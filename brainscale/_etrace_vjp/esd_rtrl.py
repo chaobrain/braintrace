@@ -33,14 +33,10 @@ import brainunit as u
 import jax
 import jax.numpy as jnp
 
-from brainscale._etrace_algorithms import (
-    EligibilityTrace,
-)
+from brainscale._etrace_algorithms import EligibilityTrace
 from brainscale._etrace_compiler_hid_param_op import HiddenParamOpRelation
 from brainscale._etrace_compiler_hidden_group import HiddenGroup
-from brainscale._etrace_concepts import (
-    ElemWiseParam,
-)
+from brainscale._etrace_concepts import ElemWiseParam
 from brainscale._misc import (
     check_dict_keys,
     etrace_x_key,
