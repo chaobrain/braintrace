@@ -235,7 +235,7 @@ class ETraceNet(brainstate.nn.Module):
         n_rec: int,
         n_out: int,
         n_layer: int,
-        args: argparse.ArgumentParser,
+        args,
     ):
         super().__init__()
 

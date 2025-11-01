@@ -39,10 +39,8 @@ from brainscale._etrace_input_data import *
 from brainscale._etrace_input_data import __all__ as _data_all
 from brainscale._etrace_operators import *
 from brainscale._etrace_operators import __all__ as _op_all
-from brainscale._etrace_vjp_algorithms import *
-from brainscale._etrace_vjp_algorithms import __all__ as _vjp_all
-from brainscale._etrace_vjp_graph_executor import *
-from brainscale._etrace_vjp_graph_executor import __all__ as _vjp_graph_all
+from brainscale._etrace_vjp import *
+from brainscale._etrace_vjp import __all__ as _vjp_all
 from brainscale._grad_exponential import *
 from brainscale._grad_exponential import __all__ as _grad_exp_all
 from brainscale._misc import *
@@ -51,11 +49,11 @@ from . import nn
 
 __all__ = ['nn'] + _alg_all + _compiler_all + _hid_param_all + _hid_group_all + _hid_pertub_all
 __all__ += _mod_info_all + _con_all + _exec_all + _data_all + _op_all + _vjp_all
-__all__ += _vjp_graph_all + _grad_exp_all + _misc_all
+__all__ += _grad_exp_all + _misc_all
 
 del _alg_all, _compiler_all, _hid_param_all, _hid_group_all, _hid_pertub_all
 del _mod_info_all, _con_all, _exec_all, _data_all, _op_all, _vjp_all
-del _vjp_graph_all, _grad_exp_all,
+del _grad_exp_all,
 del _misc_all
 
 

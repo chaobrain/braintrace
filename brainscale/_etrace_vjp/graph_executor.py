@@ -31,7 +31,7 @@
 #                advantage of etrace learning and backpropagation through time.
 #   [2024-11] version 0.0.3, a complete new revision for better model debugging.
 #   [2025-02-06]
-#       - [x] split into "_etrace_graph_executor.py" and "_etrace_vjp_graph_executor.py"
+#       - [x] split into "_etrace_graph_executor.py" and "graph_executor.py"
 #
 # ==============================================================================
 
@@ -47,25 +47,25 @@ from jax.extend import linear_util as lu
 from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
-from ._compatible_imports import Var
-from ._etrace_compiler_graph import compile_etrace_graph
-from ._etrace_compiler_hidden_group import HiddenGroup
-from ._etrace_graph_executor import ETraceGraphExecutor
-from ._etrace_input_data import (
+from brainscale._compatible_imports import Var
+from brainscale._etrace_compiler_graph import compile_etrace_graph
+from brainscale._etrace_compiler_hidden_group import HiddenGroup
+from brainscale._etrace_graph_executor import ETraceGraphExecutor
+from brainscale._etrace_input_data import (
     get_single_step_data,
     split_input_data_types,
     merge_data,
     has_multistep_data,
 )
-from ._misc import (
+from brainscale._misc import (
     etrace_df_key,
     etrace_x_key,
 )
-from ._state_managment import (
+from brainscale._state_managment import (
     assign_dict_state_values,
     split_dict_states_v2
 )
-from ._typing import (
+from brainscale._typing import (
     Outputs,
     ETraceVals,
     StateVals,

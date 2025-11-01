@@ -69,6 +69,7 @@ parser.add_argument("--spk_reset", type=str, default='soft')
 
 global_args = parser.parse_args()
 
+import brainpy
 import brainscale
 import brainstate
 import braintools
@@ -407,7 +408,8 @@ class Trainer(object):
 
         # optimizer
         self.opt = opt
-        opt.register_trainable_weights(self.target.states().subset(brainstate.ParamState))
+        self.param_weights = self.target.states().subset(brainstate.ParamState)
+        opt.register_trainable_weights(self.param_weights)
 
         # define etrace functions
         if self.args.method != 'bptt':
@@ -495,7 +497,7 @@ class Trainer(object):
             i, inp = inputs
             # no need to return weights and states, since they are generated then no longer needed
             f_grad = brainstate.transform.grad(
-                _etrace_grad, grad_states=self.opt.param_states, has_aux=True, return_value=True)
+                _etrace_grad, grad_states=self.param_weights, has_aux=True, return_value=True)
             cur_grads, local_loss, out = f_grad(i, inp, targets)
             next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
             return next_grads, (out, local_loss)
@@ -512,7 +514,7 @@ class Trainer(object):
         self._etrace_reset_fun()
 
         # initial gradients
-        grads = jax.tree.map(lambda a: jnp.zeros_like(a), self.opt.param_states.to_dict_values())
+        grads = jax.tree.map(lambda a: jnp.zeros_like(a), self.param_weights.to_dict_values())
 
         # training
         indices = np.arange(inputs.shape[0])
@@ -533,7 +535,7 @@ class Trainer(object):
                 losses.append(loss)
 
         # gradient updates
-        grads = brainstate.functional.clip_grad_norm(grads, 1.)
+        grads = brainstate.nn.clip_grad_norm(grads, 1.)
         self.opt.update(grads)
 
         # accuracy
@@ -578,7 +580,7 @@ class Trainer(object):
         grads, loss, outs = brainstate.transform.grad(_grad_step, weights, has_aux=True, return_value=True)()
 
         # optimization
-        grads = brainstate.functional.clip_grad_norm(grads, 1.)
+        grads = brainstate.nn.clip_grad_norm(grads, 1.)
         self.opt.update(grads)
 
         # accuracy
@@ -624,7 +626,7 @@ class Trainer(object):
                 f'time = {mean_time:.5f} s, '
                 f'memory = {mean_mem:.2f} GB'
             )
-            self.opt.step_epoch()
+            self.opt.step()
 
             # training accuracy
             if mean_acc > max_acc:
@@ -692,7 +694,7 @@ def network_training():
     brainstate.environ.set(dt=global_args.dt)
 
     # loading the data
-    train_loader, test_loader = _get_gesture_data(global_args, cache_dir='/mnt/d/codes/projects/brainscale-exp-for-snns/data')
+    train_loader, test_loader = _get_gesture_data(global_args, cache_dir='./data')
 
     # net
     net = ETraceNet(

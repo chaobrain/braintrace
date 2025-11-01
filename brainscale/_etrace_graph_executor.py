@@ -39,10 +39,7 @@ from typing import Dict, Any
 
 import brainstate
 
-from ._etrace_compiler_graph import (
-    ETraceGraph,
-    compile_etrace_graph,
-)
+from ._etrace_compiler_graph import ETraceGraph, compile_etrace_graph
 from ._etrace_input_data import get_single_step_data
 from ._typing import Path
 
