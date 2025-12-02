@@ -13,12 +13,12 @@
 # limitations under the License.
 # ==============================================================================
 
-import jax
-import brainstate
 from functools import partial
-from typing import Any, Callable, Dict, Optional, Union
-import brainunit as u
+from typing import Any, Dict, Optional
 
+import brainstate
+import brainunit as u
+import jax
 
 
 def _reset_state_in_a_dict(
@@ -77,6 +77,7 @@ def _zeros_like_batch_or_not(
     else:
         return u.math.zeros_like(x)
 
+
 def _batched_zeros_like(
     batch_size: Optional[int],
     num_state: int,  # the number of hidden states
@@ -108,6 +109,7 @@ def _batched_zeros_like(
         return u.math.zeros((*x.shape, num_state), x.dtype)
     else:
         return u.math.zeros((batch_size, *x.shape, num_state), x.dtype)
+
 
 def _sum_dim(xs: jax.Array, axis: int = -1):
     """

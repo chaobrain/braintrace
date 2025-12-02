@@ -159,16 +159,8 @@ def _update_param_dim_etrace_scan_fn(
     # the hidden-to-hidden Jacobians
     #
     hid_group_jacobians: Sequence[jax.Array] = jacobians[2]
-
     if normalize_matrix_spectrum:
-        normalized_hid_group_jacobians = []
-        for diag in hid_group_jacobians:
-            fn = _normalize_matrix_spectrum
-            for i in range(diag.ndim - 2):
-                fn = jax.vmap(fn)
-            normalized_hid_group_jacobians.append(fn(diag))
-    else:
-        normalized_hid_group_jacobians = hid_group_jacobians
+        hid_group_jacobians = [_normalize_matrix_spectrum(diag) for diag in hid_group_jacobians]
 
     # The etrace weight gradients at the current time step.
     # i.e., The "hist_etrace_vals" at the next time step
@@ -268,7 +260,7 @@ def _update_param_dim_etrace_scan_fn(
             #  ∂V^t/∂θ1 = ∂V^t/∂V^t-1 * ∂V^t-1/∂θ1 + ∂V^t/∂a^t-1 * ∂a^t-1/∂θ1 + ...
             #
             w_key = etrace_param_key(weight_path, relation.y, group.index)
-            diag = normalized_hid_group_jacobians[group.index]
+            diag = hid_group_jacobians[group.index]
 
             #
             # vmap over j, over the different hidden states \partial h_i^t / \partial h_j^t
@@ -297,27 +289,33 @@ def _update_param_dim_etrace_scan_fn(
             #        ϵ^t = ϵ^t_{pre} + df^t, where D_h is the hidden-to-hidden Jacobian diagonal matrix.
             #
             new_bwg = jax.tree.map(u.math.add, new_bwg_pre, phg_to_pw, is_leaf=u.math.is_quantity)
-            # new_bwg = jax.tree.map(_normalize_vector, new_bwg)
+            if normalize_matrix_spectrum:
+                new_bwg = jax.tree.map(_normalize_vector, new_bwg)
             new_etrace_bwg[w_key] = new_bwg
 
     return new_etrace_bwg, None
 
 
-def _normalize_matrix_spectrum(matrix):
-    # Compute the eigenvalues of the matrix
-    eigenvalues = jnp.linalg.eigvals(matrix)
+def _normalize_matrix_spectrum(diag):
+    def base_fn(matrix):
+        # Compute the eigenvalues of the matrix
+        eigenvalues = jnp.linalg.eigvals(matrix)
 
-    # Get the maximum eigenvalue
-    max_eigenvalue = jnp.max(jnp.abs(eigenvalues))
+        # Get the maximum eigenvalue
+        max_eigenvalue = jnp.max(jnp.abs(eigenvalues))
 
-    # Normalize the matrix by dividing it by the maximum eigenvalue
-    normalized_matrix = jax.lax.cond(
-        max_eigenvalue > 1,
-        lambda: matrix / max_eigenvalue,
-        lambda: matrix,
-    )
+        # Normalize the matrix by dividing it by the maximum eigenvalue
+        normalized_matrix = jax.lax.cond(
+            max_eigenvalue > 1,
+            lambda: matrix / max_eigenvalue,
+            lambda: matrix,
+        )
+        return normalized_matrix
 
-    return normalized_matrix
+    fn = base_fn
+    for i in range(diag.ndim - 2):
+        fn = jax.vmap(fn)
+    return fn(diag)
 
 
 def _normalize_vector(v):
@@ -330,7 +328,6 @@ def _normalize_vector(v):
 
     # # Normalize the vector by dividing it by its norm
     # normalized_vector = v / jnp.linalg.norm(v)
-    #
     return normalized_vector
 
 

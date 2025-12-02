@@ -15,16 +15,14 @@
 
 # See brainscale documentation for more details:
 
-import os
-os.environ['JAX_TRACEBACK_FILTERING'] = 'off'
-
 import brainstate
 import braintools
-import brainscale
 import jax
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
+
+import brainscale
 
 
 class CopyDataset:
@@ -107,28 +105,40 @@ class Trainer(object):
 
 
 class OnlineTrainer(Trainer):
-    def __init__(self, *args, vjp_time='t', **kwargs):
+    def __init__(self, *args, vjp_method='single-step', batch_train='vmap', **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.vjp_time = vjp_time
+        self.vjp_method = vjp_method
+        self.batch_train_method = batch_train
+        assert batch_train in ['vmap', 'batch']
 
     @brainstate.transform.jit(static_argnums=(0,))
     def batch_train(self, inputs, target):
         weights = self.target.states(brainstate.ParamState)
 
-        # 初始化在线学习模型
-        # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的
-        model = brainscale.ParamDimVjpAlgorithm(self.target)
+        if self.batch_train_method == 'vmap':
+            # 初始化在线学习模型
+            # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的
+            model = brainscale.ParamDimVjpAlgorithm(self.target, vjp_method=self.vjp_method)
 
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            # 对于每一个batch的数据，重新初始化模型状态
-            brainstate.nn.init_all_states(self.target)
-            # 使用一个样例数据编译在线学习eligibility trace
-            model.compile_graph(inputs[0, 0])
+            @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
+            def init():
+                # 对于每一个batch的数据，重新初始化模型状态
+                brainstate.nn.init_all_states(self.target)
+                # 使用一个样例数据编译在线学习eligibility trace
+                model.compile_graph(inputs[0, 0])
 
-        init()
-        model = brainstate.nn.Vmap(model, vmap_states='new')
+            init()
+            model = brainstate.nn.Vmap(model, vmap_states='new')
+
+        elif self.batch_train_method == 'batch':
+            model = brainscale.ParamDimVjpAlgorithm(
+                self.target, vjp_method=self.vjp_method, mode=brainstate.mixin.Batching())
+            brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])
+            model.compile_graph(inputs[0])
+
+        else:
+            raise ValueError
 
         def _etrace_loss(inp, tar):
             # call the model
@@ -208,6 +218,8 @@ online = OnlineTrainer(
     n_epochs=1000,
     n_seq=200,
     batch_size=128,
+    # batch_train='batch',
+    vjp_method='multi-step',
 )
 online_losses = online.f_train()
 
