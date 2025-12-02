@@ -1,6 +1,6 @@
 ---
 name: 'Feature Request'
-about: 'Suggest a new idea or improvement for BrainScale'
+about: 'Suggest a new idea or improvement for BrainTrace'
 labels: 'enhancement'
 ---
 

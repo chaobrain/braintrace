@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-# see brainscale documentations for more details.
+# see braintrace documentations for more details.
 
 import brainstate
 import braintools

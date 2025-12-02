@@ -50,7 +50,7 @@ jobs:
           pip install .
       - name: Test with pytest
         run: |
-          pytest brainscale/
+          pytest braintrace/
 
 
   test_macos:
@@ -80,7 +80,7 @@ jobs:
           pip install .
       - name: Test with pytest
         run: |
-          pytest brainscale/
+          pytest braintrace/
 
 
   test_windows:
@@ -110,5 +110,5 @@ jobs:
           pip install .
       - name: Test with pytest
         run: |
-          pytest brainscale/ -p no:faulthandler
+          pytest braintrace/ -p no:faulthandler
 

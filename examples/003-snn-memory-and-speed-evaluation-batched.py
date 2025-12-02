@@ -84,7 +84,7 @@ parser.add_argument("--spk_reset", type=str, default='soft')
 
 global_args = parser.parse_args()
 
-import brainscale
+import braintrace
 import brainstate
 import braintools
 import brainunit as u
@@ -172,7 +172,7 @@ class _LIF_Delta_Dense_Layer(brainstate.nn.Module):
         ff_init: Callable = braintools.init.KaimingNormal(ff_scale)
         w_init = jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0)
         self.syn = brainpy.state.DeltaProj(
-            comm=brainscale.nn.Linear(n_in + n_rec, n_rec, w_init=w_init),
+            comm=braintrace.nn.Linear(n_in + n_rec, n_rec, w_init=w_init),
             post=self.neu
         )
 
@@ -216,7 +216,7 @@ class _LIF_ExpCu_Dense_Layer(brainstate.nn.Module):
         ff_init: Callable = braintools.init.KaimingNormal(ff_scale)
         w_init = jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0)
         self.syn = brainpy.state.AlignPostProj(
-            comm=brainscale.nn.Linear(n_in + n_rec, n_rec, w_init),
+            comm=braintrace.nn.Linear(n_in + n_rec, n_rec, w_init),
             syn=brainpy.state.Expon(n_rec, tau=tau_syn, g_initializer=braintools.init.ZeroInit()),
             out=brainpy.state.CUBA(scale=1.),
             post=self.neu
@@ -294,7 +294,7 @@ class ETraceNet(brainstate.nn.Module):
             self.rec_layers.append(rec)
 
         # output layer
-        self.out = brainscale.nn.LeakyRateReadout(
+        self.out = braintrace.nn.LeakyRateReadout(
             in_size=n_rec,
             out_size=n_out,
             tau=args.tau_o,
@@ -474,11 +474,11 @@ class Trainer(object):
 
     def _compile_etrace_function(self, input_info):
         if self.args.method == 'expsm_diag':
-            model = brainscale.ES_D_RTRL(self.target, self.args.etrace_decay, mode=brainstate.mixin.Batching())
+            model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, mode=brainstate.mixin.Batching())
         elif self.args.method == 'diag':
-            model = brainscale.D_RTRL(self.target, mode=brainstate.mixin.Batching())
+            model = braintrace.D_RTRL(self.target, mode=brainstate.mixin.Batching())
         elif self.args.method == 'hybrid':
-            model = brainscale.HybridDimVjpAlgorithm(self.target, self.args.etrace_decay,
+            model = braintrace.HybridDimVjpAlgorithm(self.target, self.args.etrace_decay,
                                                      mode=brainstate.mixin.Batching())
         else:
             raise ValueError(f'Unknown online learning methods: {self.args.method}.')

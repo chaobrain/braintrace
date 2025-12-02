@@ -31,7 +31,7 @@ from tonic.datasets import SHD, NMNIST
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import brainscale
+import braintrace
 
 
 class ConvSNN(brainstate.nn.Module):
@@ -70,15 +70,15 @@ class ConvSNN(brainstate.nn.Module):
         )
 
         self.layer1 = brainstate.nn.Sequential(
-            brainscale.nn.Conv2d(in_size, n_channel, kernel_size=3, padding=1, **conv_inits),
-            brainscale.nn.LayerNorm.desc(),
+            braintrace.nn.Conv2d(in_size, n_channel, kernel_size=3, padding=1, **conv_inits),
+            braintrace.nn.LayerNorm.desc(),
             brainpy.state.IF.desc(**if_param),
             brainstate.nn.MaxPool2d.desc(kernel_size=2, stride=2)  # 14 * 14
         )
 
         self.layer2 = brainstate.nn.Sequential(
-            brainscale.nn.Conv2d(self.layer1.out_size, n_channel, kernel_size=3, padding=1, **conv_inits),
-            brainscale.nn.LayerNorm.desc(),
+            braintrace.nn.Conv2d(self.layer1.out_size, n_channel, kernel_size=3, padding=1, **conv_inits),
+            braintrace.nn.LayerNorm.desc(),
             brainpy.state.IF.desc(**if_param),
         )
         self.layer3 = brainstate.nn.Sequential(
@@ -86,10 +86,10 @@ class ConvSNN(brainstate.nn.Module):
             brainstate.nn.Flatten.desc()
         )
         self.layer4 = brainstate.nn.Sequential(
-            brainscale.nn.Linear(self.layer3.out_size, n_channel * 4 * 4, **linear_inits),
+            braintrace.nn.Linear(self.layer3.out_size, n_channel * 4 * 4, **linear_inits),
             brainpy.state.IF.desc(**if_param),
         )
-        self.layer5 = brainscale.nn.LeakyRateReadout(self.layer4.out_size, out_sze, tau=tau_o)
+        self.layer5 = braintrace.nn.LeakyRateReadout(self.layer4.out_size, out_sze, tau=tau_o)
 
     def update(self, x):
         # x.shape = [B, H, W, C]
@@ -222,8 +222,8 @@ class OnlineVmapTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
-        # model = brainscale.ES_D_RTRL(self.target, self.decay_or_rank)
-        model = brainscale.D_RTRL(self.target)
+        # model = braintrace.ES_D_RTRL(self.target, self.decay_or_rank)
+        model = braintrace.D_RTRL(self.target)
 
         @brainstate.transform.vmap_new_states(
             state_tag='new',
@@ -278,8 +278,8 @@ class OnlineBatchTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
-        # model = brainscale.ES_D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
-        model = brainscale.D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
+        # model = braintrace.ES_D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
+        model = braintrace.D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
 
         # initialize the online learning model
         brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])

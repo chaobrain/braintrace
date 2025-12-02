@@ -13,14 +13,14 @@ exclude = [
     "build*",
     "dist*",
     "dev*",
-    "brainscale.egg-info*",
-    "brainscale/__pycache__*",
-    "brainscale/__init__.py",
+    "braintrace.egg-info*",
+    "braintrace/__pycache__*",
+    "braintrace/__init__.py",
 ]
 
 
 [tool.setuptools.dynamic]
-version = { attr = "brainscale.__version__" }
+version = { attr = "braintrace.__version__" }
 
 
 [tool.distutils.bdist_wheel]
@@ -28,12 +28,12 @@ universal = true
 
 
 [project]
-name = "brainscale"
+name = "braintrace"
 description = "Enabling Scalable Online Learning for Brain Dynamics."
 readme = "README.md"
 license = { text = "Apache-2.0 license" }
 requires-python = ">=3.10"
-authors = [{ name = "BrainScale Developers", email = "chao.brain@qq.com" }]
+authors = [{ name = "BrainTrace Developers", email = "chao.brain@qq.com" }]
 keywords = [
     "computational neuroscience",
     "brain-inspired computing",
@@ -67,10 +67,10 @@ dynamic = ["version"]
 
 
 [project.urls]
-"Homepage" = "https://github.com/chaobrain/brainscale"
-"Bug Tracker" = "https://github.com/chaobrain/brainscale/issues"
-"Documentation" = "https://brainscale.readthedocs.io/"
-"Source Code" = "https://github.com/chaobrain/brainscale"
+"Homepage" = "https://github.com/chaobrain/braintrace"
+"Bug Tracker" = "https://github.com/chaobrain/braintrace/issues"
+"Documentation" = "https://braintrace.readthedocs.io/"
+"Source Code" = "https://github.com/chaobrain/braintrace"
 
 
 [project.optional-dependencies]

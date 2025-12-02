@@ -1,8 +1,8 @@
-``brainscale.nn`` for neural network building
+``braintrace.nn`` for neural network building
 =============================================
 
-.. currentmodule:: brainscale.nn
-.. automodule:: brainscale.nn
+.. currentmodule:: braintrace.nn
+.. automodule:: braintrace.nn
 
 
 

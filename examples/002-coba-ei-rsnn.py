@@ -25,7 +25,7 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
-import brainscale
+import braintrace
 
 
 class EvidenceAccumulation:
@@ -235,7 +235,7 @@ class _SNNEINet(brainstate.nn.Module):
         self.pop = GIF(n_rec, tau=tau_neu, tau_I2=tau_a, A2=beta)
         # feedforward
         self.ff2r = brainpy.state.AlignPostProj(
-            comm=brainscale.nn.SignedWLinear(
+            comm=braintrace.nn.SignedWLinear(
                 n_in,
                 n_rec,
                 w_init=braintools.init.KaimingNormal(ff_scale, unit=u.siemens)
@@ -250,7 +250,7 @@ class _SNNEINet(brainstate.nn.Module):
         )
         # recurrent
         inh_init = braintools.init.KaimingNormal(scale=rec_scale * w_ei_ratio, unit=u.siemens)
-        inh2r_conn = brainscale.nn.SignedWLinear(
+        inh2r_conn = braintrace.nn.SignedWLinear(
             self.n_inh,
             n_rec,
             w_init=inh_init,
@@ -267,7 +267,7 @@ class _SNNEINet(brainstate.nn.Module):
             post=self.pop
         )
         exc_init = braintools.init.KaimingNormal(scale=rec_scale, unit=u.siemens)
-        exc2r_conn = brainscale.nn.SignedWLinear(self.n_exc, n_rec, w_init=exc_init)
+        exc2r_conn = braintrace.nn.SignedWLinear(self.n_exc, n_rec, w_init=exc_init)
         self.exc2r = brainpy.state.AlignPostProj(
             comm=exc2r_conn,
             syn=brainpy.state.Expon.desc(
@@ -279,7 +279,7 @@ class _SNNEINet(brainstate.nn.Module):
             post=self.pop
         )
         # output
-        self.out = brainscale.nn.LeakyRateReadout(n_rec, n_out, tau=tau_out)
+        self.out = braintrace.nn.LeakyRateReadout(n_rec, n_out, tau=tau_out)
 
     def update(self, spk):
         e_sps, i_sps = jnp.split(self.pop.get_spike(), [self.n_exc], axis=-1)
@@ -430,11 +430,11 @@ class Trainer:
 
         # initialize the online learning model
         if self.method == 'expsm_diag':
-            model = brainscale.IODimVjpAlgorithm(self.target, decay_or_rank=0.99)
+            model = braintrace.IODimVjpAlgorithm(self.target, decay_or_rank=0.99)
         elif self.method == 'diag':
-            model = brainscale.ParamDimVjpAlgorithm(self.target)
+            model = braintrace.ParamDimVjpAlgorithm(self.target)
         elif self.method == 'hybrid':
-            model = brainscale.HybridDimVjpAlgorithm(self.target, decay_or_rank=0.99)
+            model = braintrace.HybridDimVjpAlgorithm(self.target, decay_or_rank=0.99)
         else:
             raise ValueError(f'Unknown online learning methods: {self.method}.')
 
