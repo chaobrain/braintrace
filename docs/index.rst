@@ -1,7 +1,7 @@
-``brainscale`` documentation
+``braintrace`` documentation
 ============================
 
-`brainscale <https://github.com/chaobrain/brainscale>`_ is designed for the scalable online learning of biological neural networks.
+`braintrace <https://github.com/chaobrain/braintrace>`_ is designed for the scalable online learning of biological neural networks.
 
 ----
 
@@ -11,26 +11,26 @@ Basic Usage
 ^^^^^^^^^^^
 
 
-Here we show how easy it is to use `brainscale` to build and train a simple SNN/RNN model.
+Here we show how easy it is to use `braintrace` to build and train a simple SNN/RNN model.
 
 
 
 .. code-block::
 
-   import brainscale
+   import braintrace
    import brainstate
 
    # define models as usual
    model = brainstate.nn.Sequential(
-       brainscale.nn.GRU(2, 2),
-       brainscale.nn.GRU(2, 1),
+       braintrace.nn.GRU(2, 2),
+       braintrace.nn.GRU(2, 1),
    )
 
    # initialize the model
    brainstate.nn.init_all_states(model)
 
    # the only thing you need to do just two lines of code
-   model = brainscale.ParamDimVjpAlgorithm(model)
+   model = braintrace.ParamDimVjpAlgorithm(model)
    model.compile_graph(your_inputs)
 
    # train your model as usual
@@ -48,19 +48,19 @@ Installation
 
        .. code-block:: bash
 
-          pip install -U brainscale[cpu]
+          pip install -U braintrace[cpu]
 
     .. tab-item:: GPU (CUDA 12.0)
 
        .. code-block:: bash
 
-          pip install -U brainscale[cuda12]
+          pip install -U braintrace[cuda12]
 
     .. tab-item:: TPU
 
        .. code-block:: bash
 
-          pip install -U brainscale[tpu]
+          pip install -U braintrace[tpu]
 
 
 ----
@@ -70,7 +70,7 @@ See also the ecosystem
 ^^^^^^^^^^^^^^^^^^^^^^
 
 
-``brainscale`` is of part of our `brain simulation ecosystem <https://brainmodeling.readthedocs.io/>`_.
+``braintrace`` is of part of our `brain simulation ecosystem <https://brainmodeling.readthedocs.io/>`_.
 
 
 ----

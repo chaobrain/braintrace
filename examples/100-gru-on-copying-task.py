@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-# See brainscale documentation for more details:
+# See braintrace documentation for more details:
 
 import brainstate
 import braintools
@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 
-import brainscale
+import braintrace
 
 
 class CopyDataset:
@@ -52,11 +52,11 @@ class GRUNet(brainstate.nn.Module):
         # 构建GRU多层网络
         layers = []
         for _ in range(n_layer):
-            layers.append(brainscale.nn.GRUCell(n_in, n_rec))
+            layers.append(braintrace.nn.GRUCell(n_in, n_rec))
             n_in = n_rec
         self.layer = brainstate.nn.Sequential(*layers)
         # 构建输出层
-        self.readout = brainscale.nn.Linear(n_rec, n_out)
+        self.readout = braintrace.nn.Linear(n_rec, n_out)
 
     def update(self, x):
         return self.readout(self.layer(x))
@@ -119,7 +119,7 @@ class OnlineTrainer(Trainer):
         if self.batch_train_method == 'vmap':
             # 初始化在线学习模型
             # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的
-            model = brainscale.ParamDimVjpAlgorithm(self.target, vjp_method=self.vjp_method)
+            model = braintrace.ParamDimVjpAlgorithm(self.target, vjp_method=self.vjp_method)
 
             @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
             def init():
@@ -132,7 +132,7 @@ class OnlineTrainer(Trainer):
             model = brainstate.nn.Vmap(model, vmap_states='new')
 
         elif self.batch_train_method == 'batch':
-            model = brainscale.ParamDimVjpAlgorithm(
+            model = braintrace.ParamDimVjpAlgorithm(
                 self.target, vjp_method=self.vjp_method, mode=brainstate.mixin.Batching())
             brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])
             model.compile_graph(inputs[0])

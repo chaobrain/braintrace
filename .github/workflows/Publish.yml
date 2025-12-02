@@ -39,7 +39,7 @@ jobs:
           echo "Release tag: $TAG"
           PKG_VERSION=$(python - <<'PY'
           import re, pathlib
-          init = pathlib.Path('brainscale/__init__.py').read_text(encoding='utf-8')
+          init = pathlib.Path('braintrace/__init__.py').read_text(encoding='utf-8')
           m = re.search(r"__version__\s*=\s*\"([^\"]+)\"", init)
           print(m.group(1) if m else '')
           PY
@@ -47,7 +47,7 @@ jobs:
           echo "Package version: ${PKG_VERSION}"
           TAG_STRIPPED=${TAG#v}
           if [[ -z "$PKG_VERSION" ]]; then
-            echo "Could not determine package version from brainscale/__init__.py" >&2
+            echo "Could not determine package version from braintrace/__init__.py" >&2
             exit 1
           fi
           if [[ "$TAG_STRIPPED" != "$PKG_VERSION" ]]; then

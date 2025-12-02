@@ -35,19 +35,19 @@ import sys
 
 sys.path.insert(0, os.path.abspath('../'))
 
-import brainscale
+import braintrace
 import shutil
 
 shutil.copy('../changelog.md', './changelog.md')
 
 # -- Project information -----------------------------------------------------
 
-project = 'BrainScale'
-copyright = '2024, BrainScale'
-author = 'BrainScale Developer'
+project = 'BrainTrace'
+copyright = '2024, BrainTrace'
+author = 'BrainTrace Developer'
 
 # The full version, including alpha/beta/rc tags
-release = brainscale.__version__
+release = braintrace.__version__
 
 # -- General configuration ---------------------------------------------------
 
@@ -113,11 +113,11 @@ myst_enable_extensions = [
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
 html_theme = "sphinx_book_theme"
-html_logo = "_static/brainscale.png"
-html_title = "BrainScale"
+html_logo = "_static/braintrace.png"
+html_title = "BrainTrace"
 html_copy_source = True
 html_sourcelink_suffix = ""
-html_favicon = "_static/brainscale.png"
+html_favicon = "_static/braintrace.png"
 html_last_updated_fmt = ""
 
 # Add any paths that contain custom static files (such as style sheets) here,

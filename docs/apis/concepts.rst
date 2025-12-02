@@ -1,7 +1,7 @@
 Online Learning Concepts
 ========================
 
-.. currentmodule:: brainscale
+.. currentmodule:: braintrace
 
 .. contents::
    :local:
