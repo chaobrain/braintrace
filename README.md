@@ -1,5 +1,5 @@
 <h1 align="center">BrainTrace</h1>
-<h2 align="center">Scalable Online Learning for Brain Dynamics</h2>
+<h2 align="center">SEligibility Trace-based Online Learning for Brain Dynamics</h2>
 
 <p align="center">
   	<img alt="Header image of braintrace." src="https://raw.githubusercontent.com/chaobrain/braintrace/main/docs/_static/braintrace.png" width=40%>
