@@ -1,6 +1,83 @@
 # Release Notes
 
 
+## Version 0.1.1
+
+### Major Changes
+
+#### Project Rename: BrainScale → BrainTrace
+- **Renamed the entire project from `brainscale` to `braintrace`**: This change reflects the project's focus on eligibility trace-based learning algorithms
+  - Package directory renamed from `brainscale/` to `braintrace/`
+  - All internal imports updated from `brainscale` to `braintrace`
+  - Updated all 95 files including source code, tests, documentation, and examples
+  - Updated `pyproject.toml` with new project name and metadata
+  - Updated README with new project branding and citation information
+
+#### VJP-Based Eligibility Trace Algorithms
+- **Added new VJP-based eligibility trace module** (`_etrace_vjp/`): Comprehensive implementation of vector-Jacobian product based algorithms
+  - `base.py`: Core base classes and utilities for VJP operations (671 lines)
+  - `d_rtrl.py`: Diagonal Real-Time Recurrent Learning implementation (756 lines)
+  - `esd_rtrl.py`: Efficient Sparse Diagonal RTRL implementation (847 lines)
+  - `hybrid.py`: Hybrid approaches combining multiple techniques (604 lines)
+  - `graph_executor.py`: Graph-based execution for VJP computations
+  - `misc.py`: Miscellaneous utilities including matrix spectrum normalization
+
+- **Refactored VJP algorithm structure**: Migrated from monolithic `_etrace_vjp_algorithms.py` (2,888 lines) to modular architecture
+  - Better separation of concerns
+  - Improved testability with dedicated test files (`d_rtrl_test.py`, `esd_rtrl_test.py`, `graph_executor_test.py`)
+
+#### Logo and Branding
+- Updated logo format from JPG to PNG for consistency
+- Updated logo across documentation
+
+### Breaking Changes
+
+**Package Rename:**
+1. **Import path change**: All imports must now use `braintrace` instead of `brainscale`
+
+```python
+# Old (0.1.0)
+import brainscale
+from brainscale import EligibilityTrace
+from brainscale.nn import Linear, GRUCell
+
+# New (0.1.1)
+import braintrace
+from braintrace import EligibilityTrace
+from braintrace.nn import Linear, GRUCell
+```
+
+2. **Installation**: Package name changed from `brainscale` to `braintrace`
+
+```bash
+# Old
+pip install brainscale
+
+# New
+pip install braintrace
+```
+
+### Migration Guide
+
+#### Update Import Statements
+Replace all occurrences of `brainscale` with `braintrace`:
+
+```python
+# Find and replace in your codebase
+# brainscale → braintrace
+```
+
+#### VJP Algorithm Usage
+The new VJP-based algorithms are now available through the modular interface:
+
+```python
+from braintrace._etrace_vjp import d_rtrl, esd_rtrl, hybrid
+```
+
+### Version
+- Bumped version from `0.1.0` to `0.1.1`
+
+
 ## Version 0.1.0
 
 ### Major Changes
