@@ -34,23 +34,37 @@ pip install BrainX -U
 
 The official documentation is hosted on Read the Docs: [https://braintrace.readthedocs.io](https://braintrace.readthedocs.io)
 
-## Citation
+[//]: # (## Citation)
 
-If you use this package in your research, please cite:
+[//]: # ()
+[//]: # (If you use this package in your research, please cite:)
 
-```bibtex
-@article {Wang2024.09.24.614728,
-	author = {Wang, Chaoming and Dong, Xingsi and Ji, Zilong and Jiang, Jiedong and Liu, Xiao and Wu, Si},
-	title = {BrainTrace: Enabling Scalable Online Learning in Spiking Neural Networks},
-	elocation-id = {2024.09.24.614728},
-	year = {2025},
-	doi = {10.1101/2024.09.24.614728},
-	publisher = {Cold Spring Harbor Laboratory},
-	URL = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728},
-	eprint = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728.full.pdf},
-	journal = {bioRxiv}
-}
-```
+[//]: # ()
+[//]: # (```bibtex)
+
+[//]: # (@article {Wang2024.09.24.614728,)
+
+[//]: # (	author = {Wang, Chaoming and Dong, Xingsi and Ji, Zilong and Jiang, Jiedong and Liu, Xiao and Wu, Si},)
+
+[//]: # (	title = {Enabling Scalable Online Learning in Spiking Neural Networks},)
+
+[//]: # (	elocation-id = {2024.09.24.614728},)
+
+[//]: # (	year = {2025},)
+
+[//]: # (	doi = {10.1101/2024.09.24.614728},)
+
+[//]: # (	publisher = {Cold Spring Harbor Laboratory},)
+
+[//]: # (	URL = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728},)
+
+[//]: # (	eprint = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728.full.pdf},)
+
+[//]: # (	journal = {bioRxiv})
+
+[//]: # (})
+
+[//]: # (```)
 
 ## See also the ecosystem
 
