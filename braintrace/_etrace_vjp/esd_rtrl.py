@@ -58,6 +58,7 @@ from .misc import _reset_state_in_a_dict, _sum_dim, _update_dict
 __all__ = [
     'IODimVjpAlgorithm',  # the diagonally approximated algorithm with the input-output dimension complexity
     'ES_D_RTRL',
+    'pp_prop',
 ]
 
 
@@ -845,3 +846,4 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
 
 ES_D_RTRL = IODimVjpAlgorithm
+pp_prop = IODimVjpAlgorithm
