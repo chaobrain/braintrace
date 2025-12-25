@@ -16,8 +16,8 @@
 # -*- coding: utf-8 -*-
 
 
-__version__ = "0.1.1"
-__version_info__ = (0, 1, 1)
+__version__ = "0.1.2"
+__versio_info__ = tuple(map(int, __version__.split('.')))
 
 from braintrace._etrace_algorithms import *
 from braintrace._etrace_algorithms import __all__ as _alg_all
