@@ -23,7 +23,7 @@ import braintools
 import brainunit as u
 import jax
 
-import brainpy
+import brainpy.state
 from braintrace._etrace_concepts import ETraceParam
 from braintrace._etrace_operators import MatMulOp
 from braintrace._typing import Size, ArrayLike, Spike
