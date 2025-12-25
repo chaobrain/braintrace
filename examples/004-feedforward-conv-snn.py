@@ -20,7 +20,7 @@ import sys
 sys.path.append('../')
 
 import brainstate
-import brainpy
+import brainpy.state
 import braintools
 import brainunit as u
 import jax

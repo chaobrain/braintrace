@@ -16,7 +16,7 @@
 import time
 from typing import Callable, Iterable
 
-import brainpy
+import brainpy.state
 import brainstate
 import braintools
 import brainunit as u
@@ -466,7 +466,7 @@ class Trainer:
             grads, (outs, mse_ls) = brainstate.transform.scan(_etrace_step, grads, inputs_)
             acc = self._acc(outs, targets)
 
-            grads = brainstate.functional.clip_grad_norm(grads, 1.)
+            grads = brainstate.nn.clip_grad_norm(grads, 1.)
             self.optimizer.update(grads)
             # accuracy
             return mse_ls.mean(), acc
