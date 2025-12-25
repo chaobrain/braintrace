@@ -2,6 +2,6 @@ jax
 numpy
 brainstate>=0.2.2
 brainunit
-brainpy>=2.7.1
+brainpy-state
 braintools
 

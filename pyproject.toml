@@ -60,7 +60,7 @@ dependencies = [
     "brainstate>=0.2.2",
     "brainunit",
     "brainstate",
-    "brainpy>=2.7.1",
+    "brainpy-state",
     "braintools",
 ]
 dynamic = ["version"]
@@ -74,8 +74,8 @@ dynamic = ["version"]
 
 
 [project.optional-dependencies]
-cpu = ["jax[cpu]", "brainunit", "brainstate", "brainpy", "braintools"]
-cuda12 = ["jax[cuda12]", "brainunit", "brainstate", "brainpy", "braintools"]
-cuda13 = ["jax[cuda13]", "brainunit", "brainstate", "brainpy", "braintools"]
-tpu = ["jax[tpu]", "brainunit", "brainstate", "brainpy", "braintools"]
-testing = ["pytest", "jax[cpu]", "brainunit", "brainstate", "brainpy", "braintools"]
+cpu = ["jax[cpu]", "brainunit", "brainstate", "brainpy-state", "braintools"]
+cuda12 = ["jax[cuda12]", "brainunit", "brainstate", "brainpy-state", "braintools"]
+cuda13 = ["jax[cuda13]", "brainunit", "brainstate", "brainpy-state", "braintools"]
+tpu = ["jax[tpu]", "brainunit", "brainstate", "brainpy-state", "braintools"]
+testing = ["pytest", "jax[cpu]", "brainunit", "brainstate", "brainpy-state", "braintools"]
