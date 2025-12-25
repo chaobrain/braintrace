@@ -1,6 +1,86 @@
 # Release Notes
 
 
+## Version 0.1.2
+
+### Major Changes
+
+#### Import Path Migration
+- **Updated dependency from `brainpy` to `brainpy.state`**: Migrated all imports to use the more specific `brainpy.state` module
+  - Updated `braintrace/nn/_readout.py`: Changed neuron model imports from `brainpy` to `brainpy.state`
+  - Updated all documentation notebooks (12 files): Concepts, RNN/SNN online learning, batching, state management, and graph visualization tutorials
+  - Updated example scripts (4 files): COBA EI RSNN, SNN evaluation, feedforward conv SNN, and SNN models
+  - Updated `requirements.txt` and `pyproject.toml` to specify `brainpy-state` as dependency
+  - Total: 19 files changed with improved module structure and consistency
+
+#### New Algorithms
+- **Added PP-Prop (Pseudo-Prospective Propagation) algorithm**: New eligibility trace algorithm in VJP-based methods
+  - Added `pp_prop` to `braintrace/_etrace_vjp/esd_rtrl.py`
+  - Updated `docs/apis/algorithms.rst` to include PP-Prop in algorithm documentation
+
+#### Python 3.14 Support
+- **Added Python 3.14 compatibility**: Updated project metadata to officially support Python 3.14
+  - Updated `pyproject.toml` classifiers to include Python 3.14
+
+#### Bug Fixes
+- **Fixed version info tuple creation**: Corrected the version info structure in `braintrace/__init__.py`
+  - Ensures proper version tuple formatting for compatibility checks
+
+#### CI/CD Improvements
+- **Updated GitHub Actions workflow**: Bumped `actions/upload-artifact` from v5 to v6
+  - Modernized CI/CD pipeline with latest GitHub Actions versions
+  - Improved artifact upload reliability and performance
+
+#### Documentation Updates
+- **Updated documentation links**: Refreshed links in concept documentation for better navigation
+  - Updated `docs/quickstart/concepts-en.ipynb` (116 lines modified)
+  - Updated `docs/quickstart/concepts-zh.ipynb` (104 lines modified)
+
+### Breaking Changes
+
+**Dependency Change:**
+1. **Dependency name change**: The project now requires `brainpy-state` instead of `brainpy`
+   - Update your `requirements.txt` or installation commands accordingly
+
+```bash
+# Old (0.1.1)
+pip install brainpy
+
+# New (0.1.2)
+pip install brainpy-state
+```
+
+2. **Import path update**: Update neuron model imports to use `brainpy.state`
+
+```python
+# New (0.1.2)
+from brainpy.state import IF, LIF, ALIF
+```
+
+### Migration Guide
+
+#### Update Dependencies
+Replace `brainpy` with `brainpy-state` in your project dependencies:
+
+```bash
+pip uninstall brainpy
+pip install brainpy-state
+```
+
+#### Update Import Statements
+If you have custom code importing neuron models, update to use `brainpy.state`:
+
+```python
+# Find and replace in your codebase
+# from brainpy import → from brainpy.state import
+```
+
+### Version
+- Bumped version from `0.1.1` to `0.1.2`
+
+
+
+
 ## Version 0.1.1
 
 ### Major Changes
