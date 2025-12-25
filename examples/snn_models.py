@@ -17,7 +17,7 @@
 from typing import Callable
 from typing import Iterable, Union
 
-import brainpy
+import brainpy.state
 import brainstate
 import braintools
 import brainunit as u

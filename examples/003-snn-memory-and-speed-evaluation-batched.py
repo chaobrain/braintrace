@@ -19,7 +19,7 @@ import time
 from functools import reduce
 from typing import Callable, Union
 
-import brainpy
+import brainpy.state
 import matplotlib.pyplot as plt
 import numpy as np
 
