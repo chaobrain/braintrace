@@ -56,4 +56,5 @@ compatible with the standard VJP backpropagation algorithm, such as ``jax.grad``
     HybridDimVjpAlgorithm
     ES_D_RTRL
     D_RTRL
+    pp_prop
 
