@@ -34,37 +34,34 @@ pip install BrainX -U
 
 The official documentation is hosted on Read the Docs: [https://braintrace.readthedocs.io](https://braintrace.readthedocs.io)
 
-[//]: # (## Citation)
+## Citation
 
-[//]: # ()
-[//]: # (If you use this package in your research, please cite:)
+If you use this package in your research, please cite:
 
-[//]: # ()
-[//]: # (```bibtex)
+```text
 
-[//]: # (@article {Wang2024.09.24.614728,)
+@Article{Wang2026,
+  author={Wang, Chaoming
+          and Dong, Xingsi
+          and Ji, Zilong
+          and Xiao, Mingqing
+          and Jiang, Jiedong
+          and Liu, Xiao
+          and Huan, Yuxiang
+          and Wu, Si},
+  title={Model-agnostic linear-memory online learning in spiking neural networks},
+  journal={Nature Communications},
+  year={2026},
+  month={Jan},
+  day={19},
+  abstract={Spiking neural networks (SNNs) offer a promising paradigm for modeling brain dynamics and developing neuromorphic intelligence, yet an online learning system capable of training rich spiking dynamics over long horizons with low memory footprints has been missing. Existing online approaches either incur quadratic memory growth, sacrifice biological fidelity through oversimplified models, or lack end-to-end automated tooling. Here, we introduce BrainTrace, a model-agnostic, linear-memory, and automated online learning system for spiking neural networks. BrainTrace standardizes model specification to encompass diverse neuronal and synaptic dynamics; implements a linear-memory online learning rule by exploiting intrinsic properties of spiking dynamics; and provides a compiler that automatically generates optimized online-learning code for arbitrary user-defined models. Across diverse dynamics and tasks, BrainTrace achieves strong learning performance with a low memory footprint and high computational throughput. Critically, these properties enable online fitting of a whole-brain-scale Drosophila SNN that recapitulates region-level functional activity. By reconciling generality, efficiency, and usability, BrainTrace establishes a foundation for spiking network modeling at scale.},
+  issn={2041-1723},
+  doi={10.1038/s41467-026-68453-w},
+  url={https://doi.org/10.1038/s41467-026-68453-w}
+}
 
-[//]: # (	author = {Wang, Chaoming and Dong, Xingsi and Ji, Zilong and Jiang, Jiedong and Liu, Xiao and Wu, Si},)
+```
 
-[//]: # (	title = {Enabling Scalable Online Learning in Spiking Neural Networks},)
-
-[//]: # (	elocation-id = {2024.09.24.614728},)
-
-[//]: # (	year = {2025},)
-
-[//]: # (	doi = {10.1101/2024.09.24.614728},)
-
-[//]: # (	publisher = {Cold Spring Harbor Laboratory},)
-
-[//]: # (	URL = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728},)
-
-[//]: # (	eprint = {https://www.biorxiv.org/content/early/2025/07/27/2024.09.24.614728.full.pdf},)
-
-[//]: # (	journal = {bioRxiv})
-
-[//]: # (})
-
-[//]: # (```)
 
 ## See also the ecosystem
 
