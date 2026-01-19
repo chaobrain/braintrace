@@ -38,7 +38,7 @@ The official documentation is hosted on Read the Docs: [https://braintrace.readt
 
 If you use this package in your research, please cite:
 
-```text
+```bibtex
 
 @Article{Wang2026,
   author={Wang, Chaoming
