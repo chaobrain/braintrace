@@ -16,24 +16,23 @@
 # -*- coding: utf-8 -*-
 
 
-__version__ = "0.1.2"
-__versio_info__ = tuple(map(int, __version__.split('.')))
-
 from . import nn
-
 # algorithms
 from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
-from ._etrace_vjp import (
-    ETraceVjpAlgorithm,
-    ETraceVjpGraphExecutor,
-    ParamDimVjpAlgorithm,
-    D_RTRL,
-    IODimVjpAlgorithm,
-    ES_D_RTRL,
-    pp_prop,
-    HybridDimVjpAlgorithm,
+# compiler
+from ._etrace_compiler_graph import ETraceGraph, compile_etrace_graph
+from ._etrace_compiler_hid_param_op import (
+    HiddenParamOpRelation,
+    find_hidden_param_op_relations_from_minfo,
+    find_hidden_param_op_relations_from_module,
 )
-
+from ._etrace_compiler_hidden_group import HiddenGroup, find_hidden_groups_from_minfo, find_hidden_groups_from_module
+from ._etrace_compiler_hidden_pertubation import (
+    HiddenPerturbation,
+    add_hidden_perturbation_from_minfo,
+    add_hidden_perturbation_in_module,
+)
+from ._etrace_compiler_module_info import ModuleInfo, extract_module_info
 # concepts
 from ._etrace_concepts import (
     ETraceParam,
@@ -42,7 +41,10 @@ from ._etrace_concepts import (
     FakeETraceParam,
     FakeElemWiseParam,
 )
-
+# graph executor
+from ._etrace_graph_executor import ETraceGraphExecutor
+# input data
+from ._etrace_input_data import SingleStepData, MultiStepData
 # operators
 from ._etrace_operators import (
     ETraceOp,
@@ -54,35 +56,27 @@ from ._etrace_operators import (
     general_y2w,
     stop_param_gradients,
 )
-
-# input data
-from ._etrace_input_data import SingleStepData, MultiStepData
-
-# graph executor
-from ._etrace_graph_executor import ETraceGraphExecutor
-
-# compiler
-from ._etrace_compiler_graph import ETraceGraph, compile_etrace_graph
-from ._etrace_compiler_hidden_group import HiddenGroup, find_hidden_groups_from_minfo, find_hidden_groups_from_module
-from ._etrace_compiler_hid_param_op import (
-    HiddenParamOpRelation,
-    find_hidden_param_op_relations_from_minfo,
-    find_hidden_param_op_relations_from_module,
+from ._etrace_vjp import (
+    ETraceVjpAlgorithm,
+    ETraceVjpGraphExecutor,
+    ParamDimVjpAlgorithm,
+    D_RTRL,
+    IODimVjpAlgorithm,
+    ES_D_RTRL,
+    pp_prop,
+    HybridDimVjpAlgorithm,
 )
-from ._etrace_compiler_module_info import ModuleInfo, extract_module_info
-from ._etrace_compiler_hidden_pertubation import (
-    HiddenPerturbation,
-    add_hidden_perturbation_from_minfo,
-    add_hidden_perturbation_in_module,
-)
-
 # gradient utilities
 from ._grad_exponential import GradExpon
-
 # errors
 from ._misc import NotSupportedError, CompilationError
+from ._version import __version__, __versio_info__
 
 __all__ = [
+    # version
+    '__version__',
+    '__versio_info__',
+
     # algorithms
     'ETraceAlgorithm',
     'EligibilityTrace',

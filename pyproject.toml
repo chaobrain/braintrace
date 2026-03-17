@@ -20,7 +20,7 @@ exclude = [
 
 
 [tool.setuptools.dynamic]
-version = { attr = "braintrace.__version__" }
+version = { attr = "braintrace._version.__version__" }
 
 
 [tool.distutils.bdist_wheel]
