@@ -15,7 +15,7 @@
 
 
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock
 
 import brainstate
 import jax.numpy as jnp

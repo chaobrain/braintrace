@@ -64,7 +64,7 @@ def _numel(pytree: PyTree):
     Returns:
         int: The total number of elements across all arrays in the PyTree.
     """
-    return sum(u.math.size(x) for x in jax.tree_leaves(pytree))
+    return sum(u.math.size(x) for x in jax.tree.leaves(pytree))
 
 
 def _is_weight_need_full_grad(
