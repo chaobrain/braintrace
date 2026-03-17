@@ -21,8 +21,7 @@ import brainstate
 import brainunit as u
 import jax
 
-from braintrace._etrace_compiler.hid_param_op import HiddenParamOpRelation
-from braintrace._etrace_compiler.hidden_group import HiddenGroup
+from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._etrace_concepts import ETraceParam, ElemWiseParam, ETraceGrad
 from braintrace._misc import etrace_x_key, etrace_param_key, etrace_df_key
 from braintrace._typing import (
