@@ -48,9 +48,9 @@ class GradExpon(brainstate.nn.Module):
     ):
         super().__init__()
 
-        # gradients
-        self.gradients = jax.tree.map(
-            lambda x: jax.numpy.zeros_like(x), grad_shape
+        # gradients (stored as LongTermState for proper JAX transform tracking)
+        self.gradients = brainstate.LongTermState(
+            jax.tree.map(lambda x: jax.numpy.zeros_like(x), grad_shape)
         )
 
         # decay time constant
@@ -77,9 +77,9 @@ class GradExpon(brainstate.nn.Module):
         Returns:
             None. The method updates the `self.gradients` attribute in-place.
         """
-        self.gradients = jax.tree.map(
+        self.gradients.value = jax.tree.map(
             lambda x, y: x * self.decay + y,
-            self.gradients,
+            self.gradients.value,
             grads,
             is_leaf=u.math.is_quantity
         )

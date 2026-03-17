@@ -147,7 +147,7 @@ class TestAssignStateValuesV2(unittest.TestCase):
         states = {'a': s1}
         vals = {'b': jnp.array([1.0])}
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             assign_state_values_v2(states, vals)
 
     def test_empty_dicts(self):

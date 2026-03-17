@@ -14,6 +14,7 @@
 # ==============================================================================
 
 import functools
+import warnings
 from typing import Dict, Sequence, List, Tuple, Optional, NamedTuple, Any
 
 import brainstate
@@ -75,19 +76,22 @@ def _check_consistent_states_between_model_and_compiler(
         id(st): path
         for path, st in retrieved_model_states.items()
     }
+    paths_to_remove = []
     for id_ in id_to_path:
         if id_ not in id_to_compiled_state:
             path = id_to_path[id_]
-            retrieved_model_states.pop(path)
+            paths_to_remove.append(path)
             if verbose:
-                print(f"Warning: the state {path} is not found in the compiled model.")
+                warnings.warn(f"The state {path} is not found in the compiled model.")
+    for path in paths_to_remove:
+        retrieved_model_states.pop(path)
     i_unknown = 0
     for id_ in id_to_compiled_state:
         if id_ not in id_to_path:
             st = id_to_compiled_state[id_]
             if verbose:
-                print(f"Warning: the state {st} is not found in the retrieved model. "
-                      f"We have added this state.")
+                warnings.warn(f"The state {st} is not found in the retrieved model. "
+                              f"We have added this state.")
             retrieved_model_states[unknown_state_path(i=i_unknown)] = st
             i_unknown += 1
 
@@ -517,7 +521,7 @@ def extract_module_info(
     }
     hidden_outvar_to_invar = brainstate.util.PrettyDict(hidden_outvar_to_invar)
 
-    weight_invars = brainstate.util.PrettyList(set([v for vs in weight_path_to_invars.values() for v in vs]))
+    weight_invars = brainstate.util.PrettyList(dict.fromkeys(v for vs in weight_path_to_invars.values() for v in vs))
 
     return ModuleInfo(
         # stateful model

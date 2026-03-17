@@ -43,8 +43,8 @@ def __getattr__(name):
             DeprecationWarning,
             stacklevel=2
         )
-        import brainpy.state
-        return getattr(brainpy.state, name)
+        import brainstate.state
+        return getattr(brainstate.state, name)
 
     if name in [
         'ReLU', 'RReLU', 'Hardtanh', 'ReLU6', 'Sigmoid', 'Hardsigmoid',

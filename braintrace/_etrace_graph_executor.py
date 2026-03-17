@@ -158,6 +158,9 @@ class ETraceGraphExecutor:
             attribute of the instance.
         """
 
+        # invalidate cached mappings on recompilation
+        self._state_id_to_path = None
+
         # process the inputs
         args = get_single_step_data(*args)
 

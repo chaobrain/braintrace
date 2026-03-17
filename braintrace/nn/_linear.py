@@ -274,8 +274,8 @@ class ScaledWSLinear(brainstate.nn.Module):
         super().__init__(name=name)
 
         # input and output shape
-        self.in_size = in_size
-        self.out_size = out_size
+        self.in_size = (in_size,) if isinstance(in_size, int) else tuple(in_size)
+        self.out_size = (out_size,) if isinstance(out_size, int) else tuple(out_size)
 
         # w_mask
         self.w_mask = init.param(w_mask, (self.in_size[0], 1))
@@ -387,8 +387,8 @@ class SparseLinear(brainstate.nn.Module):
 
         # input and output shape
         if in_size is not None:
-            self.in_size = in_size
-        self.out_size = sparse_mat.shape[-1]
+            self.in_size = in_size if isinstance(in_size, (tuple, list)) else (in_size,)
+        self.out_size = (sparse_mat.shape[-1],)
         if in_size is not None:
             assert self.in_size[:-1] == self.out_size[:-1], (
                 'The first n-1 dimensions of "in_size" '

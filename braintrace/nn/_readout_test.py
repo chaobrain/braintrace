@@ -21,14 +21,12 @@ Tests cover:
 - LeakySpikeReadout: Integrate-and-fire neuron model for spike-based readout
 """
 
-import pytest
-import braintrace
-import braintrace
 import brainstate
-import braintools
 import brainunit as u
 import jax.numpy as jnp
 from braintools import init
+
+import braintrace
 
 # Set default dt for all tests
 brainstate.environ.set(dt=0.1 * u.ms)

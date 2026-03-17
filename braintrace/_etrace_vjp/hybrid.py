@@ -462,7 +462,7 @@ class HybridDimVjpAlgorithm(ETraceVjpAlgorithm):
         )
         scan_fn_on = partial(
             _update_IO_dim_etrace_scan_fn,
-            hid_weight_op_relations=self.graph.hidden_param_op_relations,
+            hid_weight_op_relations=on_weight_hidden_relations,
             decay=self.decay,
         )
 

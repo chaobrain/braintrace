@@ -661,9 +661,11 @@ class ConvOp(ETraceOp):
             The updated weight dimensional tree.
         """
         self._check_weight(weight_dim_tree)
+        # Create an actual array from xinfo (ShapeDtypeStruct) since general_y2w calls ones_like on x
+        x_placeholder = u.math.ones(self.xinfo.shape, dtype=self.xinfo.dtype)
         w_like = general_y2w(
             self._pure_convolution_without_batch,
-            self.xinfo,
+            x_placeholder,
             hidden_dim_arr,
             weight_dim_tree,
         )

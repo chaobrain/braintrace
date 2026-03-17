@@ -764,7 +764,21 @@ def write_jaxpr_of_hidden_group_transition(
     #
     new_eqns = []
     env = set(list(hidden_invars) + other_invars)
+    max_iterations = len(eqns) * len(eqns) + 1  # upper bound for topological sort passes
+    iteration_count = 0
     while len(eqns) > 0:
+        iteration_count += 1
+        if iteration_count > max_iterations:
+            unresolved_invars = []
+            for eqn in eqns:
+                missing = [v for v in eqn.invars if not isinstance(v, Literal) and v not in env]
+                unresolved_invars.append((eqn, missing))
+            raise RuntimeError(
+                f'Topological sort failed: could not resolve all equation dependencies. '
+                f'{len(eqns)} equations remain unresolved. '
+                f'This may indicate a cyclic dependency or missing input variables. '
+                f'Unresolved equations: {unresolved_invars}'
+            )
         eqn = eqns.pop(0)
         if all((invar in env) for invar in eqn.invars if not isinstance(invar, Literal)):
             # Execute the equation

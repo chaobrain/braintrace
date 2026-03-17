@@ -215,6 +215,11 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
 
         if not self.is_compiled:
+            # --- invalidate cached state splits --- #
+            self._param_states = None
+            self._hidden_states = None
+            self._other_states = None
+
             # --- the model etrace graph -- #
             self.graph_executor.compile_graph(*args)
 

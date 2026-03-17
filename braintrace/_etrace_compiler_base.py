@@ -241,7 +241,7 @@ class JaxprEvaluation(object):
         eqn : JaxprEqn
             The JAX equation to evaluate.
         """
-        check_unsupported_op(self, eqn, 'while')
+        check_unsupported_op(self, eqn, 'scan')
         self._eval_eqn(eqn)
 
     def _eval_while(self, eqn: JaxprEqn) -> None:
@@ -253,7 +253,7 @@ class JaxprEvaluation(object):
         eqn : JaxprEqn
             The JAX equation to evaluate.
         """
-        check_unsupported_op(self, eqn, 'scan')
+        check_unsupported_op(self, eqn, 'while')
         self._eval_eqn(eqn)
 
     def _eval_cond(self, eqn: JaxprEqn) -> None:

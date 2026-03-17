@@ -238,35 +238,40 @@ def compile_etrace_graph(
         #   5. the hidden-hidden transition variables   ===>  for computing the hidden-hidden jacobian
         #
 
-        # all weight x
-        out_wx_jaxvars = list(set([
+        # all weight x (deduplicate while preserving insertion order)
+        out_wx_jaxvars = list(dict.fromkeys(
             relation.x for relation in hidden_param_op_relations
             if relation.x is not None
-        ]))
+        ))
 
-        # all y-to-hidden vars
-        out_wy2hid_jaxvars = set()
+        # all y-to-hidden vars (deduplicate while preserving insertion order)
+        out_wy2hid_jaxvars_dict = dict()
         for relation in hidden_param_op_relations:
             for hpo_jaxpr in relation.y_to_hidden_group_jaxprs:
-                out_wy2hid_jaxvars.update(hpo_jaxpr.invars + hpo_jaxpr.constvars)
-        out_wy2hid_jaxvars = list(out_wy2hid_jaxvars)
+                for v in hpo_jaxpr.invars + hpo_jaxpr.constvars:
+                    out_wy2hid_jaxvars_dict[v] = None
+        out_wy2hid_jaxvars = list(out_wy2hid_jaxvars_dict)
 
-        # hidden-hidden transition vars
-        hid2hid_jaxvars = set()
+        # hidden-hidden transition vars (deduplicate while preserving insertion order)
+        hid2hid_jaxvars_dict = dict()
         for group in hidden_groups:
-            hid2hid_jaxvars.update(group.hidden_invars)
-            hid2hid_jaxvars.update(group.transition_jaxpr_constvars)
-        hid2hid_jaxvars = list(hid2hid_jaxvars)
+            for v in group.hidden_invars:
+                hid2hid_jaxvars_dict[v] = None
+            for v in group.transition_jaxpr_constvars:
+                hid2hid_jaxvars_dict[v] = None
+        hid2hid_jaxvars = list(hid2hid_jaxvars_dict)
 
-        # all temporary outvars
-        temp_outvars = set(
+        # all temporary outvars (deduplicate while preserving insertion order, exclude original outputs)
+        original_outvars = set(minfo.jaxpr.outvars)
+        all_vars = (
             minfo.jaxpr.outvars[minfo.num_var_out:] +  # all state variables
             out_wx_jaxvars +  # all weight x
             out_wy2hid_jaxvars +  # all y-to-hidden invars
             hid2hid_jaxvars  # all hidden-hidden transition vars
-        ).difference(
-            minfo.jaxpr.outvars  # exclude the original function outputs
         )
+        temp_outvars = list(dict.fromkeys(
+            v for v in all_vars if v not in original_outvars
+        ))
 
         # rewrite module_info
         minfo = minfo.add_jaxpr_outs(list(temp_outvars))

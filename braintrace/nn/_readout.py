@@ -114,7 +114,7 @@ class LeakyRateReadout(brainstate.nn.Module):
         # parameters
         self.in_size = (in_size,) if isinstance(in_size, numbers.Integral) else tuple(in_size)
         self.out_size = (out_size,) if isinstance(out_size, numbers.Integral) else tuple(out_size)
-        self.tau = braintools.init.param(tau, self.in_size)
+        self.tau = braintools.init.param(tau, self.out_size)
         # Compute decay handling units properly
         tau_normalized = u.maybe_decimal(self.tau / brainstate.environ.get_dt())
         self.decay = u.math.exp(-1.0 / tau_normalized)

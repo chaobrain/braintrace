@@ -154,7 +154,7 @@ def merge_data(tree_def, *args):
     for i in range(len(data)):
         if i not in data:
             raise ValueError(f"Data at index {i} is missing.")
-    return jax.tree.unflatten(tree_def, tuple(data.values()))
+    return jax.tree.unflatten(tree_def, tuple(data[i] for i in range(len(data))))
 
 
 def get_single_step_data(*args):

@@ -43,6 +43,7 @@ import brainstate
 import brainunit as u
 import jax.core
 import jax.numpy as jnp
+from brainstate._compatible_import import get_aval
 from jax.extend import linear_util as lu
 from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
@@ -696,7 +697,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         )
         out_flat, out_tree = jax.tree.flatten(((out_single_or_multi_steps, etrace_state_vals, other_state_vals),))
         rule, in_tree = jax.api_util.flatten_fun_nokwargs(lu.wrap_init(f_vjp), out_tree)
-        out_avals = [jax.core.get_aval(x).at_least_vspace() for x in out_flat]
+        out_avals = [get_aval(x).at_least_vspace() for x in out_flat]
         jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(rule, out_avals)
         residual = VjpResiduals(jaxpr, in_tree(), out_tree, consts)
 

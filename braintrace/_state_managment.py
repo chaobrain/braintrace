@@ -88,12 +88,13 @@ def assign_state_values_v2(
     --------
     None
     """
-    assert set(states.keys()) == set(state_values.keys()), (
-        f'The keys of states and state_values must be '
-        f'the same. Got: \n '
-        f'{states.keys()} \n '
-        f'{state_values.keys()}'
-    )
+    if set(states.keys()) != set(state_values.keys()):
+        raise ValueError(
+            f'The keys of states and state_values must be '
+            f'the same. Got: \n '
+            f'{states.keys()} \n '
+            f'{state_values.keys()}'
+        )
 
     if write:
         for key in states.keys():

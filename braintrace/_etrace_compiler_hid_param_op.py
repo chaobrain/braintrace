@@ -66,6 +66,8 @@ __all__ = [
     'find_hidden_param_op_relations_from_module',
 ]
 
+_SENTINEL = object()  # sentinel to distinguish "not provided" from explicit None
+
 
 # TODO
 #
@@ -391,33 +393,33 @@ class HiddenWeightOpTracer(NamedTuple):
     op: JaxprEqn  # f: how x is transformed into y, i.e., y = f(x, w)
     weight: ETraceParam  # w
     weight_path: Path  # w
-    x: Var  # y
-    y: Var  # x
+    x: Var  # input to the operator
+    y: Var  # output of the operator
     trace: List[JaxprEqn]
     hidden_vars: set[Var]
     invar_needed_in_oth_eqns: set[Var]
 
     def replace(
         self,
-        weight=None,
-        weight_path=None,
-        op=None,
-        x=None,
-        y=None,
-        trace=None,
-        hidden_vars=None,
-        invar_needed_in_oth_eqns=None
+        weight=_SENTINEL,
+        weight_path=_SENTINEL,
+        op=_SENTINEL,
+        x=_SENTINEL,
+        y=_SENTINEL,
+        trace=_SENTINEL,
+        hidden_vars=_SENTINEL,
+        invar_needed_in_oth_eqns=_SENTINEL
     ):
         return HiddenWeightOpTracer(
-            op=(op if op is not None else self.op),
-            weight=(weight if weight is not None else self.weight),
-            weight_path=(weight_path if weight_path is not None else self.weight_path),
-            x=(x if x is not None else self.x),
-            y=(y if y is not None else self.y),
-            trace=(trace if trace is not None else self.trace),
-            hidden_vars=(hidden_vars if hidden_vars is not None else self.hidden_vars),
+            op=(op if op is not _SENTINEL else self.op),
+            weight=(weight if weight is not _SENTINEL else self.weight),
+            weight_path=(weight_path if weight_path is not _SENTINEL else self.weight_path),
+            x=(x if x is not _SENTINEL else self.x),
+            y=(y if y is not _SENTINEL else self.y),
+            trace=(trace if trace is not _SENTINEL else self.trace),
+            hidden_vars=(hidden_vars if hidden_vars is not _SENTINEL else self.hidden_vars),
             invar_needed_in_oth_eqns=(invar_needed_in_oth_eqns
-                                      if invar_needed_in_oth_eqns is not None
+                                      if invar_needed_in_oth_eqns is not _SENTINEL
                                       else self.invar_needed_in_oth_eqns)
         )
 
