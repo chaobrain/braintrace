@@ -16,7 +16,7 @@
 from ._conv import Conv1d, Conv2d, Conv3d
 from ._linear import Linear, SignedWLinear, SparseLinear, LoRA
 from ._normalizations import BatchNorm0d, BatchNorm1d, BatchNorm2d, BatchNorm3d, LayerNorm, RMSNorm, GroupNorm
-from ._readout import LeakyRateReadout, LeakySpikeReadout
+from ._readout import LeakyRateReadout
 from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
 
 __all__ = [
@@ -28,7 +28,7 @@ __all__ = [
     'BatchNorm0d', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
     'LayerNorm', 'RMSNorm', 'GroupNorm',
     # readout
-    'LeakyRateReadout', 'LeakySpikeReadout',
+    'LeakyRateReadout',
     # rnn
     'ValinaRNNCell', 'GRUCell', 'MGUCell', 'LSTMCell', 'URLSTMCell',
     'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell',
