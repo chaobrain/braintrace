@@ -20,10 +20,7 @@ import brainstate
 import braintools
 import brainunit as u
 
-from braintrace._etrace_concepts import (
-    ETraceParam,
-    ElemWiseParam,
-)
+from braintrace._etrace_concepts import ETraceParam, ElemWiseParam
 from braintrace._typing import ArrayLike
 from ._linear import Linear
 

@@ -21,9 +21,7 @@ import brainunit as u
 import jax
 import jax.numpy as jnp
 
-from braintrace._etrace_algorithms import (
-    ETraceAlgorithm,
-)
+from braintrace._etrace_algorithms import ETraceAlgorithm
 from braintrace._etrace_input_data import has_multistep_data
 from braintrace._state_managment import assign_state_values_v2
 from braintrace._typing import (
@@ -517,8 +515,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             assert len(dg_etrace_params) == 0  # gradients all etrace weights are updated by the RTRL algorithm
             assert len(self.graph.hidden_perturb.perturb_vars) == len(dg_hid_perturb_or_dl2h)
             dl2h_at_t_or_t_minus_1 = self.graph.hidden_perturb.perturb_data_to_hidden_group_data(
-                dg_hid_perturb_or_dl2h,
-                self.graph.hidden_groups,
+                dg_hid_perturb_or_dl2h, self.graph.hidden_groups,
             )
 
         else:
