@@ -425,7 +425,7 @@ class MatMulOp(ETraceOp):
             if self.weight_mask is not None:
                 weight = weight * self.weight_mask
             weight = self.weight_fn(weight)
-            y = u.math.matmul(x, self.weight_fn(weight))
+            y = u.math.matmul(x, weight)
 
         # add bias
         if 'bias' in w:
