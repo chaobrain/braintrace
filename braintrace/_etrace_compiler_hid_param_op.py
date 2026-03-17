@@ -19,6 +19,7 @@ from typing import List, Dict, Tuple, Sequence, NamedTuple, Any
 
 import brainstate
 import jax.core
+from brainstate.transform import jaxpr_to_python_code
 from jax.extend import source_info_util
 
 from ._compatible_imports import (
@@ -41,7 +42,6 @@ from ._etrace_compiler_module_info import (
     ModuleInfo,
 )
 from ._etrace_concepts import ETraceParam
-from ._etrace_debug_jaxpr2code import jaxpr_to_python_code
 from ._etrace_operators import (
     is_etrace_op,
     is_etrace_op_enable_gradient,

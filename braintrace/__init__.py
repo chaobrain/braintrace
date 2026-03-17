@@ -19,42 +19,131 @@
 __version__ = "0.1.2"
 __versio_info__ = tuple(map(int, __version__.split('.')))
 
-from braintrace._etrace_algorithms import *
-from braintrace._etrace_algorithms import __all__ as _alg_all
-from braintrace._etrace_compiler_graph import *
-from braintrace._etrace_compiler_graph import __all__ as _compiler_all
-from braintrace._etrace_compiler_hid_param_op import *
-from braintrace._etrace_compiler_hid_param_op import __all__ as _hid_param_all
-from braintrace._etrace_compiler_hidden_group import *
-from braintrace._etrace_compiler_hidden_group import __all__ as _hid_group_all
-from braintrace._etrace_compiler_hidden_pertubation import *
-from braintrace._etrace_compiler_hidden_pertubation import __all__ as _hid_pertub_all
-from braintrace._etrace_compiler_module_info import *
-from braintrace._etrace_compiler_module_info import __all__ as _mod_info_all
-from braintrace._etrace_concepts import *
-from braintrace._etrace_concepts import __all__ as _con_all
-from braintrace._etrace_graph_executor import *
-from braintrace._etrace_graph_executor import __all__ as _exec_all
-from braintrace._etrace_input_data import *
-from braintrace._etrace_input_data import __all__ as _data_all
-from braintrace._etrace_operators import *
-from braintrace._etrace_operators import __all__ as _op_all
-from braintrace._etrace_vjp import *
-from braintrace._etrace_vjp import __all__ as _vjp_all
-from braintrace._grad_exponential import *
-from braintrace._grad_exponential import __all__ as _grad_exp_all
-from braintrace._misc import *
-from braintrace._misc import __all__ as _misc_all
 from . import nn
 
-__all__ = ['nn'] + _alg_all + _compiler_all + _hid_param_all + _hid_group_all + _hid_pertub_all
-__all__ += _mod_info_all + _con_all + _exec_all + _data_all + _op_all + _vjp_all
-__all__ += _grad_exp_all + _misc_all
+# algorithms
+from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
+from ._etrace_vjp import (
+    ETraceVjpAlgorithm,
+    ETraceVjpGraphExecutor,
+    ParamDimVjpAlgorithm,
+    D_RTRL,
+    IODimVjpAlgorithm,
+    ES_D_RTRL,
+    pp_prop,
+    HybridDimVjpAlgorithm,
+)
 
-del _alg_all, _compiler_all, _hid_param_all, _hid_group_all, _hid_pertub_all
-del _mod_info_all, _con_all, _exec_all, _data_all, _op_all, _vjp_all
-del _grad_exp_all,
-del _misc_all
+# concepts
+from ._etrace_concepts import (
+    ETraceParam,
+    NonTempParam,
+    ElemWiseParam,
+    FakeETraceParam,
+    FakeElemWiseParam,
+)
+
+# operators
+from ._etrace_operators import (
+    ETraceOp,
+    MatMulOp,
+    ElemWiseOp,
+    ConvOp,
+    SpMatMulOp,
+    LoraOp,
+    general_y2w,
+    stop_param_gradients,
+)
+
+# input data
+from ._etrace_input_data import SingleStepData, MultiStepData
+
+# graph executor
+from ._etrace_graph_executor import ETraceGraphExecutor
+
+# compiler
+from ._etrace_compiler_graph import ETraceGraph, compile_etrace_graph
+from ._etrace_compiler_hidden_group import HiddenGroup, find_hidden_groups_from_minfo, find_hidden_groups_from_module
+from ._etrace_compiler_hid_param_op import (
+    HiddenParamOpRelation,
+    find_hidden_param_op_relations_from_minfo,
+    find_hidden_param_op_relations_from_module,
+)
+from ._etrace_compiler_module_info import ModuleInfo, extract_module_info
+from ._etrace_compiler_hidden_pertubation import (
+    HiddenPerturbation,
+    add_hidden_perturbation_from_minfo,
+    add_hidden_perturbation_in_module,
+)
+
+# gradient utilities
+from ._grad_exponential import GradExpon
+
+# errors
+from ._misc import NotSupportedError, CompilationError
+
+__all__ = [
+    # algorithms
+    'ETraceAlgorithm',
+    'EligibilityTrace',
+    'ETraceVjpAlgorithm',
+    'ETraceVjpGraphExecutor',
+    'ParamDimVjpAlgorithm',
+    'D_RTRL',
+    'IODimVjpAlgorithm',
+    'ES_D_RTRL',
+    'pp_prop',
+    'HybridDimVjpAlgorithm',
+
+    # concepts
+    'ETraceParam',
+    'NonTempParam',
+    'ElemWiseParam',
+    'FakeETraceParam',
+    'FakeElemWiseParam',
+
+    # operators
+    'ETraceOp',
+    'MatMulOp',
+    'ElemWiseOp',
+    'ConvOp',
+    'SpMatMulOp',
+    'LoraOp',
+    'general_y2w',
+    'stop_param_gradients',
+
+    # input data
+    'SingleStepData',
+    'MultiStepData',
+
+    # graph executor
+    'ETraceGraphExecutor',
+
+    # compiler
+    'ETraceGraph',
+    'compile_etrace_graph',
+    'HiddenGroup',
+    'find_hidden_groups_from_minfo',
+    'find_hidden_groups_from_module',
+    'HiddenParamOpRelation',
+    'find_hidden_param_op_relations_from_minfo',
+    'find_hidden_param_op_relations_from_module',
+    'ModuleInfo',
+    'extract_module_info',
+    'HiddenPerturbation',
+    'add_hidden_perturbation_from_minfo',
+    'add_hidden_perturbation_in_module',
+
+    # gradient utilities
+    'GradExpon',
+
+    # errors
+    'NotSupportedError',
+    'CompilationError',
+
+    # submodules
+    'nn',
+]
 
 
 def __getattr__(name):

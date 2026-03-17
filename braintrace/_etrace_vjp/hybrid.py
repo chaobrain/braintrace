@@ -48,15 +48,15 @@ from .d_rtrl import (
     _update_param_dim_etrace_scan_fn,
     _solve_param_dim_weight_gradients,
 )
-from .esd_rtrl import (
+from .misc import _reset_state_in_a_dict, _update_dict
+from .pp_prop import (
     _init_IO_dim_state,
     _update_IO_dim_etrace_scan_fn,
     _solve_IO_dim_weight_gradients,
     _format_decay_and_rank,
 )
-from .misc import _reset_state_in_a_dict, _update_dict
 
-__all__ = ['ETraceVjpAlgorithm']
+__all__ = ['HybridDimVjpAlgorithm']
 
 
 def _numel(pytree: PyTree):
