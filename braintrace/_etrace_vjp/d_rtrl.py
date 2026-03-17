@@ -26,10 +26,7 @@ from braintrace._etrace_compiler_hid_param_op import HiddenParamOpRelation
 from braintrace._etrace_compiler_hidden_group import HiddenGroup
 from braintrace._etrace_concepts import ElemWiseParam
 from braintrace._etrace_operators import ETraceOp
-from braintrace._misc import (
-    etrace_param_key,
-    etrace_df_key,
-)
+from braintrace._misc import etrace_param_key, etrace_df_key
 from braintrace._typing import (
     PyTree,
     WeightID,
