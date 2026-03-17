@@ -70,12 +70,12 @@ from ._etrace_vjp import (
 from ._grad_exponential import GradExpon
 # errors
 from ._misc import NotSupportedError, CompilationError
-from ._version import __version__, __versio_info__
+from ._version import __version__, __version_info__
 
 __all__ = [
     # version
     '__version__',
-    '__versio_info__',
+    '__version_info__',
 
     # algorithms
     'ETraceAlgorithm',
