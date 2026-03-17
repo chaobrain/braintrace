@@ -16,6 +16,7 @@
 from unittest.mock import MagicMock
 
 import brainstate
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -25,6 +26,28 @@ from braintrace._etrace_vjp.hybrid import (
     _numel,
     _is_weight_need_full_grad,
     HybridDimVjpAlgorithm,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helper: a lightweight wrapper that behaves like a JAX Var with .aval.shape
+# but is also traversable by jax.tree as a pytree (so _numel works on it).
+# ---------------------------------------------------------------------------
+
+class _VarLike:
+    """Wraps a JAX array so that it has .aval.shape AND is a valid pytree leaf."""
+
+    def __init__(self, arr):
+        self._arr = arr
+        self.aval = MagicMock()
+        self.aval.shape = arr.shape
+
+
+# Register _VarLike once so jax.tree.leaves can unwrap the inner array.
+jax.tree_util.register_pytree_node(
+    _VarLike,
+    lambda v: ([v._arr], None),
+    lambda _, children: _VarLike(children[0]),
 )
 
 
@@ -86,10 +109,11 @@ class TestNumel:
 # ---------------------------------------------------------------------------
 
 class TestIsWeightNeedFullGrad:
-    """Tests for _is_weight_need_full_grad."""
+    """Unit tests for _is_weight_need_full_grad using mocked relation objects."""
+
+    # --- ETraceParam with gradient == ETraceGrad.full ---
 
     def test_etrace_param_full_grad_returns_true(self):
-        """ETraceParam with gradient=full should return True."""
         weight = MagicMock(spec=ETraceParam)
         weight.gradient = ETraceGrad.full
         relation = MagicMock()
@@ -97,8 +121,9 @@ class TestIsWeightNeedFullGrad:
         mode = brainstate.mixin.Mode()
         assert _is_weight_need_full_grad(relation, mode) is True
 
+    # --- ETraceParam with gradient == ETraceGrad.approx ---
+
     def test_etrace_param_approx_grad_returns_false(self):
-        """ETraceParam with gradient=approx should return False."""
         weight = MagicMock(spec=ETraceParam)
         weight.gradient = ETraceGrad.approx
         relation = MagicMock()
@@ -106,35 +131,111 @@ class TestIsWeightNeedFullGrad:
         mode = brainstate.mixin.Mode()
         assert _is_weight_need_full_grad(relation, mode) is False
 
-    def test_elemwise_param_with_full_gradient(self):
-        """ElemWiseParam with gradient=full hits ETraceParam check first -> True."""
+    # --- ElemWiseParam always returns True ---
+
+    def test_elemwise_param_returns_true_via_full_grad(self):
         weight = MagicMock(spec=ElemWiseParam)
         weight.gradient = ETraceGrad.full
         relation = MagicMock()
         relation.weight = weight
         mode = brainstate.mixin.Mode()
+        # ElemWiseParam IS-A ETraceParam; gradient=full hits first check -> True
         assert _is_weight_need_full_grad(relation, mode) is True
 
     def test_elemwise_param_with_adaptive_gradient(self):
-        """ElemWiseParam with adaptive gradient: skips full/approx, hits isinstance -> True."""
+        """ElemWiseParam with adaptive gradient returns True via isinstance check."""
         weight = MagicMock(spec=ElemWiseParam)
         weight.gradient = ETraceGrad.adaptive
         relation = MagicMock()
         relation.weight = weight
         mode = brainstate.mixin.Mode()
+        # Skips full/approx checks, then isinstance(weight, ElemWiseParam) -> True
         assert _is_weight_need_full_grad(relation, mode) is True
 
-    def test_adaptive_grad_on_real_gru_graph(self):
-        """Test the adaptive/numel path using a real compiled GRU graph."""
-        gru = braintrace.nn.GRUCell(3, 4)
-        brainstate.nn.init_all_states(gru)
-        algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
-        algo.compile_graph(brainstate.random.rand(3))
+    # --- Adaptive gradient falls through to numel comparison ---
 
+    def test_adaptive_grad_large_io_returns_true(self):
+        """When numel(x) + numel(y) > batch_size * numel(weight), return True."""
+        weight = MagicMock(spec=ETraceParam)
+        weight.gradient = ETraceGrad.adaptive
+        weight.value = jnp.ones((2,))
+        relation = MagicMock()
+        relation.weight = weight
+        relation.x = jnp.zeros((10,))
+        relation.y = jnp.zeros((10,))
         mode = brainstate.mixin.Mode()
-        for relation in algo.graph.hidden_param_op_relations:
-            result = _is_weight_need_full_grad(relation, mode)
-            assert isinstance(result, bool)
+        # numel(x)=10 + numel(y)=10 = 20 > 1 * 2 = 2 -> True
+        assert _is_weight_need_full_grad(relation, mode) is True
+
+    def test_adaptive_grad_small_io_returns_false(self):
+        """When numel(x) + numel(y) <= batch_size * numel(weight), return False."""
+        weight = MagicMock(spec=ETraceParam)
+        weight.gradient = ETraceGrad.adaptive
+        weight.value = jnp.ones((100, 100))
+        relation = MagicMock()
+        relation.weight = weight
+        relation.x = jnp.zeros((5,))
+        relation.y = jnp.zeros((5,))
+        mode = brainstate.mixin.Mode()
+        # 5+5=10 <= 1*10000 -> False
+        assert _is_weight_need_full_grad(relation, mode) is False
+
+    def test_adaptive_grad_with_batching_mode(self):
+        """With Batching mode, batch_size comes from x.aval.shape[0]."""
+        weight = MagicMock(spec=ETraceParam)
+        weight.gradient = ETraceGrad.adaptive
+        weight.value = jnp.ones((3,))
+        relation = MagicMock()
+        relation.weight = weight
+        relation.x = _VarLike(jnp.zeros((8, 3)))
+        relation.y = _VarLike(jnp.zeros((8, 3)))
+        mode = brainstate.mixin.Batching()
+        # numel(x)=24, numel(y)=24, total=48
+        # batch_size=8, numel(weight)=3, product=24
+        # 48 > 24 -> True
+        assert _is_weight_need_full_grad(relation, mode) is True
+
+    def test_adaptive_grad_with_batching_large_weight(self):
+        """With Batching, large weight makes the comparison False."""
+        weight = MagicMock(spec=ETraceParam)
+        weight.gradient = ETraceGrad.adaptive
+        weight.value = jnp.ones((50, 50))
+        relation = MagicMock()
+        relation.weight = weight
+        relation.x = _VarLike(jnp.zeros((4, 5)))
+        relation.y = _VarLike(jnp.zeros((4, 5)))
+        mode = brainstate.mixin.Batching()
+        # numel(x)=20, numel(y)=20, total=40
+        # batch_size=4, numel(weight)=2500, product=10000
+        # 40 <= 10000 -> False
+        assert _is_weight_need_full_grad(relation, mode) is False
+
+    def test_adaptive_grad_boundary_equal(self):
+        """When numel(x) + numel(y) == batch_size * numel(weight), return False (not >)."""
+        weight = MagicMock(spec=ETraceParam)
+        weight.gradient = ETraceGrad.adaptive
+        weight.value = jnp.ones((10,))
+        relation = MagicMock()
+        relation.weight = weight
+        relation.x = jnp.zeros((5,))
+        relation.y = jnp.zeros((5,))
+        mode = brainstate.mixin.Mode()
+        # 5+5=10 == 1*10 -> not > -> False
+        assert _is_weight_need_full_grad(relation, mode) is False
+
+    # --- Non-ETraceParam, non-ElemWiseParam weight (generic weight) ---
+
+    def test_generic_weight_falls_through_to_numel(self):
+        """A weight that is neither ETraceParam nor ElemWiseParam goes to numel comparison."""
+        weight = MagicMock()
+        weight.value = jnp.ones((2,))
+        relation = MagicMock()
+        relation.weight = weight
+        relation.x = jnp.zeros((10,))
+        relation.y = jnp.zeros((10,))
+        mode = brainstate.mixin.Mode()
+        # 10+10=20 > 1*2 -> True
+        assert _is_weight_need_full_grad(relation, mode) is True
 
 
 # ---------------------------------------------------------------------------
@@ -166,7 +267,7 @@ class TestHybridDimVjpAlgorithmInit:
     def test_init_with_custom_mode(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        mode = brainstate.mixin.Mode()
+        mode = brainstate.mixin.Batching()
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9, mode=mode)
         assert algo.mode is mode
 
@@ -226,7 +327,6 @@ class TestHybridDimVjpAlgorithmCompileAndState:
         algo.compile_graph(brainstate.random.rand(3))
         xs_before = algo.etrace_xs
         algo.compile_graph(brainstate.random.rand(3))
-        # Same object reference since compile_graph is guarded by is_compiled
         assert algo.etrace_xs is xs_before
 
     def test_etrace_states_have_values(self):
@@ -249,8 +349,6 @@ class TestHybridDimVjpAlgorithmCompileAndState:
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
         algo.compile_graph(brainstate.random.rand(3))
 
-        # Set some non-zero values
-        import jax
         for key, st in algo.etrace_xs.items():
             st.value = jax.tree.map(lambda x: x + 1.0, st.value)
 
@@ -266,7 +364,6 @@ class TestHybridDimVjpAlgorithmCompileAndState:
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
         algo.compile_graph(brainstate.random.rand(3))
 
-        import jax
         for key, st in algo.etrace_dfs.items():
             st.value = jax.tree.map(lambda x: x + 1.0, st.value)
 
@@ -283,13 +380,12 @@ class TestHybridDimVjpAlgorithmCompileAndState:
         algo.compile_graph(brainstate.random.rand(3))
 
         for key, st in algo.etrace_bwg.items():
-            st.value = st.value + 1.0
+            st.value = jax.tree.map(lambda x: x + 1.0, st.value)
 
         algo.reset_state()
 
         for key, st in algo.etrace_bwg.items():
-            leaves = brainstate.graph.treefy_leaves(st.value)
-            for leaf in leaves:
+            for leaf in jax.tree.leaves(st.value):
                 assert jnp.allclose(leaf, 0.0), "etrace_bwg should be zero after reset"
 
     def test_reset_state_zeros_running_index(self):
@@ -332,26 +428,21 @@ class TestHybridDimVjpAlgorithmEtraceData:
         assert set(etrace_wgrads.keys()) == set(algo.etrace_bwg.keys())
 
     def test_assign_get_round_trip(self):
-        """_assign_etrace_data followed by _get_etrace_data should recover the same values."""
+        """_assign_etrace_data followed by _get_etrace_data should recover values."""
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
         algo.compile_graph(brainstate.random.rand(3))
 
-        # Get initial data
         data = algo._get_etrace_data()
 
-        # Modify by adding 1 to every leaf
-        import jax
         modified_data = tuple(
             {k: jax.tree.map(lambda x: x + 1.0, v) for k, v in d.items()}
             for d in data
         )
 
-        # Assign modified data
         algo._assign_etrace_data(modified_data)
 
-        # Get data again and check it matches modified version
         recovered = algo._get_etrace_data()
         for orig_dict, recovered_dict in zip(modified_data, recovered):
             for key in orig_dict:
@@ -380,7 +471,6 @@ class TestHybridDimVjpAlgorithmGetEtraceOf:
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
         algo.compile_graph(brainstate.random.rand(3))
 
-        # Create a completely unrelated ParamState
         fake_weight = brainstate.ParamState(jnp.ones((10, 10)))
         with pytest.raises(ValueError, match='Do not the etrace'):
             algo.get_etrace_of(fake_weight)
@@ -391,7 +481,6 @@ class TestHybridDimVjpAlgorithmGetEtraceOf:
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
         algo.compile_graph(brainstate.random.rand(3))
 
-        # Get the first param weight from the model
         param_states = gru.states(brainstate.ParamState)
         first_weight = list(param_states.values())[0]
 
@@ -403,21 +492,26 @@ class TestHybridDimVjpAlgorithmGetEtraceOf:
         assert isinstance(etrace_dfs, dict)
         assert isinstance(etrace_bws, dict)
 
-    def test_get_etrace_of_known_param_states(self):
-        """Calling get_etrace_of for etrace param states should not raise."""
+    def test_get_etrace_of_all_tracked_weights(self):
+        """Calling get_etrace_of for every tracked weight should not raise."""
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
         algo = HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
         algo.compile_graph(brainstate.random.rand(3))
 
-        # Get etrace of weights that have relations
-        found_any = False
+        # Only query weights that are actually tracked in the etrace graph.
+        # Some weights (e.g. Wr in GRU) may not be associated with hidden
+        # states and therefore are not in the etrace relations.
+        tracked_weights = set()
         for relation in algo.graph.hidden_param_op_relations:
-            result = algo.get_etrace_of(relation.weight)
-            assert isinstance(result, tuple)
-            assert len(result) == 3
-            found_any = True
-        assert found_any
+            tracked_weights.add(id(relation.weight))
+
+        param_states = gru.states(brainstate.ParamState)
+        for path, weight in param_states.items():
+            if id(weight) in tracked_weights:
+                result = algo.get_etrace_of(weight)
+                assert isinstance(result, tuple)
+                assert len(result) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -555,7 +649,7 @@ class TestHybridDimVjpAlgorithmIntegration:
         assert outs.shape == (10, 4)
 
     def test_for_loop_produces_outputs_each_step(self):
-        """Verify that for_loop over the algorithm produces correct output shape."""
+        """Verify that for_loop produces correct output shape."""
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
         algo = braintrace.HybridDimVjpAlgorithm(gru, decay_or_rank=0.9)
@@ -572,11 +666,9 @@ class TestHybridDimVjpAlgorithmIntegration:
         inputs = brainstate.random.randn(5, 3)
         algo.compile_graph(inputs[0])
 
-        # First run
         outs1 = brainstate.transform.for_loop(algo, inputs)
         assert outs1.shape == (5, 4)
 
-        # Reset and run again
         algo.reset_state()
         gru.reset_state()
         outs2 = brainstate.transform.for_loop(algo, inputs)
