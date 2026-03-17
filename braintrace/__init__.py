@@ -16,23 +16,25 @@
 # -*- coding: utf-8 -*-
 
 
-from . import nn
-# algorithms
-from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
 # compiler
-from ._etrace_compiler_graph import ETraceGraph, compile_etrace_graph
-from ._etrace_compiler_hid_param_op import (
+from braintrace._etrace_compiler import (
+    ETraceGraph,
+    compile_etrace_graph,
     HiddenParamOpRelation,
     find_hidden_param_op_relations_from_minfo,
     find_hidden_param_op_relations_from_module,
-)
-from ._etrace_compiler_hidden_group import HiddenGroup, find_hidden_groups_from_minfo, find_hidden_groups_from_module
-from ._etrace_compiler_hidden_pertubation import (
+    HiddenGroup,
+    find_hidden_groups_from_minfo,
+    find_hidden_groups_from_module,
     HiddenPerturbation,
     add_hidden_perturbation_from_minfo,
     add_hidden_perturbation_in_module,
+    ModuleInfo,
+    extract_module_info,
 )
-from ._etrace_compiler_module_info import ModuleInfo, extract_module_info
+from . import nn
+# algorithms
+from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
 # concepts
 from ._etrace_concepts import (
     ETraceParam,

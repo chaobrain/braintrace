@@ -21,23 +21,23 @@ from typing import Dict, Sequence, Tuple, Optional, NamedTuple
 import brainstate
 import jax
 
-from ._etrace_compiler_hid_param_op import (
+from .hid_param_op import (
     find_hidden_param_op_relations_from_minfo,
     HiddenParamOpRelation,
 )
-from ._etrace_compiler_hidden_group import (
+from .hidden_group import (
     find_hidden_groups_from_minfo,
     HiddenGroup,
 )
-from ._etrace_compiler_hidden_pertubation import (
+from .hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     HiddenPerturbation,
 )
-from ._etrace_compiler_module_info import (
+from .module_info import (
     extract_module_info,
     ModuleInfo,
 )
-from ._typing import (
+from braintrace._typing import (
     Inputs,
     Path,
 )

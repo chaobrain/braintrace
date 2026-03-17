@@ -49,8 +49,8 @@ from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
 from braintrace._compatible_imports import Var
-from braintrace._etrace_compiler_graph import compile_etrace_graph
-from braintrace._etrace_compiler_hidden_group import HiddenGroup
+from braintrace._etrace_compiler.graph import compile_etrace_graph
+from braintrace._etrace_compiler.hidden_group import HiddenGroup
 from braintrace._etrace_graph_executor import ETraceGraphExecutor
 from braintrace._etrace_input_data import (
     get_single_step_data,

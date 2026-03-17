@@ -21,19 +21,19 @@ import brainstate
 import brainunit as u
 import jax
 
-from ._compatible_imports import (
+from braintrace._compatible_imports import (
     Var,
     Jaxpr,
     ClosedJaxpr,
 )
-from ._etrace_concepts import ETraceParam
-from ._misc import (
+from braintrace._etrace_concepts import ETraceParam
+from braintrace._misc import (
     NotSupportedError,
     unknown_state_path,
     _remove_quantity,
 )
-from ._state_managment import sequence_split_state_values
-from ._typing import (
+from braintrace._state_managment import sequence_split_state_values
+from braintrace._typing import (
     Path,
     StateID,
     Inputs,

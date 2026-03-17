@@ -25,8 +25,8 @@ import pytest
 
 import braintrace
 from braintrace import _etrace_model_with_group_state as group_etrace_model
-from braintrace._etrace_compiler_hidden_group import find_hidden_groups_from_module
-from braintrace._etrace_compiler_hidden_group import group_merging
+from braintrace._etrace_compiler.hidden_group import find_hidden_groups_from_module
+from braintrace._etrace_compiler.hidden_group import group_merging
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,

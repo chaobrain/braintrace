@@ -20,27 +20,27 @@ import brainstate
 import brainunit as u
 import jax.core
 
-from ._compatible_imports import (
+from braintrace._compatible_imports import (
     Var,
     JaxprEqn,
     Jaxpr,
     ClosedJaxpr,
     new_var
 )
-from ._etrace_compiler_base import (
+from .base import (
     JaxprEvaluation,
 )
-from ._etrace_compiler_hidden_group import (
+from .hidden_group import (
     HiddenGroup,
 )
-from ._etrace_compiler_module_info import (
+from .module_info import (
     extract_module_info,
     ModuleInfo,
 )
-from ._misc import (
+from braintrace._misc import (
     git_issue_addr,
 )
-from ._typing import (
+from braintrace._typing import (
     HiddenInVar,
     HiddenOutVar,
     Path,

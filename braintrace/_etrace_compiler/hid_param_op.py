@@ -22,37 +22,37 @@ import jax.core
 from brainstate.transform import jaxpr_to_python_code
 from jax.extend import source_info_util
 
-from ._compatible_imports import (
+from braintrace._compatible_imports import (
     Var,
     Literal,
     JaxprEqn,
     Jaxpr,
 )
-from ._etrace_compiler_base import (
+from .base import (
     JaxprEvaluation,
     check_unsupported_op,
     find_matched_vars,
 )
-from ._etrace_compiler_hidden_group import (
+from .hidden_group import (
     HiddenGroup,
     find_hidden_groups_from_minfo,
 )
-from ._etrace_compiler_module_info import (
+from .module_info import (
     extract_module_info,
     ModuleInfo,
 )
-from ._etrace_concepts import ETraceParam
-from ._etrace_operators import (
+from braintrace._etrace_concepts import ETraceParam
+from braintrace._etrace_operators import (
     is_etrace_op,
     is_etrace_op_enable_gradient,
     is_etrace_op_elemwise,
 )
-from ._misc import (
+from braintrace._misc import (
     git_issue_addr,
     NotSupportedError,
     CompilationError,
 )
-from ._typing import (
+from braintrace._typing import (
     WeightXVar,
     WeightYVar,
     HiddenInVar,

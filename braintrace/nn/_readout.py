@@ -125,8 +125,7 @@ class LeakyRateReadout(brainstate.nn.Module):
         self.weight_op = ETraceParam({'weight': weight}, op=MatMulOp())
 
     def init_state(self, batch_size=None, **kwargs):
-        self.r = brainstate.HiddenState(
-            braintools.init.param(self.r_init, self.out_size, batch_size))
+        self.r = brainstate.HiddenState(braintools.init.param(self.r_init, self.out_size, batch_size))
 
     def reset_state(self, batch_size=None, **kwargs):
         self.r.value = braintools.init.param(self.r_init, self.out_size, batch_size)
