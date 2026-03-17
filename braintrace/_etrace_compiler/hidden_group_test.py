@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace import _etrace_model_with_group_state as group_etrace_model
+from braintrace._etrace_compiler import model4test as group_etrace_model
 from braintrace._etrace_compiler.hidden_group import find_hidden_groups_from_module
 from braintrace._etrace_compiler.hidden_group import group_merging
 from braintrace._etrace_model_test import (
