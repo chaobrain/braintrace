@@ -148,7 +148,6 @@ class _Conv(brainstate.nn.Module):
 
         # Evaluate the output shape
         from braintrace._etrace_operators import _etp_conv_impl
-        import jax.numpy as jnp
         xinfo = jax.ShapeDtypeStruct((1,) + self.in_size, self.kernel.value.dtype)
         abstract_y = jax.eval_shape(
             lambda x_, k_: _etp_conv_impl(
@@ -193,9 +192,12 @@ class _Conv(brainstate.nn.Module):
         b = self.bias.value if self.bias is not None else None
         y = etp_conv(
             x, k, b,
-            strides=tuple(self.stride), padding=self.padding,
-            lhs_dilation=tuple(self.lhs_dilation), rhs_dilation=tuple(self.rhs_dilation),
-            feature_group_count=self.groups, dimension_numbers=self.dimension_numbers,
+            strides=tuple(self.stride),
+            padding=self.padding,
+            lhs_dilation=tuple(self.lhs_dilation),
+            rhs_dilation=tuple(self.rhs_dilation),
+            feature_group_count=self.groups,
+            dimension_numbers=self.dimension_numbers,
         )
         if squeeze:
             import jax.numpy as jnp

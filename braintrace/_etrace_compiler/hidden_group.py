@@ -371,6 +371,22 @@ class Hidden2GroupTransition(NamedTuple):
         return repr(brainstate.util.PrettyMapping(self._asdict(), type_name=self.__class__.__name__))
 
 
+def _same_recurrence_layer(path1: Path, path2: Path) -> bool:
+    """
+    Check if two hidden state paths belong to the same recurrence layer.
+
+    Paths that diverge at a numeric index (e.g., ('layers', 0, ...) vs
+    ('layers', 1, ...)) indicate different sequential layers and should
+    be in separate groups. Paths that diverge at string keys (e.g.,
+    ('neu', 'V') vs ('neu', 'a')) are within the same layer.
+    """
+    min_len = min(len(path1), len(path2))
+    for i in range(min_len):
+        if path1[i] != path2[i]:
+            return not (isinstance(path1[i], int) or isinstance(path2[i], int))
+    return True
+
+
 def _simplify_hid2hid_tracer(
     tracer: HiddenToHiddenGroupTracer,
     hidden_invar_to_path: Dict[HiddenInVar, Path],
@@ -392,15 +408,21 @@ def _simplify_hid2hid_tracer(
     #
     # [pre-step]
     #
-    # Filter out hidden outvars with incompatible shapes.
+    # Filter out hidden outvars from different recurrence layers.
     # In multi-layer networks, a hidden state from one layer may be
-    # connected to hidden outvars of other layers with different shapes
-    # through the computation graph. These cross-layer connections
-    # should not be in the same group.
-    invar_state = path_to_state[hidden_invar_to_path[tracer.hidden_invar]]
+    # connected to hidden outvars of other layers through the computation
+    # graph. These cross-layer connections should not be in the same group.
+    # Two filters are applied:
+    #   1. Shape compatibility: outvars must match the invar's shape.
+    #   2. Layer membership: outvars whose paths diverge from the invar's
+    #      path at a numeric index (e.g., layers.0 vs layers.1) are in
+    #      different sequential layers and are excluded.
+    invar_path = hidden_invar_to_path[tracer.hidden_invar]
+    invar_state = path_to_state[invar_path]
     compatible_outvars = {
         hv for hv in tracer.connected_hidden_outvars
-        if path_to_state[hidden_outvar_to_path[hv]].varshape == invar_state.varshape
+        if (path_to_state[hidden_outvar_to_path[hv]].varshape == invar_state.varshape
+            and _same_recurrence_layer(invar_path, hidden_outvar_to_path[hv]))
     }
     if not compatible_outvars:
         return None
