@@ -55,14 +55,16 @@ def _make_eqn(
     params: dict | None = None,
 ) -> JaxprEqn:
     p = Primitive(prim_name)
+    # JAX 0.9.0+ renamed 'effects' to 'effs' in JaxprEqn.__init__
+    effs_kwarg = 'effs' if jax.__version_info__ >= (0, 9, 0) else 'effects'
     return JaxprEqn(
         invars=invars,
         outvars=outvars,
         primitive=p,
         params=params or {},
-        effs=set(),
         source_info=new_source_info(),
         ctx=None,
+        **{effs_kwarg: set()},
     )
 
 
