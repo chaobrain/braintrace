@@ -13,35 +13,38 @@
 # limitations under the License.
 # ==============================================================================
 
+from ._conv import Conv1d, Conv2d, Conv3d
+from ._linear import Linear, SignedWLinear, SparseLinear, LoRA
+from ._normalizations import BatchNorm0d, BatchNorm1d, BatchNorm2d, BatchNorm3d, LayerNorm, RMSNorm, GroupNorm
+from ._readout import LeakyRateReadout
+from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
 
-from ._conv import *
-from ._conv import __all__ as _conv_all
-from ._linear import *
-from ._linear import __all__ as _linear_all
-from ._normalizations import *
-from ._normalizations import __all__ as _normalizations_all
-from ._readout import *
-from ._readout import __all__ as _readout_all
-from ._rnn import *
-from ._rnn import __all__ as _rnn_all
-
-__all__ = _conv_all + _linear_all + _normalizations_all + _rnn_all + _readout_all
-del _conv_all, _linear_all, _normalizations_all, _rnn_all, _readout_all
+__all__ = [
+    # conv
+    'Conv1d', 'Conv2d', 'Conv3d',
+    # linear
+    'Linear', 'SignedWLinear', 'SparseLinear', 'LoRA',
+    # normalizations
+    'BatchNorm0d', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
+    'LayerNorm', 'RMSNorm', 'GroupNorm',
+    # readout
+    'LeakyRateReadout',
+    # rnn
+    'ValinaRNNCell', 'GRUCell', 'MGUCell', 'LSTMCell', 'URLSTMCell',
+    'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell',
+]
 
 
 def __getattr__(name):
     import warnings
-    if name in [
-        'IF', 'LIF', 'ALIF',
-        'Expon', 'Alpha', 'DualExpon', 'STP', 'STD',
-    ]:
+    if name in ['IF', 'LIF', 'ALIF', 'Expon', 'Alpha', 'DualExpon', 'STP', 'STD']:
         warnings.warn(
             f'braintrace.nn.{name} is deprecated. Use brainstate.state.{name} instead.',
             DeprecationWarning,
             stacklevel=2
         )
-        import brainpy
-        return getattr(brainpy.state, name)
+        import brainstate.state
+        return getattr(brainstate.state, name)
 
     if name in [
         'ReLU', 'RReLU', 'Hardtanh', 'ReLU6', 'Sigmoid', 'Hardsigmoid',

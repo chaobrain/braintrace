@@ -24,9 +24,9 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace import _etrace_model_with_group_state as group_etrace_model
-from braintrace._etrace_compiler_hidden_group import find_hidden_groups_from_module
-from braintrace._etrace_compiler_hidden_group import group_merging
+from braintrace._etrace_compiler import model4test as group_etrace_model
+from braintrace._etrace_compiler.hidden_group import find_hidden_groups_from_module
+from braintrace._etrace_compiler.hidden_group import group_merging
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,
@@ -243,10 +243,10 @@ class Test_module_with_group_state:
 
         print()
         for group1, group2 in zip(hidden_groups_without_group, hidden_groups_with_group):
-            assert (len(group1.hidden_paths) == len(group2.hidden_paths)) + 1
-            assert (len(group1.hidden_invars) == len(group2.hidden_invars)) + 1
-            assert (len(group1.hidden_outvars) == len(group2.hidden_outvars)) + 1
-            assert (len(group1.hidden_states) == len(group2.hidden_states)) + 1
+            assert len(group1.hidden_paths) == len(group2.hidden_paths) + 1
+            assert len(group1.hidden_invars) == len(group2.hidden_invars) + 1
+            assert len(group1.hidden_outvars) == len(group2.hidden_outvars) + 1
+            assert len(group1.hidden_states) == len(group2.hidden_states) + 1
             assert group1.num_state == group2.num_state
             assert group1.varshape == group2.varshape
 

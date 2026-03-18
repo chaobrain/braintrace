@@ -359,12 +359,14 @@ class FakeElemWiseParam(object):
         name: Optional[str] = None,
     ):
         super().__init__()
+        self._is_etrace_op = False
         if isinstance(op, ETraceOp):
             assert isinstance(op, ElemWiseOp), (
                 f'op should be ElemWiseOp. '
                 f'But we got {type(op)}.'
             )
             op = op.xw_to_y
+            self._is_etrace_op = True
         self.op = op
         self.value = weight
         self.name = name
@@ -379,4 +381,6 @@ class FakeElemWiseParam(object):
         Returns:
             brainstate.typing.ArrayLike: The result of applying the operator to the weight.
         """
-        return self.op(None, self.value)
+        if self._is_etrace_op:
+            return self.op(None, self.value)
+        return self.op(self.value)

@@ -20,27 +20,27 @@ import brainstate
 import brainunit as u
 import jax.core
 
-from ._compatible_imports import (
+from braintrace._compatible_imports import (
     Var,
     JaxprEqn,
     Jaxpr,
     ClosedJaxpr,
     new_var
 )
-from ._etrace_compiler_base import (
+from .base import (
     JaxprEvaluation,
 )
-from ._etrace_compiler_hidden_group import (
+from .hidden_group import (
     HiddenGroup,
 )
-from ._etrace_compiler_module_info import (
+from .module_info import (
     extract_module_info,
     ModuleInfo,
 )
-from ._misc import (
+from braintrace._misc import (
     git_issue_addr,
 )
-from ._typing import (
+from braintrace._typing import (
     HiddenInVar,
     HiddenOutVar,
     Path,
@@ -115,7 +115,7 @@ class HiddenPerturbation(NamedTuple):
         """
         Initialize the perturbation data.
         """
-        return [jax.numpy.zeros_like(v.aval) for v in self.perturb_vars]
+        return [jax.numpy.zeros(v.aval.shape, dtype=v.aval.dtype) for v in self.perturb_vars]
 
     def perturb_data_to_hidden_group_data(
         self,
@@ -185,21 +185,27 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         self.closed_jaxpr = closed_jaxpr
 
         # initialize the super class
+        # Use dict.fromkeys to deduplicate while preserving insertion order
+        # (avoids non-deterministic set iteration for jaxpr variable ordering)
+        hidden_outvars_ordered = list(dict.fromkeys(hidden_outvar_to_invar.keys()))
+        hidden_invars_ordered = list(dict.fromkeys(hidden_outvar_to_invar.values()))
         super().__init__(
             weight_invars=weight_invars,
-            hidden_invars=set(hidden_outvar_to_invar.values()),
-            hidden_outvars=set(hidden_outvar_to_invar.keys()),
+            hidden_invars=set(hidden_invars_ordered),
+            hidden_outvars=set(hidden_outvars_ordered),
             invar_to_hidden_path=invar_to_hidden_path,
             outvar_to_hidden_path=outvar_to_hidden_path
         )
+        # Keep an ordered version for deterministic iteration in compile()
+        self._hidden_outvars_ordered = hidden_outvars_ordered
 
         self.path_to_state = path_to_state
 
     def compile(self) -> HiddenPerturbation:
-        # new invars, the var order is the same as the hidden_outvars
+        # new invars, the var order is the same as the hidden_outvars (use ordered list for determinism)
         self.perturb_invars = {
             v: self._new_var_like(v)
-            for v in self.hidden_outvars
+            for v in self._hidden_outvars_ordered
         }
 
         # the hidden states that are not found in the code
@@ -234,8 +240,8 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         revised_closed_jaxpr = ClosedJaxpr(jaxpr, self.closed_jaxpr.literals)
 
         # finalizing
-        perturb_hidden_paths = [self.outvar_to_hidden_path[v] for v in self.hidden_outvars]
-        perturb_hidden_states = [self.path_to_state[self.outvar_to_hidden_path[v]] for v in self.hidden_outvars]
+        perturb_hidden_paths = [self.outvar_to_hidden_path[v] for v in self._hidden_outvars_ordered]
+        perturb_hidden_states = [self.path_to_state[self.outvar_to_hidden_path[v]] for v in self._hidden_outvars_ordered]
         info = HiddenPerturbation(
             perturb_vars=brainstate.util.PrettyList(self.perturb_invars.values()),
             perturb_hidden_paths=brainstate.util.PrettyList(perturb_hidden_paths),
@@ -252,6 +258,10 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
     def _eval_pjit(self, eqn: JaxprEqn) -> None:
         """
         Evaluating the pjit primitive.
+
+        Note: Unlike the base class, the perturbation compiler must process ALL
+        equations (including etrace ops without gradient) to maintain a valid jaxpr.
+        Skipping equations would leave variable references unresolved.
         """
         self._eval_eqn(eqn)
 

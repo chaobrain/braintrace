@@ -1,4 +1,4 @@
-# Copyright 2025 BrainX Ecosystem Limited. All Rights Reserved.
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,19 +13,5 @@
 # limitations under the License.
 # ==============================================================================
 
-from .base import ETraceVjpAlgorithm
-from .d_rtrl import ParamDimVjpAlgorithm, D_RTRL
-from .graph_executor import ETraceVjpGraphExecutor
-from .hybrid import HybridDimVjpAlgorithm
-from .pp_prop import IODimVjpAlgorithm, ES_D_RTRL, pp_prop
-
-__all__ = [
-    'ETraceVjpAlgorithm',
-    'ETraceVjpGraphExecutor',
-    'ParamDimVjpAlgorithm',
-    'D_RTRL',
-    'IODimVjpAlgorithm',
-    'ES_D_RTRL',
-    'pp_prop',
-    'HybridDimVjpAlgorithm',
-]
+__version__ = "0.2.0"
+__version_info__ = tuple(map(int, __version__.split('.')))

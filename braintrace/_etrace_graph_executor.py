@@ -39,7 +39,7 @@ from typing import Dict, Any
 
 import brainstate
 
-from ._etrace_compiler_graph import ETraceGraph, compile_etrace_graph
+from braintrace._etrace_compiler import ETraceGraph, compile_etrace_graph
 from ._etrace_input_data import get_single_step_data
 from ._typing import Path
 
@@ -157,6 +157,9 @@ class ETraceGraphExecutor:
             This method does not return any value. It initializes the compiled graph
             attribute of the instance.
         """
+
+        # invalidate cached mappings on recompilation
+        self._state_id_to_path = None
 
         # process the inputs
         args = get_single_step_data(*args)

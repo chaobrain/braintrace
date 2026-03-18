@@ -21,18 +21,9 @@ import brainstate
 import brainunit as u
 import jax
 
-from braintrace._etrace_compiler_hid_param_op import HiddenParamOpRelation
-from braintrace._etrace_compiler_hidden_group import HiddenGroup
-from braintrace._etrace_concepts import (
-    ETraceParam,
-    ElemWiseParam,
-    ETraceGrad,
-)
-from braintrace._misc import (
-    etrace_x_key,
-    etrace_param_key,
-    etrace_df_key,
-)
+from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
+from braintrace._etrace_concepts import ETraceParam, ElemWiseParam, ETraceGrad
+from braintrace._misc import etrace_x_key, etrace_param_key, etrace_df_key
 from braintrace._typing import (
     PyTree,
     Path,
@@ -48,15 +39,15 @@ from .d_rtrl import (
     _update_param_dim_etrace_scan_fn,
     _solve_param_dim_weight_gradients,
 )
-from .esd_rtrl import (
+from .misc import _reset_state_in_a_dict, _update_dict
+from .pp_prop import (
     _init_IO_dim_state,
     _update_IO_dim_etrace_scan_fn,
     _solve_IO_dim_weight_gradients,
     _format_decay_and_rank,
 )
-from .misc import _reset_state_in_a_dict, _update_dict
 
-__all__ = ['ETraceVjpAlgorithm']
+__all__ = ['HybridDimVjpAlgorithm']
 
 
 def _numel(pytree: PyTree):
@@ -73,7 +64,7 @@ def _numel(pytree: PyTree):
     Returns:
         int: The total number of elements across all arrays in the PyTree.
     """
-    return sum(u.math.size(x) for x in jax.tree_leaves(pytree))
+    return sum(u.math.size(x) for x in jax.tree.leaves(pytree))
 
 
 def _is_weight_need_full_grad(
@@ -470,7 +461,7 @@ class HybridDimVjpAlgorithm(ETraceVjpAlgorithm):
         )
         scan_fn_on = partial(
             _update_IO_dim_etrace_scan_fn,
-            hid_weight_op_relations=self.graph.hidden_param_op_relations,
+            hid_weight_op_relations=on_weight_hidden_relations,
             decay=self.decay,
         )
 

@@ -34,8 +34,7 @@ import jax
 import jax.numpy as jnp
 
 from braintrace._etrace_algorithms import EligibilityTrace
-from braintrace._etrace_compiler_hid_param_op import HiddenParamOpRelation
-from braintrace._etrace_compiler_hidden_group import HiddenGroup
+from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
 from braintrace._etrace_concepts import ElemWiseParam
 from braintrace._misc import (
     check_dict_keys,
@@ -418,6 +417,8 @@ def _solve_IO_dim_weight_gradients(
     # This is the correction factor for the exponential smoothing.
     correction_factor = 1. - u.math.power(1. - decay, running_index + 1)
     correction_factor = u.math.where(running_index < 1000, correction_factor, 1.)
+    # Clamp to avoid division by zero when decay is very small (e.g., rank=1 gives decay=0)
+    correction_factor = u.math.maximum(correction_factor, 1e-8)
     correction_factor = jax.lax.stop_gradient(correction_factor)
 
     xs, dfs = hist_etrace_data

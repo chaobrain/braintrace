@@ -79,6 +79,5 @@ Readout Layers
    :template: classtemplate.rst
 
    LeakyRateReadout
-   LeakySpikeReadout
 
 

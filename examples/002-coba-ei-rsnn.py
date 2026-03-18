@@ -16,7 +16,7 @@
 import time
 from typing import Callable, Iterable
 
-import brainpy.state
+import brainpy
 import brainstate
 import braintools
 import brainunit as u

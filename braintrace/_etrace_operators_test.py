@@ -22,7 +22,6 @@ import braintrace
 
 class Test_MatMulOp:
     def test1(self):
-        fn = braintrace.MatMulOp(weight_fn=jnp.abs)
         fn = braintrace.MatMulOp()
         x = brainstate.random.rand(10)
         w = {'weight': brainstate.random.randn(10, 20)}
@@ -34,8 +33,17 @@ class Test_MatMulOp:
         dx, dw2 = f_vjp(dy)
 
         assert jnp.allclose(y1, y2)
-        print(dw1['weight'].shape)
-        print(dw2['weight'].shape)
+        assert dw1['weight'].shape == dw2['weight'].shape
+
+    def test_with_weight_fn(self):
+        fn = braintrace.MatMulOp(weight_fn=jnp.abs)
+        x = brainstate.random.rand(10)
+        w = {'weight': brainstate.random.randn(10, 20)}
+        y1 = fn(x, w)
+        dy = brainstate.random.randn(20)
+
+        y2, f_vjp = jax.vjp(fn.xw_to_y, x, w)
+        assert jnp.allclose(y1, y2)
 
 
 class Test_SpMatMulOp:
@@ -54,5 +62,4 @@ class Test_SpMatMulOp:
         dx, dw2 = f_vjp(dy)
 
         assert jnp.allclose(y1, y2)
-        print(dw1['weight'].shape)
-        print(dw2['weight'].shape)
+        assert dw1['weight'].shape == dw2['weight'].shape

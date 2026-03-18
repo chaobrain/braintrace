@@ -23,7 +23,7 @@ from typing import Dict, Any, Optional
 
 import brainstate
 
-from ._etrace_compiler_graph import ETraceGraph
+from braintrace._etrace_compiler import ETraceGraph
 from ._etrace_graph_executor import ETraceGraphExecutor
 from ._typing import Path
 
@@ -215,6 +215,11 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
 
         if not self.is_compiled:
+            # --- invalidate cached state splits --- #
+            self._param_states = None
+            self._hidden_states = None
+            self._other_states = None
+
             # --- the model etrace graph -- #
             self.graph_executor.compile_graph(*args)
 

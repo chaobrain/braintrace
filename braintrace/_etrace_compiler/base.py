@@ -15,7 +15,7 @@
 
 from typing import Dict, Sequence, Set, List
 
-from ._compatible_imports import (
+from braintrace._compatible_imports import (
     Var,
     JaxprEqn,
     is_jit_primitive,
@@ -23,11 +23,11 @@ from ._compatible_imports import (
     is_while_primitive,
     is_cond_primitive,
 )
-from ._etrace_operators import (
+from braintrace._etrace_operators import (
     is_etrace_op,
     is_etrace_op_enable_gradient,
 )
-from ._typing import Path
+from braintrace._typing import Path
 
 
 def find_matched_vars(
@@ -241,7 +241,7 @@ class JaxprEvaluation(object):
         eqn : JaxprEqn
             The JAX equation to evaluate.
         """
-        check_unsupported_op(self, eqn, 'while')
+        check_unsupported_op(self, eqn, 'scan')
         self._eval_eqn(eqn)
 
     def _eval_while(self, eqn: JaxprEqn) -> None:
@@ -253,7 +253,7 @@ class JaxprEvaluation(object):
         eqn : JaxprEqn
             The JAX equation to evaluate.
         """
-        check_unsupported_op(self, eqn, 'scan')
+        check_unsupported_op(self, eqn, 'while')
         self._eval_eqn(eqn)
 
     def _eval_cond(self, eqn: JaxprEqn) -> None:

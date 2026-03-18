@@ -150,9 +150,6 @@ Replace all occurrences of `brainscale` with `braintrace`:
 #### VJP Algorithm Usage
 The new VJP-based algorithms are now available through the modular interface:
 
-```python
-from braintrace._etrace_vjp import d_rtrl, esd_rtrl, hybrid
-```
 
 ### Version
 - Bumped version from `0.1.0` to `0.1.1`

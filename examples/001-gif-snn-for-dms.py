@@ -24,9 +24,6 @@ import numpy as np
 from snn_models import DMSDataset, GifNet, OnlineTrainer, BPTTTrainer
 
 if __name__ == '__main__':
-    OnlineTrainer, BPTTTrainer
-
-
     with brainstate.environ.context(dt=1. * u.ms):
         data = DMSDataset(
             bg_fr=1. * u.Hz,

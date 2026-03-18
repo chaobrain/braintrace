@@ -20,11 +20,7 @@ exclude = [
 
 
 [tool.setuptools.dynamic]
-version = { attr = "braintrace.__version__" }
-
-
-[tool.distutils.bdist_wheel]
-universal = true
+version = { attr = "braintrace._version.__version__" }
 
 
 [project]
@@ -32,7 +28,7 @@ name = "braintrace"
 description = "Enabling Scalable Online Learning for Brain Dynamics."
 readme = "README.md"
 license = { text = "Apache-2.0 license" }
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [{ name = "BrainTrace Developers", email = "chao.brain@qq.com" }]
 keywords = [
     "computational neuroscience",
@@ -45,7 +41,6 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -75,8 +70,8 @@ dynamic = ["version"]
 
 
 [project.optional-dependencies]
-cpu = ["jax[cpu]", "brainunit", "brainstate", "brainpy-state", "braintools"]
-cuda12 = ["jax[cuda12]", "brainunit", "brainstate", "brainpy-state", "braintools"]
-cuda13 = ["jax[cuda13]", "brainunit", "brainstate", "brainpy-state", "braintools"]
-tpu = ["jax[tpu]", "brainunit", "brainstate", "brainpy-state", "braintools"]
-testing = ["pytest", "jax[cpu]", "brainunit", "brainstate", "brainpy-state", "braintools"]
+cpu = ["jax[cpu]"]
+cuda12 = ["jax[cuda12]"]
+cuda13 = ["jax[cuda13]"]
+tpu = ["jax[tpu]"]
+testing = ["pytest", "jax[cpu]"]

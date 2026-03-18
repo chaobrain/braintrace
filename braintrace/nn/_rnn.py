@@ -20,10 +20,7 @@ import brainstate
 import braintools
 import brainunit as u
 
-from braintrace._etrace_concepts import (
-    ETraceParam,
-    ElemWiseParam,
-)
+from braintrace._etrace_concepts import ETraceParam, ElemWiseParam
 from braintrace._typing import ArrayLike
 from ._linear import Linear
 
@@ -629,8 +626,8 @@ class URLSTMCell(brainstate.nn.RNNCell):
         self.bias = param_type(self._forget_bias(), op=u.math.add, grad='full')
 
     def _forget_bias(self):
-        u = brainstate.random.uniform(1 / self.out_size[-1], 1 - 1 / self.out_size[1], (self.out_size[-1],))
-        return -u.math.log(1 / u - 1)
+        rand_val = brainstate.random.uniform(1 / self.out_size[-1], 1 - 1 / self.out_size[-1], (self.out_size[-1],))
+        return -u.math.log(1 / rand_val - 1)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.c = brainstate.HiddenState(
@@ -1051,7 +1048,11 @@ class LRUCell(brainstate.nn.Module):
         c = u.math.exp(self.gamma_log.execute())
         a_cos_b = a * u.math.cos(b)
         a_sin_b = a * u.math.sin(b)
-        self.h_re.value = a_cos_b * self.h_re.value - a_sin_b * self.h_im.value + c * self.B_re(inputs)
-        self.h_im.value = a_sin_b * self.h_re.value + a_cos_b * self.h_im.value + c * self.B_im(inputs)
+        # Compute both new values before any state mutation to avoid stale-read bug
+        # (h_im computation must use old h_re, not the updated one)
+        new_h_re = a_cos_b * self.h_re.value - a_sin_b * self.h_im.value + c * self.B_re(inputs)
+        new_h_im = a_sin_b * self.h_re.value + a_cos_b * self.h_im.value + c * self.B_im(inputs)
+        self.h_re.value = new_h_re
+        self.h_im.value = new_h_im
         r = self.C_re(self.h_re.value) - self.C_im(self.h_im.value) + inputs * self.D.execute()
         return r

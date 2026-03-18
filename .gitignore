@@ -202,3 +202,4 @@ cython_debug/
 /docs/_static/etrace_op_functions.pptx
 /docs/_static/etrace_op_functions.pdf
 /.claude/
+/docs/changelog.md
