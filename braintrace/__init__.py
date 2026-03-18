@@ -16,8 +16,9 @@
 # -*- coding: utf-8 -*-
 
 
-# compiler
-from braintrace._etrace_compiler import (
+from . import nn
+from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
+from ._etrace_compiler import (
     ETraceGraph,
     compile_etrace_graph,
     HiddenParamOpRelation,
@@ -32,14 +33,8 @@ from braintrace._etrace_compiler import (
     ModuleInfo,
     extract_module_info,
 )
-from . import nn
-# algorithms
-from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
-# graph executor
 from ._etrace_graph_executor import ETraceGraphExecutor
-# input data
 from ._etrace_input_data import SingleStepData, MultiStepData
-# ETP primitives and user API
 from ._etrace_operators import (
     matmul,
     element_wise,
@@ -56,9 +51,7 @@ from ._etrace_vjp import (
     ES_D_RTRL,
     pp_prop,
 )
-# gradient utilities
 from ._grad_exponential import GradExpon
-# errors
 from ._misc import NotSupportedError, CompilationError
 from ._version import __version__, __version_info__
 
@@ -96,7 +89,7 @@ __all__ = [
     'ETraceGraph',
     'compile_etrace_graph',
     'HiddenGroup',
-    'find_hidden_groups_from_mixin',
+    'find_hidden_groups_from_minfo',
     'find_hidden_groups_from_module',
     'HiddenParamOpRelation',
     'find_hidden_param_op_relations_from_minfo',

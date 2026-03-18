@@ -59,7 +59,7 @@ class _BatchNormETrace(_BatchNorm):
         mean_type: type = BatchState,
         **kwargs,
     ):
-        weight_type = brainstate.ParamState
+        weight_type = brainstate.nn._normalizations.NormalizationParamState
 
         super().__init__(
             in_size=in_size,
@@ -359,7 +359,7 @@ class LayerNorm(brainstate.nn.LayerNorm):
         # param_type removed (primitive-based ETP)
         **kwargs,
     ):
-        weight_type = brainstate.ParamState
+        weight_type = brainstate.nn._normalizations.NormalizationParamState
         super().__init__(*args, param_type=weight_type, **kwargs)
 
 
@@ -410,7 +410,7 @@ class RMSNorm(brainstate.nn.RMSNorm):
         # param_type removed (primitive-based ETP)
         **kwargs,
     ):
-        weight_type = brainstate.ParamState
+        weight_type = brainstate.nn._normalizations.NormalizationParamState
         super().__init__(*args, param_type=weight_type, **kwargs)
 
 
@@ -463,5 +463,5 @@ class GroupNorm(brainstate.nn.GroupNorm):
         # param_type removed (primitive-based ETP)
         **kwargs,
     ):
-        weight_type = brainstate.ParamState
+        weight_type = brainstate.nn._normalizations.NormalizationParamState
         super().__init__(*args, param_type=weight_type, **kwargs)
