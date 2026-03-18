@@ -59,6 +59,7 @@ from typing import Callable, Dict, Optional, Sequence, Any
 
 import jax
 import jax.numpy as jnp
+import saiunit as u
 from jax.core import ShapedArray
 from jax.interpreters import mlir, batching, ad
 
@@ -483,9 +484,15 @@ def matmul(x, weight, bias=None):
         Output array.
     """
     p = etp_mm_p if x.ndim >= 2 else etp_mv_p
+    x_v, x_u = u.split_mantissa_unit(x)
+    weight_v, weight_u = u.split_mantissa_unit(weight)
+    unit = x_u * weight_u
     if bias is not None:
-        return p.bind(x, weight, bias, has_bias=True)
-    return p.bind(x, weight, has_bias=False)
+        bias_v = u.Quantity(bias).to_decimal(unit)
+        r = p.bind(x_v, weight_v, bias_v, has_bias=True)
+    else:
+        r = p.bind(x_v, weight_v, has_bias=False)
+    return u.maybe_decimal(r * x_u * weight_u)
 
 
 def element_wise(weight, fn=lambda w: w):
@@ -502,7 +509,9 @@ def element_wise(weight, fn=lambda w: w):
         ``fn(weight)``.
     """
     y = fn(weight)
-    return etp_elemwise_p.bind(y)
+    y_v, y_u = u.split_mantissa_unit(y)
+    r = etp_elemwise_p.bind(y_v)
+    return u.maybe_decimal(r * y_u)
 
 
 def conv(
@@ -547,9 +556,15 @@ def conv(
         batch_group_count=batch_group_count,
         dimension_numbers=dimension_numbers,
     )
+    x_v, x_u = u.split_mantissa_unit(x)
+    kernel_v, kernel_u = u.split_mantissa_unit(kernel)
+    unit = x_u * kernel_u
     if bias is not None:
-        return etp_conv_p.bind(x, kernel, bias, has_bias=True, **conv_kwargs)
-    return etp_conv_p.bind(x, kernel, has_bias=False, **conv_kwargs)
+        bias_v = u.Quantity(bias).to_decimal(unit)
+        r = etp_conv_p.bind(x_v, kernel_v, bias_v, has_bias=True, **conv_kwargs)
+    else:
+        r = etp_conv_p.bind(x_v, kernel_v, has_bias=False, **conv_kwargs)
+    return u.maybe_decimal(r * x_u * kernel_u)
 
 
 def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
@@ -569,9 +584,15 @@ def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
         Output array.
     """
     p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p
+    x_v, x_u = u.split_mantissa_unit(x)
+    w_v, w_u = u.split_mantissa_unit(weight_data)
+    unit = x_u * w_u
     if bias is not None:
-        return p.bind(x, weight_data, bias, sparse_mat=sparse_mat, has_bias=True)
-    return p.bind(x, weight_data, sparse_mat=sparse_mat, has_bias=False)
+        bias_v = u.Quantity(bias).to_decimal(unit)
+        r = p.bind(x_v, w_v, bias_v, sparse_mat=sparse_mat, has_bias=True)
+    else:
+        r = p.bind(x_v, w_v, sparse_mat=sparse_mat, has_bias=False)
+    return u.maybe_decimal(r * x_u * w_u)
 
 
 def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
@@ -592,6 +613,13 @@ def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
         Output array.
     """
     p = etp_lora_mm_p if x.ndim >= 2 else etp_lora_mv_p
+    x_v, x_u = u.split_mantissa_unit(x)
+    B_v, B_u = u.split_mantissa_unit(B)
+    A_v, A_u = u.split_mantissa_unit(A)
+    unit = x_u * B_u * A_u
     if bias is not None:
-        return p.bind(x, B, A, bias, alpha=alpha, has_bias=True)
-    return p.bind(x, B, A, alpha=alpha, has_bias=False)
+        bias_v = u.Quantity(bias).to_decimal(unit)
+        r = p.bind(x_v, B_v, A_v, bias_v, alpha=alpha, has_bias=True)
+    else:
+        r = p.bind(x_v, B_v, A_v, alpha=alpha, has_bias=False)
+    return u.maybe_decimal(r * x_u * B_u * A_u)
