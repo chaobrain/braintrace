@@ -35,7 +35,11 @@ import jax.numpy as jnp
 
 from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
-from braintrace._etrace_concepts import ElemWiseParam
+from braintrace._etrace_operators import (
+    etp_elemwise_p,
+    etp_rules_xy_to_dw,
+    is_batched_primitive,
+)
 from braintrace._misc import (
     check_dict_keys,
     etrace_x_key,
@@ -158,7 +162,6 @@ def _init_IO_dim_state(
     etrace_xs_to_weights: defaultdict[ETraceX_Key, List[Path]],
     state_id_to_path: Dict[int, Path],
     relation: HiddenParamOpRelation,
-    mode: brainstate.mixin.Mode
 ):
     """
     Initialize the eligibility trace states for input-output dimensions.
@@ -194,26 +197,26 @@ def _init_IO_dim_state(
     #
     # we need to initialize the eligibility trace states for the weight x and the df.
 
-    # "relation.x" may be repeatedly used in the graph
-    if not isinstance(relation.weight, ElemWiseParam):
-        if relation.x not in etrace_xs:
-            shape = relation.x.aval.shape
-            dtype = relation.x.aval.dtype
-            etrace_xs[id(relation.x)] = EligibilityTrace(u.math.zeros(shape, dtype))
+    # "relation.x_var" may be repeatedly used in the graph
+    if not (relation.primitive is etp_elemwise_p):
+        if relation.x_var not in etrace_xs:
+            shape = relation.x_var.aval.shape
+            dtype = relation.x_var.aval.dtype
+            etrace_xs[id(relation.x_var)] = EligibilityTrace(u.math.zeros(shape, dtype))
 
-        # relation.x maybe repeatedly used to feed into the
+        # relation.x_var maybe repeatedly used to feed into the
         # weight operation for transforming the hidden states
         # therefore we record the target paths of the weight x
         #
-        etrace_xs_to_weights[id(relation.x)].append(state_id_to_path[id(relation.weight)])
+        etrace_xs_to_weights[id(relation.x_var)].append(state_id_to_path[id(relation.weight)])
 
-    y_shape = relation.y.aval.shape
-    y_dtype = relation.y.aval.dtype
+    y_shape = relation.y_var.aval.shape
+    y_dtype = relation.y_var.aval.dtype
     for group in relation.hidden_groups:
         group: HiddenGroup
         if y_shape != group.varshape:
-            if isinstance(relation.weight, ElemWiseParam):
-                if not (mode.is_a(brainstate.mixin.Batching) and y_shape == group.varshape[1:]):
+            if (relation.primitive is etp_elemwise_p):
+                if not (is_batched_primitive(relation.primitive) and y_shape == group.varshape[1:]):
                     raise ValueError(
                         f'The shape of the hidden states should be the '
                         f'same as the shape of the hidden group. '
@@ -225,8 +228,8 @@ def _init_IO_dim_state(
                     f'same as the shape of the hidden group. '
                     f'While we got {y_shape} != {group.varshape}. '
                 )
-        key = etrace_df_key(relation.y, group.index)
-        if key in etrace_dfs:  # relation.y is a unique output of the weight operation
+        key = etrace_df_key(relation.y_var, group.index)
+        if key in etrace_dfs:  # relation.y_var is a unique output of the weight operation
             raise ValueError(f'The relation {key} has been added. ')
 
         #
@@ -353,7 +356,7 @@ def _update_IO_dim_etrace_scan_fn(
             # [∂V^t/∂V^t-1, ∂V^t/∂a^t-1,  [∂V^t-1/∂θ2,
             #  ∂a^t/∂V^t-1, ∂a^t/∂a^t-1]   ∂a^t-1/∂θ2]
             #
-            df_key = etrace_df_key(relation.y, group.index)
+            df_key = etrace_df_key(relation.y_var, group.index)
             hid_jac = hid_group_jacobians[group.index]
             pre_trace_df = jnp.einsum(
                 '...ij,...j->...i',
@@ -383,7 +386,6 @@ def _solve_IO_dim_weight_gradients(
     weight_vals: Dict[Path, WeightVals],
     running_index: int,
     decay: float,
-    mode: brainstate.mixin.Mode,
 ):
     """
     Compute and update the weight gradients for input-output dimensions using eligibility trace data.
@@ -426,35 +428,26 @@ def _solve_IO_dim_weight_gradients(
     for relation in weight_hidden_relations:
         relation: HiddenParamOpRelation
 
-        if not isinstance(relation.weight, ElemWiseParam):
-            x = xs[id(relation.x)]
+        if not (relation.primitive is etp_elemwise_p):
+            x = xs[id(relation.x_var)]
         else:
             x = None
-        weight_path = relation.path
-        weight_op = relation.weight.op
+        weight_path = relation.weight_path
+        xy_to_dw = etp_rules_xy_to_dw[relation.primitive]
+        eqn_params = relation.eqn_params
+        batched = is_batched_primitive(relation.primitive)
 
         for group in relation.hidden_groups:
             group: HiddenGroup
-            #
-            # Step 4:
-            #
-            # Solve the weight gradients by using the etrace data
-            #
-            #       dw = (dL/dH \circ df) \otimes x
-            #
-            df_key = etrace_df_key(relation.y, group.index)
-            df = dfs[df_key] / correction_factor  # the hidden gradients
-            df_hid = df * dG_hidden_groups[group.index]  # the hidden gradients
+            df_key = etrace_df_key(relation.y_var, group.index)
+            df = dfs[df_key] / correction_factor
+            df_hid = df * dG_hidden_groups[group.index]
 
-            #
-            # Compute the weight gradients according to the x and y
-            #
-            #    dw = df(dx, dy)
-            #
             fn_vmap = jax.vmap(
-                lambda df: weight_op.xy_to_dw(x, df, weight_vals[weight_path]), in_axes=-1, out_axes=-1,
+                lambda df: xy_to_dw(x, df, weight_vals[weight_path], **eqn_params),
+                in_axes=-1, out_axes=-1,
             )
-            if isinstance(relation.weight, ElemWiseParam) and mode.is_a(brainstate.mixin.Batching):
+            if (relation.primitive is etp_elemwise_p) and batched:
                 fn_vmap = jax.vmap(fn_vmap)
                 dg_weight = _sum_dim(_sum_dim(fn_vmap(df_hid), axis=-1), axis=0)
             else:
@@ -531,20 +524,11 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         self,
         model: brainstate.nn.Module,
         decay_or_rank: float | int,
-        mode: Optional[brainstate.mixin.Mode] = None,
         name: Optional[str] = None,
-        vjp_method: str = 'single-step'
+        vjp_method: str = 'single-step',
+        **kwargs,
     ):
         super().__init__(model, name=name, vjp_method=vjp_method)
-
-        # computing mode
-        if mode is None:
-            self.mode = brainstate.environ.get('mode', brainstate.mixin.Mode())
-        else:
-            self.mode = mode
-        assert isinstance(self.mode, brainstate.mixin.Mode), 'The mode should be an instance of brainstate.mixin.Mode.'
-
-        # the learning parameters
         self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
 
     def init_etrace_state(self, *args, **kwargs):
@@ -567,7 +551,6 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
                 self.etrace_xs_to_weights,
                 self.graph_executor.state_id_to_path,
                 relation,
-                self.mode,
             )
 
     def reset_state(self, batch_size: int = None, **kwargs):
@@ -604,12 +587,12 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             find_this_weight = True
 
             # get the weight_op input
-            wx_var = etrace_x_key(relation.x)
+            wx_var = etrace_x_key(relation.x_var)
             if wx_var is not None:
                 etrace_xs[wx_var] = self.etrace_xs[wx_var].value
 
             # get the weight_op df
-            wy_var = relation.y
+            wy_var = relation.y_var
             for group in relation.hidden_groups:
                 group: HiddenGroup
                 df_key = etrace_df_key(wy_var, group.index)
@@ -832,7 +815,6 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             weight_vals,
             running_index,
             self.decay,
-            self.mode,
         )
 
         # update the non-etrace parameters

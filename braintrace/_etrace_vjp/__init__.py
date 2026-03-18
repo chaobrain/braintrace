@@ -16,7 +16,6 @@
 from .base import ETraceVjpAlgorithm
 from .d_rtrl import ParamDimVjpAlgorithm, D_RTRL
 from .graph_executor import ETraceVjpGraphExecutor
-from .hybrid import HybridDimVjpAlgorithm
 from .pp_prop import IODimVjpAlgorithm, ES_D_RTRL, pp_prop
 
 __all__ = [
@@ -27,5 +26,4 @@ __all__ = [
     'IODimVjpAlgorithm',
     'ES_D_RTRL',
     'pp_prop',
-    'HybridDimVjpAlgorithm',
 ]

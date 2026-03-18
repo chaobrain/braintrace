@@ -17,7 +17,7 @@ from typing import Sequence, Tuple, List, Hashable, Dict
 
 import brainstate
 
-from ._etrace_concepts import ETraceParam
+pass  # ParamState removed (primitive-based ETP)
 from ._typing import Path
 
 
@@ -123,7 +123,7 @@ def sequence_split_state_values(
     """
     Split the state values into the weight values, the hidden values, and the other state values.
 
-    The weight values are the values of the ``braincore.ParamState`` states (including ``ETraceParam``).
+    The weight values are the values of the ``braincore.ParamState`` states (including ``ParamState``).
     The hidden values are the values of the ``ETraceState`` states.
     The other state values are the values of the other states.
 
@@ -173,7 +173,7 @@ def sequence_split_state_values(
 def split_dict_states_v2(
     states: Dict[Path, brainstate.State]
 ) -> Tuple[
-    Dict[Path, ETraceParam],
+    Dict[Path, brainstate.ParamState],
     Dict[Path, brainstate.HiddenState],
     Dict[Path, brainstate.ParamState],
     Dict[Path, brainstate.State]
@@ -197,11 +197,11 @@ def split_dict_states_v2(
 
     Returns
     --------
-    Tuple[Dict[Path, ETraceParam], Dict[Path, brainstate.HiddenState], Dict[Path, brainstate.ParamState], Dict[Path, brainstate.State]]
+    Tuple[Dict[Path, brainstate.ParamState], Dict[Path, brainstate.HiddenState], Dict[Path, brainstate.ParamState], Dict[Path, brainstate.State]]
         A tuple containing four dictionaries:
-        - etrace_param_states: The etrace parameter states.
+        - etrace_param_states: ParamState instances used with ETP primitives (all ParamState for now).
         - hidden_states: The hidden states.
-        - param_states: The other kinds of parameter states.
+        - param_states: Other ParamState not used with ETP primitives (empty — split determined by compiler).
         - other_states: The other states.
     """
     etrace_param_states = dict()
@@ -211,21 +211,11 @@ def split_dict_states_v2(
     for key, st in states.items():
         if isinstance(st, brainstate.HiddenState):
             hidden_states[key] = st
-        elif isinstance(st, ETraceParam):
-            if st.is_etrace:
-                etrace_param_states[key] = st
-            else:
-                # The ETraceParam is set to "is_etrace = False" since
-                # no hidden state is associated with it,
-                # so it should be treated as a normal parameter state
-                # and be trained with spatial gradients only
-                param_states[key] = st
+        elif isinstance(st, brainstate.ParamState):
+            # All ParamState go to etrace_param_states.
+            # The compiler determines which ones actually participate
+            # in ETP via primitive scanning.
+            etrace_param_states[key] = st
         else:
-            if isinstance(st, brainstate.ParamState):
-                # The ParamState which is not an ETraceParam,
-                # should be treated as a normal parameter state
-                # and be trained with spatial gradients only
-                param_states[key] = st
-            else:
-                other_states[key] = st
+            other_states[key] = st
     return etrace_param_states, hidden_states, param_states, other_states

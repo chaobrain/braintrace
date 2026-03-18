@@ -22,8 +22,7 @@ import brainstate
 import jax
 from braintools import init
 
-from braintrace._etrace_concepts import ETraceParam
-from braintrace._etrace_operators import ConvOp
+from braintrace._etrace_operators import conv as etp_conv
 from braintrace._typing import ArrayLike
 
 __all__ = [
@@ -96,11 +95,10 @@ class _Conv(brainstate.nn.Module):
         b_init: Optional[Union[Callable, ArrayLike]] = None,
         w_mask: Optional[Union[ArrayLike, Callable]] = None,
         name: Optional[str] = None,
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
         super().__init__(name=name)
 
-        # general parameters
         assert self.num_spatial_dims + 1 == len(in_size)
         self.in_size = tuple(in_size)
         self.in_channels = in_size[-1]
@@ -112,7 +110,6 @@ class _Conv(brainstate.nn.Module):
         self.groups = groups
         self.dimension_numbers = to_dimension_numbers(self.num_spatial_dims, channels_last=True, transpose=False)
 
-        # the padding parameter
         if isinstance(padding, str):
             assert padding in ['SAME', 'VALID']
         elif isinstance(padding, int):
@@ -135,47 +132,35 @@ class _Conv(brainstate.nn.Module):
             raise ValueError
         self.padding = padding
 
-        # the number of in-/out-channels
         assert self.out_channels % self.groups == 0, '"out_channels" should be divisible by groups'
         assert self.in_channels % self.groups == 0, '"in_channels" should be divisible by groups'
 
-        # kernel shape and w_mask
         kernel_shape = tuple(self.kernel_size) + (self.in_channels // self.groups, self.out_channels)
         self.kernel_shape = kernel_shape
         self.w_mask = init.param(w_mask, kernel_shape, allow_none=True)
 
-        # --- initializers --- #
-        self.w_initializer = w_init
-        self.b_initializer = b_init
-
-        # --- weights --- #
-        params = {}
-        params['weight'] = init.param(self.w_initializer, self.kernel_shape, allow_none=False)
-        if self.b_initializer is not None:
+        self.kernel = brainstate.ParamState(init.param(w_init, self.kernel_shape, allow_none=False))
+        if b_init is not None:
             bias_shape = (1,) * len(self.kernel_size) + (self.out_channels,)
-            bias = init.param(self.b_initializer, bias_shape, allow_none=True)
-            params['bias'] = bias
+            self.bias = brainstate.ParamState(init.param(b_init, bias_shape, allow_none=True))
+        else:
+            self.bias = None
 
-        # --- operation --- #
-        xinfo = jax.ShapeDtypeStruct(self.in_size, params['weight'].dtype)
-
-        op = ConvOp(
-            xinfo=xinfo,
-            window_strides=self.stride,
-            padding=self.padding,
-            lhs_dilation=self.lhs_dilation,
-            rhs_dilation=self.rhs_dilation,
-            feature_group_count=self.groups,
-            dimension_numbers=self.dimension_numbers,
-            weight_mask=self.w_mask,
+        # Evaluate the output shape
+        from braintrace._etrace_operators import _etp_conv_impl
+        import jax.numpy as jnp
+        xinfo = jax.ShapeDtypeStruct((1,) + self.in_size, self.kernel.value.dtype)
+        abstract_y = jax.eval_shape(
+            lambda x_, k_: _etp_conv_impl(
+                x_, k_,
+                strides=tuple(self.stride), padding=self.padding,
+                lhs_dilation=tuple(self.lhs_dilation), rhs_dilation=tuple(self.rhs_dilation),
+                feature_group_count=self.groups, dimension_numbers=self.dimension_numbers,
+            ),
+            xinfo,
+            jax.ShapeDtypeStruct(self.kernel_shape, self.kernel.value.dtype),
         )
-
-        # --- Evaluate the output shape --- #
-        abstract_y = jax.eval_shape(op, xinfo, params)
-        self.out_size = abstract_y.shape
-
-        # --- parameters --- #
-        self.weight_op = param_type(params, op=op)
+        self.out_size = abstract_y.shape[1:]  # remove batch dim
 
     def _check_input_dim(self, x):
         if x.ndim == self.num_spatial_dims + 1:
@@ -196,7 +181,26 @@ class _Conv(brainstate.nn.Module):
 
     def update(self, x):
         self._check_input_dim(x)
-        return self.weight_op.execute(x)
+        k = self.kernel.value
+        if self.w_mask is not None:
+            k = k * self.w_mask
+        # conv requires batch dim
+        squeeze = False
+        if x.ndim == self.num_spatial_dims + 1:
+            import jax.numpy as jnp
+            x = jnp.expand_dims(x, 0)
+            squeeze = True
+        b = self.bias.value if self.bias is not None else None
+        y = etp_conv(
+            x, k, b,
+            strides=tuple(self.stride), padding=self.padding,
+            lhs_dilation=tuple(self.lhs_dilation), rhs_dilation=tuple(self.rhs_dilation),
+            feature_group_count=self.groups, dimension_numbers=self.dimension_numbers,
+        )
+        if squeeze:
+            import jax.numpy as jnp
+            y = jnp.squeeze(y, 0)
+        return y
 
 
 class Conv1d(_Conv):
@@ -241,8 +245,7 @@ class Conv1d(_Conv):
         The optional mask of the weights. Default is None.
     name : str or None, optional
         The name of the object. Default is None.
-    param_type : type, optional
-        The parameter type. Default is ETraceParam.
+    
 
     Examples
     --------
@@ -306,8 +309,7 @@ class Conv2d(_Conv):
         The optional mask of the weights. Default is None.
     name : str or None, optional
         The name of the object. Default is None.
-    param_type : type, optional
-        The parameter type. Default is ETraceParam.
+    
 
     Examples
     --------
@@ -371,8 +373,7 @@ class Conv3d(_Conv):
         The optional mask of the weights. Default is None.
     name : str or None, optional
         The name of the object. Default is None.
-    param_type : type, optional
-        The parameter type. Default is ETraceParam.
+    
 
     Examples
     --------

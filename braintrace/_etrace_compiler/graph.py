@@ -73,8 +73,8 @@ class ETraceGraph(NamedTuple):
     The overall compiled graph for the eligibility trace.
 
     The eligibility trace graph, tracking the relationship between the etrace weights
-    :py:class:`ETraceParam`, the etrace variables :py:class:`ETraceState`, and the etrace
-    operations :py:class:`ETraceOp`.
+    ParamState, the etrace variables HiddenState, and the etrace
+    operations :pyETP primitives.
 
     The following fields are included:
 
@@ -191,8 +191,8 @@ def compile_etrace_graph(
 
     This is the most important method for the eligibility trace graph. It builds the
     graph for the model, tracking the relationship between the etrace weights
-    :py:class:`ETraceParam`, the etrace sattes :py:class:`ETraceState`, and the etrace
-    operations :py:class:`ETraceOp`, which will be used for computing the weight
+    ParamState, the etrace sattes HiddenState, and the etrace
+    operations :pyETP primitives, which will be used for computing the weight
     spatial gradients, the hidden state Jacobian, and the hidden state-weight Jacobian.
 
     This function is crucial for building the eligibility trace graph, which tracks the
@@ -240,8 +240,8 @@ def compile_etrace_graph(
 
         # all weight x (deduplicate while preserving insertion order)
         out_wx_jaxvars = list(dict.fromkeys(
-            relation.x for relation in hidden_param_op_relations
-            if relation.x is not None
+            relation.x_var for relation in hidden_param_op_relations
+            if relation.x_var is not None
         ))
 
         # all y-to-hidden vars (deduplicate while preserving insertion order)

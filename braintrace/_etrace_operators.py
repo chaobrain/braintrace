@@ -1,4 +1,4 @@
-# Copyright 2024 BrainX Ecosystem Limited. All Rights Reserved.
+# Copyright 2024-2025 BrainX Ecosystem Limited. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,1062 +13,585 @@
 # limitations under the License.
 # ==============================================================================
 
-import contextlib
-import threading
-from typing import Callable, Optional, Dict, Sequence, Any
+r"""
+ETP (Eligibility Trace Propagation) primitives and rule registries.
 
-import brainstate
-import brainunit as u
+This module defines JAX custom primitives that mark weight operations in
+the computational graph. The compiler identifies these primitives by type
+(``eqn.primitive in ETP_PRIMITIVES``), replacing the old approach of
+matching JIT function names.
+
+Primitives
+----------
+Dense matmul:
+    ``etp_mm_p``  — batched:  y = x @ w (+ b),  x is (batch, in)
+    ``etp_mv_p``  — unbatched: y = x @ w (+ b),  x is (in,)
+
+Element-wise:
+    ``etp_elemwise_p`` — identity marker for diagonal weight ops
+
+Convolution:
+    ``etp_conv_p`` — y = conv(x, kernel) (+ b), always expects batch dim
+
+Sparse matmul:
+    ``etp_sp_mm_p`` / ``etp_sp_mv_p``
+
+LoRA:
+    ``etp_lora_mm_p`` / ``etp_lora_mv_p``
+
+Rule Registries
+---------------
+``etp_rules_yw_to_w``   : trace propagation (D-RTRL)
+``etp_rules_xy_to_dw``  : weight gradient (D-RTRL + ES-D-RTRL)
+``etp_rules_init_state`` : trace initialization (replaces Batching mode)
+
+User API
+--------
+``matmul(x, w, bias)``       — auto-dispatches mm/mv based on x.ndim
+``element_wise(w, fn)``      — element-wise marker
+``conv(x, kernel, bias, ..)`` — convolution
+``sparse_matmul(x, w, ..)``  — sparse matmul
+``lora_matmul(x, B, A, ..)`` — LoRA matmul
+"""
+
+from functools import partial
+from typing import Callable, Dict, Optional, Sequence, Any
+
 import jax
-import numpy as np
+import jax.numpy as jnp
+from jax.core import ShapedArray
+from jax.interpreters import mlir, batching, ad
+
+from braintrace._compatible_imports import Primitive
 
 __all__ = [
-    'ETraceOp',  # base class
-    'MatMulOp',  # x @ f(w * m) + b
-    'ElemWiseOp',  # element-wise operation
-    'ConvOp',  # x [convolution] f(w * m) + bias
-    'SpMatMulOp',  # x @ f(sparse_weight) + b
-    'LoraOp',  # low-rank approximation
+    # primitives
+    'etp_mm_p',
+    'etp_mv_p',
+    'etp_elemwise_p',
+    'etp_conv_p',
+    'etp_sp_mm_p',
+    'etp_sp_mv_p',
+    'etp_lora_mm_p',
+    'etp_lora_mv_p',
 
-    'general_y2w',
-    'stop_param_gradients',  # stop weight gradients
+    # rule registries
+    'etp_rules_yw_to_w',
+    'etp_rules_xy_to_dw',
+    'etp_rules_init_state',
+
+    # helpers
+    'register_primitive',
+    'is_etp_primitive',
+    'is_batched_primitive',
+    'ETP_PRIMITIVES',
+    'BATCHED_PRIMITIVES',
+
+    # user API
+    'matmul',
+    'element_wise',
+    'conv',
+    'sparse_matmul',
+    'lora_matmul',
 ]
 
-_etrace_op_name = '_etrace_operator_call'
-_etrace_op_name_enable_grad = f'{_etrace_op_name}_enable_grad_'
-_etrace_op_name_elemwise = f'{_etrace_op_name}_enable_grad_elemwise_'
+# ======================================================================
+# Primitive & rule registries
+# ======================================================================
 
-X = brainstate.typing.ArrayLike
-W = brainstate.typing.PyTree
-Y = brainstate.typing.ArrayLike
+ETP_PRIMITIVES: set = set()
 
+etp_rules_yw_to_w: Dict[Primitive, Callable] = {}
+r"""D-RTRL trace propagation: ``(hidden_dim, trace, **params) → trace``."""
 
-class OperatorContext(threading.local):
-    """
-    The context for the eligibility trace operator.
-    """
+etp_rules_xy_to_dw: Dict[Primitive, Callable] = {}
+r"""Weight gradient: ``(x, hidden_dim, w, **params) → dw``."""
 
-    def __init__(self, *args, **kwargs):
-        """
-        Initializes a new instance of the OperatorContext class.
+etp_rules_init_state: Dict[Primitive, Callable] = {}
+r"""Trace initialization: ``(x_var, y_var, weight, num_hidden_state) → zeros``.
 
-        This constructor initializes the context for the eligibility trace operator,
-        setting up the initial state for stopping parameter gradients.
-
-        Args:
-            *args: Variable length argument list.
-            **kwargs: Arbitrary keyword arguments.
-        """
-        super().__init__(*args, **kwargs)
-        self.stop_param_gradient = [False]
+Replaces ``brainstate.mixin.Batching`` mode checks. The primitive type
+encodes whether the computation is batched (mm) or unbatched (mv).
+"""
 
 
-context = OperatorContext()
+def is_etp_primitive(primitive):
+    """Check whether a JAX primitive is an ETP primitive."""
+    return primitive in ETP_PRIMITIVES
 
 
-@contextlib.contextmanager
-def stop_param_gradients(stop_or_not: bool = True):
-    """
-    Stop the weight gradients for the ETrace weight operator.
-
-    Example::
-
-      >>> import braintrace
-      >>> with braintrace.stop_param_gradients():
-      >>>    # do something
-
-    Args:
-        stop_or_not: Whether to stop the weight gradients.
-    """
-    try:
-        context.stop_param_gradient.append(stop_or_not)
-        yield
-    finally:
-        context.stop_param_gradient.pop()
+BATCHED_PRIMITIVES: set = set()  # populated as primitives are registered
 
 
-def wrap_etrace_fun(fun, name: str = _etrace_op_name):
-    """
-    Wraps a function by assigning it a new name.
+def is_batched_primitive(primitive):
+    """Check whether an ETP primitive operates on batched data."""
+    return primitive in BATCHED_PRIMITIVES
 
-    This utility function is used to rename a given function, which can be useful
-    for tracking or identifying functions during debugging or logging.
+
+# ======================================================================
+# Primitive registration helper
+# ======================================================================
+
+def register_primitive(name, impl_fn, *, batched=False):
+    """Create an ETP primitive with all JAX rules auto-derived from *impl_fn*.
+
+    Registered automatically:
+    - **impl** — eager execution
+    - **abstract_eval** — via ``jax.eval_shape(impl)``
+    - **lowering** — via ``mlir.lower_fun(impl)``
+    - **JVP** — via ``jax.jvp(impl)``
+    - **transpose** — derived by JAX from the JVP
+    - **batching** — via ``jax.vmap(impl)``
+
+    Only ETP-specific rules (``yw_to_w``, ``xy_to_dw``, ``init_state``)
+    need hand-writing.
 
     Args:
-        fun: The function to be wrapped and renamed.
-        name: The new name to assign to the function. Defaults to '_etrace_operator_call'.
+        name: Primitive name (e.g., ``'etp_mm'``).
+        impl_fn: Implementation function.
+        batched: Whether this primitive operates on batched data.
 
     Returns:
-        The original function with its name attribute set to the specified name.
+        The registered ``Primitive``.
     """
-    fun.__name__ = name
-    return fun
+    p = Primitive(name)
+    ETP_PRIMITIVES.add(p)
+    if batched:
+        BATCHED_PRIMITIVES.add(p)
+
+    # impl
+    p.def_impl(impl_fn)
+
+    # abstract_eval
+    @p.def_abstract_eval
+    def _abstract(*args, **params):
+        shapes = tuple(ShapedArray(a.shape, a.dtype) for a in args)
+        out = jax.eval_shape(partial(impl_fn, **params), *shapes)
+        return ShapedArray(out.shape, out.dtype)
+
+    # lowering
+    mlir.register_lowering(
+        p, mlir.lower_fun(impl_fn, multiple_results=False),
+    )
+
+    # JVP
+    def _jvp(primals, tangents, **params):
+        tans = tuple(
+            jnp.zeros(pr.shape, pr.dtype) if isinstance(t, ad.Zero) else t
+            for pr, t in zip(primals, tangents)
+        )
+        return jax.jvp(partial(impl_fn, **params), primals, tans)
+
+    ad.primitive_jvps[p] = _jvp
+
+    # batching
+    def _batching(args, dims, **params):
+        return jax.vmap(partial(impl_fn, **params), in_axes=dims)(*args), 0
+
+    batching.primitive_batchers[p] = _batching
+
+    return p
 
 
-def is_etrace_op(jit_param_name: str):
-    """
-    Determines if a given jitted parameter name corresponds to an eligibility trace operator.
+# ======================================================================
+# etp_mm_p / etp_mv_p  —  y = x @ w (+ b)
+# ======================================================================
 
-    This function checks if the provided parameter name starts with a predefined prefix
-    that identifies it as an eligibility trace operator.
-
-    Args:
-        jit_param_name (str): The name of the jitted parameter to check.
-
-    Returns:
-        bool: True if the parameter name indicates an eligibility trace operator, False otherwise.
-    """
-    return jit_param_name.startswith(_etrace_op_name)
+def _etp_matmul_impl(*args, has_bias=False):
+    x, w = args[0], args[1]
+    y = x @ w
+    if has_bias:
+        y = y + args[2]
+    return y
 
 
-def is_etrace_op_enable_gradient(jit_param_name: str) -> bool:
-    """
-    Determines if a given jitted parameter name corresponds to an eligibility trace operator
-    with the gradient enabled.
-
-    This function checks if the provided parameter name starts with a predefined prefix
-    that identifies it as an eligibility trace operator with gradient capabilities.
-
-    Args:
-        jit_param_name (str): The name of the jitted parameter to check.
-
-    Returns:
-        bool: True if the parameter name indicates an eligibility trace operator with
-        gradient enabled, False otherwise.
-    """
-    return jit_param_name.startswith(_etrace_op_name_enable_grad)
+# --- mm (batched) ---
 
 
-def is_etrace_op_elemwise(jit_param_name: str):
-    """
-    Determines if a given jitted parameter name corresponds to an element-wise eligibility trace operator.
-
-    This function checks if the provided parameter name starts with a predefined prefix
-    that identifies it as an element-wise eligibility trace operator.
-
-    Args:
-        jit_param_name (str): The name of the jitted parameter to check.
-
-    Returns:
-        bool: True if the parameter name indicates an element-wise eligibility trace operator, False otherwise.
-    """
-    return jit_param_name.startswith(_etrace_op_name_elemwise)
+def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False):
+    r"""Batched: hidden_dim (batch, out), trace (batch, in, out, n_state)."""
+    return trace * jnp.expand_dims(hidden_dim, axis=1)
 
 
-def general_y2w(
-    xw2y: Callable[[X, W], Y],
-    x: X,
-    y: Y,
-    w: W,
+def _mm_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
+    r"""VJP of ``y = x @ w``, per-sample via vmap."""
+    _, vjp_fn = jax.vjp(lambda w_: x @ w_, w)
+    return vjp_fn(hidden_dim)[0]
+
+
+def _mm_init_state(x_var, y_var, weight, num_hidden_state):
+    batch = x_var.aval.shape[0]
+    w_shape = jnp.shape(weight.value)
+    return jnp.zeros((batch, *w_shape, num_hidden_state))
+
+
+etp_mm_p = register_primitive('etp_mm', _etp_matmul_impl, batched=True)
+etp_rules_yw_to_w[etp_mm_p] = _mm_yw_to_w
+etp_rules_xy_to_dw[etp_mm_p] = _mm_xy_to_dw
+etp_rules_init_state[etp_mm_p] = _mm_init_state
+
+
+# --- mv (unbatched) ---
+
+
+def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False):
+    r"""Unbatched: hidden_dim (out,), trace (in, out, n_state)."""
+    return trace * jnp.expand_dims(hidden_dim, axis=0)
+
+
+def _mv_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
+    r"""VJP of ``y = x @ w``."""
+    _, vjp_fn = jax.vjp(lambda w_: x @ w_, w)
+    return vjp_fn(hidden_dim)[0]
+
+
+def _mv_init_state(x_var, y_var, weight, num_hidden_state):
+    w_shape = jnp.shape(weight.value)
+    return jnp.zeros((*w_shape, num_hidden_state))
+
+
+etp_mv_p = register_primitive('etp_mv', _etp_matmul_impl, batched=False)
+etp_rules_yw_to_w[etp_mv_p] = _mv_yw_to_w
+etp_rules_xy_to_dw[etp_mv_p] = _mv_xy_to_dw
+etp_rules_init_state[etp_mv_p] = _mv_init_state
+
+
+# ======================================================================
+# etp_elemwise_p  —  identity marker for diagonal weight ops
+# ======================================================================
+
+def _etp_elemwise_impl(y):
+    return y
+
+
+def _elemwise_yw_to_w(hidden_dim, trace):
+    r"""Element-wise multiply."""
+    return trace * hidden_dim
+
+
+def _elemwise_xy_to_dw(x, hidden_dim, w):
+    r"""Identity marker — gradient is just ``hidden_dim``.
+    Chain rule through ``fn`` is handled by JAX on the ops
+    before the primitive."""
+    return hidden_dim
+
+
+def _elemwise_init_state(x_var, y_var, weight, num_hidden_state):
+    y_shape = y_var.aval.shape
+    return jnp.zeros((*y_shape, num_hidden_state))
+
+
+etp_elemwise_p = register_primitive('etp_elemwise', _etp_elemwise_impl)
+etp_rules_yw_to_w[etp_elemwise_p] = _elemwise_yw_to_w
+etp_rules_xy_to_dw[etp_elemwise_p] = _elemwise_xy_to_dw
+etp_rules_init_state[etp_elemwise_p] = _elemwise_init_state
+
+
+# ======================================================================
+# etp_conv_p  —  y = conv(x, kernel) (+ b)
+# ======================================================================
+
+def _etp_conv_impl(
+    *args,
+    has_bias=False,
+    strides=(1,),
+    padding='SAME',
+    lhs_dilation=None,
+    rhs_dilation=None,
+    feature_group_count=1,
+    batch_group_count=1,
+    dimension_numbers=None,
 ):
-    """
-    General function to compute the weight from the hidden dimensional array.
+    x, kernel = args[0], args[1]
+    y = jax.lax.conv_general_dilated(
+        lhs=x, rhs=kernel,
+        window_strides=strides, padding=padding,
+        lhs_dilation=lhs_dilation, rhs_dilation=rhs_dilation,
+        feature_group_count=feature_group_count,
+        batch_group_count=batch_group_count,
+        dimension_numbers=dimension_numbers,
+    )
+    if has_bias:
+        y = y + args[2]
+    return y
+
+
+def _conv_yw_to_w(hidden_dim, trace, **params):
+    r"""Broadcast ``hidden_dim`` across all dims except output channel."""
+    n_expand = trace.ndim - hidden_dim.ndim
+    for _ in range(n_expand):
+        hidden_dim = jnp.expand_dims(hidden_dim, axis=0)
+    return trace * hidden_dim
+
+
+def _conv_xy_to_dw(x, hidden_dim, w, **params):
+    r"""VJP of ``y = conv(x, w)`` w.r.t. ``w``."""
+    conv_kw = {k: v for k, v in params.items() if k != 'has_bias'}
+
+    def _fwd(w_):
+        return jax.lax.conv_general_dilated(x, w_, **conv_kw)
+
+    _, vjp_fn = jax.vjp(_fwd, w)
+    return vjp_fn(hidden_dim)[0]
+
+
+def _conv_init_state(x_var, y_var, weight, num_hidden_state):
+    batch = x_var.aval.shape[0]
+    kernel_shape = jnp.shape(weight.value)
+    return jnp.zeros((batch, *kernel_shape, num_hidden_state))
+
+
+etp_conv_p = register_primitive('etp_conv', _etp_conv_impl, batched=True)
+etp_rules_yw_to_w[etp_conv_p] = _conv_yw_to_w
+etp_rules_xy_to_dw[etp_conv_p] = _conv_xy_to_dw
+etp_rules_init_state[etp_conv_p] = _conv_init_state
+
+
+# ======================================================================
+# etp_sp_mm_p / etp_sp_mv_p  —  sparse matmul
+# ======================================================================
+
+def _etp_sp_matmul_impl(*args, sparse_mat=None, has_bias=False):
+    x, weight_data = args[0], args[1]
+    w = sparse_mat.with_data(weight_data)
+    y = x @ w
+    if has_bias:
+        y = y + args[2]
+    return y
+
+
+def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
+    return sparse_mat.yw_to_w_transposed(hidden_dim, trace)
+
+
+def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
+    return sparse_mat.yw_to_w_transposed(hidden_dim, trace)
+
+
+def _sp_xy_to_dw(x, hidden_dim, w, *, sparse_mat=None, has_bias=False):
+    _, vjp_fn = jax.vjp(lambda w_: x @ sparse_mat.with_data(w_), w)
+    return vjp_fn(hidden_dim)[0]
+
+
+def _sp_mm_init_state(x_var, y_var, weight, num_hidden_state):
+    batch = x_var.aval.shape[0]
+    nnz = jnp.shape(weight.value)[0]
+    return jnp.zeros((batch, nnz, num_hidden_state))
+
+
+def _sp_mv_init_state(x_var, y_var, weight, num_hidden_state):
+    nnz = jnp.shape(weight.value)[0]
+    return jnp.zeros((nnz, num_hidden_state))
+
+
+etp_sp_mm_p = register_primitive('etp_sp_mm', _etp_sp_matmul_impl, batched=True)
+etp_rules_yw_to_w[etp_sp_mm_p] = _sp_mm_yw_to_w
+etp_rules_xy_to_dw[etp_sp_mm_p] = _sp_xy_to_dw
+etp_rules_init_state[etp_sp_mm_p] = _sp_mm_init_state
+
+etp_sp_mv_p = register_primitive('etp_sp_mv', _etp_sp_matmul_impl, batched=False)
+etp_rules_yw_to_w[etp_sp_mv_p] = _sp_mv_yw_to_w
+etp_rules_xy_to_dw[etp_sp_mv_p] = _sp_xy_to_dw
+etp_rules_init_state[etp_sp_mv_p] = _sp_mv_init_state
+
+
+# ======================================================================
+# etp_lora_mm_p / etp_lora_mv_p  —  y = alpha * x @ B @ A (+ b)
+# ======================================================================
+
+def _etp_lora_impl(*args, alpha=1.0, has_bias=False):
+    x, B, A = args[0], args[1], args[2]
+    y = alpha * (x @ B @ A)
+    if has_bias:
+        y = y + args[3]
+    return y
+
+
+def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
+    r"""LoRA batched: trace is ``{B: (batch, in, rank, ns), A: (batch, rank, out, ns)}``.
+    Only propagate through A (B frozen during trace propagation)."""
+    trace_A = trace['A']
+    trace_A = trace_A * jnp.expand_dims(hidden_dim, axis=1)
+    return {'B': trace['B'], 'A': trace_A}
+
+
+def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
+    r"""LoRA unbatched: trace is ``{B: (in, rank, ns), A: (rank, out, ns)}``."""
+    trace_A = trace['A']
+    trace_A = trace_A * jnp.expand_dims(hidden_dim, axis=0)
+    return {'B': trace['B'], 'A': trace_A}
+
+
+def _lora_xy_to_dw(x, hidden_dim, w_B, w_A, *, alpha=1.0, has_bias=False):
+    r"""VJP of ``y = alpha * x @ B @ A``."""
+
+    def _fwd(B, A):
+        return alpha * (x @ B @ A)
+
+    _, vjp_fn = jax.vjp(_fwd, w_B, w_A)
+    dB, dA = vjp_fn(hidden_dim)
+    return {'B': dB, 'A': dA}
+
+
+def _lora_mm_init_state(x_var, y_var, weight, num_hidden_state):
+    # weight.value is a dict {'B': ..., 'A': ...}
+    w = weight.value
+    batch = x_var.aval.shape[0]
+    return {
+        'B': jnp.zeros((batch, *jnp.shape(w['B']), num_hidden_state)),
+        'A': jnp.zeros((batch, *jnp.shape(w['A']), num_hidden_state)),
+    }
+
+
+def _lora_mv_init_state(x_var, y_var, weight, num_hidden_state):
+    w = weight.value
+    return {
+        'B': jnp.zeros((*jnp.shape(w['B']), num_hidden_state)),
+        'A': jnp.zeros((*jnp.shape(w['A']), num_hidden_state)),
+    }
+
+
+etp_lora_mm_p = register_primitive('etp_lora_mm', _etp_lora_impl, batched=True)
+etp_rules_yw_to_w[etp_lora_mm_p] = _lora_mm_yw_to_w
+etp_rules_xy_to_dw[etp_lora_mm_p] = _lora_xy_to_dw
+etp_rules_init_state[etp_lora_mm_p] = _lora_mm_init_state
+
+etp_lora_mv_p = register_primitive('etp_lora_mv', _etp_lora_impl, batched=False)
+etp_rules_yw_to_w[etp_lora_mv_p] = _lora_mv_yw_to_w
+etp_rules_xy_to_dw[etp_lora_mv_p] = _lora_xy_to_dw
+etp_rules_init_state[etp_lora_mv_p] = _lora_mv_init_state
+
+
+# ======================================================================
+# User-facing functions
+# ======================================================================
+
+def matmul(x, weight, bias=None):
+    r"""ETP-aware matrix multiplication.
+
+    Computes :math:`y = x \mathbin{@} w \; (+ b)`.
+
+    Auto-dispatches to ``etp_mm_p`` (batched) or ``etp_mv_p`` (unbatched)
+    based on ``x.ndim``.
 
     Args:
-        xw2y: The function to compute the output from the input and weight.
-        x: The input data.
-        y: The hidden dimensional array.
-        w: The weight dimensional array.
+        x: Input array, shape ``(..., in_features)`` or ``(in_features,)``.
+        weight: Weight matrix, shape ``(in_features, out_features)``.
+        bias: Optional bias vector, shape ``(out_features,)``.
 
     Returns:
-        The updated weight dimensional array.
+        Output array.
     """
-    x = u.math.ones_like(x)
-    primals, f_vjp = jax.vjp(
-        # dimensionless processing
-        lambda w: u.get_mantissa(xw2y(x, w)),
-        w
-    )
-    assert y.shape == primals.shape, (
-        f'The shape of the hidden_dim_arr must be the same as the primals. '
-        f'Got {y.shape} and {primals.shape}'
-    )
-    w_like = f_vjp(
-        # dimensionless processing
-        u.get_mantissa(y)
-    )[0]
-    return w_like
+    p = etp_mm_p if x.ndim >= 2 else etp_mv_p
+    if bias is not None:
+        return p.bind(x, weight, bias, has_bias=True)
+    return p.bind(x, weight, has_bias=False)
 
 
-class ETraceOp(brainstate.util.PrettyObject):
-    """
-    The Eligibility Trace Operator.
+def element_wise(weight, fn=lambda w: w):
+    r"""ETP-aware element-wise operation.
 
-    The function must have the signature: ``(x: jax.Array, weight: PyTree) -> jax.Array``.
-
-    Attributes:
-        fun: The operator function.
-        is_diagonal: bool. Whether the operator is in the hidden diagonal or not.
+    Applies ``fn`` to ``weight`` and passes through a marker primitive.
+    The operation is treated as *diagonal* in the hidden-state space.
 
     Args:
-        is_diagonal: bool. Whether the operator is in the hidden diagonal or not.
+        weight: Weight parameter.
+        fn: Element-wise function. Defaults to identity.
+
+    Returns:
+        ``fn(weight)``.
     """
-    __module__ = 'braintrace'
-
-    def __init__(
-        self,
-        is_diagonal: Optional[bool] = False,
-        name: Optional[str] = None,
-    ):
-        super().__init__()
-
-        # whether the operator is in the hidden diagonal
-        self.is_diagonal = is_diagonal
-
-        # function JIT name
-        if name is None:
-            name = (
-                _etrace_op_name_enable_grad
-                if is_diagonal else
-                _etrace_op_name
-            )
-
-        # JIT the operator function
-        # This is important during compilation of eligibility trace graph
-        self._jitted_call = jax.jit(wrap_etrace_fun(self._define_call(), name))
-
-    def _define_call(self):
-        return lambda x, weights: self.xw_to_y(x, weights)
-
-    def __pretty_repr_item__(self, k, v):
-        if k == '_jitted_call':
-            return None, None
-        return k, v
-
-    def __call__(
-        self,
-        inputs: X,
-        weights: W,
-    ) -> Y:
-        y = self._jitted_call(inputs, weights)
-        if context.stop_param_gradient[-1] and not self.is_diagonal:
-            y = jax.lax.stop_gradient(y)
-        return y
-
-    def xw_to_y(
-        self,
-        inputs: X,
-        weights: W,
-    ) -> Y:
-        """
-        This function is used to compute the output of the operator.
-
-        It computes:
-
-        $$
-        y = f(x, w)
-        $$
-
-        Args:
-            inputs: The input data.
-            weights: The weight parameters.
-
-        Returns:
-            The output of the operator.
-        """
-        raise NotImplementedError
-
-    def yw_to_w(
-        self,
-        hidden_dim_arr: Y,
-        weight_dim_tree: W,
-    ) -> W:
-        """
-        This function is used to compute the weight from the hidden dimensional array.
-
-        It computes:
-
-        $$
-        w = f(y, w)
-        $$
-
-        This function is mainly used when computing eligibility trace updates based on
-        :py:class:`ParamDimVjpAlgorithm`.
-        """
-        raise NotImplementedError
-
-    def xy_to_dw(
-        self,
-        input_dim_arr: X,
-        hidden_dim_arr: Y,
-        weights: W,
-    ) -> W:
-        r"""
-        Computes the gradient of the weights (dw) with respect to the loss.
-
-        This function is primarily used for computing eligibility trace updates.
-        It calculates the weight gradients by performing a vector-Jacobian
-        product (VJP) operation. The core idea is to apply the chain rule:
-
-        $$
-        dw = \frac{\partial L}{\partial w} = \frac{\partial L}{\partial y} \frac{\partial y}{\partial w}
-        $$
-
-        where $L$ is the loss, $y$ is the output of the operator ($y = f(x, w)$),
-        and $w$ are the weights.
-
-        Args:
-            input_dim_arr (X): The input dimensional array, representing the input data ($x$).
-            hidden_dim_arr (Y): The hidden dimensional array, representing the gradient of the loss
-                with respect to the operator's output ($\frac{\partial L}{\partial y}$).
-            weights (W): The current weight parameters of the operator ($w$).
-
-        Returns:
-            W: The computed gradient of the weights ($\frac{\partial L}{\partial w}$).
-        """
-        primals, f_vjp = jax.vjp(lambda w: u.get_mantissa(self.xw_to_y(input_dim_arr, w)), weights)
-        assert hidden_dim_arr.shape == primals.shape, (
-            f'The shape of the hidden_dim_arr must be the same as the primals. '
-            f'Got {hidden_dim_arr.shape} and {primals.shape}'
-        )
-        w_like = f_vjp(u.get_mantissa(hidden_dim_arr))[0]
-        return w_like
-
-
-class MatMulOp(ETraceOp):
-    """
-    The matrix multiplication operator for eligibility trace-based gradient learning.
-
-    This operator is used to compute the output of the operator, mathematically:
-
-    If ``apply_weight_fn_before_mask`` is ``False``:
-
-    $$
-    y = x @ f(w * m) + b
-    $$
-
-    If ``apply_weight_fn_before_mask`` is ``True``:
-
-    $$
-    y = x @ (f(w) * m) + b
-    $$
-
-    $b$ is the bias term, which can be optional, $m$ is the weight mask,
-    and $f$ is the weight function.
-
-    By default, the weight function is the identity function, and
-    the weight mask is None.
-    """
-
-    def __init__(
-        self,
-        weight_mask: Optional[jax.Array] = None,
-        weight_fn: Callable[[X], X] = lambda w: w,
-        apply_weight_fn_before_mask: bool = False,
-    ):
-        super().__init__(is_diagonal=False)
-
-        # weight mask
-        if weight_mask is None:
-            pass
-        elif isinstance(weight_mask, (np.ndarray, jax.Array, u.Quantity)):
-            weight_mask = u.math.asarray(weight_mask)
-        else:
-            raise TypeError(f'The weight_mask must be an array-like. But got {type(weight_mask)}')
-        self.weight_mask = weight_mask
-
-        # weight function
-        assert callable(weight_fn), f'The weight_fn must be callable. But got {type(weight_fn)}'
-        self.weight_fn = weight_fn
-
-        # apply weight function before mask
-        assert isinstance(apply_weight_fn_before_mask, bool), 'apply_weight_fn_before_mask must be a boolean.'
-        self.apply_weight_fn_before_mask = apply_weight_fn_before_mask
-
-    def _vjp_weight_fn(self, w, dw):
-        _, f_vjp = jax.vjp(self.weight_fn, w)
-        dw, = f_vjp(dw)
-        return dw
-
-    def _check_weight(self, w: Dict[str, brainstate.typing.ArrayLike]):
-        if not isinstance(w, dict):
-            raise TypeError(f'{self.__class__.__name__} only supports '
-                            f'the dictionary weight. But got {type(w)}')
-        if 'weight' not in w:
-            raise ValueError(f'The weight must contain the key "weight".')
-
-    def xw_to_y(
-        self,
-        x: brainstate.typing.ArrayLike,
-        w: Dict[str, brainstate.typing.ArrayLike]
-    ):
-        r"""
-        This function is used to compute the output of the operator, mathematically:
-
-        $$
-        y = x @ f(w * m) + b
-        $$
-
-        if the bias is provided.
-
-        $$
-        y = x @ f(w * m)
-        $$
-
-        if the bias is not provided.
-
-        """
-        self._check_weight(w)
-
-        if self.apply_weight_fn_before_mask:
-
-            # Case 1: apply the weight function before the mask
-            weight = self.weight_fn(w['weight'])
-            if self.weight_mask is not None:
-                weight = weight * self.weight_mask
-            y = u.math.matmul(x, weight)
-
-        else:
-
-            # Case 2: apply the weight function after the mask
-            weight = w['weight']
-            if self.weight_mask is not None:
-                weight = weight * self.weight_mask
-            weight = self.weight_fn(weight)
-            y = u.math.matmul(x, weight)
-
-        # add bias
-        if 'bias' in w:
-            y = y + w['bias']
-        return y
-
-    def yw_to_w(
-        self,
-        hidden_dim_arr: brainstate.typing.ArrayLike,
-        weight_dim_tree: Dict[str, brainstate.typing.ArrayLike],
-    ) -> Dict[str, brainstate.typing.ArrayLike]:
-        """
-        This function is used to compute the weight from the hidden dimensional array.
-
-        $$
-        w = f(y, w)
-        $$
-
-        Args:
-            hidden_dim_arr: The hidden dimensional array.
-            weight_dim_tree: The weight dimensional tree.
-
-        Returns:
-            The updated weight dimensional tree.
-        """
-        if not isinstance(hidden_dim_arr, (np.ndarray, jax.Array, u.Quantity)):
-            raise TypeError(f'The hidden_dim_arr must be an array-like. But got {type(hidden_dim_arr)}')
-        self._check_weight(weight_dim_tree)
-
-        weight_like = weight_dim_tree['weight']
-        old_weight = weight_like
-        if 'bias' in weight_dim_tree:
-            bias_like = weight_dim_tree['bias']
-        else:
-            bias_like = None
-        if hidden_dim_arr.ndim == 1:
-            assert weight_like.ndim == 2, (
-                f'The weight must be a 2D array when hidden_dim_arr is 1D. '
-                f'But got the shape {weight_like.shape}'
-            )
-            if self.weight_mask is None:
-                weight_like = weight_like * u.math.expand_dims(hidden_dim_arr, axis=0)
-            else:
-                raise NotImplementedError(
-                    'please apply weight_mask using weight_fn. For example: \n\n'
-                    'weight_fn = lambda w: w * mask'
-                )
-                weight_like = (
-                    weight_like *
-                    self.weight_mask *
-                    u.math.expand_dims(hidden_dim_arr, axis=0)
-                )
-            if bias_like is not None:
-                assert bias_like.ndim == 1, (
-                    f'The bias must be a 1D array when hidden_dim_arr is 1D. '
-                    f'But got the shape {bias_like.shape}'
-                )
-                bias_like = bias_like * hidden_dim_arr
-        elif hidden_dim_arr.ndim == 2:
-            assert weight_like.ndim == 3, (
-                f'The weight must be a 3D array when hidden_dim_arr is 2D. '
-                f'But got the shape {weight_like.shape}'
-            )
-            # assume batch size is the first dimension
-            if self.weight_mask is None:
-                weight_like = weight_like * u.math.expand_dims(hidden_dim_arr, axis=1)
-            else:
-                raise NotImplementedError(
-                    'please apply weight_mask using weight_fn. For example: \n\n'
-                    'weight_fn = lambda w: w * mask'
-                )
-                weight_like = (
-                    weight_like *
-                    u.math.expand_dims(self.weight_mask, axis=0) *
-                    u.math.expand_dims(hidden_dim_arr, axis=1)
-                )
-            if bias_like is not None:
-                assert bias_like.ndim == 2, (
-                    f'The bias must be a 2D array when hidden_dim_arr is 2D. '
-                    f'But got the shape {bias_like.shape}'
-                )
-                bias_like = bias_like * hidden_dim_arr
-        else:
-            raise ValueError(f'The hidden_dim_arr must be a 1D or 2D array. But got the shape {hidden_dim_arr.shape}')
-
-        weight_like = self._vjp_weight_fn(old_weight, weight_like)
-        if bias_like is None:
-            return {'weight': weight_like}
-        else:
-            return {'weight': weight_like, 'bias': bias_like}
-
-
-class ConvOp(ETraceOp):
-    r"""
-    The convolution operator for eligibility trace-based gradient learning.
-
-    This operator is used to compute the output of the operator, mathematically:
-
-    $$
-    y = x \mathrm{[convolution]} f(w * m) + \mathrm{bias}
-    $$
-
-    $bias$ is the bias term, which can be optional, $m$ is the weight mask,
-    and $f$ is the weight function.
-    """
-
-    def __init__(
-        self,
-        xinfo: jax.ShapeDtypeStruct,
-        window_strides: Sequence[int],
-        padding: str | Sequence[tuple[int, int]],
-        lhs_dilation: Sequence[int] | None = None,
-        rhs_dilation: Sequence[int] | None = None,
-        feature_group_count: int = 1,
-        batch_group_count: int = 1,
-        dimension_numbers: Any = None,
-        weight_mask: Optional[jax.Array] = None,
-        weight_fn: Callable[[X], X] = lambda w: w,
-    ):
-        super().__init__(is_diagonal=False)
-
-        self.window_strides = window_strides
-        self.padding = padding
-        self.lhs_dilation = lhs_dilation
-        self.rhs_dilation = rhs_dilation
-        self.feature_group_count = feature_group_count
-        self.batch_group_count = batch_group_count
-        self.dimension_numbers = dimension_numbers
-
-        # weight mask
-        if weight_mask is None:
-            pass
-        elif isinstance(weight_mask, (np.ndarray, jax.Array, u.Quantity)):
-            weight_mask = u.math.asarray(weight_mask)
-        else:
-            raise TypeError(f'The weight_mask must be an array-like. But got {type(weight_mask)}')
-        self.weight_mask = weight_mask
-
-        # weight function
-        assert callable(weight_fn), f'The weight_fn must be callable. But got {type(weight_fn)}'
-        self.weight_fn = weight_fn
-
-        # input info
-        self.xinfo = xinfo
-
-    def _check_weight(self, w: Dict[str, brainstate.typing.ArrayLike]):
-        if not isinstance(w, dict):
-            raise TypeError(f'{self.__class__.__name__} only supports '
-                            f'the dictionary weight. But got {type(w)}')
-        if 'weight' not in w:
-            raise ValueError(f'The weight must contain the key "weight".')
-
-    def _vjp_weight_fn(self, w, dw):
-        _, f_vjp = jax.vjp(self.weight_fn, w)
-        dw, = f_vjp(dw)
-        return dw
-
-    def _pure_convolution_without_batch(
-        self,
-        inputs: X,
-        weights: W,
-    ) -> Y:
-        self._check_weight(weights)
-        if inputs.ndim == self.xinfo.ndim:
-            inputs = u.math.expand_dims(inputs, axis=0)
-        elif inputs.ndim == self.xinfo.ndim + 1:
-            inputs = inputs  # already has batch dimension
-        else:
-            raise ValueError(
-                f'The inputs must have the same number of dimensions as xinfo. '
-                f'Got {inputs.ndim} and {self.xinfo.ndim}'
-            )
-        inputs, input_unit = u.split_mantissa_unit(inputs)
-        weight, weight_unit = u.split_mantissa_unit(weights['weight'])
-
-        # convolution
-        y = jax.lax.conv_general_dilated(
-            lhs=inputs,
-            rhs=weight,
-            window_strides=self.window_strides,
-            padding=self.padding,
-            lhs_dilation=self.lhs_dilation,
-            rhs_dilation=self.rhs_dilation,
-            feature_group_count=self.feature_group_count,
-            batch_group_count=self.batch_group_count,
-            dimension_numbers=self.dimension_numbers
-        )
-        y = u.maybe_decimal(y * input_unit * weight_unit)
-
-        # bias
-        if 'bias' in weights:
-            y = y + weights['bias']
-        return u.math.squeeze(y, axis=0)
-
-    def xw_to_y(
-        self,
-        inputs: X,
-        weights: W,
-    ) -> Y:
-        # weight processing
-        weights = {k: v for k, v in weights.items()}
-        if self.weight_mask is not None:
-            weights['weight'] = weights['weight'] * self.weight_mask
-        weights['weight'] = self.weight_fn(weights['weight'])
-        # convolution
-        if inputs.ndim == self.xinfo.ndim:
-            return self._pure_convolution_without_batch(inputs, weights)
-        elif inputs.ndim == self.xinfo.ndim + 1:
-            return jax.vmap(self._pure_convolution_without_batch, in_axes=(0, None))(inputs, weights)
-        else:
-            raise ValueError(
-                f'The inputs must have the same number of dimensions as xinfo or xinfo + 1. '
-                f'Got {inputs.ndim} and {self.xinfo.ndim}'
-            )
-
-    def yw_to_w(
-        self,
-        hidden_dim_arr: brainstate.typing.ArrayLike,
-        weight_dim_tree: Dict[str, brainstate.typing.ArrayLike],
-    ) -> Dict[str, brainstate.typing.ArrayLike]:
-        """
-        This function is used to compute the weight from the hidden dimensional array.
-
-        $$
-        w = f(y, w)
-        $$
-
-        Args:
-            hidden_dim_arr: The hidden dimensional array.
-            weight_dim_tree: The weight dimensional tree.
-
-        Returns:
-            The updated weight dimensional tree.
-        """
-        self._check_weight(weight_dim_tree)
-        # Create an actual array from xinfo (ShapeDtypeStruct) since general_y2w calls ones_like on x
-        x_placeholder = u.math.ones(self.xinfo.shape, dtype=self.xinfo.dtype)
-        w_like = general_y2w(
-            self._pure_convolution_without_batch,
-            x_placeholder,
-            hidden_dim_arr,
-            weight_dim_tree,
-        )
-        old_weight = weight_dim_tree['weight']
-        new_weight = jax.tree.map(u.math.multiply, weight_dim_tree, w_like)
-        new_weight['weight'] = self._vjp_weight_fn(old_weight, new_weight['weight'])
-        return new_weight
-
-
-class SpMatMulOp(ETraceOp):
-    """
-    The sparse matrix-vector multiplication operator for eligibility trace-based gradient learning.
-
-    This operator is used to compute the output of the operator, mathematically:
-
-    $$
-    y = v @ f(w) + b,
-    $$
-
-    $b$ is the bias term, which can be optional, $f$ is the weight function, and $v$ is the input vector.
-
-    By default, the weight function is the identity function.
-
-    .. note::
-
-       The sparse matrix must be the instance of ``brainunit.sparse.SparseMatrix``,
-       which implements the protocol method ``.yw_to_w()`` that we need.
-
-    """
-
-    def __init__(
-        self,
-        sparse_mat: u.sparse.SparseMatrix,
-        weight_fn: Callable[[X], X] = lambda w: w,
-    ):
-        super().__init__(is_diagonal=False)
-
-        # sparse matrix
-        assert isinstance(sparse_mat, u.sparse.SparseMatrix), (
-            f'The sparse_mat must be a SparseMatrix. But we got {type(sparse_mat)}'
-        )
-        self.sparse_mat = sparse_mat
-
-        # weight function
-        assert callable(weight_fn), f'The weight_fn must be callable. But got {type(weight_fn)}'
-        self.weight_fn = weight_fn
-
-    def _check_weight(self, w: W, check_shape: bool = True):
-        if not isinstance(w, dict):
-            raise TypeError(f'{self.__class__.__name__} only supports '
-                            f'the dictionary weight. But got {type(w)}')
-        if 'weight' not in w:
-            raise ValueError(f'The weight must contain the key "weight".')
-        if check_shape:
-            if w['weight'].shape != self.sparse_mat.data.shape:
-                raise ValueError(f'The shape of the weight must be the same as the sparse matrix data. '
-                                 f'Got {w["weight"].shape} and {self.sparse_mat.data.shape}.')
-        if w['weight'].dtype != self.sparse_mat.data.dtype:
-            raise ValueError(f'The dtype of the weight must be the same as the sparse matrix data. '
-                             f'Got {w["weight"].dtype} and {self.sparse_mat.data.dtype}.')
-        if u.get_unit(w['weight']) != u.get_unit(self.sparse_mat.data):
-            raise ValueError(f'The unit of the weight must be the same as the sparse matrix data. '
-                             f'Got {u.get_unit(w["weight"])} and {u.get_unit(self.sparse_mat.data)}.')
-
-    def _vjp_weight_fn(self, w, dw):
-        _, f_vjp = jax.vjp(self.weight_fn, w)
-        dw, = f_vjp(dw)
-        return dw
-
-    def xw_to_y(
-        self,
-        x: brainstate.typing.ArrayLike,
-        w: Dict[str, brainstate.typing.ArrayLike]
-    ):
-        r"""
-        This function is used to compute the output of the operator, mathematically:
-
-        $$
-        y = x @ f(w) + b
-        $$
-        """
-        self._check_weight(w)
-        weight = self.weight_fn(w['weight'])
-        sparse_mat = self.sparse_mat.with_data(weight)
-        y = x @ sparse_mat
-        if 'bias' in w:
-            y = y + w['bias']
-        return y
-
-    def yw_to_w(
-        self,
-        hidden_dim_arr: brainstate.typing.ArrayLike,
-        weight_dim_tree: Dict[str, brainstate.typing.ArrayLike],
-    ) -> Dict[str, brainstate.typing.ArrayLike]:
-        """
-        This function is used to compute the weight from the hidden dimensional array.
-
-        $$
-        w = f(y, w)
-        $$
-
-        Args:
-            hidden_dim_arr: The hidden dimensional array.
-            weight_dim_tree: The weight dimensional tree.
-
-        Returns:
-            The updated weight dimensional tree.
-        """
-        self._check_weight(weight_dim_tree, check_shape=False)
-        weight_like: brainstate.typing.ArrayLike = weight_dim_tree['weight']
-        old_weight = weight_like
-        if 'bias' in weight_dim_tree:
-            bias_like = weight_dim_tree['bias']
-        else:
-            bias_like = None
-        assert hidden_dim_arr.ndim == 1, (
-            f'The hidden_dim_arr must be a 1D array. But got the shape {hidden_dim_arr.shape}'
-        )
-        weight_like = self.sparse_mat.yw_to_w_transposed(hidden_dim_arr, weight_like)
-        if bias_like is not None:
-            assert bias_like.ndim == 1, (
-                f'The bias must be a 1D array when hidden_dim_arr is 1D. '
-                f'But got the shape {bias_like.shape}'
-            )
-            bias_like = bias_like * hidden_dim_arr
-        weight_like = self._vjp_weight_fn(old_weight, weight_like)
-        if bias_like is None:
-            return {'weight': weight_like}
-        else:
-            return {'weight': weight_like, 'bias': bias_like}
-
-
-class LoraOp(ETraceOp):
-    r"""
-    The low-rank approximation operator for eligibility trace-based gradient learning.
-
-    This operator is used to compute the output of the operator, mathematically:
-
-    $$
-    y = \alpha x B A + b
-    $$
-
-    $b$ is the bias term, which can be optional, $\alpha$ is the scaling factor,
-    $A$ is the weight matrix, $B$ is the low-rank matrix, and $x$ is the input data.
-
-    """
-
-    def __init__(
-        self,
-        alpha: Optional[brainstate.typing.ArrayLike] = None,
-    ):
-        super().__init__(is_diagonal=False)
-
-        # weight mask
-        if alpha is not None:
-            alpha = u.math.asarray(alpha)
-        self.alpha = alpha
-
-    def _check_weight(self, w: W):
-        if not isinstance(w, dict):
-            raise TypeError(f'{self.__class__.__name__} only supports '
-                            f'the dictionary weight. But got {type(w)}')
-        if 'B' not in w:
-            raise ValueError(f'The weight must contain the key "B".')
-        if 'A' not in w:
-            raise ValueError(f'The weight must contain the key "A".')
-
-    def xw_to_y(
-        self,
-        x: brainstate.typing.ArrayLike,
-        w: Dict[str, brainstate.typing.ArrayLike]
-    ):
-        r"""
-        This function is used to compute the output of the operator, mathematically:
-
-        $$
-        y = \alpha * x @ B @ A + b
-        $$
-
-        Args:
-            x: The input data.
-            w: The weight parameters.
-
-        Returns:
-            The output of the operator.
-        """
-        self._check_weight(w)
-        if self.alpha is not None:
-            x = self.alpha * x
-        y = x @ w['B'] @ w['A']
-        if 'bias' in w:
-            y = y + w['bias']
-        return y
-
-    def yw_to_w(
-        self,
-        hidden_dim_arr: brainstate.typing.ArrayLike,
-        weight_dim_tree: Dict[str, brainstate.typing.ArrayLike],
-    ) -> Dict[str, brainstate.typing.ArrayLike]:
-        """
-        This function is used to compute the weight from the hidden dimensional array.
-
-        $$
-        w = f(y, w)
-        $$
-
-        Args:
-            hidden_dim_arr: The hidden dimensional array.
-            weight_dim_tree: The weight dimensional tree.
-
-        Returns:
-            The updated weight dimensional tree.
-        """
-        if not isinstance(hidden_dim_arr, (np.ndarray, jax.Array, u.Quantity)):
-            raise TypeError(f'The hidden_dim_arr must be an array-like. But got {type(hidden_dim_arr)}')
-        self._check_weight(weight_dim_tree)
-
-        B_like = weight_dim_tree['B']
-        A_like = weight_dim_tree['A']
-        if 'bias' in weight_dim_tree:
-            bias_like = weight_dim_tree['bias']
-        else:
-            bias_like = None
-        if hidden_dim_arr.ndim == 1:
-            assert B_like.ndim == 2 and A_like.ndim == 2, (
-                f'The weight must be a 2D array when hidden_dim_arr is 1D. '
-                f'But got the shape of B = {B_like.shape}, A = {A_like.shape}.'
-            )
-            A_like = (
-                A_like *
-                u.math.expand_dims(hidden_dim_arr, axis=0)
-            )
-            if bias_like is not None:
-                assert bias_like.ndim == 1, (
-                    f'The bias must be a 1D array when hidden_dim_arr is 1D. '
-                    f'But got the shape {bias_like.shape}'
-                )
-                bias_like = bias_like * hidden_dim_arr
-        elif hidden_dim_arr.ndim == 2:
-            assert B_like.ndim == 3 and A_like.ndim == 3, (
-                f'The weight must be a 3D array when hidden_dim_arr is 2D. '
-                f'But got the shape B = {B_like.shape}, A = {A_like.shape}.'
-            )
-            # assume batch size is the first dimension
-            A_like = (
-                A_like *
-                u.math.expand_dims(hidden_dim_arr, axis=1)
-            )
-            if bias_like is not None:
-                assert bias_like.ndim == 2, (
-                    f'The bias must be a 2D array when hidden_dim_arr is 2D. '
-                    f'But got the shape {bias_like.shape}'
-                )
-                bias_like = bias_like * hidden_dim_arr
-        else:
-            raise ValueError(f'The hidden_dim_arr must be a 1D or 2D array. But got the shape {hidden_dim_arr.shape}')
-        if bias_like is None:
-            return {'B': B_like, 'A': A_like}
-        else:
-            return {'B': B_like, 'A': A_like, 'bias': bias_like}
-
-
-class ElemWiseOp(ETraceOp):
-    """
-    The element-wise operator for the eligibility trace-based gradient learning.
-    
-    This interface can be used to define any element-wise operation between weight parameters and hidden states. 
-
-    .. note::
-
-        Different from the :py:class:`StandardOp`, the element-wise operator does not require the input data.
-        Its function signature is ``(w: PyTree) -> ndarray``.
-
-        The most important thing is that the element-wise operator must generate the output with
-        the same shape as the hidden states.
+    y = fn(weight)
+    return etp_elemwise_p.bind(y)
+
+
+def conv(
+    x,
+    kernel,
+    bias=None,
+    *,
+    strides: Sequence[int] = (1,),
+    padding: str = 'SAME',
+    lhs_dilation: Optional[Sequence[int]] = None,
+    rhs_dilation: Optional[Sequence[int]] = None,
+    feature_group_count: int = 1,
+    batch_group_count: int = 1,
+    dimension_numbers: Any = None,
+):
+    r"""ETP-aware convolution.
+
+    Computes :math:`y = \mathrm{conv}(x, kernel) \; (+ b)`.
+    Always expects a batch dimension on ``x``.
 
     Args:
-        fn: the element-wise function, which must have the signature: ``(w: PyTree) -> ndarray``.
+        x: Input tensor with batch dimension.
+        kernel: Convolution kernel.
+        bias: Optional bias.
+        strides: Window strides.
+        padding: Padding mode.
+        lhs_dilation: Left-hand-side dilation.
+        rhs_dilation: Right-hand-side dilation.
+        feature_group_count: Feature group count.
+        batch_group_count: Batch group count.
+        dimension_numbers: Convolution dimension numbers.
+
+    Returns:
+        Convolution output.
     """
+    conv_kwargs = dict(
+        strides=tuple(strides),
+        padding=padding,
+        lhs_dilation=tuple(lhs_dilation) if lhs_dilation is not None else None,
+        rhs_dilation=tuple(rhs_dilation) if rhs_dilation is not None else None,
+        feature_group_count=feature_group_count,
+        batch_group_count=batch_group_count,
+        dimension_numbers=dimension_numbers,
+    )
+    if bias is not None:
+        return etp_conv_p.bind(x, kernel, bias, has_bias=True, **conv_kwargs)
+    return etp_conv_p.bind(x, kernel, has_bias=False, **conv_kwargs)
 
-    def __init__(
-        self,
-        fn: Callable = lambda w: w,
-    ):
-        self._raw_fn = fn
-        super().__init__(is_diagonal=True, name=_etrace_op_name_elemwise)
 
-    def __pretty_repr_item__(self, k, v):
-        if k == '_jitted_call':
-            return None
-        if k == '_raw_fn':
-            return 'fn', v
-        return k, v
+def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
+    r"""ETP-aware sparse matrix multiplication.
 
-    def _define_call(self):
-        return lambda weights: self._raw_fn(weights) * 1.0
+    Computes :math:`y = x \mathbin{@} \mathrm{sparse}(w) \; (+ b)`.
 
-    def __call__(self, weights: W) -> Y:
-        return self._jitted_call(weights)
+    Auto-dispatches batched/unbatched based on ``x.ndim``.
 
-    def xw_to_y(
-        self,
-        inputs: Optional[X],
-        weights: W
-    ) -> Y:
-        r"""
-        This function is used to compute the output of the element-wise operator.
+    Args:
+        x: Input array.
+        weight_data: Sparse matrix data (non-zero values).
+        sparse_mat: The sparse matrix structure (``brainunit.sparse.SparseMatrix``).
+        bias: Optional bias.
 
-        It computes:
+    Returns:
+        Output array.
+    """
+    p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p
+    if bias is not None:
+        return p.bind(x, weight_data, bias, sparse_mat=sparse_mat, has_bias=True)
+    return p.bind(x, weight_data, sparse_mat=sparse_mat, has_bias=False)
 
-        $$
-        y = f(w)
-        $$
 
-        Args:
-            inputs: The input data. It is None.
-            weights: The weight parameters.
+def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
+    r"""ETP-aware LoRA (Low-Rank Adaptation) matrix multiplication.
 
-        Returns:
-            The output of the operator.
-        """
-        return self._raw_fn(weights)
+    Computes :math:`y = \alpha \cdot x \mathbin{@} B \mathbin{@} A \; (+ b)`.
 
-    def yw_to_w(
-        self,
-        hidden_dim_arr: Y,
-        weight_dim_tree: W,
-    ) -> W:
-        r"""
-        This function is used to compute the weight from the hidden dimensional array.
+    Auto-dispatches batched/unbatched based on ``x.ndim``.
 
-        It computes:
+    Args:
+        x: Input array.
+        B: Low-rank matrix B, shape ``(in_features, rank)``.
+        A: Low-rank matrix A, shape ``(rank, out_features)``.
+        alpha: Scaling factor.
+        bias: Optional bias.
 
-        $$
-        w = f(y, w)
-        $$
-
-        Args:
-            hidden_dim_arr: The hidden dimensional array.
-            weight_dim_tree: The weight dimensional tree.
-
-        Returns:
-            The updated weight dimensional tree.
-        """
-        prim, f_vjp = jax.vjp(
-            # dimensionless processing
-            lambda w: u.get_mantissa(self._raw_fn(w)),
-            weight_dim_tree
-        )
-        assert hidden_dim_arr.shape == prim.shape, (
-            f'The shape of the hidden_dim_arr must be the same as the weight_dim_tree. '
-            f'Got {hidden_dim_arr.shape} and {prim.shape}'
-        )
-        y_to_w = f_vjp(
-            # dimensionless processing
-            u.get_mantissa(hidden_dim_arr)
-        )[0]
-        # new_w = y_to_w * old_w
-        new_w = jax.tree.map(
-            lambda w1, w2: w1 * w2,
-            weight_dim_tree,
-            y_to_w,
-        )
-        return new_w
-
-    def xy_to_dw(
-        self,
-        input_dim_arr: Optional[X],
-        hidden_dim_arr: Y,
-        weights: W,
-    ) -> W:
-        r"""
-        Computes the gradient of the weights (dw) based on the hidden dimensional array.
-
-        For element-wise operations, the computation is typically:
-
-        $$
-        dw = \frac{\partial L}{\partial w} = \frac{\partial L}{\partial y} \frac{\partial y}{\partial w}
-        $$
-
-        where $y = f(w)$. This method computes $\frac{\partial y}{\partial w}$ and multiplies
-        it by the incoming gradient $\frac{\partial L}{\partial y}$ (represented by `hidden_dim_arr`).
-
-        Args:
-            input_dim_arr: The input dimensional array. This is not used for ElemWiseOp.
-            hidden_dim_arr: The hidden dimensional array, representing the gradient of the loss
-                            with respect to the operator's output ($dL/dy$).
-            weights: The current weight parameters of the operator.
-
-        Returns:
-            The computed gradient of the weights (dw).
-        """
-
-        primals, f_vjp = jax.vjp(
-            # dimensionless processing
-            lambda w: u.get_mantissa(self._raw_fn(w)),
-            weights
-        )
-        assert hidden_dim_arr.shape == primals.shape, (
-            f'The shape of the hidden_dim_arr must be the same as the primals. '
-            f'Got {hidden_dim_arr.shape} and {primals.shape}'
-        )
-        return f_vjp(
-            # dimensionless processing
-            u.get_mantissa(hidden_dim_arr)
-        )[0]
+    Returns:
+        Output array.
+    """
+    p = etp_lora_mm_p if x.ndim >= 2 else etp_lora_mv_p
+    if bias is not None:
+        return p.bind(x, B, A, bias, alpha=alpha, has_bias=True)
+    return p.bind(x, B, A, alpha=alpha, has_bias=False)

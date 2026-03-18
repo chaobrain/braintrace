@@ -25,8 +25,7 @@ import jax
 from brainstate import BatchState
 from brainstate.nn._normalizations import _BatchNorm
 
-from braintrace._etrace_concepts import ETraceParam
-from braintrace._etrace_operators import ETraceOp, Y, W, general_y2w
+pass  # old imports removed
 from braintrace._typing import ArrayLike, Size, Axes
 
 __all__ = [
@@ -38,23 +37,6 @@ __all__ = [
     'RMSNorm',
     'GroupNorm'
 ]
-
-
-class ScaleOp(ETraceOp):
-    def xw_to_y(self, x, param):
-        if 'scale' in param:
-            x = x * param['scale']
-        if 'bias' in param:
-            x = x + param['bias']
-        return x
-
-    def yw_to_w(
-        self,
-        hidden_dim_arr: Y,
-        weight_dim_tree: W,
-    ) -> W:
-        w_like = general_y2w(self.xw_to_y, hidden_dim_arr, hidden_dim_arr, weight_dim_tree)
-        return jax.tree.map(u.math.multiply, weight_dim_tree, w_like)
 
 
 class _BatchNormETrace(_BatchNorm):
@@ -75,13 +57,9 @@ class _BatchNormETrace(_BatchNorm):
         name: Optional[str] = None,
         dtype: Any = None,
         mean_type: type = BatchState,
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
-        weight_type = partial(
-            param_type,
-            op=ScaleOp(is_diagonal=True),
-            grad='full',
-        )
+        weight_type = brainstate.ParamState
 
         super().__init__(
             in_size=in_size,
@@ -137,8 +115,7 @@ class BatchNorm0d(_BatchNormETrace):
         The dtype of the layer parameters. Default is None.
     mean_type : type, optional
         The type for storing running statistics. Default is BatchState.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -196,8 +173,7 @@ class BatchNorm1d(_BatchNormETrace):
         The dtype of the layer parameters. Default is None.
     mean_type : type, optional
         The type for storing running statistics. Default is BatchState.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -255,8 +231,7 @@ class BatchNorm2d(_BatchNormETrace):
         The dtype of the layer parameters. Default is None.
     mean_type : type, optional
         The type for storing running statistics. Default is BatchState.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -314,8 +289,7 @@ class BatchNorm3d(_BatchNormETrace):
         The dtype of the layer parameters. Default is None.
     mean_type : type, optional
         The type for storing running statistics. Default is BatchState.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -359,8 +333,7 @@ class LayerNorm(brainstate.nn.LayerNorm):
         The initializer for the scale parameter. Default is Constant(1.).
     name : str or None, optional
         The name of the layer. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -383,14 +356,10 @@ class LayerNorm(brainstate.nn.LayerNorm):
     def __init__(
         self,
         *args,
-        param_type: type = ETraceParam,
+        # param_type removed (primitive-based ETP)
         **kwargs,
     ):
-        weight_type = partial(
-            param_type,
-            op=ScaleOp(is_diagonal=True),
-            grad='full',
-        )
+        weight_type = brainstate.ParamState
         super().__init__(*args, param_type=weight_type, **kwargs)
 
 
@@ -415,8 +384,7 @@ class RMSNorm(brainstate.nn.RMSNorm):
         The initializer for the scale parameter. Default is Constant(1.).
     name : str or None, optional
         The name of the layer. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -439,14 +407,10 @@ class RMSNorm(brainstate.nn.RMSNorm):
     def __init__(
         self,
         *args,
-        param_type: type = ETraceParam,
+        # param_type removed (primitive-based ETP)
         **kwargs,
     ):
-        weight_type = partial(
-            param_type,
-            op=ScaleOp(is_diagonal=True),
-            grad='full',
-        )
+        weight_type = brainstate.ParamState
         super().__init__(*args, param_type=weight_type, **kwargs)
 
 
@@ -473,8 +437,7 @@ class GroupNorm(brainstate.nn.GroupNorm):
         The initializer for the scale parameter. Default is Constant(1.).
     name : str or None, optional
         The name of the layer. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is :class:`ETraceParam`.
+    
 
     Examples
     --------
@@ -497,12 +460,8 @@ class GroupNorm(brainstate.nn.GroupNorm):
     def __init__(
         self,
         *args,
-        param_type: type = ETraceParam,
+        # param_type removed (primitive-based ETP)
         **kwargs,
     ):
-        weight_type = partial(
-            param_type,
-            op=ScaleOp(is_diagonal=True),
-            grad='full',
-        )
+        weight_type = brainstate.ParamState
         super().__init__(*args, param_type=weight_type, **kwargs)

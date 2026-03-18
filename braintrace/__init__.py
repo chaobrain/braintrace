@@ -33,31 +33,19 @@ from braintrace._etrace_compiler import (
     extract_module_info,
 )
 from . import nn
-from . import etp
 # algorithms
 from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
-# concepts
-from ._etrace_concepts import (
-    ETraceParam,
-    NonTempParam,
-    ElemWiseParam,
-    FakeETraceParam,
-    FakeElemWiseParam,
-)
 # graph executor
 from ._etrace_graph_executor import ETraceGraphExecutor
 # input data
 from ._etrace_input_data import SingleStepData, MultiStepData
-# operators
+# ETP primitives and user API
 from ._etrace_operators import (
-    ETraceOp,
-    MatMulOp,
-    ElemWiseOp,
-    ConvOp,
-    SpMatMulOp,
-    LoraOp,
-    general_y2w,
-    stop_param_gradients,
+    matmul,
+    element_wise,
+    conv,
+    sparse_matmul,
+    lora_matmul,
 )
 from ._etrace_vjp import (
     ETraceVjpAlgorithm,
@@ -67,7 +55,6 @@ from ._etrace_vjp import (
     IODimVjpAlgorithm,
     ES_D_RTRL,
     pp_prop,
-    HybridDimVjpAlgorithm,
 )
 # gradient utilities
 from ._grad_exponential import GradExpon
@@ -90,24 +77,13 @@ __all__ = [
     'IODimVjpAlgorithm',
     'ES_D_RTRL',
     'pp_prop',
-    'HybridDimVjpAlgorithm',
 
-    # concepts
-    'ETraceParam',
-    'NonTempParam',
-    'ElemWiseParam',
-    'FakeETraceParam',
-    'FakeElemWiseParam',
-
-    # operators
-    'ETraceOp',
-    'MatMulOp',
-    'ElemWiseOp',
-    'ConvOp',
-    'SpMatMulOp',
-    'LoraOp',
-    'general_y2w',
-    'stop_param_gradients',
+    # ETP primitives (user API)
+    'matmul',
+    'element_wise',
+    'conv',
+    'sparse_matmul',
+    'lora_matmul',
 
     # input data
     'SingleStepData',
@@ -120,7 +96,7 @@ __all__ = [
     'ETraceGraph',
     'compile_etrace_graph',
     'HiddenGroup',
-    'find_hidden_groups_from_minfo',
+    'find_hidden_groups_from_mixin',
     'find_hidden_groups_from_module',
     'HiddenParamOpRelation',
     'find_hidden_param_op_relations_from_minfo',
@@ -141,25 +117,3 @@ __all__ = [
     # submodules
     'nn',
 ]
-
-
-def __getattr__(name):
-    mapping = {
-        'ETraceState': 'HiddenState',
-        'ETraceGroupState': 'HiddenGroupState',
-        'ETraceTreeState': 'HiddenTreeState',
-    }
-
-    if name in mapping:
-        import warnings
-        import brainstate
-
-        warnings.warn(
-            f"braintrace.{name} is deprecated and will be removed in a future release. "
-            f"Please use brainstate.{mapping[name]} instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return getattr(brainstate, mapping[name])
-    raise AttributeError(name)

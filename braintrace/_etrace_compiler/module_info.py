@@ -26,7 +26,7 @@ from braintrace._compatible_imports import (
     Jaxpr,
     ClosedJaxpr,
 )
-from braintrace._etrace_concepts import ETraceParam
+pass  # ParamState removed (primitive-based ETP)
 from braintrace._misc import (
     NotSupportedError,
     unknown_state_path,
@@ -474,10 +474,12 @@ def extract_module_info(
     state_tree_outvars = brainstate.util.PrettyList(state_tree_outvars)
 
     # -- checking weights as invar -- #
+    # Map ALL ParamState (not just ParamState) so primitive-based
+    # ETP scanning can find weights used with etp_mm_p / etp_mv_p / etc.
     weight_path_to_invars = {
         state_id_to_path[id(st)]: jax.tree.leaves(invar)
         for invar, st in zip(state_tree_invars, compiled_states)
-        if isinstance(st, ETraceParam)
+        if isinstance(st, brainstate.ParamState)
     }
     weight_path_to_invars = brainstate.util.PrettyDict(weight_path_to_invars)
 

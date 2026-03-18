@@ -22,8 +22,7 @@ import brainstate
 import braintools
 import brainunit as u
 
-from braintrace._etrace_concepts import ETraceParam
-from braintrace._etrace_operators import MatMulOp
+from braintrace._etrace_operators import matmul
 from braintrace._typing import Size, ArrayLike
 
 __all__ = [
@@ -73,7 +72,7 @@ class LeakyRateReadout(brainstate.nn.Module):
         The decay factor computed from tau.
     r : HiddenState
         The readout state variable.
-    weight_op : ETraceParam
+    weight_op : ParamState
         The parameter object that holds the weights and operations.
 
     Examples
@@ -121,8 +120,9 @@ class LeakyRateReadout(brainstate.nn.Module):
         self.r_init = r_init
 
         # weights
-        weight = braintools.init.param(w_init, (self.in_size[0], self.out_size[0]))
-        self.weight_op = ETraceParam({'weight': weight}, op=MatMulOp())
+        self.W = brainstate.ParamState(
+            braintools.init.param(w_init, (self.in_size[0], self.out_size[0]))
+        )
 
     def init_state(self, batch_size=None, **kwargs):
         self.r = brainstate.HiddenState(braintools.init.param(self.r_init, self.out_size, batch_size))
@@ -131,6 +131,6 @@ class LeakyRateReadout(brainstate.nn.Module):
         self.r.value = braintools.init.param(self.r_init, self.out_size, batch_size)
 
     def update(self, x):
-        r = self.decay * self.r.value + self.weight_op.execute(x)
+        r = self.decay * self.r.value + matmul(x, self.W.value)
         self.r.value = r
         return r

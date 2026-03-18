@@ -23,10 +23,6 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     is_cond_primitive,
 )
-from braintrace._etrace_operators import (
-    is_etrace_op,
-    is_etrace_op_enable_gradient,
-)
 from braintrace._typing import Path
 
 
@@ -109,14 +105,15 @@ def check_unsupported_op(
         in an unsupported manner.
     """
     # checking whether the weight variables are used in the equation
+    # Note: with the primitive-based system, weight vars inside JIT are
+    # handled by backward tracing in the compiler, so we only warn.
     invar = find_element_exist_in_the_set(eqn.invars, self.weight_invars)
     if invar is not None:
-        raise NotImplementedError(
-            f'Currently, we do not support the weight states are used within a {op_name} function. \n'
-            f'Please remove your {op_name} on the intermediate steps. \n\n'
-            f'The weight state is: {self.invar_to_hidden_path[invar]}. \n'
-            f'The Jaxpr of the {op_name} function is: \n\n'
-            f'{eqn} \n\n'
+        import warnings
+        warnings.warn(
+            f'Weight state found inside a {op_name} function. '
+            f'The primitive-based compiler handles this via backward tracing.',
+            stacklevel=3,
         )
 
     # checking whether the hidden variables are computed in the equation
@@ -222,14 +219,7 @@ class JaxprEvaluation(object):
         eqn : JaxprEqn
             The JAX equation to evaluate.
         """
-        if is_etrace_op(eqn.params['name']):
-            if is_etrace_op_enable_gradient(eqn.params['name']):
-                self._eval_eqn(eqn)
-            return
-
         check_unsupported_op(self, eqn, 'jit')
-
-        # treat the pjit as a normal jaxpr equation
         self._eval_eqn(eqn)
 
     def _eval_scan(self, eqn: JaxprEqn) -> None:

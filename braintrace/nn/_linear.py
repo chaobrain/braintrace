@@ -21,8 +21,7 @@ import brainstate
 import brainunit as u
 from braintools import init
 
-from braintrace._etrace_concepts import ETraceParam
-from braintrace._etrace_operators import MatMulOp, LoraOp, SpMatMulOp
+from braintrace._etrace_operators import matmul, sparse_matmul, lora_matmul
 from braintrace._typing import ArrayLike
 
 __all__ = [
@@ -54,8 +53,7 @@ class Linear(brainstate.nn.Module):
         An optional mask for the weights. Default is None.
     name : str or None, optional
         The name of the layer. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
+    
 
     Attributes
     ----------
@@ -65,9 +63,8 @@ class Linear(brainstate.nn.Module):
         The size of the output features.
     w_mask : ArrayLike or Callable or None
         An optional mask for the weights.
-    weight_op : ETraceParam
-        The parameter object that holds the weights and the operation to be
-        performed on them.
+    W : ParamState
+        The weight parameter.
 
     Examples
     --------
@@ -96,7 +93,7 @@ class Linear(brainstate.nn.Module):
         b_init: Optional[Union[Callable, ArrayLike]] = init.ZeroInit(),
         w_mask: Optional[Union[ArrayLike, Callable]] = None,
         name: Optional[str] = None,
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
         super().__init__(name=name)
 
@@ -109,16 +106,19 @@ class Linear(brainstate.nn.Module):
         b_shape = (self.out_size[-1],)
         self.w_mask = init.param(w_mask, w_shape)
 
-        # weights
-        params = dict(weight=init.param(w_init, w_shape, allow_none=False))
-        if b_init is not None:
-            params['bias'] = init.param(b_init, b_shape, allow_none=False)
-
-        # weight + op
-        self.weight_op = param_type(params, op=MatMulOp(self.w_mask))
+        # weights as separate ParamState
+        self.W = brainstate.ParamState(init.param(w_init, w_shape, allow_none=False))
+        self.b = (
+            brainstate.ParamState(init.param(b_init, b_shape, allow_none=False))
+            if b_init is not None else None
+        )
 
     def update(self, x):
-        return self.weight_op.execute(x)
+        w = self.W.value
+        if self.w_mask is not None:
+            w = w * self.w_mask
+        b = self.b.value if self.b is not None else None
+        return matmul(x, w, b)
 
 
 class SignedWLinear(brainstate.nn.Module):
@@ -140,8 +140,7 @@ class SignedWLinear(brainstate.nn.Module):
         The sign matrix to constrain the weights. Default is None.
     name : str or None, optional
         The name of the layer. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
+    
 
     Attributes
     ----------
@@ -149,9 +148,8 @@ class SignedWLinear(brainstate.nn.Module):
         The size of the input features.
     out_size : int or sequence of int
         The size of the output features.
-    weight_op : ETraceParam
-        The parameter object that holds the weights and the operation to be
-        performed on them.
+    W : ParamState
+        The weight parameter.
 
     Examples
     --------
@@ -180,25 +178,20 @@ class SignedWLinear(brainstate.nn.Module):
         w_init: Union[Callable, ArrayLike] = init.KaimingNormal(),
         w_sign: Optional[ArrayLike] = None,
         name: Optional[str] = None,
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
         super().__init__(name=name)
-
-        # input and output shape
         self.in_size = in_size
         self.out_size = out_size
-
-        # weights
         w_shape = (self.in_size[-1], self.out_size[-1])
-        weight = init.param(w_init, w_shape, allow_none=False)
-        op = MatMulOp(
-            weight_mask=w_sign,
-            weight_fn=u.math.abs,
-        )
-        self.weight_op = param_type({'weight': weight}, op=op)
+        self.W = brainstate.ParamState(init.param(w_init, w_shape, allow_none=False))
+        self.w_sign = w_sign
 
     def update(self, x):
-        return self.weight_op.execute(x)
+        w = u.math.abs(self.W.value)
+        if self.w_sign is not None:
+            w = w * self.w_sign
+        return matmul(x, w)
 
 
 class ScaledWSLinear(brainstate.nn.Module):
@@ -224,8 +217,7 @@ class ScaledWSLinear(brainstate.nn.Module):
         The epsilon value for the weight standardization. Default is 1e-4.
     name : str or None, optional
         The name of the object. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
+    
 
     Attributes
     ----------
@@ -237,7 +229,7 @@ class ScaledWSLinear(brainstate.nn.Module):
         The optional mask of the weights.
     eps : float
         The epsilon value for the weight standardization.
-    weight_op : ETraceParam
+    weight_op : ParamState
         The parameter object that holds the weights and the operation.
 
     Examples
@@ -269,43 +261,35 @@ class ScaledWSLinear(brainstate.nn.Module):
         ws_gain: bool = True,
         eps: float = 1e-4,
         name: Optional[str] = None,
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
         super().__init__(name=name)
-
-        # input and output shape
         self.in_size = (in_size,) if isinstance(in_size, int) else tuple(in_size)
         self.out_size = (out_size,) if isinstance(out_size, int) else tuple(out_size)
-
-        # w_mask
         self.w_mask = init.param(w_mask, (self.in_size[0], 1))
-
-        # parameters
         self.eps = eps
 
-        # weights
         w_shape = (self.in_size[-1], self.out_size[-1])
         b_shape = (self.out_size[-1],)
-        params = dict(weight=init.param(w_init, w_shape, allow_none=False))
-        if b_init is not None:
-            params['bias'] = init.param(b_init, b_shape, allow_none=False)
-        # gain
-        if ws_gain:
-            params['gain'] = u.math.ones((1, w_shape[-1]), dtype=params['weight'].dtype)
-
-        # operation
-        op = MatMulOp(
-            weight_mask=self.w_mask,
-            weight_fn=lambda w: brainstate.nn.weight_standardization(
-                w['weight'], self.eps, w.get('gain', None)),
-            apply_weight_fn_before_mask=True
+        self.W = brainstate.ParamState(init.param(w_init, w_shape, allow_none=False))
+        self.b = (
+            brainstate.ParamState(init.param(b_init, b_shape, allow_none=False))
+            if b_init is not None else None
+        )
+        self.gain = (
+            brainstate.ParamState(u.math.ones((1, w_shape[-1]), dtype=self.W.value.dtype))
+            if ws_gain else None
         )
 
-        # weight + op
-        self.weight_op = param_type(params, op=op)
-
     def update(self, x):
-        return self.weight_op.execute(x)
+        w = brainstate.nn.weight_standardization(
+            self.W.value, self.eps,
+            self.gain.value if self.gain is not None else None
+        )
+        if self.w_mask is not None:
+            w = w * self.w_mask
+        b = self.b.value if self.b is not None else None
+        return matmul(x, w, b)
 
 
 class SparseLinear(brainstate.nn.Module):
@@ -329,8 +313,7 @@ class SparseLinear(brainstate.nn.Module):
         dimensions of the output size. Default is None.
     name : str or None, optional
         The name of the layer. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
+    
 
     Attributes
     ----------
@@ -340,7 +323,7 @@ class SparseLinear(brainstate.nn.Module):
     out_size : int
         The size of the output features, determined by the last dimension of the
         sparse matrix.
-    weight_op : ETraceParam
+    weight_op : ParamState
         The parameter object that holds the sparse weights and the operation to
         be performed on them.
 
@@ -381,11 +364,9 @@ class SparseLinear(brainstate.nn.Module):
         b_init: Optional[Union[Callable, ArrayLike]] = None,
         in_size: brainstate.typing.Size = None,
         name: Optional[str] = None,
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
         super().__init__(name=name)
-
-        # input and output shape
         if in_size is not None:
             self.in_size = in_size if isinstance(in_size, (tuple, list)) else (in_size,)
         self.out_size = (sparse_mat.shape[-1],)
@@ -394,17 +375,17 @@ class SparseLinear(brainstate.nn.Module):
                 'The first n-1 dimensions of "in_size" '
                 'and "out_size" must be the same.'
             )
-
-        # weights
         assert isinstance(sparse_mat, u.sparse.SparseMatrix), '"weight" must be a brainunit.sparse.SparseMatrix.'
-        params = dict(weight=sparse_mat.data)
-        if b_init is not None:
-            params['bias'] = init.param(b_init, self.out_size[-1], allow_none=False)
-        op = SpMatMulOp(sparse_mat=sparse_mat)  # x @ sparse matrix
-        self.weight_op = param_type(params, op=op)
+        self.sparse_mat = sparse_mat
+        self.weight_data = brainstate.ParamState(sparse_mat.data)
+        self.bias = (
+            brainstate.ParamState(init.param(b_init, self.out_size[-1], allow_none=False))
+            if b_init is not None else None
+        )
 
     def update(self, x):
-        return self.weight_op.execute(x)
+        b = self.bias.value if self.bias is not None else None
+        return sparse_matmul(x, self.weight_data.value, sparse_mat=self.sparse_mat, bias=b)
 
 
 class LoRA(brainstate.nn.Module):
@@ -439,8 +420,7 @@ class LoRA(brainstate.nn.Module):
         Initializer function for the weight matrix B. Default is ZeroInit().
     A_init : Callable or ArrayLike, optional
         Initializer function for the weight matrix A. Default is LecunNormal().
-    param_type : type, optional
-        The type of the LoRA parameters. Default is ETraceParam.
+    
 
     Attributes
     ----------
@@ -454,7 +434,7 @@ class LoRA(brainstate.nn.Module):
         A scaling factor for the LoRA operation.
     base_module : Callable or None
         A base module to call and substitute, if possible.
-    weight_op : ETraceParam
+    weight_op : ParamState
         The parameter object that holds the LoRA weights and the operation to
         be performed on them.
 
@@ -492,33 +472,23 @@ class LoRA(brainstate.nn.Module):
         base_module: Optional[Callable] = None,
         B_init: Union[Callable, ArrayLike] = init.ZeroInit(),
         A_init: Union[Callable, ArrayLike] = init.LecunNormal(),
-        param_type: type = ETraceParam,
+        **kwargs,
     ):
         super().__init__()
-
-        # input and output shape
         self.in_size = in_features
         self.out_size = out_features
         self.in_features = in_features
         self.out_features = out_features
         self.lora_rank = lora_rank
         self.alpha = alpha
-
-        # others
         if base_module is not None:
             assert callable(base_module), '"base_module" must be callable.'
         self.base_module = base_module
-
-        # weights
-        param = dict(
-            B=B_init((self.in_size[-1], lora_rank)),
-            A=A_init((lora_rank, self.out_size[-1]))
-        )
-        op = LoraOp(alpha=self.alpha / self.lora_rank)
-        self.weight_op = param_type(param, op=op)
+        self.B = brainstate.ParamState(B_init((self.in_size[-1], lora_rank)))
+        self.A = brainstate.ParamState(A_init((lora_rank, self.out_size[-1])))
 
     def update(self, x: ArrayLike):
-        out = self.weight_op.execute(x)
+        out = lora_matmul(x, self.B.value, self.A.value, alpha=self.alpha / self.lora_rank)
         if self.base_module is not None:
             out += self.base_module(x)
         return out
