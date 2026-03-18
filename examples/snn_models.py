@@ -502,17 +502,21 @@ class LIF_Delta_Net(brainstate.nn.Module):
         self.neu = brainpy.state.LIF(n_rec, tau=tau_mem, spk_fun=spk_fun, spk_reset=spk_reset, V_th=V_th)
         rec_init: Callable = braintools.init.KaimingNormal(rec_scale, unit=u.mV)
         ff_init: Callable = braintools.init.KaimingNormal(ff_scale, unit=u.mV)
-        w_init = u.math.concatenate([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0)
+        w_init = u.math.concatenate([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0)
         self.syn = brainpy.state.DeltaProj(
-            comm=braintrace.nn.Linear(n_in + n_rec, n_rec,
-                                      w_init=w_init,
-                                      b_init=braintools.init.ZeroInit(unit=u.mV)),
+            comm=braintrace.nn.Linear(
+                n_in + n_rec, n_rec,
+                w_init=w_init,
+                b_init=braintools.init.ZeroInit(unit=u.mV)
+            ),
             post=self.neu
         )
-        self.out = braintrace.nn.LeakyRateReadout(in_size=n_rec,
-                                                  out_size=n_out,
-                                                  tau=tau_o,
-                                                  w_init=braintools.init.KaimingNormal())
+        self.out = braintrace.nn.LeakyRateReadout(
+            in_size=n_rec,
+            out_size=n_out,
+            tau=tau_o,
+            w_init=braintools.init.KaimingNormal()
+        )
 
     def update(self, spk):
         self.syn(u.math.concatenate([spk, self.neu.get_spike()], axis=-1))
