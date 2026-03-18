@@ -43,7 +43,7 @@ from braintrace._typing import (
     dG_Weight,
 )
 from .base import ETraceVjpAlgorithm
-from .misc import _reset_state_in_a_dict, _batched_zeros_like, _sum_dim, _update_dict
+from .misc import _reset_state_in_a_dict, _sum_dim, _update_dict
 
 __all__ = [
     'ParamDimVjpAlgorithm',

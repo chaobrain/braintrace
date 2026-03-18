@@ -305,9 +305,12 @@ def _etp_conv_impl(
 ):
     x, kernel = args[0], args[1]
     y = jax.lax.conv_general_dilated(
-        lhs=x, rhs=kernel,
-        window_strides=strides, padding=padding,
-        lhs_dilation=lhs_dilation, rhs_dilation=rhs_dilation,
+        lhs=x,
+        rhs=kernel,
+        window_strides=strides,
+        padding=padding,
+        lhs_dilation=lhs_dilation,
+        rhs_dilation=rhs_dilation,
         feature_group_count=feature_group_count,
         batch_group_count=batch_group_count,
         dimension_numbers=dimension_numbers,
