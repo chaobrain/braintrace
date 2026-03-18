@@ -203,3 +203,6 @@ cython_debug/
 /docs/_static/etrace_op_functions.pdf
 /.claude/
 /docs/changelog.md
+/braintrace/etp/JAX_INTERPRETER.md
+/braintrace/etp/ETP.md
+/braintrace/etp/CLAUDE.md

@@ -33,6 +33,7 @@ from braintrace._etrace_compiler import (
     extract_module_info,
 )
 from . import nn
+from . import etp
 # algorithms
 from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
 # concepts
