@@ -31,7 +31,7 @@ class IF_Delta_Dense_Layer(brainstate.nn.Module):
     ):
         super().__init__()
         self.neu = brainpy.state.IF(n_rec, tau=tau_mem, spk_reset=spk_reset, V_th=V_th)
-        w_init = u.math.concatenate([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0)
+        w_init = u.math.concatenate([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0)
         self.syn = braintrace.nn.Linear(
             n_in + n_rec,
             n_rec,
@@ -71,7 +71,7 @@ class _ExpCo_Dense_Layer(brainstate.nn.Module):
             self.n_exc_in = int(n_in * 0.8)
             self.n_inh_in = n_in - self.n_exc_in
 
-            weight = jnp.concat([ff_init([self.n_exc_in, n_rec]), rec_init([self.n_exc_rec, n_rec])], axis=0)
+            weight = jnp.concat([ff_init((self.n_exc_in, n_rec)), rec_init((self.n_exc_rec, n_rec))], axis=0)
             weight = weight * u.mS
             self.exe_syn = brainpy.state.AlignPostProj(
                 comm=braintrace.nn.SignedWLinear(self.n_exc_in + self.n_exc_rec, n_rec, w_init=weight),
@@ -80,7 +80,7 @@ class _ExpCo_Dense_Layer(brainstate.nn.Module):
                 post=self.neu
             )
 
-            weight = jnp.concat([4 * ff_init([self.n_inh_in, n_rec]), 4 * rec_init([self.n_inh_rec, n_rec])], axis=0)
+            weight = jnp.concat([4 * ff_init((self.n_inh_in, n_rec)), 4 * rec_init((self.n_inh_rec, n_rec))], axis=0)
             weight = weight * u.mS
             self.inh_syn = brainpy.state.AlignPostProj(
                 comm=braintrace.nn.SignedWLinear(self.n_inh_in + self.n_inh_rec, n_rec, w_init=weight),
@@ -92,7 +92,7 @@ class _ExpCo_Dense_Layer(brainstate.nn.Module):
             b_init = braintools.init.ZeroInit(unit=u.mS)
 
             self.inp_syn = brainpy.state.AlignPostProj(
-                comm=braintrace.nn.Linear(n_in, n_rec, w_init=ff_init([n_in, n_rec]) * u.mS, b_init=b_init),
+                comm=braintrace.nn.Linear(n_in, n_rec, w_init=ff_init((n_in, n_rec)) * u.mS, b_init=b_init),
                 syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
                 out=brainpy.state.CUBA.desc(),
                 post=self.neu
@@ -100,7 +100,7 @@ class _ExpCo_Dense_Layer(brainstate.nn.Module):
 
             self.exe_syn = brainpy.state.AlignPostProj(
                 comm=braintrace.nn.SignedWLinear(
-                    self.n_exc_rec, n_rec, w_init=rec_init([self.n_exc_rec, n_rec]) * u.mS),
+                    self.n_exc_rec, n_rec, w_init=rec_init((self.n_exc_rec, n_rec)) * u.mS),
                 syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
                 out=brainpy.state.COBA.desc(E=1.5 * u.volt),
                 post=self.neu
@@ -108,7 +108,7 @@ class _ExpCo_Dense_Layer(brainstate.nn.Module):
 
             self.inh_syn = brainpy.state.AlignPostProj(
                 comm=braintrace.nn.SignedWLinear(
-                    self.n_inh_rec, n_rec, w_init=4 * rec_init([self.n_inh_rec, n_rec]) * u.mS),
+                    self.n_inh_rec, n_rec, w_init=4 * rec_init((self.n_inh_rec, n_rec)) * u.mS),
                 syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
                 out=brainpy.state.COBA.desc(E=-0.5 * u.volt),
                 post=self.neu
@@ -196,7 +196,7 @@ class LIF_ExpCu_Dense_Layer(brainstate.nn.Module):
         self.syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
                 n_in + n_rec, n_rec,
-                jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0) * u.mS,
+                jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0) * u.mS,
                 b_init=braintools.init.ZeroInit(unit=u.mS)
             ),
             syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
@@ -235,7 +235,7 @@ class LIF_STDExpCu_Dense_Layer(brainstate.nn.Module):
         self.syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
                 n_in + n_rec, n_rec,
-                jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0) * u.mS,
+                jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0) * u.mS,
                 b_init=braintools.init.ZeroInit(unit=u.mS)
             ),
             syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
@@ -273,7 +273,7 @@ class LIF_STPExpCu_Dense_Layer(brainstate.nn.Module):
         self.syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
                 n_in + n_rec, n_rec,
-                jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])]) * u.mS,
+                jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))]) * u.mS,
                 b_init=braintools.init.ZeroInit(unit=u.mS)
             ),
             syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
@@ -314,7 +314,7 @@ class ALIF_ExpCu_Dense_Layer(brainstate.nn.Module):
         self.syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
                 n_in + n_rec, n_rec,
-                jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0) * u.mS,
+                jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0) * u.mS,
                 b_init=braintools.init.ZeroInit(unit=u.mS)
             ),
             syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
@@ -346,7 +346,7 @@ class ALIF_Delta_Dense_Layer(brainstate.nn.Module):
             n_rec, tau=tau_mem, spk_fun=spk_fun, spk_reset=spk_reset, V_th=V_th, tau_a=tau_a,
             beta=beta
         )
-        w_init = jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0)
+        w_init = jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0)
         self.syn = brainpy.state.DeltaProj(
             comm=braintrace.nn.Linear(n_in + n_rec, n_rec, w_init=w_init * u.mV,
                                       b_init=braintools.init.ZeroInit(unit=u.mV)),
@@ -385,7 +385,7 @@ class ALIF_STDExpCu_Dense_Layer(brainstate.nn.Module):
         self.syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
                 n_in + n_rec, n_rec,
-                jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])], axis=0) * u.mS,
+                jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))], axis=0) * u.mS,
                 b_init=braintools.init.ZeroInit(unit=u.mS)
             ),
             syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
@@ -432,7 +432,7 @@ class ALIF_STPExpCu_Dense_Layer(brainstate.nn.Module):
         self.syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
                 n_in + n_rec, n_rec,
-                jnp.concat([ff_init([n_in, n_rec]), rec_init([n_rec, n_rec])]) * u.mS,
+                jnp.concat([ff_init((n_in, n_rec)), rec_init((n_rec, n_rec))]) * u.mS,
                 b_init=braintools.init.ZeroInit(unit=u.mS)
             ),
             syn=brainpy.state.Expon.desc(n_rec, tau=tau_syn),
