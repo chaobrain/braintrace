@@ -27,7 +27,7 @@ Here we show how easy it is to use `braintrace` to build and train a simple SNN/
    )
 
    # initialize the model
-   brainstate.nn.init_all_states(model)
+   model.init_all_states()
 
    # the only thing you need to do just two lines of code
    model = braintrace.ParamDimVjpAlgorithm(model)
