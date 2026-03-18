@@ -39,13 +39,8 @@ This package provides a primitive-based alternative to the existing
 
 # Primitives & rule registries
 from ._primitives import (
-    etp_matmul_p,
-    etp_elemwise_p,
-    etp_conv_p,
-    ETP_PRIMITIVES,
+    register_primitive,
     is_etp_primitive,
-    etp_rules_xy_to_dw,
-    etp_rules_xy_to_dw,
 )
 
 # User-facing functions
