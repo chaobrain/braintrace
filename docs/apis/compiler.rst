@@ -1,5 +1,5 @@
-Online Learning Compiler
-========================
+Compiler
+========
 
 .. currentmodule:: braintrace
 
@@ -7,80 +7,98 @@ Online Learning Compiler
    :local:
    :depth: 1
 
+The compiler analyzes the model's JAX intermediate representation (Jaxpr)
+to discover relationships between ETP primitives, weight parameters,
+and hidden states. This page documents the compiler pipeline and its
+data structures.
 
 
-Data Structure
---------------
+Graph Compilation
+-----------------
 
-The following classes are the data structures used for storing eligibility trace graph during the compilation.
-Our eligibility trace compiler needs to store the hidden state groups, the operations, the parameter weights,
-the perturbations, and the compiled model.
-
-- :class:`HiddenGroup` summarizes all hidden state groups in the model.
-  Each hidden state group contains multiple hidden state, and the hidden state transition function.
-- :class:`HiddenParamOpRelation` summarizes the relation between hidden state groups,
-  the associated parameter weights, and the operations that use them.
-- :class:`HiddenPerturbation` summarizes the perturbation of hidden state groups.
-  It contains the perturbation function, and the perturbation hidden target.
-- :class:`ModuleInfo` contains the information of the model, including the input, output, hidden, states, jaxpr, and many others.
-- :class:`ETraceGraph` contains the compiled graph of the model, including the
-  hidden state groups, the operations, the parameter weights, the jaxpr of compiled models,
-  and others.
-
+The main entry point for compiling a model into an eligibility trace graph.
 
 .. autosummary::
    :toctree: generated/
    :nosignatures:
    :template: classtemplate.rst
 
-    HiddenGroup
-    HiddenParamOpRelation
-    HiddenPerturbation
-    ModuleInfo
-    ETraceGraph
+   compile_etrace_graph
+   ETraceGraph
 
+
+Module Info
+-----------
+
+Extracts the Jaxpr and state information from a ``brainstate.nn.Module``.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   extract_module_info
+   ModuleInfo
+
+
+Hidden Groups
+-------------
+
+Groups of hidden states that are updated together in the recurrent computation.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   HiddenGroup
+   find_hidden_groups_from_minfo
+   find_hidden_groups_from_module
+
+
+Hidden-Parameter-Operation Relations
+-------------------------------------
+
+Connections between ETP primitives, weight parameters, and hidden states.
+Each relation describes: *"weight W is used through ETP primitive P,
+and the output feeds into hidden group H."*
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   HiddenParamOpRelation
+   find_hidden_param_op_relations_from_minfo
+   find_hidden_param_op_relations_from_module
+
+
+Hidden Perturbation
+-------------------
+
+Perturbation structures for computing hidden-to-hidden Jacobians
+(the diagonal approximation of :math:`\partial h^t / \partial h^{t-1}`).
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   HiddenPerturbation
+   add_hidden_perturbation_from_minfo
+   add_hidden_perturbation_in_module
 
 
 Graph Executor
 --------------
 
-The following classes are the base classes for the online learning compilation.
-
-``ETraceGraphExecutor`` is used to implement or execute the compiled eligibility trace graph.
-It utilizes the compiled graph defined in the above data structure to execute the model,
-compute the Jacobian of hidden-group, the Jacobian of weight-to-hidden-group,
-and the gradient of the loss-to-hidden-group.
-
-``ETraceGraphExecutor`` defines the abstract methods for the online learning graph execution.
-Generally, the derived classes should implement the following methods:
-
-- :meth:`ETraceGraphExecutor.solve_h2w_h2h_jacobian` to compute the Jacobian of hidden-group and weight-to-hidden-group.
-- :meth:`ETraceGraphExecutor.solve_h2w_h2h_l2h_jacobian` to compute the Jacobian of loss-to-hidden-group, hidden-group, and weight-to-hidden-group.
-
+Executes the compiled graph: runs the forward pass and computes
+the hidden-to-weight and hidden-to-hidden Jacobians.
 
 .. autosummary::
    :toctree: generated/
    :nosignatures:
    :template: classtemplate.rst
 
-    ETraceGraphExecutor
-
-
-``ETraceVjpGraphExecutor`` implements the graph execution for the VJP-based online learning algorithms,
-including those eligibility trace algorithms for:
-
-- :class:`IODimVjpAlgorithm`
-- :class:`ParamDimVjpAlgorithm`
-- :class:`HybridDimVjpAlgorithm`
-
-
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-    ETraceVjpGraphExecutor
-
-
-
-
+   ETraceGraphExecutor
+   ETraceVjpGraphExecutor
