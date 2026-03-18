@@ -25,6 +25,10 @@ from braintrace._compatible_imports import (
 )
 from braintrace._typing import Path
 
+__all__ = [
+    'JaxprEvaluation',
+]
+
 
 def find_matched_vars(
     invars: Sequence[Var],
