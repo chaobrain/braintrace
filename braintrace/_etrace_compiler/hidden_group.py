@@ -390,6 +390,22 @@ def _simplify_hid2hid_tracer(
         The hidden-to-hidden state transition.
     """
     #
+    # [pre-step]
+    #
+    # Filter out hidden outvars with incompatible shapes.
+    # In multi-layer networks, a hidden state from one layer may be
+    # connected to hidden outvars of other layers with different shapes
+    # through the computation graph. These cross-layer connections
+    # should not be in the same group.
+    invar_state = path_to_state[hidden_invar_to_path[tracer.hidden_invar]]
+    compatible_outvars = {
+        hv for hv in tracer.connected_hidden_outvars
+        if path_to_state[hidden_outvar_to_path[hv]].varshape == invar_state.varshape
+    }
+    if not compatible_outvars:
+        return None
+
+    #
     # [first step]
     #
     # Remove the unnecessary equations in the trace.
@@ -397,7 +413,7 @@ def _simplify_hid2hid_tracer(
     # that do not contain the hidden states.
     tracer.invar_needed_in_oth_eqns.clear()
     new_trace = []
-    whole_trace_needed_vars = set(tracer.connected_hidden_outvars)
+    whole_trace_needed_vars = set(compatible_outvars)
     visited_needed_vars = set()  # needed_vars has been satisfied
     for eqn in reversed(tracer.trace):
         need_outvars = []
@@ -411,43 +427,8 @@ def _simplify_hid2hid_tracer(
 
     # [second step]
     #
-    # Checking whether the shape of each hidden state is consistent.
-    # Currently, we only support the element-wise state transition.
-    hidden_outvars = tuple(tracer.connected_hidden_outvars)
-    invar_state = path_to_state[hidden_invar_to_path[tracer.hidden_invar]]
-    for hidden_var in hidden_outvars:
-        # The most direct way when the shapes of "y" and "hidden var" are the same is using "identity()" function.
-        # However, there may be bugs, for examples, the output is reshaped to the same shape as the hidden state,
-        # or, the split and concatenate operators are used while the shapes are the same between the outputs and
-        # hidden states.
-        # The most safe way is using automatic shape inverse transformation.
-        #
-        # However, the automatic inverse transformation may also cause errors, for example, if the following
-        # operators are used:
-        #     def f(a):
-        #         s = jnp.sum(a, axis=[1,2], keepdims=True)
-        #         return a / s
-        #
-        # this will result in the following jaxpr:
-        #     { lambda ; a:f32[10,20,5]. let
-        #         b:f32[10] = reduce_sum[axes=(1, 2)] a
-        #         c:f32[10,1,1] = broadcast_in_dim[broadcast_dimensions=(0,) shape=(10, 1, 1)] b
-        #         d:f32[10,20,5] = div a c
-        #       in (d,) }
-        #
-        # It seems that the automatic shape inverse transformation is complex for handling such cases.\
-        # Therefore, currently, we only consider the simple cases, and raise an error for the complex cases.
-
-        outvar_state = path_to_state[hidden_outvar_to_path[hidden_var]]
-        if invar_state.varshape != outvar_state.varshape:
-            raise NotSupportedError(
-                f'Currently, we only support the state group that hase the same shape. \n'
-                f'However, we got {invar_state.varshape} != {outvar_state.varshape}. \n'
-                f'Please check the hidden state transition function. \n\n'
-                f'{invar_state}'
-                f'\n\n'
-                f'{outvar_state}\n'
-            )
+    # Shape filtering was already done in the pre-step.
+    hidden_outvars = tuple(compatible_outvars)
 
     # [third step]
     #
@@ -629,13 +610,16 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # 3. remove the unnecessary hidden states
 
         hidden_to_group_transition = [
-            _simplify_hid2hid_tracer(
-                tracer,
-                self.invar_to_hidden_path,
-                self.outvar_to_hidden_path,
-                self.path_to_state,
+            t for t in (
+                _simplify_hid2hid_tracer(
+                    tracer,
+                    self.invar_to_hidden_path,
+                    self.outvar_to_hidden_path,
+                    self.path_to_state,
+                )
+                for tracer in self.active_tracers.values()
             )
-            for tracer in self.active_tracers.values()
+            if t is not None
         ]
 
         # [ second step ]
