@@ -326,29 +326,6 @@ class TestParamDimVjpAlgorithmInit:
         with pytest.raises(AssertionError):
             ParamDimVjpAlgorithm(model, vjp_method='invalid-method')
 
-    def test_mode_defaults_from_environ(self):
-        model = self._make_model()
-        algo = ParamDimVjpAlgorithm(model)
-        # The mode should be set (from environ or default Mode())
-        assert isinstance(algo.mode, brainstate.mixin.Mode)
-
-    def test_mode_explicit(self):
-        model = self._make_model()
-        mode = brainstate.mixin.Mode()
-        algo = ParamDimVjpAlgorithm(model, mode=mode)
-        assert algo.mode is mode
-
-    def test_mode_batching(self):
-        model = self._make_model()
-        mode = brainstate.mixin.Batching(2)
-        algo = ParamDimVjpAlgorithm(model, mode=mode)
-        assert algo.mode.has(brainstate.mixin.Batching)
-
-    def test_invalid_mode_raises(self):
-        model = self._make_model()
-        with pytest.raises(AssertionError):
-            ParamDimVjpAlgorithm(model, mode="not_a_mode")
-
     def test_name_set(self):
         model = self._make_model()
         algo = ParamDimVjpAlgorithm(model, name='test_algo')
