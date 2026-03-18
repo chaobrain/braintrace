@@ -31,17 +31,16 @@ This replaces ~700 lines of ``JaxprEvalForWeightOpHiddenRelation`` with
 """
 
 import warnings
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set
 
 import brainstate
 import jax
 
-from braintrace._compatible_imports import Primitive, Jaxpr, Var, Literal, JaxprEqn, is_jit_primitive
-from braintrace._etrace_compiler.hidden_group import HiddenGroup
-from braintrace._etrace_compiler.module_info import ModuleInfo
+from braintrace._compatible_imports import Primitive, Jaxpr, Var, JaxprEqn, is_jit_primitive
+from braintrace._etrace_compiler import HiddenGroup, ModuleInfo
 from braintrace._misc import git_issue_addr
 from braintrace._typing import Path, HiddenOutVar
-from ._primitives import ETP_PRIMITIVES, etp_elemwise_p, is_etp_primitive
+from ._primitives import etp_elemwise_p, is_etp_primitive
 
 __all__ = [
     'ETPOpRelation',
@@ -352,17 +351,19 @@ def find_etp_relations_from_jaxpr(
             for g in connected_groups
         ]
 
-        relations.append(ETPOpRelation(
-            primitive=primitive,
-            weight_path=weight_path,
-            weight=weight_state,
-            x_var=x_var,
-            y_var=y_var,
-            hidden_groups=connected_groups,
-            y_to_hidden_group_jaxprs=y_to_hid_jaxprs,
-            connected_hidden_paths=connected_paths,
-            eqn_params=dict(eqn.params),
-        ))
+        relations.append(
+            ETPOpRelation(
+                primitive=primitive,
+                weight_path=weight_path,
+                weight=weight_state,
+                x_var=x_var,
+                y_var=y_var,
+                hidden_groups=connected_groups,
+                y_to_hidden_group_jaxprs=y_to_hid_jaxprs,
+                connected_hidden_paths=connected_paths,
+                eqn_params=dict(eqn.params),
+            )
+        )
 
     return tuple(relations)
 

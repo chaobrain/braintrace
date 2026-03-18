@@ -62,11 +62,7 @@ __all__ = [
     'etp_conv_p',
     # registry helpers
     'register_primitive',
-    'ETP_PRIMITIVES',
     'is_etp_primitive',
-    # rule registries
-    'etp_rules_yw_to_w',
-    'etp_rules_xy_to_dw',
 ]
 
 # ======================================================================
