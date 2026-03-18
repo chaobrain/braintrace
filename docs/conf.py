@@ -34,6 +34,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.abspath('../'))
+sys.path.insert(0, os.path.abspath('./'))
 
 import braintrace
 import shutil
@@ -48,6 +49,10 @@ author = 'BrainTrace Developer'
 
 # The full version, including alpha/beta/rc tags
 release = braintrace.__version__
+
+from highlight_lexer import fix_ipython2_lexer_in_notebooks
+
+fix_ipython2_lexer_in_notebooks(os.path.abspath(os.path.dirname(os.path.abspath(__file__))))
 
 # -- General configuration ---------------------------------------------------
 

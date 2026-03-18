@@ -12,17 +12,14 @@ ETrace State
 ------------
 
 
-If you are trying to define the hidden states for eligibility trace-based learning,
-you can use the following classes to define the model.
+The state classes previously available as ``ETraceState``, ``ETraceGroupState``, and
+``ETraceTreeState`` have been moved to the ``brainstate`` package. If you are trying to
+define the hidden states for eligibility trace-based learning, please use the following
+classes from ``brainstate``:
 
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-    ETraceState
-    ETraceGroupState
-    ETraceTreeState
+- :py:class:`brainstate.HiddenState`
+- :py:class:`brainstate.HiddenGroupState`
+- :py:class:`brainstate.HiddenTreeState`
 
 
 ETrace Parameter
