@@ -38,6 +38,7 @@ from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
 from braintrace._etrace_operators import (
     etp_elemwise_p,
     etp_rules_xy_to_dw,
+    etp_rules_init_pp,
     is_batched_primitive,
 )
 from braintrace._misc import (
@@ -241,8 +242,10 @@ def _init_IO_dim_state(
         #
         #   [∂A^t-1/∂θ1, ∂B^t-1/∂θ1, ...]
         #
-        shape = group.varshape + (group.num_state,)
-        etrace_dfs[key] = EligibilityTrace(u.math.zeros(shape, y_dtype))
+        init_fn = etp_rules_init_pp[relation.primitive]
+        etrace_dfs[key] = EligibilityTrace(
+            init_fn(relation.x_var, relation.y_var, relation.weight, group.num_state)
+        )
 
 
 def _update_IO_dim_etrace_scan_fn(

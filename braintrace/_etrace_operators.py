@@ -43,7 +43,8 @@ Rule Registries
 ---------------
 ``etp_rules_yw_to_w``   : trace propagation (D-RTRL)
 ``etp_rules_xy_to_dw``  : weight gradient (D-RTRL + ES-D-RTRL)
-``etp_rules_init_state`` : trace initialization (replaces Batching mode)
+``etp_rules_init_drtrl``  : D-RTRL trace initialization (parameter-dim)
+``etp_rules_init_pp``     : pp_prop df trace initialization (IO-dim)
 
 User API
 --------
@@ -79,7 +80,8 @@ __all__ = [
     # rule registries
     'etp_rules_yw_to_w',
     'etp_rules_xy_to_dw',
-    'etp_rules_init_state',
+    'etp_rules_init_drtrl',
+    'etp_rules_init_pp',
 
     # helpers
     'register_primitive',
@@ -108,11 +110,18 @@ r"""D-RTRL trace propagation: ``(hidden_dim, trace, **params) → trace``."""
 etp_rules_xy_to_dw: Dict[Primitive, Callable] = {}
 r"""Weight gradient: ``(x, hidden_dim, w, **params) → dw``."""
 
-etp_rules_init_state: Dict[Primitive, Callable] = {}
-r"""Trace initialization: ``(x_var, y_var, weight, num_hidden_state) → zeros``.
+etp_rules_init_drtrl: Dict[Primitive, Callable] = {}
+r"""D-RTRL trace initialization: ``(x_var, y_var, weight, num_hidden_state) → zeros``.
 
-Replaces ``brainstate.mixin.Batching`` mode checks. The primitive type
-encodes whether the computation is batched (mm) or unbatched (mv).
+Returns parameter-dimension trace state. Shape depends on the weight
+(e.g. ``(batch, *w_shape, ns)`` for batched matmul).
+"""
+
+etp_rules_init_pp: Dict[Primitive, Callable] = {}
+r"""pp_prop (IO-dim) df trace initialization: ``(x_var, y_var, weight, num_hidden_state) → zeros``.
+
+Returns IO-dimension df trace state. Shape is typically
+``(*y_shape, num_hidden_state)``.
 """
 
 
@@ -137,6 +146,7 @@ def register_primitive(name, impl_fn, *, batched=False):
     """Create an ETP primitive with all JAX rules auto-derived from *impl_fn*.
 
     Registered automatically:
+
     - **impl** — eager execution
     - **abstract_eval** — via ``jax.eval_shape(impl)``
     - **lowering** — via ``mlir.lower_fun(impl)``
@@ -144,8 +154,8 @@ def register_primitive(name, impl_fn, *, batched=False):
     - **transpose** — derived by JAX from the JVP
     - **batching** — via ``jax.vmap(impl)``
 
-    Only ETP-specific rules (``yw_to_w``, ``xy_to_dw``, ``init_state``)
-    need hand-writing.
+    Only ETP-specific rules (``yw_to_w``, ``xy_to_dw``, ``init_drtrl``,
+    ``init_pp``) need hand-writing.
 
     Args:
         name: Primitive name (e.g., ``'etp_mm'``).
@@ -220,16 +230,21 @@ def _mm_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
     return vjp_fn(hidden_dim)[0]
 
 
-def _mm_init_state(x_var, y_var, weight, num_hidden_state):
+def _mm_init_drtrl(x_var, y_var, weight, num_hidden_state):
     batch = x_var.aval.shape[0]
     w_shape = jnp.shape(weight.value)
     return jnp.zeros((batch, *w_shape, num_hidden_state))
 
 
+def _mm_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
 etp_mm_p = register_primitive('etp_mm', _etp_matmul_impl, batched=True)
 etp_rules_yw_to_w[etp_mm_p] = _mm_yw_to_w
 etp_rules_xy_to_dw[etp_mm_p] = _mm_xy_to_dw
-etp_rules_init_state[etp_mm_p] = _mm_init_state
+etp_rules_init_drtrl[etp_mm_p] = _mm_init_drtrl
+etp_rules_init_pp[etp_mm_p] = _mm_init_pp
 
 
 # --- mv (unbatched) ---
@@ -246,15 +261,20 @@ def _mv_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
     return vjp_fn(hidden_dim)[0]
 
 
-def _mv_init_state(x_var, y_var, weight, num_hidden_state):
+def _mv_init_drtrl(x_var, y_var, weight, num_hidden_state):
     w_shape = jnp.shape(weight.value)
     return jnp.zeros((*w_shape, num_hidden_state))
+
+
+def _mv_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
 etp_mv_p = register_primitive('etp_mv', _etp_matmul_impl, batched=False)
 etp_rules_yw_to_w[etp_mv_p] = _mv_yw_to_w
 etp_rules_xy_to_dw[etp_mv_p] = _mv_xy_to_dw
-etp_rules_init_state[etp_mv_p] = _mv_init_state
+etp_rules_init_drtrl[etp_mv_p] = _mv_init_drtrl
+etp_rules_init_pp[etp_mv_p] = _mv_init_pp
 
 
 # ======================================================================
@@ -277,15 +297,20 @@ def _elemwise_xy_to_dw(x, hidden_dim, w):
     return hidden_dim
 
 
-def _elemwise_init_state(x_var, y_var, weight, num_hidden_state):
+def _elemwise_init_drtrl(x_var, y_var, weight, num_hidden_state):
     y_shape = y_var.aval.shape
     return jnp.zeros((*y_shape, num_hidden_state))
+
+
+def _elemwise_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
 etp_elemwise_p = register_primitive('etp_elemwise', _etp_elemwise_impl)
 etp_rules_yw_to_w[etp_elemwise_p] = _elemwise_yw_to_w
 etp_rules_xy_to_dw[etp_elemwise_p] = _elemwise_xy_to_dw
-etp_rules_init_state[etp_elemwise_p] = _elemwise_init_state
+etp_rules_init_drtrl[etp_elemwise_p] = _elemwise_init_drtrl
+etp_rules_init_pp[etp_elemwise_p] = _elemwise_init_pp
 
 
 # ======================================================================
@@ -339,16 +364,21 @@ def _conv_xy_to_dw(x, hidden_dim, w, **params):
     return vjp_fn(hidden_dim)[0]
 
 
-def _conv_init_state(x_var, y_var, weight, num_hidden_state):
+def _conv_init_drtrl(x_var, y_var, weight, num_hidden_state):
     batch = x_var.aval.shape[0]
     kernel_shape = jnp.shape(weight.value)
     return jnp.zeros((batch, *kernel_shape, num_hidden_state))
 
 
+def _conv_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
 etp_conv_p = register_primitive('etp_conv', _etp_conv_impl, batched=True)
 etp_rules_yw_to_w[etp_conv_p] = _conv_yw_to_w
 etp_rules_xy_to_dw[etp_conv_p] = _conv_xy_to_dw
-etp_rules_init_state[etp_conv_p] = _conv_init_state
+etp_rules_init_drtrl[etp_conv_p] = _conv_init_drtrl
+etp_rules_init_pp[etp_conv_p] = _conv_init_pp
 
 
 # ======================================================================
@@ -377,26 +407,36 @@ def _sp_xy_to_dw(x, hidden_dim, w, *, sparse_mat=None, has_bias=False):
     return vjp_fn(hidden_dim)[0]
 
 
-def _sp_mm_init_state(x_var, y_var, weight, num_hidden_state):
+def _sp_mm_init_drtrl(x_var, y_var, weight, num_hidden_state):
     batch = x_var.aval.shape[0]
     nnz = jnp.shape(weight.value)[0]
     return jnp.zeros((batch, nnz, num_hidden_state))
 
 
-def _sp_mv_init_state(x_var, y_var, weight, num_hidden_state):
+def _sp_mm_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
+def _sp_mv_init_drtrl(x_var, y_var, weight, num_hidden_state):
     nnz = jnp.shape(weight.value)[0]
     return jnp.zeros((nnz, num_hidden_state))
+
+
+def _sp_mv_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
 etp_sp_mm_p = register_primitive('etp_sp_mm', _etp_sp_matmul_impl, batched=True)
 etp_rules_yw_to_w[etp_sp_mm_p] = _sp_mm_yw_to_w
 etp_rules_xy_to_dw[etp_sp_mm_p] = _sp_xy_to_dw
-etp_rules_init_state[etp_sp_mm_p] = _sp_mm_init_state
+etp_rules_init_drtrl[etp_sp_mm_p] = _sp_mm_init_drtrl
+etp_rules_init_pp[etp_sp_mm_p] = _sp_mm_init_pp
 
 etp_sp_mv_p = register_primitive('etp_sp_mv', _etp_sp_matmul_impl, batched=False)
 etp_rules_yw_to_w[etp_sp_mv_p] = _sp_mv_yw_to_w
 etp_rules_xy_to_dw[etp_sp_mv_p] = _sp_xy_to_dw
-etp_rules_init_state[etp_sp_mv_p] = _sp_mv_init_state
+etp_rules_init_drtrl[etp_sp_mv_p] = _sp_mv_init_drtrl
+etp_rules_init_pp[etp_sp_mv_p] = _sp_mv_init_pp
 
 
 # ======================================================================
@@ -437,7 +477,7 @@ def _lora_xy_to_dw(x, hidden_dim, w_B, w_A, *, alpha=1.0, has_bias=False):
     return {'B': dB, 'A': dA}
 
 
-def _lora_mm_init_state(x_var, y_var, weight, num_hidden_state):
+def _lora_mm_init_drtrl(x_var, y_var, weight, num_hidden_state):
     # weight.value is a dict {'B': ..., 'A': ...}
     w = weight.value
     batch = x_var.aval.shape[0]
@@ -447,7 +487,11 @@ def _lora_mm_init_state(x_var, y_var, weight, num_hidden_state):
     }
 
 
-def _lora_mv_init_state(x_var, y_var, weight, num_hidden_state):
+def _lora_mm_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
+def _lora_mv_init_drtrl(x_var, y_var, weight, num_hidden_state):
     w = weight.value
     return {
         'B': jnp.zeros((*jnp.shape(w['B']), num_hidden_state)),
@@ -455,15 +499,21 @@ def _lora_mv_init_state(x_var, y_var, weight, num_hidden_state):
     }
 
 
+def _lora_mv_init_pp(x_var, y_var, weight, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
 etp_lora_mm_p = register_primitive('etp_lora_mm', _etp_lora_impl, batched=True)
 etp_rules_yw_to_w[etp_lora_mm_p] = _lora_mm_yw_to_w
 etp_rules_xy_to_dw[etp_lora_mm_p] = _lora_xy_to_dw
-etp_rules_init_state[etp_lora_mm_p] = _lora_mm_init_state
+etp_rules_init_drtrl[etp_lora_mm_p] = _lora_mm_init_drtrl
+etp_rules_init_pp[etp_lora_mm_p] = _lora_mm_init_pp
 
 etp_lora_mv_p = register_primitive('etp_lora_mv', _etp_lora_impl, batched=False)
 etp_rules_yw_to_w[etp_lora_mv_p] = _lora_mv_yw_to_w
 etp_rules_xy_to_dw[etp_lora_mv_p] = _lora_xy_to_dw
-etp_rules_init_state[etp_lora_mv_p] = _lora_mv_init_state
+etp_rules_init_drtrl[etp_lora_mv_p] = _lora_mv_init_drtrl
+etp_rules_init_pp[etp_lora_mv_p] = _lora_mv_init_pp
 
 
 # ======================================================================

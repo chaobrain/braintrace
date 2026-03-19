@@ -27,7 +27,7 @@ from braintrace._etrace_operators import (
     etp_elemwise_p,
     etp_rules_yw_to_w,
     etp_rules_xy_to_dw,
-    etp_rules_init_state,
+    etp_rules_init_drtrl,
     is_batched_primitive,
 )
 from braintrace._misc import etrace_param_key, etrace_df_key
@@ -66,7 +66,7 @@ def _init_param_dim_state(
         bwg_key = etrace_param_key(relation.weight_path, relation.y_var, group.index)
         if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
-        init_fn = etp_rules_init_state[relation.primitive]
+        init_fn = etp_rules_init_drtrl[relation.primitive]
         etrace_bwg[bwg_key] = EligibilityTrace(
             init_fn(relation.x_var, relation.y_var, relation.weight, group.num_state)
         )
