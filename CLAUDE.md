@@ -11,7 +11,7 @@ Implements online learning algorithms (D-RTRL, ES-D-RTRL, postsynaptic propagati
 ```
 braintrace/
 ├── __init__.py                    Public API exports
-├── _etrace_operators.py           ETP primitives, rule registries, user API functions
+├── _etrace_operators.py           ETPPrimitive, rule registries, user API functions
 ├── _etrace_algorithms.py          EligibilityTrace, ETraceAlgorithm
 ├── _etrace_graph_executor.py      ETraceGraphExecutor (forward pass + Jacobians)
 ├── _etrace_input_data.py          SingleStepData, MultiStepData
@@ -40,7 +40,7 @@ braintrace/
 ## Architecture layers
 
 ```
-Layer 1: _etrace_operators.py    Primitives + rule registries + user API
+Layer 1: _etrace_operators.py    ETPPrimitive + rule registries + user API
 Layer 2: _etrace_compiler/       Jaxpr walk → find primitives → connect to hidden states
 Layer 3: _etrace_graph_executor  Forward pass + h2w/h2h Jacobian computation
 Layer 4: _etrace_vjp/            D-RTRL, ES-D-RTRL, postsynaptic propagation algorithms
@@ -60,13 +60,18 @@ Layer 4: _etrace_vjp/            D-RTRL, ES-D-RTRL, postsynaptic propagation alg
 | `etp_sp_mm_p` / `etp_sp_mv_p` | sparse matmul | Yes/No | x, weight_data |
 | `etp_lora_mm_p` / `etp_lora_mv_p` | y = alpha * x @ B @ A (+ b) | Yes/No | x, B, A |
 
-### Three rule registries
+### ETPPrimitive & rule registries
 
-Each primitive registers handlers in three global dicts:
+`register_primitive()` returns an `ETPPrimitive` (subclass of JAX `Primitive`) with built-in rule registration methods. Rules are stored in four global constant dicts:
 
-- `etp_rules_yw_to_w[primitive]` — D-RTRL trace propagation: `(hidden_dim, trace, **p) -> trace`
-- `etp_rules_xy_to_dw[primitive]` — weight gradient: `(x, hidden_dim, w, **p) -> dw`
-- `etp_rules_init_state[primitive]` — trace initialization: `(x_var, y_var, weight, num_hidden_state) -> zeros`
+| Registry | Method on `ETPPrimitive` | Signature |
+|---|---|---|
+| `ETP_RULES_YW_TO_W` | `register_yw_to_w(fn)` | `(hidden_dim, trace, **params) -> trace` |
+| `ETP_RULES_XY_TO_DW` | `register_xy_to_dw(fn)` | `(x, hidden_dim, w, **params) -> dw` |
+| `ETP_RULES_INIT_DRTRL` | `register_init_drtrl(fn)` | `(x_var, y_var, weight, num_hidden_state) -> zeros` |
+| `ETP_RULES_INIT_PP` | `register_init_pp(fn)` | `(x_var, y_var, weight, num_hidden_state) -> zeros` |
+
+A convenience method `register_etp_rules(*, yw_to_w, xy_to_dw, init_drtrl, init_pp)` registers multiple rules in one call.
 
 ### User API functions
 
@@ -82,7 +87,7 @@ All functions handle `saiunit` quantities (split mantissa/unit, recombine after 
 
 ### Primitives are thin markers, not reimplementations
 
-Each primitive's `impl` delegates to standard JAX ops (`x @ w`, `lax.conv_general_dilated`). All JAX rules (JVP, transpose, batching, abstract_eval, lowering) are auto-derived via `register_primitive()`. No hand-written derivative formulas.
+Each primitive's `impl` delegates to standard JAX ops (`x @ w`, `lax.conv_general_dilated`). All JAX rules (JVP, transpose, batching, abstract_eval, lowering) are auto-derived via `register_primitive()`, which returns an `ETPPrimitive` instance. No hand-written derivative formulas.
 
 ### Batched vs unbatched dispatch
 
@@ -93,6 +98,8 @@ Dense matmul and sparse/LoRA matmul each have two primitives (mm/mv). The user A
 The compiler maps ALL `brainstate.ParamState` invars. Selection is **primitive-based**: a parameter participates in ETP if and only if it is used through an ETP primitive. Parameters used with regular JAX ops are excluded — no special class needed.
 
 ```python
+import brainstate, jax, braintrace
+
 class MyRNN(brainstate.nn.Module):
     def __init__(self):
         self.w_rec = brainstate.ParamState(...)   # want ETP
@@ -129,20 +136,19 @@ Result: `HiddenParamOpRelation` — connects a `ParamState` to its reachable hid
 ## Adding a new primitive
 
 ```python
-from braintrace._etrace_operators import (
-    register_primitive, etp_rules_yw_to_w, etp_rules_xy_to_dw, etp_rules_init_state
-)
+import braintrace
 
 def _my_impl(x, w, *, my_param=1):
     return some_jax_op(x, w, my_param)
 
-my_p = register_primitive('etp_my_op', _my_impl, batched=True)
-etp_rules_yw_to_w[my_p] = lambda hidden_dim, trace, **p: trace * hidden_dim[None, :]
-etp_rules_xy_to_dw[my_p] = lambda x, hidden_dim, w, **p: jax.vjp(lambda w: _my_impl(x, w, **p), w)[1](hidden_dim)[0]
-etp_rules_init_state[my_p] = lambda x_var, y_var, weight, ns: jnp.zeros((x_var.aval.shape[0], *jnp.shape(weight.value), ns))
+my_p = braintrace.register_primitive('etp_my_op', _my_impl, batched=True)
+my_p.register_yw_to_w(lambda hidden_dim, trace, **p: trace * hidden_dim[None, :])
+my_p.register_xy_to_dw(lambda x, hidden_dim, w, **p: jax.vjp(lambda w: _my_impl(x, w, **p), w)[1](hidden_dim)[0])
+my_p.register_init_drtrl(lambda x_var, y_var, weight, ns: jnp.zeros((x_var.aval.shape[0], *jnp.shape(weight.value), ns)))
+my_p.register_init_pp(lambda x_var, y_var, weight, ns: jnp.zeros((*y_var.aval.shape, ns), dtype=y_var.aval.dtype))
 ```
 
-All JAX rules (jit, grad, vmap, jvp) are auto-derived. Only the three ETP-specific rules need hand-writing.
+All JAX rules (jit, grad, vmap, jvp) are auto-derived. Only the four ETP-specific rules need hand-writing via `ETPPrimitive` methods.
 
 ## Public API (`braintrace.__init__`)
 
@@ -152,6 +158,10 @@ import braintrace
 # ETP primitives (user API)
 braintrace.matmul, braintrace.element_wise, braintrace.conv
 braintrace.sparse_matmul, braintrace.lora_matmul
+
+# ETP primitive registration
+braintrace.ETPPrimitive         # Primitive subclass with register_* methods
+braintrace.register_primitive   # create ETPPrimitive + auto-derive JAX rules
 
 # Algorithms
 braintrace.EligibilityTrace, braintrace.ETraceAlgorithm
@@ -190,7 +200,7 @@ python -m pytest braintrace/ -v
 ## File dependency flow
 
 ```
-_etrace_operators.py (primitives + rules + user API)
+_etrace_operators.py (ETPPrimitive + rules + user API)
     ↓
 _etrace_compiler/ (jaxpr analysis & graph compilation)
     ├── hid_param_op.py ← _etrace_operators.ETP_PRIMITIVES

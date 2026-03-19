@@ -37,8 +37,8 @@ from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
 from braintrace._etrace_operators import (
     etp_elemwise_p,
-    etp_rules_xy_to_dw,
-    etp_rules_init_pp,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_INIT_PP,
     is_batched_primitive,
 )
 from braintrace._misc import (
@@ -242,7 +242,7 @@ def _init_IO_dim_state(
         #
         #   [∂A^t-1/∂θ1, ∂B^t-1/∂θ1, ...]
         #
-        init_fn = etp_rules_init_pp[relation.primitive]
+        init_fn = ETP_RULES_INIT_PP[relation.primitive]
         etrace_dfs[key] = EligibilityTrace(
             init_fn(relation.x_var, relation.y_var, relation.weight, group.num_state)
         )
@@ -436,7 +436,7 @@ def _solve_IO_dim_weight_gradients(
         else:
             x = None
         weight_path = relation.weight_path
-        xy_to_dw = etp_rules_xy_to_dw[relation.primitive]
+        xy_to_dw = ETP_RULES_XY_TO_DW[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
 

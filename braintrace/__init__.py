@@ -36,11 +36,13 @@ from ._etrace_compiler import (
 from ._etrace_graph_executor import ETraceGraphExecutor
 from ._etrace_input_data import SingleStepData, MultiStepData
 from ._etrace_operators import (
+    ETPPrimitive,
     matmul,
     element_wise,
     conv,
     sparse_matmul,
     lora_matmul,
+    register_primitive,
 )
 from ._etrace_vjp import (
     ETraceVjpAlgorithm,
@@ -77,6 +79,10 @@ __all__ = [
     'conv',
     'sparse_matmul',
     'lora_matmul',
+
+    # ETP primitive class & rule registration
+    'ETPPrimitive',
+    'register_primitive',
 
     # input data
     'SingleStepData',

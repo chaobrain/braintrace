@@ -41,10 +41,10 @@ LoRA:
 
 Rule Registries
 ---------------
-``etp_rules_yw_to_w``   : trace propagation (D-RTRL)
-``etp_rules_xy_to_dw``  : weight gradient (D-RTRL + ES-D-RTRL)
-``etp_rules_init_drtrl``  : D-RTRL trace initialization (parameter-dim)
-``etp_rules_init_pp``     : pp_prop df trace initialization (IO-dim)
+``ETP_RULES_YW_TO_W``   : trace propagation (D-RTRL)
+``ETP_RULES_XY_TO_DW``  : weight gradient (D-RTRL + ES-D-RTRL)
+``ETP_RULES_INIT_DRTRL``  : D-RTRL trace initialization (parameter-dim)
+``ETP_RULES_INIT_PP``     : pp_prop df trace initialization (IO-dim)
 
 User API
 --------
@@ -67,28 +67,9 @@ from jax.interpreters import mlir, batching, ad
 from braintrace._compatible_imports import Primitive
 
 __all__ = [
-    # primitives
-    'etp_mm_p',
-    'etp_mv_p',
-    'etp_elemwise_p',
-    'etp_conv_p',
-    'etp_sp_mm_p',
-    'etp_sp_mv_p',
-    'etp_lora_mm_p',
-    'etp_lora_mv_p',
-
-    # rule registries
-    'etp_rules_yw_to_w',
-    'etp_rules_xy_to_dw',
-    'etp_rules_init_drtrl',
-    'etp_rules_init_pp',
-
-    # helpers
+    # ETP primitive class & registration
+    'ETPPrimitive',
     'register_primitive',
-    'is_etp_primitive',
-    'is_batched_primitive',
-    'ETP_PRIMITIVES',
-    'BATCHED_PRIMITIVES',
 
     # user API
     'matmul',
@@ -104,20 +85,20 @@ __all__ = [
 
 ETP_PRIMITIVES: set = set()
 
-etp_rules_yw_to_w: Dict[Primitive, Callable] = {}
+ETP_RULES_YW_TO_W: Dict[Primitive, Callable] = {}
 r"""D-RTRL trace propagation: ``(hidden_dim, trace, **params) → trace``."""
 
-etp_rules_xy_to_dw: Dict[Primitive, Callable] = {}
+ETP_RULES_XY_TO_DW: Dict[Primitive, Callable] = {}
 r"""Weight gradient: ``(x, hidden_dim, w, **params) → dw``."""
 
-etp_rules_init_drtrl: Dict[Primitive, Callable] = {}
+ETP_RULES_INIT_DRTRL: Dict[Primitive, Callable] = {}
 r"""D-RTRL trace initialization: ``(x_var, y_var, weight, num_hidden_state) → zeros``.
 
 Returns parameter-dimension trace state. Shape depends on the weight
 (e.g. ``(batch, *w_shape, ns)`` for batched matmul).
 """
 
-etp_rules_init_pp: Dict[Primitive, Callable] = {}
+ETP_RULES_INIT_PP: Dict[Primitive, Callable] = {}
 r"""pp_prop (IO-dim) df trace initialization: ``(x_var, y_var, weight, num_hidden_state) → zeros``.
 
 Returns IO-dimension df trace state. Shape is typically
@@ -139,8 +120,74 @@ def is_batched_primitive(primitive):
 
 
 # ======================================================================
-# Primitive registration helper
+# ETPPrimitive wrapper & registration helper
 # ======================================================================
+
+class ETPPrimitive(Primitive):
+    """A JAX ``Primitive`` subclass with built-in ETP rule registration methods.
+
+    Returned by :func:`register_primitive`.  Supports all standard JAX
+    primitive operations (``bind``, ``def_impl``, etc.) and adds
+    convenience methods for registering ETP-specific rules.
+
+    Example::
+
+        my_p = register_primitive('etp_my_op', _my_impl, batched=True)
+        my_p.register_yw_to_w(my_yw_to_w_fn)
+        my_p.register_xy_to_dw(my_xy_to_dw_fn)
+        my_p.register_init_drtrl(my_init_drtrl_fn)
+        my_p.register_init_pp(my_init_pp_fn)
+    """
+
+    def register_yw_to_w(self, fn: Callable):
+        """Register a D-RTRL trace propagation rule.
+
+        Signature: ``(hidden_dim, trace, **params) -> trace``.
+        """
+        ETP_RULES_YW_TO_W[self] = fn
+
+    def register_xy_to_dw(self, fn: Callable):
+        """Register a weight-gradient rule.
+
+        Signature: ``(x, hidden_dim, w, **params) -> dw``.
+        """
+        ETP_RULES_XY_TO_DW[self] = fn
+
+    def register_init_drtrl(self, fn: Callable):
+        """Register a D-RTRL trace initialization rule.
+
+        Signature: ``(x_var, y_var, weight, num_hidden_state) -> zeros``.
+        """
+        ETP_RULES_INIT_DRTRL[self] = fn
+
+    def register_init_pp(self, fn: Callable):
+        """Register a pp_prop (IO-dim) df trace initialization rule.
+
+        Signature: ``(x_var, y_var, weight, num_hidden_state) -> zeros``.
+        """
+        ETP_RULES_INIT_PP[self] = fn
+
+    def register_etp_rules(
+        self,
+        *,
+        yw_to_w: Callable = None,
+        xy_to_dw: Callable = None,
+        init_drtrl: Callable = None,
+        init_pp: Callable = None,
+    ):
+        """Register multiple ETP rules in one call.
+
+        Only non-``None`` arguments are registered.
+        """
+        if yw_to_w is not None:
+            ETP_RULES_YW_TO_W[self] = yw_to_w
+        if xy_to_dw is not None:
+            ETP_RULES_XY_TO_DW[self] = xy_to_dw
+        if init_drtrl is not None:
+            ETP_RULES_INIT_DRTRL[self] = init_drtrl
+        if init_pp is not None:
+            ETP_RULES_INIT_PP[self] = init_pp
+
 
 def register_primitive(name, impl_fn, *, batched=False):
     """Create an ETP primitive with all JAX rules auto-derived from *impl_fn*.
@@ -155,7 +202,8 @@ def register_primitive(name, impl_fn, *, batched=False):
     - **batching** — via ``jax.vmap(impl)``
 
     Only ETP-specific rules (``yw_to_w``, ``xy_to_dw``, ``init_drtrl``,
-    ``init_pp``) need hand-writing.
+    ``init_pp``) need hand-writing — use the returned
+    :class:`ETPPrimitive`'s ``register_*`` methods.
 
     Args:
         name: Primitive name (e.g., ``'etp_mm'``).
@@ -163,9 +211,9 @@ def register_primitive(name, impl_fn, *, batched=False):
         batched: Whether this primitive operates on batched data.
 
     Returns:
-        The registered ``Primitive``.
+        :class:`ETPPrimitive`: The registered primitive.
     """
-    p = Primitive(name)
+    p = ETPPrimitive(name)
     ETP_PRIMITIVES.add(p)
     if batched:
         BATCHED_PRIMITIVES.add(p)
@@ -241,10 +289,10 @@ def _mm_init_pp(x_var, y_var, weight, num_hidden_state):
 
 
 etp_mm_p = register_primitive('etp_mm', _etp_matmul_impl, batched=True)
-etp_rules_yw_to_w[etp_mm_p] = _mm_yw_to_w
-etp_rules_xy_to_dw[etp_mm_p] = _mm_xy_to_dw
-etp_rules_init_drtrl[etp_mm_p] = _mm_init_drtrl
-etp_rules_init_pp[etp_mm_p] = _mm_init_pp
+etp_mm_p.register_yw_to_w(_mm_yw_to_w)
+etp_mm_p.register_xy_to_dw(_mm_xy_to_dw)
+etp_mm_p.register_init_drtrl(_mm_init_drtrl)
+etp_mm_p.register_init_pp(_mm_init_pp)
 
 
 # --- mv (unbatched) ---
@@ -271,10 +319,10 @@ def _mv_init_pp(x_var, y_var, weight, num_hidden_state):
 
 
 etp_mv_p = register_primitive('etp_mv', _etp_matmul_impl, batched=False)
-etp_rules_yw_to_w[etp_mv_p] = _mv_yw_to_w
-etp_rules_xy_to_dw[etp_mv_p] = _mv_xy_to_dw
-etp_rules_init_drtrl[etp_mv_p] = _mv_init_drtrl
-etp_rules_init_pp[etp_mv_p] = _mv_init_pp
+etp_mv_p.register_yw_to_w(_mv_yw_to_w)
+etp_mv_p.register_xy_to_dw(_mv_xy_to_dw)
+etp_mv_p.register_init_drtrl(_mv_init_drtrl)
+etp_mv_p.register_init_pp(_mv_init_pp)
 
 
 # ======================================================================
@@ -307,10 +355,10 @@ def _elemwise_init_pp(x_var, y_var, weight, num_hidden_state):
 
 
 etp_elemwise_p = register_primitive('etp_elemwise', _etp_elemwise_impl)
-etp_rules_yw_to_w[etp_elemwise_p] = _elemwise_yw_to_w
-etp_rules_xy_to_dw[etp_elemwise_p] = _elemwise_xy_to_dw
-etp_rules_init_drtrl[etp_elemwise_p] = _elemwise_init_drtrl
-etp_rules_init_pp[etp_elemwise_p] = _elemwise_init_pp
+etp_elemwise_p.register_yw_to_w(_elemwise_yw_to_w)
+etp_elemwise_p.register_xy_to_dw(_elemwise_xy_to_dw)
+etp_elemwise_p.register_init_drtrl(_elemwise_init_drtrl)
+etp_elemwise_p.register_init_pp(_elemwise_init_pp)
 
 
 # ======================================================================
@@ -375,10 +423,10 @@ def _conv_init_pp(x_var, y_var, weight, num_hidden_state):
 
 
 etp_conv_p = register_primitive('etp_conv', _etp_conv_impl, batched=True)
-etp_rules_yw_to_w[etp_conv_p] = _conv_yw_to_w
-etp_rules_xy_to_dw[etp_conv_p] = _conv_xy_to_dw
-etp_rules_init_drtrl[etp_conv_p] = _conv_init_drtrl
-etp_rules_init_pp[etp_conv_p] = _conv_init_pp
+etp_conv_p.register_yw_to_w(_conv_yw_to_w)
+etp_conv_p.register_xy_to_dw(_conv_xy_to_dw)
+etp_conv_p.register_init_drtrl(_conv_init_drtrl)
+etp_conv_p.register_init_pp(_conv_init_pp)
 
 
 # ======================================================================
@@ -427,16 +475,16 @@ def _sp_mv_init_pp(x_var, y_var, weight, num_hidden_state):
 
 
 etp_sp_mm_p = register_primitive('etp_sp_mm', _etp_sp_matmul_impl, batched=True)
-etp_rules_yw_to_w[etp_sp_mm_p] = _sp_mm_yw_to_w
-etp_rules_xy_to_dw[etp_sp_mm_p] = _sp_xy_to_dw
-etp_rules_init_drtrl[etp_sp_mm_p] = _sp_mm_init_drtrl
-etp_rules_init_pp[etp_sp_mm_p] = _sp_mm_init_pp
+etp_sp_mm_p.register_yw_to_w(_sp_mm_yw_to_w)
+etp_sp_mm_p.register_xy_to_dw(_sp_xy_to_dw)
+etp_sp_mm_p.register_init_drtrl(_sp_mm_init_drtrl)
+etp_sp_mm_p.register_init_pp(_sp_mm_init_pp)
 
 etp_sp_mv_p = register_primitive('etp_sp_mv', _etp_sp_matmul_impl, batched=False)
-etp_rules_yw_to_w[etp_sp_mv_p] = _sp_mv_yw_to_w
-etp_rules_xy_to_dw[etp_sp_mv_p] = _sp_xy_to_dw
-etp_rules_init_drtrl[etp_sp_mv_p] = _sp_mv_init_drtrl
-etp_rules_init_pp[etp_sp_mv_p] = _sp_mv_init_pp
+etp_sp_mv_p.register_yw_to_w(_sp_mv_yw_to_w)
+etp_sp_mv_p.register_xy_to_dw(_sp_xy_to_dw)
+etp_sp_mv_p.register_init_drtrl(_sp_mv_init_drtrl)
+etp_sp_mv_p.register_init_pp(_sp_mv_init_pp)
 
 
 # ======================================================================
@@ -504,16 +552,16 @@ def _lora_mv_init_pp(x_var, y_var, weight, num_hidden_state):
 
 
 etp_lora_mm_p = register_primitive('etp_lora_mm', _etp_lora_impl, batched=True)
-etp_rules_yw_to_w[etp_lora_mm_p] = _lora_mm_yw_to_w
-etp_rules_xy_to_dw[etp_lora_mm_p] = _lora_xy_to_dw
-etp_rules_init_drtrl[etp_lora_mm_p] = _lora_mm_init_drtrl
-etp_rules_init_pp[etp_lora_mm_p] = _lora_mm_init_pp
+etp_lora_mm_p.register_yw_to_w(_lora_mm_yw_to_w)
+etp_lora_mm_p.register_xy_to_dw(_lora_xy_to_dw)
+etp_lora_mm_p.register_init_drtrl(_lora_mm_init_drtrl)
+etp_lora_mm_p.register_init_pp(_lora_mm_init_pp)
 
 etp_lora_mv_p = register_primitive('etp_lora_mv', _etp_lora_impl, batched=False)
-etp_rules_yw_to_w[etp_lora_mv_p] = _lora_mv_yw_to_w
-etp_rules_xy_to_dw[etp_lora_mv_p] = _lora_xy_to_dw
-etp_rules_init_drtrl[etp_lora_mv_p] = _lora_mv_init_drtrl
-etp_rules_init_pp[etp_lora_mv_p] = _lora_mv_init_pp
+etp_lora_mv_p.register_yw_to_w(_lora_mv_yw_to_w)
+etp_lora_mv_p.register_xy_to_dw(_lora_xy_to_dw)
+etp_lora_mv_p.register_init_drtrl(_lora_mv_init_drtrl)
+etp_lora_mv_p.register_init_pp(_lora_mv_init_pp)
 
 
 # ======================================================================

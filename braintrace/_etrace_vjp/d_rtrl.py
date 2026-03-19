@@ -25,9 +25,9 @@ from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._etrace_operators import (
     etp_elemwise_p,
-    etp_rules_yw_to_w,
-    etp_rules_xy_to_dw,
-    etp_rules_init_drtrl,
+    ETP_RULES_YW_TO_W,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
 )
 from braintrace._misc import etrace_param_key, etrace_df_key
@@ -66,7 +66,7 @@ def _init_param_dim_state(
         bwg_key = etrace_param_key(relation.weight_path, relation.y_var, group.index)
         if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
-        init_fn = etp_rules_init_drtrl[relation.primitive]
+        init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
         etrace_bwg[bwg_key] = EligibilityTrace(
             init_fn(relation.x_var, relation.y_var, relation.weight, group.num_state)
         )
@@ -154,7 +154,7 @@ def _update_param_dim_etrace_scan_fn(
         #
         weight_path = relation.weight_path
         weight_val = weight_path_to_vals[weight_path]
-        xy_to_dw = etp_rules_xy_to_dw[relation.primitive]
+        xy_to_dw = ETP_RULES_XY_TO_DW[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
         batched = is_batched_primitive(relation.primitive)
@@ -216,7 +216,7 @@ def _update_param_dim_etrace_scan_fn(
             # d: (n_hidden, ..., [n_state])
             # old_bwg: (n_param, ..., [n_state])
             old_bwg = hist_etrace_vals[w_key]
-            yw_to_w = etp_rules_yw_to_w[relation.primitive]
+            yw_to_w = ETP_RULES_YW_TO_W[relation.primitive]
             fn_bwg_pre = lambda d: _sum_dim(
                 jax.vmap(
                     partial(yw_to_w, **eqn_params), in_axes=-1, out_axes=-1
@@ -321,7 +321,7 @@ def _solve_param_dim_weight_gradients(
         # 3. the operator information
         #
         weight_path = relation.weight_path
-        yw_to_w_rule = etp_rules_yw_to_w[relation.primitive]
+        yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
         yw_to_w = (
