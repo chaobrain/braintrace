@@ -191,8 +191,8 @@ def compile_etrace_graph(
 
     This is the most important method for the eligibility trace graph. It builds the
     graph for the model, tracking the relationship between the etrace weights
-    ParamState, the etrace sattes HiddenState, and the etrace
-    operations :pyETP primitives, which will be used for computing the weight
+    ParamState, the etrace state HiddenState, and the etrace
+    operations ETP primitives, which will be used for computing the weight
     spatial gradients, the hidden state Jacobian, and the hidden state-weight Jacobian.
 
     This function is crucial for building the eligibility trace graph, which tracks the

@@ -111,6 +111,10 @@ def is_etp_primitive(primitive):
     return primitive in ETP_PRIMITIVES
 
 
+def is_etp_enable_gradient_primitive(primitive):
+    return False
+
+
 BATCHED_PRIMITIVES: set = set()  # populated as primitives are registered
 
 
