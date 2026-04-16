@@ -26,7 +26,6 @@ from braintrace._compatible_imports import (
     Jaxpr,
     ClosedJaxpr,
 )
-pass  # ParamState removed (primitive-based ETP)
 from braintrace._misc import (
     NotSupportedError,
     unknown_state_path,
