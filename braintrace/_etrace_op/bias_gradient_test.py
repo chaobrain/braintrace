@@ -177,3 +177,116 @@ class TestConvBiasGradient:
                             err_msg='D-RTRL dkernel does not match BPTT')
         npt.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
                             err_msg='D-RTRL dbias does not match BPTT (was it zero?)')
+
+
+class TestSparseMMBiasGradient:
+    """D-RTRL gradient correctness for etp_sp_mm_p with a bias vector.
+
+    Uses a hashable stub sparse matrix (backed by a dense 3×4 identity-like
+    template) so the test does not depend on saiunit.CSR being hashable in JAX.
+    The stub's ``with_data`` reconstructs the dense matrix from the flat data
+    vector (one value per non-zero), and ``yw_to_w_transposed`` applies the
+    transposed pattern.
+    """
+
+    def _make_sparse_mat(self):
+        """Return (sparse_mat, dense_template, nnz, dim)."""
+
+        # 4×4 diagonal sparse matrix — 4 non-zeros. Square so that h_new and
+        # h_old share the same shape, making the recurrent connection direct.
+        dim = 4
+        rows = jnp.array([0, 1, 2, 3])
+        cols = jnp.array([0, 1, 2, 3])
+        dense_template = jnp.eye(dim)  # shape (dim, dim)
+
+        class _HashableStub:
+            """Minimal stub satisfying the ETP sparse-mat contract."""
+
+            def __hash__(self):
+                return id(self)
+
+            def __eq__(self, other):
+                return self is other
+
+            def with_data(self, data):
+                # Substitute flat data vector back into the dense template.
+                return dense_template.at[rows, cols].set(data)
+
+            def yw_to_w_transposed(self, hidden_dim, trace):
+                # Per D-RTRL executor call: trace is (nnz,), hidden_dim is (out,).
+                # For a diagonal matrix col_i == i, so:
+                #   e^t_i = hidden_dim[col_i] * trace_i = hidden_dim[i] * trace_i.
+                if hidden_dim.ndim == 0:
+                    return trace * hidden_dim
+                n = trace.shape[0]
+                return trace * hidden_dim[:n]
+
+        sparse_mat = _HashableStub()
+        nnz = dim
+        return sparse_mat, dense_template, rows, cols, nnz, dim
+
+    def test_drtrl_sparse_grad_matches_bptt(self):
+        """D-RTRL dweight_data and dbias must match BPTT for one recurrent step."""
+        sparse_mat, dense_template, rows, cols, nnz, dim = self._make_sparse_mat()
+
+        w_init = jnp.ones((nnz,)) * 0.1
+        b_init = jnp.ones((dim,)) * 0.05
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.p = brainstate.ParamState({'weight': w_init, 'bias': b_init})
+                self.h = brainstate.HiddenState(jnp.zeros((1, dim)))
+
+            def update(self, x):
+                y = braintrace.sparse_matmul(
+                    self.h.value, self.p.value['weight'],
+                    sparse_mat=sparse_mat, bias=self.p.value['bias'],
+                )
+                self.h.value = jnp.tanh(x + y)
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        alg = braintrace.D_RTRL(cell)
+        alg.compile_graph(jnp.zeros((1, dim)))
+
+        x = jnp.ones((1, dim)) * 0.3
+
+        # --- ETP gradient via D-RTRL ---
+        @brainstate.transform.jit
+        def etrace_grad_step(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState),
+            )(inp)
+
+        grads_etrace = etrace_grad_step(x)
+
+        # grads_etrace is keyed by path; cell.p is a dict-valued ParamState
+        grad_p = list(grads_etrace.values())[0]
+        assert isinstance(grad_p, dict), (
+            f'Expected dict gradient for merged ParamState, got {type(grad_p)}'
+        )
+
+        # --- BPTT reference ---
+        # stub.with_data(w) = dense_template.at[rows, cols].set(w)
+        def bptt_loss(params):
+            h = jnp.zeros((1, dim))
+            w_dense = dense_template.at[rows, cols].set(params['weight'])
+            y = h @ w_dense + params['bias']
+            h = jnp.tanh(x + y)
+            return h.sum()
+
+        bptt = jax.grad(bptt_loss)({'weight': cell.p.value['weight'],
+                                    'bias': cell.p.value['bias']})
+
+        # Non-zero sanity check for bias gradient
+        assert jnp.abs(bptt['bias']).max() > 1e-3, (
+            f'BPTT bias gradient is unexpectedly near-zero: {bptt["bias"]}'
+        )
+
+        npt.assert_allclose(grad_p['weight'], bptt['weight'], atol=1e-5,
+                            err_msg='D-RTRL dweight_data does not match BPTT')
+        npt.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
+                            err_msg='D-RTRL dbias does not match BPTT (was it zero?)')

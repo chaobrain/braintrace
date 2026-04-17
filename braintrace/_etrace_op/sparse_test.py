@@ -63,6 +63,19 @@ class _StubSparseMat:
 
     Backed by a dense matrix internally; ``with_data`` rebuilds the dense
     form by reshaping the flat data vector into the original shape.
+
+    ``yw_to_w_transposed`` is called by the D-RTRL executor with
+    ``trace`` having the same shape as the weight data (i.e. ``(nnz,)``
+    per vmap step). For this stub, all non-zeros are in a specific pattern
+    so the transposed application just multiplies each nnz-entry by the
+    corresponding column's hidden-dim value.
+
+    To keep rule-level unit tests straightforward (those tests explicitly
+    pass the trace in the expected per-executor shape), the stub
+    implements the rule correctly for ``trace.ndim == 1``:
+    ``result_i = trace_i * hidden_dim[i]`` (for diagonal patterns where
+    ``col_i == i``).  When ``trace.ndim == 2`` (legacy test code), it
+    falls back to the old broadcast behaviour.
     """
 
     def __init__(self, dense_template: jnp.ndarray):
@@ -77,6 +90,17 @@ class _StubSparseMat:
         return data.reshape(self._shape)
 
     def yw_to_w_transposed(self, hidden_dim, trace):
+        if trace.ndim == 1:
+            # Called by the executor per-vmap step: trace is (nnz,),
+            # hidden_dim is (out_dim,) or scalar.
+            # For this stub's diagonal-like structure we use the first
+            # min(nnz, out_dim) elements of hidden_dim.
+            n = trace.shape[0]
+            if hidden_dim.ndim == 0:
+                return trace * hidden_dim
+            return trace * hidden_dim[:n]
+        # Legacy 2-D trace shape (in, out) — used only in unit tests that
+        # pass trace in the old full-matrix form.
         return trace * jnp.expand_dims(hidden_dim, axis=0)
 
 
@@ -186,10 +210,20 @@ class TestSpMmEtpRules:
         rule = ETP_RULES_YW_TO_W[etp_sp_mm_p]
         stub = _StubSparseMat(jnp.zeros((3, 4)))
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
-        trace = jnp.ones((3, 4))
+        # trace is now a dict {'weight': ...}
+        trace = {'weight': jnp.ones((3, 4))}
         out = rule(hidden, trace, sparse_mat=stub)
         # stub.yw_to_w_transposed broadcasts hidden over rows.
-        np.testing.assert_allclose(out, jnp.ones((3, 4)) * hidden[None, :])
+        np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
+
+    def test_yw_to_w_with_bias(self):
+        rule = ETP_RULES_YW_TO_W[etp_sp_mm_p]
+        stub = _StubSparseMat(jnp.zeros((3, 4)))
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
+        trace = {'weight': jnp.ones((3, 4)), 'bias': jnp.ones(4)}
+        out = rule(hidden, trace, sparse_mat=stub, has_bias=True)
+        np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
+        np.testing.assert_allclose(out['bias'], hidden)
 
     def test_xy_to_dw_matches_jax_vjp(self):
         rule = ETP_RULES_XY_TO_DW[etp_sp_mm_p]
@@ -197,26 +231,55 @@ class TestSpMmEtpRules:
         x = jnp.ones((2, 3))
         w_data = jnp.arange(12.0)
         hidden = jnp.ones((2, 4))
-        dw = rule(x, hidden, w_data, sparse_mat=stub)
+        # weights is now a dict
+        weights = {'weight': w_data}
+        dw = rule(x, hidden, weights, sparse_mat=stub)
         # Equivalent to VJP through `x @ stub.with_data(w)` wrt w.
         _, vjp_fn = jax.vjp(lambda w_: x @ stub.with_data(w_), w_data)
         ref = vjp_fn(hidden)[0]
-        np.testing.assert_allclose(dw, ref)
+        np.testing.assert_allclose(dw['weight'], ref)
+
+    def test_xy_to_dw_with_bias(self):
+        rule = ETP_RULES_XY_TO_DW[etp_sp_mm_p]
+        stub = _StubSparseMat(jnp.zeros((3, 4)))
+        x = jnp.ones((2, 3))
+        w_data = jnp.arange(12.0)
+        b_data = jnp.zeros(4)
+        hidden = jnp.ones((2, 4))
+        weights = {'weight': w_data, 'bias': b_data}
+        dw = rule(x, hidden, weights, sparse_mat=stub, has_bias=True)
+        # Bias gradient via VJP: g = hidden (2,4), db = sum(g, axis=0) = (4,).
+        # Verify against the JAX VJP reference.
+        def _fwd(w_dict):
+            return x @ stub.with_data(w_dict['weight']) + w_dict['bias']
+        _, vjp_fn = jax.vjp(_fwd, weights)
+        ref = vjp_fn(hidden)[0]
+        np.testing.assert_allclose(dw['bias'], ref['bias'])
 
     def test_init_drtrl_shape(self):
         rule = ETP_RULES_INIT_DRTRL[etp_sp_mm_p]
         x_var = _fake_var((4, 3))
         y_var = _fake_var((4, 5))
-        w_var = _fake_var((7,))      # nnz
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
-        assert out.shape == (4, 7, 2)
+        # weight_vars is now a dict
+        weight_vars = {'weight': _fake_var((7,))}      # nnz
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert out['weight'].shape == (4, 7, 2)
+
+    def test_init_drtrl_shape_with_bias(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_sp_mm_p]
+        x_var = _fake_var((4, 3))
+        y_var = _fake_var((4, 5))
+        weight_vars = {'weight': _fake_var((7,)), 'bias': _fake_var((5,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert out['weight'].shape == (4, 7, 2)
+        assert out['bias'].shape == (4, 5, 2)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_sp_mm_p]
         x_var = _fake_var((4, 3))
         y_var = _fake_var((4, 5))
-        w_var = _fake_var((7,))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        weight_vars = {'weight': _fake_var((7,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (4, 5, 2)
 
 
@@ -226,24 +289,43 @@ class TestSpMvEtpRules:
         rule = ETP_RULES_YW_TO_W[etp_sp_mv_p]
         stub = _StubSparseMat(jnp.zeros((3, 4)))
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
-        trace = jnp.ones((3, 4))
+        # trace is now a dict {'weight': ...}
+        trace = {'weight': jnp.ones((3, 4))}
         out = rule(hidden, trace, sparse_mat=stub)
-        np.testing.assert_allclose(out, jnp.ones((3, 4)) * hidden[None, :])
+        np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
+
+    def test_yw_to_w_with_bias(self):
+        rule = ETP_RULES_YW_TO_W[etp_sp_mv_p]
+        stub = _StubSparseMat(jnp.zeros((3, 4)))
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
+        trace = {'weight': jnp.ones((3, 4)), 'bias': jnp.ones(4)}
+        out = rule(hidden, trace, sparse_mat=stub, has_bias=True)
+        np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
+        np.testing.assert_allclose(out['bias'], hidden)
 
     def test_init_drtrl_shape(self):
         rule = ETP_RULES_INIT_DRTRL[etp_sp_mv_p]
         x_var = _fake_var((3,))
         y_var = _fake_var((5,))
-        w_var = _fake_var((7,))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
-        assert out.shape == (7, 2)
+        weight_vars = {'weight': _fake_var((7,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert out['weight'].shape == (7, 2)
+
+    def test_init_drtrl_shape_with_bias(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_sp_mv_p]
+        x_var = _fake_var((3,))
+        y_var = _fake_var((5,))
+        weight_vars = {'weight': _fake_var((7,)), 'bias': _fake_var((5,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert out['weight'].shape == (7, 2)
+        assert out['bias'].shape == (5, 2)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_sp_mv_p]
         x_var = _fake_var((3,))
         y_var = _fake_var((5,))
-        w_var = _fake_var((7,))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        weight_vars = {'weight': _fake_var((7,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (5, 2)
 
 

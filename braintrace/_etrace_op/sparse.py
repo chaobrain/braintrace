@@ -21,6 +21,17 @@ non-zero values flow through the primitive as the ``weight_data`` invar.
 The structure object must implement ``with_data`` (substitute new data
 into the structure) and ``yw_to_w_transposed`` (apply the transposed
 sparse pattern to a trace).
+
+**Dict rule API (N-trainable-input refactor)**
+
+Both primitives declare ``trainable_invars_fn``, which returns
+``{'weight': 1}`` when ``has_bias=False`` and ``{'weight': 1, 'bias': 2}``
+when ``has_bias=True``. The four ETP rules accept / return
+``Dict[str, Array]`` instead of bare arrays so the executor can route
+gradients to *both* weight and bias ``ParamState`` objects in one pass.
+
+When ``has_bias=False`` the ``'bias'`` key is simply absent from every
+dict, so the legacy (no-bias) code path is unchanged in behaviour.
 """
 
 import jax
@@ -45,37 +56,106 @@ def _etp_sp_matmul_impl(*args, sparse_mat=None, has_bias=False):
     return y
 
 
-def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
-    return sparse_mat.yw_to_w_transposed(hidden_dim, trace)
+# ---------------------------------------------------------------------------
+# trainable_invars_fn — shared by both mm and mv
+# ---------------------------------------------------------------------------
 
+def _sp_trainable_invars(params):
+    """Return ``{key: invar_index}`` depending on ``has_bias``."""
+    base = {'weight': 1}
+    if params.get('has_bias', False):
+        base['bias'] = 2
+    return base
+
+
+# ---------------------------------------------------------------------------
+# etp_sp_mm_p — batched
+# ---------------------------------------------------------------------------
+
+def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
+    r"""Batched: propagate hidden-state Jacobian through the sparse trace.
+
+    ``trace['weight']`` has shape ``(batch, nnz, n_state)`` (parameter-dim)
+    or ``(nnz, n_state)`` (after vmap removes the batch dim in the gradient
+    computation path).  ``sparse_mat.yw_to_w_transposed`` applies the
+    transposed sparse pattern.
+
+    ``trace['bias']`` has shape ``(batch, out, n_state)`` and the bias
+    gradient is simply the elementwise product with ``hidden_dim``.
+    """
+    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
+
+
+def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False):
+    r"""VJP of ``y = x @ sparse_mat.with_data(w) (+ b)`` in one pass.
+
+    Returns a ``Dict[str, Array]`` with keys ``'weight'`` (and ``'bias'``
+    when ``has_bias=True``).
+    """
+    def _fwd(w_dict):
+        y = x @ sparse_mat.with_data(w_dict['weight'])
+        if has_bias:
+            y = y + w_dict['bias']
+        return u.get_mantissa(y)
+
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
+
+
+def _sp_mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled ``Dict[str, Array]`` for the D-RTRL parameter-dim trace.
+
+    The bias trace has shape ``(batch, out, n_state)`` where ``out`` is taken
+    from ``y_var.aval.shape[1]`` (the output feature dimension, stripping
+    the batch axis).
+    """
+    batch = x_var.aval.shape[0]
+    nnz = weight_vars['weight'].aval.shape[0]
+    out = {'weight': jnp.zeros((batch, nnz, num_hidden_state))}
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+        )
+    return out
+
+
+def _sp_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
+# ---------------------------------------------------------------------------
+# etp_sp_mv_p — unbatched
+# ---------------------------------------------------------------------------
 
 def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
-    return sparse_mat.yw_to_w_transposed(hidden_dim, trace)
+    r"""Unbatched: propagate hidden-state Jacobian through the sparse trace."""
+    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
 
 
-def _sp_xy_to_dw(x, hidden_dim, w, *, sparse_mat=None, has_bias=False):
-    _, vjp_fn = jax.vjp(lambda w_: u.get_mantissa(x @ sparse_mat.with_data(w_)), w)
-    return u.get_mantissa(vjp_fn(hidden_dim)[0])
+def _sp_mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled ``Dict[str, Array]`` for the D-RTRL parameter-dim trace."""
+    nnz = weight_vars['weight'].aval.shape[0]
+    out = {'weight': jnp.zeros((nnz, num_hidden_state))}
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (*weight_vars['bias'].aval.shape, num_hidden_state)
+        )
+    return out
 
 
-def _sp_mm_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
-    batch = x_var.aval.shape[0]
-    nnz = weight_var.aval.shape[0]
-    return jnp.zeros((batch, nnz, num_hidden_state))
-
-
-def _sp_mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _sp_mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-def _sp_mv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
-    nnz = weight_var.aval.shape[0]
-    return jnp.zeros((nnz, num_hidden_state))
-
-
-def _sp_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
-    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
-
+# ---------------------------------------------------------------------------
+# Primitive registration
+# ---------------------------------------------------------------------------
 
 etp_sp_mm_p = register_primitive_spec(
     ETPPrimitiveSpec(
@@ -88,6 +168,7 @@ etp_sp_mm_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=True,
+        trainable_invars_fn=_sp_trainable_invars,
     )
 )
 
@@ -102,6 +183,7 @@ etp_sp_mv_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=False,
+        trainable_invars_fn=_sp_trainable_invars,
     )
 )
 
