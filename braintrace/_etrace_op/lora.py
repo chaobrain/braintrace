@@ -17,8 +17,17 @@ r"""LoRA (Low-Rank Adaptation) ETP primitives.
 
 ``etp_lora_mm_p`` (batched) and ``etp_lora_mv_p`` (unbatched) compute
 :math:`y = \alpha \cdot x \mathbin{@} B \mathbin{@} A` plus an optional
-bias. The trace and gradient state are pytrees with ``B`` and ``A``
-leaves; the originating ``ParamState`` holds both factors as a pytree.
+bias. The trace and gradient state are pytrees with ``lora_b``, ``lora_a``
+(and optionally ``bias``) leaves; the originating ``ParamState`` holds
+all factors as a pytree, e.g. ``{'lora_b': B, 'lora_a': A, 'bias': b}``.
+
+**Dict rule API (N-trainable-input refactor)**
+
+Both primitives declare ``trainable_invars_fn``, which returns
+``{'lora_b': 1, 'lora_a': 2}`` when ``has_bias=False`` and
+``{'lora_b': 1, 'lora_a': 2, 'bias': 3}`` when ``has_bias=True``.
+Keys ``'lora_b'`` / ``'lora_a'`` match the pytree leaf names in
+``braintrace.nn.LoRALinear``'s merged ``ParamState``.
 """
 
 import jax
@@ -42,63 +51,96 @@ def _etp_lora_impl(*args, alpha=1.0, has_bias=False):
     return y
 
 
+def _lora_trainable_invars(params):
+    """Return ``{key: invar_index}`` for LoRA's trainable inputs."""
+    base = {'lora_b': 1, 'lora_a': 2}
+    if params.get('has_bias', False):
+        base['bias'] = 3
+    return base
+
+
 def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
-    r"""LoRA batched: trace is ``{B: (batch, in, rank, ns), A: (batch, rank, out, ns)}``.
+    r"""LoRA batched trace propagation.
+
+    ``hidden_dim`` is called in two contexts by the D-RTRL executor:
+    (a) trace update: shape ``(..., out)``, e.g. ``(batch, out)`` after ns-vmap;
+    (b) gradient solve: shape ``(out,)`` after the additional batch-vmap.
+
+    In both cases we want to broadcast ``hidden_dim`` across the ``rank``
+    axis of ``trace['lora_a']`` whose shape is ``(..., rank, out)``.
+    ``jnp.expand_dims(hidden_dim, axis=-2)`` inserts a singleton at axis
+    -2 so it aligns correctly:
+        (out,)        → (1, out)   broadcasts with (rank, out)      ✓
+        (batch, out)  → (batch, 1, out) broadcasts with (batch, rank, out) ✓
 
     Only propagate through A (B frozen during trace propagation).
     """
-    trace_A = trace['A']
-    trace_A = trace_A * jnp.expand_dims(hidden_dim, axis=1)
-    return {'B': trace['B'], 'A': trace_A}
+    trace_A = trace['lora_a'] * jnp.expand_dims(hidden_dim, axis=-2)
+    out = {'lora_b': trace['lora_b'], 'lora_a': trace_A}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
 
 
 def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
-    r"""LoRA unbatched: trace is ``{B: (in, rank, ns), A: (rank, out, ns)}``."""
-    trace_A = trace['A']
-    trace_A = trace_A * jnp.expand_dims(hidden_dim, axis=0)
-    return {'B': trace['B'], 'A': trace_A}
+    r"""LoRA unbatched: trace is ``{'lora_b': (in, rank, ns), 'lora_a': (rank, out, ns)}``."""
+    trace_A = trace['lora_a'] * jnp.expand_dims(hidden_dim, axis=0)
+    out = {'lora_b': trace['lora_b'], 'lora_a': trace_A}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
 
 
-def _lora_xy_to_dw(x, hidden_dim, w_B, w_A, *, alpha=1.0, has_bias=False):
-    r"""VJP of ``y = alpha * x @ B @ A``."""
+def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False):
+    r"""VJP of ``y = alpha * x @ B @ A (+ bias)``, returning a dict keyed
+    by ``'lora_b'``, ``'lora_a'``, and optionally ``'bias'``."""
 
-    def _fwd(B, A):
-        return u.get_mantissa(alpha * (x @ B @ A))
+    def _fwd(w):
+        y = alpha * (x @ w['lora_b'] @ w['lora_a'])
+        if has_bias:
+            y = y + w['bias']
+        return u.get_mantissa(y)
 
-    _, vjp_fn = jax.vjp(_fwd, w_B, w_A)
-    dB, dA = vjp_fn(hidden_dim)
-    return {'B': u.get_mantissa(dB), 'A': u.get_mantissa(dA)}
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _lora_mm_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
-    # weight_var is the B invar of the primitive; A's shape is (rank, out).
+def _lora_mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled ``Dict[str, Array]`` for D-RTRL (batched LoRA)."""
     batch = x_var.aval.shape[0]
-    B_shape = weight_var.aval.shape
-    rank = B_shape[1]
-    out = y_var.aval.shape[-1]
-    A_shape = (rank, out)
-    return {
-        'B': jnp.zeros((batch, *B_shape, num_hidden_state)),
-        'A': jnp.zeros((batch, *A_shape, num_hidden_state)),
+    B_shape = weight_vars['lora_b'].aval.shape
+    A_shape = weight_vars['lora_a'].aval.shape
+    out = {
+        'lora_b': jnp.zeros((batch, *B_shape, num_hidden_state)),
+        'lora_a': jnp.zeros((batch, *A_shape, num_hidden_state)),
     }
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+        )
+    return out
 
 
-def _lora_mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _lora_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-def _lora_mv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
-    B_shape = weight_var.aval.shape
-    rank = B_shape[1]
-    out = y_var.aval.shape[-1]
-    A_shape = (rank, out)
-    return {
-        'B': jnp.zeros((*B_shape, num_hidden_state)),
-        'A': jnp.zeros((*A_shape, num_hidden_state)),
+def _lora_mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled ``Dict[str, Array]`` for D-RTRL (unbatched LoRA)."""
+    B_shape = weight_vars['lora_b'].aval.shape
+    A_shape = weight_vars['lora_a'].aval.shape
+    out = {
+        'lora_b': jnp.zeros((*B_shape, num_hidden_state)),
+        'lora_a': jnp.zeros((*A_shape, num_hidden_state)),
     }
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (*weight_vars['bias'].aval.shape, num_hidden_state)
+        )
+    return out
 
 
-def _lora_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _lora_mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -113,6 +155,7 @@ etp_lora_mm_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=True,
+        trainable_invars_fn=_lora_trainable_invars,
     )
 )
 
@@ -127,6 +170,7 @@ etp_lora_mv_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=False,
+        trainable_invars_fn=_lora_trainable_invars,
     )
 )
 
