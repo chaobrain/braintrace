@@ -66,14 +66,24 @@ def _mm_trainable_invars(params):
 
 
 def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False):
-    r"""Batched: hidden_dim (batch, out), trace Dict[str, Array].
+    r"""Batched: trace propagation for ``etp_mm_p``.
 
-    For the weight:  trace['weight'] (batch, in, out, n_state)
-                     hidden_dim (batch, out) -> expand axis=1 -> (batch, 1, out, ...)
-    For the bias:    trace['bias']   (batch, out, n_state)
-                     hidden_dim (batch, out) -> multiply element-wise
+    Called in two executor contexts, both after the ``n_state`` vmap:
+
+    (a) trace update (batch retained): ``hidden_dim (batch, out)``,
+        ``trace['weight'] (batch, in, out)``.
+    (b) gradient solve (outer batch vmap strips batch): ``hidden_dim (out,)``,
+        ``trace['weight'] (in, out)``.
+
+    Inserting a singleton at ``axis=-2`` aligns ``hidden_dim`` with the
+    ``in`` axis of the trace in both contexts — for square weights the
+    old ``axis=1`` happened to match, but it failed silently for
+    non-square ``(in != out)``.
+
+    For the bias: ``trace['bias']`` has the same shape as ``hidden_dim``,
+    so elementwise multiply is correct in both contexts.
     """
-    out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=1)}
+    out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=-2)}
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
     return out

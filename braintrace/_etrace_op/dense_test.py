@@ -206,24 +206,33 @@ class TestJAXRules:
 class TestMmEtpRules:
 
     def test_yw_to_w_broadcasts_hidden(self):
-        """``yw_to_w`` multiplies ``trace['weight']`` element-wise by ``hidden_dim``
-        broadcast along axis 1. The rule accepts and returns a dict."""
+        """``yw_to_w`` multiplies ``trace['weight']`` element-wise by
+        ``hidden_dim`` broadcast along the input axis. Trace shape is
+        ``(in, out)`` (solve context, batch stripped); ``hidden_dim`` is
+        ``(out,)``. ``expand_dims(hidden_dim, axis=-2)`` → ``(1, out)``
+        broadcasts against ``(in, out)`` → per-row scaling by ``hidden[o]``.
+        Correct for non-square (in != out)."""
         rule = ETP_RULES_YW_TO_W[etp_mm_p]
-        # trace['weight'] shape (out, in_eq), hidden (out,) — expand_dims axis=1 → (out, 1)
-        # broadcasts against (out, in_eq) → output (out, in_eq).
-        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
-        trace = {'weight': jnp.ones((4, 5))}
+        in_dim, out_dim = 5, 3
+        hidden = jnp.array([1.0, 2.0, 3.0])       # (out,)
+        trace = {'weight': jnp.ones((in_dim, out_dim))}
         out = rule(hidden, trace)
         assert isinstance(out, dict)
-        assert out['weight'].shape == (4, 5)
-        # row j scaled by hidden[j]
-        np.testing.assert_allclose(out['weight'], hidden[:, None] * jnp.ones((4, 5)))
+        assert out['weight'].shape == (in_dim, out_dim)
+        # Column j scaled by hidden[j].
+        np.testing.assert_allclose(
+            out['weight'], jnp.ones((in_dim, out_dim)) * hidden[None, :]
+        )
 
     def test_yw_to_w_with_bias(self):
         """When has_bias=True, ``yw_to_w`` also scales ``trace['bias']``."""
         rule = ETP_RULES_YW_TO_W[etp_mm_p]
-        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
-        trace = {'weight': jnp.ones((4, 5)), 'bias': jnp.ones((4,))}
+        in_dim, out_dim = 5, 4
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])       # (out,)
+        trace = {
+            'weight': jnp.ones((in_dim, out_dim)),      # (in, out)
+            'bias': jnp.ones((out_dim,)),               # (out,)
+        }
         out = rule(hidden, trace, has_bias=True)
         assert isinstance(out, dict)
         assert 'bias' in out

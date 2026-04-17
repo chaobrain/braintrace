@@ -102,6 +102,48 @@ class TestMMBiasGradient:
                             err_msg='D-RTRL db does not match BPTT (was it zero?)')
 
 
+class TestMMNonSquareWeight:
+    """_mm_yw_to_w must broadcast hidden_dim correctly when in != out.
+
+    The latent bug was ``jnp.expand_dims(hidden_dim, axis=1)`` in the
+    gradient-solve context where the batch axis is stripped: for
+    ``hidden_dim: (out,)`` and ``trace: (in, out)`` with ``in != out``,
+    axis=1 produced shape ``(out, 1)`` and broadcasting failed. Fixed by
+    using ``axis=-2`` which inserts the singleton at the correct axis
+    in both the batched (trace-update) and unbatched (solve) contexts.
+    """
+
+    def test_yw_to_w_non_square_solve_context(self):
+        from braintrace._etrace_op.dense import _mm_yw_to_w
+        # Gradient-solve shapes (batch axis stripped by outer vmap).
+        in_dim, out_dim = 5, 3
+        trace_weight = jnp.arange(in_dim * out_dim, dtype=jnp.float32).reshape(
+            in_dim, out_dim
+        )
+        hidden_dim = jnp.array([1.0, 2.0, 3.0])  # (out,)
+
+        out = _mm_yw_to_w(hidden_dim, {'weight': trace_weight}, has_bias=False)
+
+        # Expected: trace[i, o] * hidden_dim[o] — broadcast across in axis.
+        expected = trace_weight * hidden_dim[None, :]
+        npt.assert_array_equal(out['weight'], expected)
+        assert out['weight'].shape == (in_dim, out_dim)
+
+    def test_yw_to_w_non_square_trace_update_context(self):
+        from braintrace._etrace_op.dense import _mm_yw_to_w
+        # Trace-update shapes (batch retained).
+        batch, in_dim, out_dim = 2, 5, 3
+        trace_weight = jnp.ones((batch, in_dim, out_dim)) * 0.5
+        hidden_dim = jnp.ones((batch, out_dim)) * 2.0
+
+        out = _mm_yw_to_w(hidden_dim, {'weight': trace_weight}, has_bias=False)
+
+        # Expected: trace[b,i,o] * hidden_dim[b,o].
+        expected = trace_weight * hidden_dim[:, None, :]
+        npt.assert_array_equal(out['weight'], expected)
+        assert out['weight'].shape == (batch, in_dim, out_dim)
+
+
 class TestConvBiasGradient:
     """D-RTRL gradient correctness for etp_conv_p with a bias vector."""
 
