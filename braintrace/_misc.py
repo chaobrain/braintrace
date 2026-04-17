@@ -23,7 +23,7 @@ import saiunit as u
 import jax.tree
 
 from ._compatible_imports import Var
-from ._typing import Path, ETraceDF_Key, ETraceWG_Key
+from ._typing import Path, ETraceDF_Key
 
 
 __all__ = [
@@ -132,35 +132,6 @@ def etrace_df_key(
     """
     assert isinstance(y_key, Var), f'y_key must be a Var, but got {y_key}.'
     return (id(y_key), hid_group_key(hidden_group_id))
-
-
-def etrace_param_key(
-    weight_path: Path,
-    y_key: Var,
-    hidden_group_id: int,
-) -> ETraceWG_Key:
-    """
-    Generate a key for the eligibility trace parameter.
-
-    Parameters
-    ----------
-    weight_path : Path
-        The path to the weight, represented as a list or tuple of strings.
-    y_key : Var
-        The variable key associated with the trace.
-    hidden_group_id : int
-        The ID of the hidden group.
-
-    Returns
-    -------
-    tuple
-        A tuple containing the weight path, variable key, and a string key representing the hidden group.
-    """
-    assert isinstance(weight_path, (list, tuple)), f'weight_path must be a list or tuple, but got {weight_path}.'
-    assert all(isinstance(x, (str, int)) for x in weight_path), \
-        f'weight_path must be a list of str, but got {weight_path}.'
-    assert isinstance(y_key, Var), f'y_key must be a Var, but got {y_key}.'
-    return (weight_path, id(y_key), hid_group_key(hidden_group_id))
 
 
 def unknown_state_path(i: int) -> Path:

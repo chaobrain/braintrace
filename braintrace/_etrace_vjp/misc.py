@@ -147,55 +147,6 @@ def _unit_safe_add(a, b):
     return u.math.add(a, b)
 
 
-def _extract_weight_leaf(weight_val: brainstate.typing.PyTree, leaf_idx: int):
-    """Extract the weight array from a (possibly pytree) ``ParamState`` value.
-
-    When ``Linear`` (and related layers) merge weight and bias into a single
-    ``ParamState({'weight': W, 'bias': b})``, runtime code that needs only the
-    weight array must pick it out of the pytree value. ``leaf_idx`` is the
-    ``weight_leaf_idx`` recorded on the ``HiddenParamOpRelation`` at compile
-    time — it points into ``jax.tree.leaves(weight_val)`` so the right leaf is
-    returned regardless of dict-key ordering or pytree shape.
-    """
-    leaves = jax.tree.leaves(weight_val)
-    if not leaves:
-        return weight_val
-    if leaf_idx >= len(leaves):
-        # Defensive: fall back to the first leaf if the index is out of range.
-        return leaves[0]
-    return leaves[leaf_idx]
-
-
-def _wrap_leaf_as_pytree(
-    leaf_val: jax.Array,
-    reference_pytree: brainstate.typing.PyTree,
-    leaf_idx: int,
-):
-    """Insert ``leaf_val`` at position ``leaf_idx`` in a pytree with the same
-    structure as ``reference_pytree``, filling other leaves with zeros.
-
-    Used to turn an etrace-computed weight gradient (just one array) into a
-    gradient pytree that matches the ``ParamState``'s pytree value, e.g.
-    ``{'weight': dW, 'bias': zeros_like(b)}``. The bias slot is zero because
-    the current etrace rules only track the weight leaf; bias gradients from
-    this pathway are simply absent.
-
-    If ``reference_pytree`` is a bare array (no container nesting), the
-    wrapping is a no-op — the unchanged ``leaf_val`` is returned.
-    """
-    ref_treedef = jax.tree.structure(reference_pytree)
-    # Bare arrays have the trivial treedef of a single leaf. In that case the
-    # ParamState is already shaped like the raw weight, so no wrapping needed.
-    if ref_treedef.num_leaves <= 1 and ref_treedef == jax.tree.structure(0):
-        return leaf_val
-    leaves = jax.tree.leaves(reference_pytree)
-    new_leaves = [
-        leaf_val if i == leaf_idx else u.math.zeros_like(leaf)
-        for i, leaf in enumerate(leaves)
-    ]
-    return jax.tree.unflatten(ref_treedef, new_leaves)
-
-
 def _extract_leaf(pytree_val: brainstate.typing.PyTree, leaf_idx: int):
     """Return the leaf at ``leaf_idx`` in ``jax.tree.leaves(pytree_val)``.
 
@@ -219,9 +170,8 @@ def _wrap_leaves_as_pytree(
     """Build a pytree matching ``reference_pytree`` with ``leaf_grads``
     inserted at the given leaf indices; any other leaf is zero-filled.
 
-    Generalization of ``_wrap_leaf_as_pytree`` to multiple leaves. When the
-    reference is a bare array, ``leaf_grads`` must contain at most one entry
-    at index 0 and that value is returned directly (no wrapping).
+    When the reference is a bare array, ``leaf_grads`` must contain at most one
+    entry at index 0 and that value is returned directly (no wrapping).
 
     Raises ``IndexError`` if any supplied index is outside
     ``len(jax.tree.leaves(reference_pytree))``.
@@ -244,6 +194,34 @@ def _wrap_leaves_as_pytree(
         for i, leaf in enumerate(leaves)
     ]
     return jax.tree.unflatten(ref_treedef, new_leaves)
+
+
+def _route_grads_by_path(relation, dg_dict, weight_vals, target_dict):
+    """Route per-key gradients from a dict-API rule into per-path pytrees.
+
+    Both D-RTRL and ES-D-RTRL share this bookkeeping: for each key in
+    ``dg_dict`` (returned by ``xy_to_dw`` or ``yw_to_w``), look up the owning
+    ``ParamState`` path and the leaf index from ``relation``, accumulate into
+    ``per_path``, then wrap with ``_wrap_leaves_as_pytree`` and merge into
+    ``target_dict`` via ``_update_dict``.
+
+    Args:
+        relation: HiddenParamOpRelation — provides ``trainable_paths`` and
+            ``trainable_leaf_indices``.
+        dg_dict: Dict[str, Array] — gradient contributions keyed by trainable
+            invar name (e.g. ``'weight'``, ``'lora_b'``).
+        weight_vals: Dict[Path, PyTree] — current ParamState pytree values;
+            used as the structure template for ``_wrap_leaves_as_pytree``.
+        target_dict: Dict[Path, PyTree] — accumulation target, modified in place.
+    """
+    per_path: Dict[Any, Dict[int, Any]] = {}
+    for key, grad in dg_dict.items():
+        path = relation.trainable_paths[key]
+        leaf_idx = relation.trainable_leaf_indices[key]
+        per_path.setdefault(path, {})[leaf_idx] = grad
+    for path, leaf_to_grad in per_path.items():
+        wrapped = _wrap_leaves_as_pytree(weight_vals[path], leaf_to_grad)
+        _update_dict(target_dict, path, wrapped)
 
 
 def _update_dict(

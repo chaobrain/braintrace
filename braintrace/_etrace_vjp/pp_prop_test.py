@@ -920,15 +920,14 @@ class TestDiagOn:
 
 
 # ===========================================================================
-#  Smoke test: dict-based xy_to_dw call (Task 6 adapter)
+#  Smoke test: ES_D_RTRL end-to-end gradient routing
 # ===========================================================================
 
 class TestPPPropDictGradientRouting:
-    """Smoke test: after the Task 6 adapter, a full ES_D_RTRL run over a
-    no-bias mm recurrent cell finishes cleanly with the dict-based
-    xy_to_dw call plumbed in. Gradient shapes must be correct."""
+    """Smoke test: a full ES_D_RTRL run over a no-bias mm recurrent cell
+    finishes cleanly. Gradient shapes must be correct."""
 
-    def test_mm_smoke_after_dict_adapter(self):
+    def test_mm_smoke_es_d_rtrl(self):
         import brainstate
         import jax
         import jax.numpy as jnp

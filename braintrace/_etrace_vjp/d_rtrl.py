@@ -29,9 +29,8 @@ from braintrace._etrace_op import (
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
-    get_primitive_spec,
 )
-from braintrace._misc import etrace_param_key, etrace_df_key
+from braintrace._misc import etrace_df_key
 from braintrace._typing import (
     PyTree,
     WeightID,
@@ -45,13 +44,11 @@ from braintrace._typing import (
 )
 from .base import ETraceVjpAlgorithm
 from .misc import (
-    _extract_weight_leaf,
     _extract_leaf,
     _reset_state_in_a_dict,
+    _route_grads_by_path,
     _sum_dim,
     _update_dict,
-    _wrap_leaf_as_pytree,
-    _wrap_leaves_as_pytree,
 )
 
 __all__ = [
@@ -68,33 +65,21 @@ def _init_param_dim_state(
     Initialize the eligibility trace states for parameter dimensions.
 
     Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
-    trainable-input names. For primitives not yet migrated to the
-    dict-based rule API, the legacy single-array init is wrapped as
-    ``{'weight': <array>}`` for uniform storage.
+    trainable-input names (dict-based rule API).
     """
-    spec = get_primitive_spec(relation.primitive)
-    use_dict_api = spec is not None and spec.trainable_invars_fn is not None
     for group in relation.hidden_groups:
         group: HiddenGroup
         bwg_key = (id(relation.y_var), group.index)
         if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
-        if use_dict_api:
-            init_val = init_fn(
-                relation.x_var, relation.y_var, relation.trainable_vars, group.num_state,
-            )
-            if not isinstance(init_val, dict):
-                raise TypeError(
-                    f'Primitive {relation.primitive.name} declares trainable_invars_fn '
-                    f'so init_drtrl must return a dict; got {type(init_val).__name__}.'
-                )
-        else:
-            raise NotImplementedError(
-                f'ETP primitive {relation.primitive.name} is missing '
-                f'trainable_invars_fn on its spec. All shipped primitives migrate '
-                f'to the dict-based rule API in Tasks 7-11; out-of-tree primitives '
-                f'must do the same. (init_drtrl must return a dict keyed by trainable invar name)'
+        init_val = init_fn(
+            relation.x_var, relation.y_var, relation.trainable_vars, group.num_state,
+        )
+        if not isinstance(init_val, dict):
+            raise TypeError(
+                f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
+                f'got {type(init_val).__name__}.'
             )
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
@@ -170,25 +155,14 @@ def _update_param_dim_etrace_scan_fn(
     for relation in hidden_param_op_relations:
         relation: HiddenParamOpRelation
 
-        spec = get_primitive_spec(relation.primitive)
-        use_dict_api = spec is not None and spec.trainable_invars_fn is not None
-
         # Build the weights dict the rules consume.
-        if use_dict_api:
-            weights_dict = {
-                key: _extract_leaf(
-                    weight_path_to_vals[relation.trainable_paths[key]],
-                    relation.trainable_leaf_indices[key],
-                )
-                for key in relation.trainable_vars
-            }
-        else:
-            raise NotImplementedError(
-                f'ETP primitive {relation.primitive.name} is missing '
-                f'trainable_invars_fn on its spec. All shipped primitives migrate '
-                f'to the dict-based rule API in Tasks 7-11; out-of-tree primitives '
-                f'must do the same. (xy_to_dw / yw_to_w must accept a weights dict)'
+        weights_dict = {
+            key: _extract_leaf(
+                weight_path_to_vals[relation.trainable_paths[key]],
+                relation.trainable_leaf_indices[key],
             )
+            for key in relation.trainable_vars
+        }
 
         xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
@@ -201,18 +175,11 @@ def _update_param_dim_etrace_scan_fn(
         else:
             x = etrace_xs_at_t[id(relation.x_var)]
 
-        # Wrappers that always take/return dicts regardless of the underlying rule's API.
-        def _call_xy_to_dw_dict(x_, df_, weights_, _use_dict=use_dict_api, _rule=xy_to_dw_rule, _params=eqn_params):
-            if _use_dict:
-                return _rule(x_, df_, weights_, **_params)
-            single = _rule(x_, df_, weights_['weight'], **_params)
-            return {'weight': single}
+        def _call_xy_to_dw_dict(x_, df_, weights_, _rule=xy_to_dw_rule, _params=eqn_params):
+            return _rule(x_, df_, weights_, **_params)
 
-        def _call_yw_to_w_dict(d, trace_, _use_dict=use_dict_api, _rule=yw_to_w_rule, _params=eqn_params):
-            if _use_dict:
-                return _rule(d, trace_, **_params)
-            single = _rule(d, trace_['weight'], **_params)
-            return {'weight': single}
+        def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
+            return _rule(d, trace_, **_params)
 
         def comp_dw_with_x(x_, df_, _wdict=weights_dict):
             return _call_xy_to_dw_dict(x_, df_, _wdict)
@@ -324,18 +291,12 @@ def _solve_param_dim_weight_gradients(
     # update the etrace weight gradients
     temp_data: Dict[Path, PyTree] = dict()
     for relation in weight_hidden_relations:
-        spec = get_primitive_spec(relation.primitive)
-        use_dict_api = spec is not None and spec.trainable_invars_fn is not None
-
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
 
-        def _call_yw_to_w_dict(d, trace_, _use_dict=use_dict_api, _rule=yw_to_w_rule, _params=eqn_params):
-            if _use_dict:
-                return _rule(d, trace_, **_params)
-            single = _rule(d, trace_['weight'], **_params)
-            return {'weight': single}
+        def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
+            return _rule(d, trace_, **_params)
 
         yw_to_w = (
             jax.vmap(_call_yw_to_w_dict)
@@ -364,23 +325,7 @@ def _solve_param_dim_weight_gradients(
             dg_weight_dict = fn_unit_restore(dg_weight_dict)
 
             # Route per-key to owning ParamState path.
-            per_path: Dict[Path, Dict[int, jax.Array]] = {}
-            for key, grad in dg_weight_dict.items():
-                if use_dict_api:
-                    path = relation.trainable_paths[key]
-                    leaf_idx = relation.trainable_leaf_indices[key]
-                else:
-                    raise NotImplementedError(
-                        f'ETP primitive {relation.primitive.name} is missing '
-                        f'trainable_invars_fn on its spec. All shipped primitives migrate '
-                        f'to the dict-based rule API in Tasks 7-11; out-of-tree primitives '
-                        f'must do the same. (grad routing requires dict-API path mapping)'
-                    )
-                per_path.setdefault(path, {})[leaf_idx] = grad
-
-            for path, leaf_to_grad in per_path.items():
-                wrapped = _wrap_leaves_as_pytree(weight_vals[path], leaf_to_grad)
-                _update_dict(temp_data, path, wrapped)
+            _route_grads_by_path(relation, dg_weight_dict, weight_vals, temp_data)
 
     #
     # Step 3:
