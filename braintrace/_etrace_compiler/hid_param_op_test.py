@@ -17,7 +17,7 @@
 from pprint import pprint
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import pytest
 
 import braintrace
@@ -49,6 +49,10 @@ class TestFindRelationsFromModule:
 
         print()
         pprint(relations)
+        # Only Wz and Wh feed directly into h. Wr's output reaches h only
+        # through Wh's matmul (another non-gradient-enabled ETP primitive),
+        # so it must not register a relation — ETP cannot decompose the
+        # weight -> weight -> hidden pathway without double-counting.
         assert (len(relations) == 2)
         for relation in relations:
             assert len(relation.connected_hidden_paths) == 1
