@@ -62,32 +62,155 @@ def _etp_conv_impl(
     return y
 
 
+def _conv_trainable_invars(params):
+    """Return ``{key: invar_index}`` depending on ``has_bias``."""
+    base = {'weight': 1}
+    if params.get('has_bias', False):
+        base['bias'] = 2
+    return base
+
+
 def _conv_yw_to_w(hidden_dim, trace, **params):
-    r"""Broadcast ``hidden_dim`` across all dims except output channel."""
-    n_expand = trace.ndim - hidden_dim.ndim
+    r"""Propagate the hidden-state Jacobian through the weight-shaped trace.
+
+    This function is called in two different vmap contexts:
+
+    1. **scan / etrace-update path** (no outer batch vmap):
+       ``hidden_dim``      = ``(batch, *spatial_out, out_ch)``,
+       ``trace['weight']`` = ``(batch, *kernel_dims, out_ch)``,
+       ``trace['bias']``   = ``(batch, *spatial_out, out_ch)`` if present.
+
+    2. **gradient-computation path** (outer batch vmap applied):
+       ``hidden_dim``      = ``(*spatial_out, out_ch)``,
+       ``trace['weight']`` = ``(*kernel_dims, out_ch)``,
+       ``trace['bias']``   = ``(*spatial_out, out_ch)`` if present.
+
+    The bias shares parameters across spatial positions, so the bias gradient
+    requires summing over spatial dims. The bias trace has the **same shape as
+    the output y** (per element ∂h/∂b = ∂h/∂y), and ``yw_to_w`` sums the
+    elementwise product ``hidden_dim * trace['bias']`` over the spatial axes.
+
+    For scalar ``hidden_dim`` (0-D) the function multiplies elementwise and
+    returns immediately.
+    """
+    has_bias = params.get('has_bias', False)
+    w_trace = trace['weight']
+
+    if hidden_dim.ndim == 0:
+        # Scalar (degenerate) case: multiply all trace entries elementwise.
+        out = {'weight': w_trace * hidden_dim}
+        if has_bias:
+            out['bias'] = jnp.sum(trace['bias'] * hidden_dim)
+        return out
+
+    # ── Determine batch prefix length ─────────────────────────────────────────
+    # hidden_dim = (*batch, *spatial, out_ch),  w_trace = (*batch, *kernel, out_ch).
+    # ``sum_start`` is the first axis that is spatial (not batch, not out_ch).
+    #
+    # Context 1 (scan): batch=1, hidden=(1,H,C), w=(1,Hk,Cin,C)
+    #   sum_start = max(0, min(4,3)-2) = 1
+    # Context 2 (grad): batch=0, hidden=(H,C),   w=(Hk,Cin,C)
+    #   sum_start = max(0, min(3,2)-2) = 0
+    sum_start = max(0, min(w_trace.ndim, hidden_dim.ndim) - 2)
+
+    # ── Weight: reduce hidden_dim to (*batch, out_ch) then broadcast ──────────
+    w_sum_axes = tuple(range(sum_start, hidden_dim.ndim - 1))
+    hd_reduced = jnp.sum(hidden_dim, axis=w_sum_axes) if w_sum_axes else hidden_dim
+
+    n_expand = w_trace.ndim - hd_reduced.ndim
+    hd_for_weight = hd_reduced
     for _ in range(n_expand):
-        hidden_dim = jnp.expand_dims(hidden_dim, axis=0)
-    return trace * hidden_dim
+        hd_for_weight = jnp.expand_dims(hd_for_weight, axis=-2)
+
+    out = {'weight': w_trace * hd_for_weight}
+
+    # ── Bias: trace['bias'] has y-output shape (*batch, *spatial, out_ch). ────
+    # Multiply elementwise with hidden_dim and sum over the spatial dims
+    # (axes sum_start … ndim-2) to obtain (*batch, out_ch).
+    if has_bias:
+        b_trace = trace['bias']
+        b_sum_axes = tuple(range(sum_start, b_trace.ndim - 1))
+        out['bias'] = jnp.sum(b_trace * hidden_dim, axis=b_sum_axes) if b_sum_axes else b_trace * hidden_dim
+    return out
 
 
-def _conv_xy_to_dw(x, hidden_dim, w, **params):
-    r"""VJP of ``y = conv(x, w)`` w.r.t. ``w``."""
-    conv_kw = {k: v for k, v in params.items() if k != 'has_bias'}
+def _conv_xy_to_dw(x, hidden_dim, weights, **params):
+    r"""Direct-trace initial contribution: ``∂h/∂w`` and ``∂h/∂b``.
 
-    def _fwd(w_):
-        return u.get_mantissa(jax.lax.conv_general_dilated(x, w_, **conv_kw))
+    For the **kernel** ``w``: uses VJP of ``y = conv(x, w)`` — this is a true
+    function of ``x`` and requires the full conv VJP.
 
-    _, vjp_fn = jax.vjp(_fwd, w)
-    return u.get_mantissa(vjp_fn(hidden_dim)[0])
+    For the **bias** ``b``: ``y_{nhk} = conv(x)_{nhk} + b_k``, so
+    ``∂y_{nhk}/∂b_k = 1``.  Therefore ``∂h_{nhk}/∂b_k = hidden_dim_{nhk}``
+    (the cotangent ∂h/∂y at that position), with **no spatial summation**.
+    The bias trace stores per-position values (same shape as ``y``); the
+    summation over spatial positions is deferred to ``_conv_yw_to_w`` during
+    the gradient-computation pass.
+    """
+    has_bias = params.get('has_bias', False)
+    # Build conv_general_dilated kwargs; remap 'strides' -> 'window_strides'.
+    conv_kw = {}
+    for k, v in params.items():
+        if k == 'has_bias':
+            continue
+        if k == 'strides':
+            conv_kw['window_strides'] = v
+        else:
+            conv_kw[k] = v
+
+    # The batched D-RTRL executor vmaps over the batch dimension, so x may
+    # arrive here without a leading batch axis (e.g. shape (H, C) instead of
+    # (N, H, C)).  conv_general_dilated always requires a batch dim, so we
+    # temporarily add one when needed.
+    unbatched = x.ndim < 3  # heuristic: 1-D conv needs at least (N, H, C)
+    if unbatched:
+        x_in = x[None]          # (1, H, C)
+        hd_in = hidden_dim[None]  # (1, H, C) or similar
+    else:
+        x_in = x
+        hd_in = hidden_dim
+
+    # Kernel gradient via VJP (needs x).
+    def _fwd_w(w):
+        return u.get_mantissa(
+            jax.lax.conv_general_dilated(x_in, w, **conv_kw)
+        )
+
+    _, vjp_fn = jax.vjp(_fwd_w, weights['weight'])
+    dw = u.get_mantissa(vjp_fn(hd_in)[0])
+    out = {'weight': dw}
+
+    if has_bias:
+        # Bias gradient = hidden_dim (cotangent at each output position).
+        # No spatial summation — the trace stores per-position ∂h/∂b.
+        out['bias'] = hidden_dim  # shape (H, C) or (N, H, C)
+
+    return out
 
 
-def _conv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+def _conv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled Dict[str, Array] for the D-RTRL parameter-dim trace.
+
+    The bias trace has shape ``(batch, *y_spatial_and_ch, n_state)`` where
+    ``y_spatial_and_ch = y_var.aval.shape[1:]`` (all output dims except batch).
+    This stores the per-position Jacobian ``∂h_{nhk}/∂b_k``; the spatial
+    summation happens in ``_conv_yw_to_w`` during gradient computation.
+    """
     batch = x_var.aval.shape[0]
-    kernel_shape = weight_var.aval.shape
-    return jnp.zeros((batch, *kernel_shape, num_hidden_state))
+    out = {
+        'weight': jnp.zeros(
+            (batch, *weight_vars['weight'].aval.shape, num_hidden_state)
+        )
+    }
+    if 'bias' in weight_vars:
+        # y_var.aval.shape = (batch, *spatial, out_ch); strip the batch dim.
+        out['bias'] = jnp.zeros(
+            (batch, *y_var.aval.shape[1:], num_hidden_state)
+        )
+    return out
 
 
-def _conv_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _conv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -102,6 +225,7 @@ etp_conv_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=True,
+        trainable_invars_fn=_conv_trainable_invars,
     )
 )
 

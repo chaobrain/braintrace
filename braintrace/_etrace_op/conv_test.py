@@ -204,19 +204,41 @@ class TestJAXRules:
 
 class TestConvEtpRules:
 
-    def test_yw_to_w_broadcasts_hidden(self):
+    def test_yw_to_w_broadcasts_hidden_no_bias(self):
         rule = ETP_RULES_YW_TO_W[etp_conv_p]
-        # trace shape (out_ch, in_ch, kw) — rank 3.
-        # hidden shape (out_ch,) — rank 1.
-        # n_expand = 3 - 1 = 2 → expand_dims twice → (1, 1, out_ch).
-        # Broadcasts against (out_ch, in_ch, kw)? No — last axis would
-        # collide. The actual broadcast targets a (kw_dim) trailing
-        # axis equal to out_ch only when kw == out_ch.
-        # For a clean shape test pick trace shape (out_ch, ..., out_ch).
-        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
-        trace = jnp.ones((4,))                # rank 1 — no expand needed
-        out = rule(hidden, trace)
-        np.testing.assert_allclose(out, hidden * trace)
+        # Simulate call with batch dim retained (as in D-RTRL executor).
+        # 1-D NHC-HIO conv: kernel (H_k=3, in_ch=4, out_ch=4).
+        # After n_state vmap only: hidden_dim (batch, out_ch), trace (batch, H_k, in_ch, out_ch).
+        batch = 1
+        hidden = jnp.ones((batch, 4)) * jnp.arange(1, 5)   # (1, 4)
+        w_trace = jnp.ones((batch, 3, 4, 4))                # (1, H_k, in_ch, out_ch)
+        trace = {'weight': w_trace}
+        out = rule(hidden, trace, has_bias=False)
+        assert out['weight'].shape == (1, 3, 4, 4)
+        assert 'bias' not in out
+        # hidden (1,4) expands to (1,1,1,4); w_trace * = (1,3,4,4)
+        np.testing.assert_allclose(out['weight'], w_trace * hidden[:, None, None, :])
+
+    def test_yw_to_w_broadcasts_hidden_with_bias(self):
+        rule = ETP_RULES_YW_TO_W[etp_conv_p]
+        # Simulate post-n_state-vmap shapes for 1-D conv NHC-HIO with spatial output.
+        # hidden_dim = (batch=1, H_out=6, out_ch=4) — spatial output retained.
+        # trace['weight'] = (batch=1, H_k=3, in_ch=4, out_ch=4).
+        # trace['bias']   = (batch=1, H_out=6, out_ch=4)  ← same as y output (per-position).
+        batch = 1
+        hidden = jnp.ones((batch, 6, 4))         # (1, H_out, out_ch)
+        w_trace = jnp.ones((batch, 3, 4, 4))     # (1, H_k, in_ch, out_ch)
+        b_trace = jnp.ones((batch, 6, 4)) * 2.0  # (1, H_out, out_ch) — per-position trace
+        trace = {'weight': w_trace, 'bias': b_trace}
+        out = rule(hidden, trace, has_bias=True)
+        assert 'weight' in out
+        assert 'bias' in out
+        assert out['weight'].shape == (1, 3, 4, 4)
+        # bias result: sum over H_out of (b_trace * hidden) → (1, out_ch)
+        assert out['bias'].shape == (1, 4)
+        # bias update: elementwise product then sum over spatial (axis 1)
+        expected_bias = jnp.sum(b_trace * hidden, axis=1)  # sum over H_out → (1, 4)
+        np.testing.assert_allclose(out['bias'], expected_bias)
 
     def test_xy_to_dw_matches_jax_vjp(self):
         """The rule forwards its kwargs straight to
@@ -228,27 +250,61 @@ class TestConvEtpRules:
         k = jnp.arange(36.0).reshape(4, 3, 3)
         ref_y_shape = _ref_conv(x, k, **_BASE_CONV_KW).shape
         hidden = jnp.ones(ref_y_shape)
-        dk = rule(x, hidden, k, has_bias=False, **_BASE_CONV_KW)
+        weights = {'weight': k}
+        dk_dict = rule(x, hidden, weights, has_bias=False, **_BASE_CONV_KW)
         _, vjp_fn = jax.vjp(
             lambda k_: _ref_conv(x, k_, **_BASE_CONV_KW), k
         )
         ref_dk = vjp_fn(hidden)[0]
-        np.testing.assert_allclose(dk, ref_dk)
+        np.testing.assert_allclose(dk_dict['weight'], ref_dk)
+        assert 'bias' not in dk_dict
 
-    def test_init_drtrl_shape(self):
+    def test_xy_to_dw_with_bias(self):
+        """xy_to_dw returns both 'weight' and 'bias' gradients when has_bias=True.
+
+        The bias 'gradient' is the cotangent (hidden_dim) itself — same shape as y.
+        No spatial summation: that is deferred to _conv_yw_to_w.
+        """
+        rule = ETP_RULES_XY_TO_DW[etp_conv_p]
+        x = jnp.ones((1, 3, 8))
+        k = jnp.arange(36.0).reshape(4, 3, 3)
+        b = jnp.ones(4)
+        ref_y_shape = _ref_conv(x, k, **_BASE_CONV_KW).shape
+        hidden = jnp.ones(ref_y_shape)       # (1, 4, 8) in NCH layout
+        weights = {'weight': k, 'bias': b}
+        dk_dict = rule(x, hidden, weights, has_bias=True, **_BASE_CONV_KW)
+        assert 'weight' in dk_dict
+        assert 'bias' in dk_dict
+        # bias 'trace' = hidden_dim itself (per-position, no summation)
+        assert dk_dict['bias'].shape == hidden.shape
+        np.testing.assert_allclose(dk_dict['bias'], hidden)
+
+    def test_init_drtrl_shape_no_bias(self):
         rule = ETP_RULES_INIT_DRTRL[etp_conv_p]
         x_var = _fake_var((1, 3, 8))
         y_var = _fake_var((1, 4, 8))
-        k_var = _fake_var((4, 3, 3))
-        out = rule(x_var, y_var, k_var, num_hidden_state=2)
-        assert out.shape == (1, 4, 3, 3, 2)
+        weight_vars = {'weight': _fake_var((4, 3, 3))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert out['weight'].shape == (1, 4, 3, 3, 2)
+        assert 'bias' not in out
+
+    def test_init_drtrl_shape_with_bias(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_conv_p]
+        x_var = _fake_var((1, 3, 8))
+        y_var = _fake_var((1, 4, 8))
+        # bias has shape (4,) but the trace stores per-position ∂h/∂b
+        weight_vars = {'weight': _fake_var((4, 3, 3)), 'bias': _fake_var((4,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert out['weight'].shape == (1, 4, 3, 3, 2)
+        # bias trace: (batch, *y_shape[1:], n_state) = (1, 4, 8, 2)
+        assert out['bias'].shape == (1, 4, 8, 2)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_conv_p]
         x_var = _fake_var((1, 3, 8))
         y_var = _fake_var((1, 4, 8))
-        k_var = _fake_var((4, 3, 3))
-        out = rule(x_var, y_var, k_var, num_hidden_state=2)
+        weight_vars = {'weight': _fake_var((4, 3, 3))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (1, 4, 8, 2)
 
 

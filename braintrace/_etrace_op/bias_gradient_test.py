@@ -100,3 +100,80 @@ class TestMMBiasGradient:
                             err_msg='D-RTRL dW does not match BPTT')
         npt.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
                             err_msg='D-RTRL db does not match BPTT (was it zero?)')
+
+
+class TestConvBiasGradient:
+    """D-RTRL gradient correctness for etp_conv_p with a bias vector."""
+
+    def test_drtrl_conv_grad_matches_bptt(self):
+        """D-RTRL dkernel and dbias must match BPTT for one recurrent step."""
+        kernel_init = jnp.ones((3, 4, 4)) * 0.05   # (H, in, out) for 1D conv NHC-HIO
+        bias_init = jnp.ones((4,)) * 0.1
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.p = brainstate.ParamState(
+                    {'weight': kernel_init, 'bias': bias_init}
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, 6, 4)))
+
+            def update(self, x):
+                k = self.p.value['weight']
+                b = self.p.value['bias']
+                y = braintrace.conv(
+                    self.h.value, k, b,
+                    strides=(1,), padding='SAME',
+                    dimension_numbers=('NHC', 'HIO', 'NHC'),
+                )
+                self.h.value = jnp.tanh(x + y)
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        alg = braintrace.D_RTRL(cell)
+        alg.compile_graph(jnp.zeros((1, 6, 4)))
+
+        x = jnp.ones((1, 6, 4)) * 0.3
+
+        # --- ETP gradient via D-RTRL ---
+        @brainstate.transform.jit
+        def etrace_grad_step(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState),
+            )(inp)
+
+        grads_etrace = etrace_grad_step(x)
+
+        # grads_etrace is keyed by path; cell.p is a dict-valued ParamState
+        grad_p = list(grads_etrace.values())[0]
+        assert isinstance(grad_p, dict), (
+            f'Expected dict gradient for merged ParamState, got {type(grad_p)}'
+        )
+
+        # --- BPTT reference ---
+        def bptt_loss(params):
+            h = jnp.zeros((1, 6, 4))
+            y = jax.lax.conv_general_dilated(
+                lhs=h, rhs=params['weight'],
+                window_strides=(1,), padding='SAME',
+                dimension_numbers=('NHC', 'HIO', 'NHC'),
+            ) + params['bias']
+            h = jnp.tanh(x + y)
+            return h.sum()
+
+        bptt = jax.grad(bptt_loss)({
+            'weight': cell.p.value['weight'],
+            'bias': cell.p.value['bias'],
+        })
+
+        # Non-zero sanity check for bias gradient
+        assert jnp.abs(bptt['bias']).max() > 1e-3, (
+            f'BPTT bias gradient is unexpectedly near-zero: {bptt["bias"]}'
+        )
+
+        npt.assert_allclose(grad_p['weight'], bptt['weight'], atol=1e-5,
+                            err_msg='D-RTRL dkernel does not match BPTT')
+        npt.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
+                            err_msg='D-RTRL dbias does not match BPTT (was it zero?)')
