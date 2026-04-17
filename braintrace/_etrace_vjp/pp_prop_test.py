@@ -924,8 +924,9 @@ class TestDiagOn:
 # ===========================================================================
 
 class TestPPPropDictGradientRouting:
-    """Smoke test: a full ES_D_RTRL run over a no-bias mm recurrent cell
-    finishes cleanly. Gradient shapes must be correct."""
+    """Smoke test: dict-API gradient routing through ES_D_RTRL with a
+    no-bias mm recurrent cell. Verifies the per-path routing produces
+    correctly shaped gradients end-to-end."""
 
     def test_mm_smoke_es_d_rtrl(self):
         import brainstate

@@ -196,26 +196,31 @@ def _wrap_leaves_as_pytree(
     return jax.tree.unflatten(ref_treedef, new_leaves)
 
 
-def _route_grads_by_path(relation, dg_dict, weight_vals, target_dict):
+def _route_grads_by_path(
+    relation,
+    per_key_grads: Dict[str, jax.Array],
+    weight_vals: Dict[Any, brainstate.typing.PyTree],
+    target_dict: Dict[Any, brainstate.typing.PyTree],
+) -> None:
     """Route per-key gradients from a dict-API rule into per-path pytrees.
 
     Both D-RTRL and ES-D-RTRL share this bookkeeping: for each key in
-    ``dg_dict`` (returned by ``xy_to_dw`` or ``yw_to_w``), look up the owning
-    ``ParamState`` path and the leaf index from ``relation``, accumulate into
-    ``per_path``, then wrap with ``_wrap_leaves_as_pytree`` and merge into
+    ``per_key_grads`` (returned by ``xy_to_dw`` or ``yw_to_w``), look up the
+    owning ``ParamState`` path and the leaf index from ``relation``, accumulate
+    into ``per_path``, then wrap with ``_wrap_leaves_as_pytree`` and merge into
     ``target_dict`` via ``_update_dict``.
 
     Args:
         relation: HiddenParamOpRelation — provides ``trainable_paths`` and
             ``trainable_leaf_indices``.
-        dg_dict: Dict[str, Array] — gradient contributions keyed by trainable
-            invar name (e.g. ``'weight'``, ``'lora_b'``).
+        per_key_grads: Dict[str, Array] — gradient contributions keyed by
+            trainable invar name (e.g. ``'weight'``, ``'lora_b'``).
         weight_vals: Dict[Path, PyTree] — current ParamState pytree values;
             used as the structure template for ``_wrap_leaves_as_pytree``.
         target_dict: Dict[Path, PyTree] — accumulation target, modified in place.
     """
-    per_path: Dict[Any, Dict[int, Any]] = {}
-    for key, grad in dg_dict.items():
+    per_path: Dict[Any, Dict[int, jax.Array]] = {}
+    for key, grad in per_key_grads.items():
         path = relation.trainable_paths[key]
         leaf_idx = relation.trainable_leaf_indices[key]
         per_path.setdefault(path, {})[leaf_idx] = grad
