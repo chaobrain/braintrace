@@ -209,11 +209,14 @@ class TestConvEtpRules:
         # Simulate call with batch dim retained (as in D-RTRL executor).
         # 1-D NHC-HIO conv: kernel (H_k=3, in_ch=4, out_ch=4).
         # After n_state vmap only: hidden_dim (batch, out_ch), trace (batch, H_k, in_ch, out_ch).
+        # dimension_numbers and strides must be supplied — _conv_layout uses them to derive
+        # the spatial rank and channel-axis position.
         batch = 1
         hidden = jnp.ones((batch, 4)) * jnp.arange(1, 5)   # (1, 4)
         w_trace = jnp.ones((batch, 3, 4, 4))                # (1, H_k, in_ch, out_ch)
         trace = {'weight': w_trace}
-        out = rule(hidden, trace, has_bias=False)
+        params = dict(has_bias=False, strides=(1,), dimension_numbers=('NHC', 'HIO', 'NHC'))
+        out = rule(hidden, trace, **params)
         assert out['weight'].shape == (1, 3, 4, 4)
         assert 'bias' not in out
         # hidden (1,4) expands to (1,1,1,4); w_trace * = (1,3,4,4)
@@ -225,12 +228,15 @@ class TestConvEtpRules:
         # hidden_dim = (batch=1, H_out=6, out_ch=4) — spatial output retained.
         # trace['weight'] = (batch=1, H_k=3, in_ch=4, out_ch=4).
         # trace['bias']   = (batch=1, H_out=6, out_ch=4)  ← same as y output (per-position).
+        # dimension_numbers and strides must be supplied so _conv_layout can derive
+        # the spatial rank and channel-axis position.
         batch = 1
         hidden = jnp.ones((batch, 6, 4))         # (1, H_out, out_ch)
         w_trace = jnp.ones((batch, 3, 4, 4))     # (1, H_k, in_ch, out_ch)
         b_trace = jnp.ones((batch, 6, 4)) * 2.0  # (1, H_out, out_ch) — per-position trace
         trace = {'weight': w_trace, 'bias': b_trace}
-        out = rule(hidden, trace, has_bias=True)
+        params = dict(has_bias=True, strides=(1,), dimension_numbers=('NHC', 'HIO', 'NHC'))
+        out = rule(hidden, trace, **params)
         assert 'weight' in out
         assert 'bias' in out
         assert out['weight'].shape == (1, 3, 4, 4)

@@ -70,25 +70,82 @@ def _conv_trainable_invars(params):
     return base
 
 
+def _conv_layout(params, y_ndim):
+    """Return ``(n_spatial, channel_axis, batch_axis)`` for the conv output layout.
+
+    ``n_spatial``:    spatial rank (1, 2, or 3).
+    ``channel_axis``: position of the output-channel axis in an output array
+                      of rank ``y_ndim``.
+    ``batch_axis``:   position of the batch axis in an output array of rank
+                      ``y_ndim``.
+
+    Sources used (in priority order):
+
+    1. ``params['dimension_numbers']`` — when a ``ConvDimensionNumbers``
+       namedtuple is present, ``out_spec[0]`` is the batch position and
+       ``out_spec[1]`` is the channel position in the output.
+    2. ``params['strides']`` — ``len(strides)`` gives ``n_spatial``.
+    3. When ``dimension_numbers`` is ``None`` JAX defaults to ``iota``
+       (``(0,1,2,...)``) which maps to the NCHW / NCH convention:
+       batch at axis 0, channel at axis 1.
+
+    Notes on ``ConvDimensionNumbers.out_spec``::
+
+        ConvDimensionNumbers(lhs_spec, rhs_spec, out_spec)
+
+    ``out_spec`` is a tuple of length ``n_spatial + 2`` where each element
+    is the *physical* axis index in the output array corresponding to the
+    logical dimension in the order ``(N, C, spatial...)``.  Concretely::
+
+        out_spec[0]  → position of N (batch)   in the output
+        out_spec[1]  → position of C (channel) in the output
+        out_spec[2:] → positions of spatial dims in the output
+
+    Example: NHWC gives ``out_spec = (0, 3, 1, 2)`` so
+    ``batch_axis=0``, ``channel_axis=3``.
+    """
+    n_spatial = len(params.get('strides', (1,)))
+    dn = params.get('dimension_numbers', None)
+    if dn is None:
+        # JAX default: iota = (0,1,2,...) → NCHW / NCH convention.
+        batch_axis = 0
+        channel_axis = 1
+    elif isinstance(dn, tuple) and len(dn) == 3 and isinstance(dn[2], str):
+        # String-tuple form e.g. ('NHWC', 'HWIO', 'NHWC').
+        out_spec_str = dn[2]
+        batch_axis = out_spec_str.index('N')
+        channel_axis = out_spec_str.index('C')
+    else:
+        # ConvDimensionNumbers namedtuple: out_spec[0]=batch_pos, out_spec[1]=channel_pos.
+        out_spec = dn.out_spec
+        batch_axis = out_spec[0]
+        channel_axis = out_spec[1]
+    return n_spatial, channel_axis, batch_axis
+
+
 def _conv_yw_to_w(hidden_dim, trace, **params):
     r"""Propagate the hidden-state Jacobian through the weight-shaped trace.
 
     This function is called in two different vmap contexts:
 
     1. **scan / etrace-update path** (no outer batch vmap):
-       ``hidden_dim``      = ``(batch, *spatial_out, out_ch)``,
+       ``hidden_dim``      = ``(batch, *spatial_out, out_ch)`` (or permuted),
        ``trace['weight']`` = ``(batch, *kernel_dims, out_ch)``,
        ``trace['bias']``   = ``(batch, *spatial_out, out_ch)`` if present.
 
     2. **gradient-computation path** (outer batch vmap applied):
-       ``hidden_dim``      = ``(*spatial_out, out_ch)``,
-       ``trace['weight']`` = ``(*kernel_dims, out_ch)``,
+       ``hidden_dim``      = ``(*spatial_out, out_ch)`` (batch axis stripped),
+       ``trace['weight']`` = ``(*kernel_dims, out_ch)`` (batch axis stripped),
        ``trace['bias']``   = ``(*spatial_out, out_ch)`` if present.
 
     The bias shares parameters across spatial positions, so the bias gradient
-    requires summing over spatial dims. The bias trace has the **same shape as
-    the output y** (per element ∂h/∂b = ∂h/∂y), and ``yw_to_w`` sums the
+    requires summing over spatial dims.  The bias trace has the **same shape
+    as the output y** (per element ∂h/∂b = ∂h/∂y), and ``yw_to_w`` sums the
     elementwise product ``hidden_dim * trace['bias']`` over the spatial axes.
+
+    Layout awareness: spatial axes are derived from the actual
+    ``dimension_numbers`` / ``strides`` params rather than assuming any
+    fixed channel-last convention.
 
     For scalar ``hidden_dim`` (0-D) the function multiplies elementwise and
     returns immediately.
@@ -103,19 +160,43 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
             out['bias'] = jnp.sum(trace['bias'] * hidden_dim)
         return out
 
-    # ── Determine batch prefix length ─────────────────────────────────────────
-    # hidden_dim = (*batch, *spatial, out_ch),  w_trace = (*batch, *kernel, out_ch).
-    # ``sum_start`` is the first axis that is spatial (not batch, not out_ch).
-    #
-    # Context 1 (scan): batch=1, hidden=(1,H,C), w=(1,Hk,Cin,C)
-    #   sum_start = max(0, min(4,3)-2) = 1
-    # Context 2 (grad): batch=0, hidden=(H,C),   w=(Hk,Cin,C)
-    #   sum_start = max(0, min(3,2)-2) = 0
-    sum_start = max(0, min(w_trace.ndim, hidden_dim.ndim) - 2)
+    # ── Determine layout from params ──────────────────────────────────────────
+    # y_ndim for the *batched* output (scan context) is hidden_dim.ndim when
+    # a batch prefix is present, or hidden_dim.ndim + 1 when it is stripped
+    # (grad context).  We infer which context we are in from whether
+    # hidden_dim has a batch prefix:
+    #   scan context:  hidden_dim.ndim == n_spatial + 2  (batch + spatial + ch)
+    #   grad context:  hidden_dim.ndim == n_spatial + 1  (spatial + ch only)
+    n_spatial, channel_axis_batched, batch_axis_batched = _conv_layout(
+        params, y_ndim=None  # y_ndim not needed; we use n_spatial directly
+    )
+    # hidden_dim.ndim in scan context = n_spatial + 2 (batch + spatial + channel)
+    # hidden_dim.ndim in grad context = n_spatial + 1 (spatial + channel, no batch)
+    has_batch_prefix = (hidden_dim.ndim == n_spatial + 2)
 
-    # ── Weight: reduce hidden_dim to (*batch, out_ch) then broadcast ──────────
-    w_sum_axes = tuple(range(sum_start, hidden_dim.ndim - 1))
-    hd_reduced = jnp.sum(hidden_dim, axis=w_sum_axes) if w_sum_axes else hidden_dim
+    # Compute spatial axes in hidden_dim (same permutation as y output).
+    if has_batch_prefix:
+        # Axes in full output: {batch_axis_batched, channel_axis_batched} excluded.
+        spatial_axes_hd = tuple(
+            sorted(set(range(hidden_dim.ndim)) - {batch_axis_batched, channel_axis_batched})
+        )
+        # channel_axis in hidden_dim (same as in y).
+        ch_axis_hd = channel_axis_batched
+    else:
+        # Batch axis is stripped.  Remaining axes: spatial + channel.
+        # The original channel_axis_batched and batch_axis_batched are for the
+        # batched layout.  After stripping the batch axis, remaining axes are
+        # renumbered: remove batch_axis_batched from the set.
+        all_axes = set(range(n_spatial + 2))
+        remaining = sorted(all_axes - {batch_axis_batched})
+        # remaining[i] is the original axis index; map to new (shifted) index.
+        ch_axis_hd = remaining.index(channel_axis_batched)
+        spatial_axes_hd = tuple(i for i in range(len(remaining)) if i != ch_axis_hd)
+
+    # ── Weight: reduce hidden_dim over spatial axes, then broadcast ───────────
+    # Target shape after reduction: axes {ch_axis_hd} remain, spatial removed.
+    hd_reduced = jnp.sum(hidden_dim, axis=spatial_axes_hd) if spatial_axes_hd else hidden_dim
+    # hd_reduced shape: (*batch_prefix, out_ch)  [only batch and ch axes survive]
 
     n_expand = w_trace.ndim - hd_reduced.ndim
     hd_for_weight = hd_reduced
@@ -124,12 +205,11 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
 
     out = {'weight': w_trace * hd_for_weight}
 
-    # ── Bias: trace['bias'] has y-output shape (*batch, *spatial, out_ch). ────
-    # Multiply elementwise with hidden_dim and sum over the spatial dims
-    # (axes sum_start … ndim-2) to obtain (*batch, out_ch).
+    # ── Bias: trace['bias'] has y-output shape; sum over spatial axes ─────────
     if has_bias:
         b_trace = trace['bias']
-        b_sum_axes = tuple(range(sum_start, b_trace.ndim - 1))
+        # b_trace has same ndim as hidden_dim (same layout).
+        b_sum_axes = spatial_axes_hd
         out['bias'] = jnp.sum(b_trace * hidden_dim, axis=b_sum_axes) if b_sum_axes else b_trace * hidden_dim
     return out
 
@@ -159,13 +239,15 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
             conv_kw[k] = v
 
     # The batched D-RTRL executor vmaps over the batch dimension, so x may
-    # arrive here without a leading batch axis (e.g. shape (H, C) instead of
-    # (N, H, C)).  conv_general_dilated always requires a batch dim, so we
-    # temporarily add one when needed.
-    unbatched = x.ndim < 3  # heuristic: 1-D conv needs at least (N, H, C)
+    # arrive here without a leading batch axis.
+    # Unbatched detection: a batched input has ndim == n_spatial + 2
+    # (batch + spatial + channel / or the permuted equivalent), while an
+    # unbatched input has ndim == n_spatial + 1.
+    n_spatial = len(params.get('strides', (1,)))
+    unbatched = (x.ndim == n_spatial + 1)
     if unbatched:
-        x_in = x[None]          # (1, H, C)
-        hd_in = hidden_dim[None]  # (1, H, C) or similar
+        x_in = x[None]
+        hd_in = hidden_dim[None]
     else:
         x_in = x
         hd_in = hidden_dim
@@ -183,7 +265,7 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
     if has_bias:
         # Bias gradient = hidden_dim (cotangent at each output position).
         # No spatial summation — the trace stores per-position ∂h/∂b.
-        out['bias'] = hidden_dim  # shape (H, C) or (N, H, C)
+        out['bias'] = hidden_dim
 
     return out
 
