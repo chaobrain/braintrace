@@ -90,11 +90,12 @@ def _init_param_dim_state(
                     f'so init_drtrl must return a dict; got {type(init_val).__name__}.'
                 )
         else:
-            init_val = {
-                'weight': init_fn(
-                    relation.x_var, relation.y_var, relation.trainable_vars['weight'], group.num_state,
-                )
-            }
+            raise NotImplementedError(
+                f'ETP primitive {relation.primitive.name} is missing '
+                f'trainable_invars_fn on its spec. All shipped primitives migrate '
+                f'to the dict-based rule API in Tasks 7-11; out-of-tree primitives '
+                f'must do the same. (init_drtrl must return a dict keyed by trainable invar name)'
+            )
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
 
@@ -182,12 +183,12 @@ def _update_param_dim_etrace_scan_fn(
                 for key in relation.trainable_vars
             }
         else:
-            weights_dict = {
-                'weight': _extract_leaf(
-                    weight_path_to_vals[relation.trainable_paths['weight']],
-                    relation.trainable_leaf_indices['weight'],
-                )
-            }
+            raise NotImplementedError(
+                f'ETP primitive {relation.primitive.name} is missing '
+                f'trainable_invars_fn on its spec. All shipped primitives migrate '
+                f'to the dict-based rule API in Tasks 7-11; out-of-tree primitives '
+                f'must do the same. (xy_to_dw / yw_to_w must accept a weights dict)'
+            )
 
         xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
@@ -369,8 +370,12 @@ def _solve_param_dim_weight_gradients(
                     path = relation.trainable_paths[key]
                     leaf_idx = relation.trainable_leaf_indices[key]
                 else:
-                    path = relation.trainable_paths['weight']
-                    leaf_idx = relation.trainable_leaf_indices['weight']
+                    raise NotImplementedError(
+                        f'ETP primitive {relation.primitive.name} is missing '
+                        f'trainable_invars_fn on its spec. All shipped primitives migrate '
+                        f'to the dict-based rule API in Tasks 7-11; out-of-tree primitives '
+                        f'must do the same. (grad routing requires dict-API path mapping)'
+                    )
                 per_path.setdefault(path, {})[leaf_idx] = grad
 
             for path, leaf_to_grad in per_path.items():

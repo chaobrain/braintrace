@@ -67,7 +67,7 @@ def _compile(model, *inputs):
 def _relation_set(graph):
     """Return ``{(weight_path, hidden_path)}`` for exact-set assertions."""
     return {
-        (next(iter(r.trainable_paths.values())), h)
+        (r.path, h)
         for r in graph.hidden_param_op_relations
         for h in r.connected_hidden_paths
     }
@@ -75,11 +75,11 @@ def _relation_set(graph):
 
 def _primitive_for(graph, weight_path):
     for r in graph.hidden_param_op_relations:
-        if next(iter(r.trainable_paths.values()), None) == weight_path:
+        if r.path == weight_path:
             return r.primitive
     raise AssertionError(
         f'No relation found for {weight_path!r}; have: '
-        f'{[next(iter(r.trainable_paths.values()), None) for r in graph.hidden_param_op_relations]}'
+        f'{[r.path for r in graph.hidden_param_op_relations]}'
     )
 
 
@@ -97,9 +97,9 @@ def _assert_deterministic(model_factory, inp):
 
     g1 = _compile(_build(), inp)
     g2 = _compile(_build(), inp)
-    order1 = [(next(iter(r.trainable_paths.values()), None), tuple(r.connected_hidden_paths))
+    order1 = [(r.path, tuple(r.connected_hidden_paths))
               for r in g1.hidden_param_op_relations]
-    order2 = [(next(iter(r.trainable_paths.values()), None), tuple(r.connected_hidden_paths))
+    order2 = [(r.path, tuple(r.connected_hidden_paths))
               for r in g2.hidden_param_op_relations]
     assert order1 == order2, (
         f'Relation ordering is not deterministic: {order1} vs {order2}'
@@ -526,7 +526,7 @@ class TestCategoryD_ExclusionPaths:
 
         assert len(graph.hidden_param_op_relations) == 0, (
             f'Plain @ must not register any ETP relation; got '
-            f'{[next(iter(r.trainable_paths.values()), None) for r in graph.hidden_param_op_relations]}'
+            f'{[r.path for r in graph.hidden_param_op_relations]}'
         )
 
     def test_mixed_only_etp_registered(self):
@@ -538,7 +538,7 @@ class TestCategoryD_ExclusionPaths:
 
         assert _relation_set(graph) == {(('w_etp',), ('h',))}
         # Critically: w_plain must NOT appear in any relation.
-        paths = {next(iter(r.trainable_paths.values()), None) for r in graph.hidden_param_op_relations}
+        paths = {r.path for r in graph.hidden_param_op_relations}
         assert ('w_plain',) not in paths
 
     def test_non_temporal_weight_emits_record(self):
@@ -553,7 +553,7 @@ class TestCategoryD_ExclusionPaths:
         graph = _compile(model, inp)
 
         # w_rec is included; w_loss is not.
-        paths = {next(iter(r.trainable_paths.values()), None) for r in graph.hidden_param_op_relations}
+        paths = {r.path for r in graph.hidden_param_op_relations}
         assert ('w_rec',) in paths
         assert ('w_loss',) not in paths
 
@@ -590,7 +590,7 @@ class TestCategoryE_CanonicalRecurrences:
         graph = _compile(gru, inp)
 
         # Exact inclusion set — Wr excluded.
-        paths = {next(iter(r.trainable_paths.values()))[0] for r in graph.hidden_param_op_relations}
+        paths = {r.path[0] for r in graph.hidden_param_op_relations}
         assert paths == {'Wz', 'Wh'}, (
             f'GRU must include exactly Wz and Wh; got {paths}'
         )
@@ -616,7 +616,7 @@ class TestCategoryE_CanonicalRecurrences:
 
         graph = _compile(lstm, inp)
 
-        names = {next(iter(r.trainable_paths.values()))[0] for r in graph.hidden_param_op_relations}
+        names = {r.path[0] for r in graph.hidden_param_op_relations}
         # All four gates plus no extras.
         assert 'Wi' in names
         assert 'Wf' in names
@@ -788,7 +788,7 @@ class TestCategoryK_SharedTiedWeight:
             f'Expected exactly two relations for shared weight; got {len(rels)}'
         )
         for r in rels:
-            assert next(iter(r.trainable_paths.values())) == ('w',)
+            assert r.path == ('w',)
             assert r.connected_hidden_paths == [('h',)]
             assert r.primitive is etp_mv_p
         # The two relations must use different y_var instances (different
@@ -814,7 +814,7 @@ class TestCategoryL_MixedBatching:
         graph = _compile(model, x_u, x_b)
 
         by_path = {
-            next(iter(r.trainable_paths.values())): r.primitive
+            r.path: r.primitive
             for r in graph.hidden_param_op_relations
         }
         assert by_path == {
@@ -847,7 +847,7 @@ class TestCategoryM_PartialPath:
             (('w2',), ('h',)),
         }
 
-        by_path = {next(iter(r.trainable_paths.values()), None): r for r in graph.hidden_param_op_relations}
+        by_path = {r.path: r for r in graph.hidden_param_op_relations}
         assert by_path[('w1',)].path_classification == {
             ('h',): PathClassification.MIXED,
         }

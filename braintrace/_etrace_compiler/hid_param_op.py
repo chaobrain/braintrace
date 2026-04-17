@@ -728,18 +728,16 @@ def find_hidden_param_op_relations_from_jaxpr(
             )
 
         if weight_path is None:
-            first_invar_repr = (
-                trainable_invars_map[first_key] if first_key else None
-            )
+            first_invar_repr = trainable_invars_map[first_key]
             emit(
                 kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
                 level=DiagnosticLevel.WARNING,
                 message=(
-                    f'ETP primitive {primitive.name} at {eqn} has a weight input '
-                    f'that could not be traced back to any ParamState. Skipping.'
+                    f'ETP primitive {primitive.name} at {eqn} has a trainable input '
+                    f'({first_key}) that could not be traced back to any ParamState. Skipping.'
                 ),
                 primitive=primitive,
-                context={'weight_var': first_invar_repr},
+                context={'trainable_var': first_invar_repr, 'key': first_key},
             )
             continue
 

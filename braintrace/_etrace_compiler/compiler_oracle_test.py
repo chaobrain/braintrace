@@ -169,7 +169,7 @@ class TestOracle_PartialPathDirectOnly:
         graph = _silent_compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
 
-        by_path = {next(iter(r.trainable_paths.values()), None): r for r in graph.hidden_param_op_relations}
+        by_path = {r.path: r for r in graph.hidden_param_op_relations}
         rel_w1 = by_path[('w1',)]
         group = rel_w1.hidden_groups[0]
         y_val = temps[rel_w1.y_var]
@@ -194,7 +194,7 @@ class TestOracle_PartialPathDirectOnly:
         graph = _silent_compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
 
-        by_path = {next(iter(r.trainable_paths.values()), None): r for r in graph.hidden_param_op_relations}
+        by_path = {r.path: r for r in graph.hidden_param_op_relations}
         rel_w2 = by_path[('w2',)]
         group = rel_w2.hidden_groups[0]
         y_val = temps[rel_w2.y_var]
@@ -252,6 +252,6 @@ class TestOracle_FiniteDifference:
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
         rel = next(
             r for r in graph.hidden_param_op_relations
-            if next(iter(r.trainable_paths.values()), None) == ('w1',)
+            if r.path == ('w1',)
         )
         self._check_fd(rel, rel.hidden_groups[0], temps)
