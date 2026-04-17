@@ -161,3 +161,42 @@ class TestTrainableDictsDefault:
         assert r.trainable_leaf_indices == {'weight': 0}
         assert r.trainable_param_states == {'weight': None}
         assert r.trainable_processing_chains == {'weight': ()}
+
+
+class TestTrainableInvarsPopulatedForDense:
+    """Even before per-primitive migration, the compiler fills the
+    trainable_* dicts from spec.resolve_trainable_invars(). For un-migrated
+    primitives (e.g. etp_mm_p without a trainable_invars_fn), this yields
+    the single-key {'weight': ...} form."""
+
+    def test_single_weight_populated_for_mm(self):
+        import brainstate
+        import jax.numpy as jnp
+        import braintrace
+        from braintrace._etrace_compiler import (
+            find_hidden_param_op_relations_from_module,
+        )
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        relations = find_hidden_param_op_relations_from_module(
+            cell, jnp.zeros((1, 4))
+        )
+        assert len(relations) == 1
+        r = relations[0]
+        assert list(r.trainable_vars.keys()) == ['weight']
+        assert r.trainable_vars['weight'] is r.weight_var
+        assert r.trainable_paths['weight'] == r.weight_path
+        assert r.trainable_leaf_indices['weight'] == r.weight_leaf_idx
+        assert r.trainable_processing_chains['weight'] == r.weight_processing_chain
+        assert r.trainable_param_states['weight'] is r.weight

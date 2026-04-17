@@ -256,6 +256,25 @@ def _build_consumer_map(jaxpr: Jaxpr) -> Dict[Var, List[JaxprEqn]]:
 # Spec dispatch — locate weight / x / y vars on a primitive equation
 # ---------------------------------------------------------------------------
 
+def _resolve_eqn_trainable_invars(
+    eqn: JaxprEqn,
+) -> Dict[str, Var]:
+    """Return ``{key: invar_var}`` for every trainable input of *eqn*.
+
+    Uses the spec's ``resolve_trainable_invars`` when available. For the
+    legacy ``etp_elemwise_p`` special case (no spec, weight at invar[0]),
+    returns the single-key ``{'weight': eqn.invars[0]}`` form.
+    """
+    primitive = eqn.primitive
+    spec = get_primitive_spec(primitive)
+    if spec is not None:
+        key_to_idx = spec.resolve_trainable_invars(eqn.params)
+        return {k: eqn.invars[i] for k, i in key_to_idx.items()}
+    if primitive is etp_elemwise_p:
+        return {'weight': eqn.invars[0]}
+    return {'weight': eqn.invars[1]}
+
+
 def _resolve_eqn_vars(
     eqn: JaxprEqn,
 ) -> Tuple[Var, Optional[Var], Var]:
@@ -752,6 +771,38 @@ def find_hidden_param_op_relations_from_jaxpr(
             weight_var, weight_path, producers, weight_path_to_invars,
         )
 
+        # --- NEW: resolve every trainable invar declared by the primitive ---
+        trainable_invars_map = _resolve_eqn_trainable_invars(eqn)
+        trainable_vars: Dict[str, Var] = {}
+        trainable_paths: Dict[str, Path] = {}
+        trainable_leaf_indices: Dict[str, int] = {}
+        trainable_param_states: Dict[str, brainstate.ParamState] = {}
+        trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
+        for key, invar in trainable_invars_map.items():
+            if invar is weight_var:
+                # Reuse the already-resolved primary key metadata.
+                t_path, t_chain = weight_path, processing_chain
+                t_leaf = weight_leaf_idx
+                t_state = weight_state
+            else:
+                t_path, t_chain = _trace_var_to_param(
+                    invar, producers, invar_to_weight_path,
+                    cache=weight_trace_cache,
+                )
+                if t_path is None:
+                    # Trainable invar doesn't trace to any ParamState —
+                    # skip it; later tasks emit a diagnostic here.
+                    continue
+                t_leaf = _resolve_weight_leaf_idx(
+                    invar, t_path, producers, weight_path_to_invars,
+                )
+                t_state = path_to_state.get(t_path)
+            trainable_vars[key] = invar
+            trainable_paths[key] = t_path
+            trainable_leaf_indices[key] = t_leaf
+            trainable_param_states[key] = t_state
+            trainable_processing_chains[key] = t_chain
+
         # --- Restricted reachability for relation registration ---
         reachable_hvars, blocking_eqns = _bfs_forward(
             y_var, consumers, hidden_outvar_set,
@@ -849,6 +900,11 @@ def find_hidden_param_op_relations_from_jaxpr(
             eqn_params=dict(eqn.params),
             weight_processing_chain=processing_chain,
             path_classification=dict(path_class),
+            trainable_vars=dict(trainable_vars),
+            trainable_paths=dict(trainable_paths),
+            trainable_leaf_indices=dict(trainable_leaf_indices),
+            trainable_param_states=dict(trainable_param_states),
+            trainable_processing_chains=dict(trainable_processing_chains),
         ))
         emit(
             kind=DiagnosticKind.RELATION_INCLUDED,
