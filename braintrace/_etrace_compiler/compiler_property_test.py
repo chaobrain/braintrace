@@ -41,14 +41,18 @@ Properties under test
 
 from __future__ import annotations
 
+import importlib.util
 import warnings
 
-import brainstate
-import jax.numpy as jnp
 import pytest
+
+if importlib.util.find_spec("hypothesis") is None:
+    pytest.skip("hypothesis not installed", allow_module_level=True)
 
 from hypothesis import HealthCheck, given, settings, strategies as st
 
+import brainstate
+import jax.numpy as jnp
 import braintrace
 from braintrace import (
     DiagnosticKind,
@@ -61,7 +65,6 @@ from braintrace._etrace_compiler.scenario_catalog import (
     StackedDeepRNN,
     UnbatchedMvRNN,
 )
-
 
 _HYPOTHESIS_SETTINGS = settings(
     max_examples=20,
@@ -209,6 +212,7 @@ def _make_chain_rnn(chain_len: int, n: int) -> brainstate.nn.Module:
     Only ``w_{chain_len}`` (the final matmul) must be included in
     relations; all earlier weights are W -> W -> h excluded.
     """
+
     class _Chain(brainstate.nn.Module):
         def __init__(self_inner):
             super().__init__()
