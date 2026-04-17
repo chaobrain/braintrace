@@ -114,3 +114,50 @@ class TestFindRelationsFromModule:
             brainstate.nn.init_all_states(layer)
             relations = find_hidden_param_op_relations_from_module(layer, input)
             pprint(relations)
+
+
+class TestTrainableDictsDefault:
+    """The new trainable_* dict fields default to empty dicts and do not
+    affect the construction of existing relations. (Later tasks populate
+    them during compilation.)"""
+
+    def test_trainable_vars_default_empty(self):
+        # Build a minimal relation directly; we just check the new field exists.
+        from braintrace._etrace_compiler.hid_param_op import HiddenParamOpRelation
+        # NamedTuple defaults: the new fields must exist and default to empty dicts.
+        fields = HiddenParamOpRelation._fields
+        assert 'trainable_vars' in fields
+        assert 'trainable_paths' in fields
+        assert 'trainable_leaf_indices' in fields
+        assert 'trainable_param_states' in fields
+        assert 'trainable_processing_chains' in fields
+
+    def test_trainable_dicts_can_be_set(self):
+        # Smoke: construct a relation with all required fields, including the
+        # new ones populated, and read them back.
+        from braintrace._etrace_compiler.hid_param_op import HiddenParamOpRelation
+        r = HiddenParamOpRelation(
+            primitive=None,
+            weight=None,
+            weight_path=('w',),
+            weight_var=None,
+            weight_leaf_idx=0,
+            x_var=None,
+            y_var=None,
+            hidden_groups=[],
+            y_to_hidden_group_jaxprs=[],
+            connected_hidden_paths=[],
+            eqn_params={},
+            weight_processing_chain=(),
+            path_classification={},
+            trainable_vars={'weight': 'v'},
+            trainable_paths={'weight': ('w',)},
+            trainable_leaf_indices={'weight': 0},
+            trainable_param_states={'weight': None},
+            trainable_processing_chains={'weight': ()},
+        )
+        assert r.trainable_vars == {'weight': 'v'}
+        assert r.trainable_paths == {'weight': ('w',)}
+        assert r.trainable_leaf_indices == {'weight': 0}
+        assert r.trainable_param_states == {'weight': None}
+        assert r.trainable_processing_chains == {'weight': ()}

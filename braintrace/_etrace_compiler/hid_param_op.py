@@ -152,6 +152,23 @@ class HiddenParamOpRelation(NamedTuple):
             primitive consumes the ``ParamState`` invar directly.
         path_classification: ``{hidden_path: PathClassification.*}`` for each
             connected hidden state. Populated by the path-classification pass.
+        trainable_vars: Per-key dict mapping a primitive-chosen key name
+            (e.g. ``'weight'``, ``'bias'``, ``'B'``, ``'A'``) to its jaxpr
+            ``Var``. Empty when the primitive's spec has no
+            ``trainable_invars_fn``; otherwise populated by the compiler
+            with one entry per declared trainable input.
+        trainable_paths: Per-key dict mapping each key to the owning
+            ``ParamState``'s module path. When the primitive has two keys
+            whose invars trace to the same ``ParamState`` (e.g. merged
+            ``{weight, bias}`` Linear), the entries share a path.
+        trainable_leaf_indices: Per-key dict mapping each key to the leaf
+            index in ``jax.tree.leaves`` of the owning ``ParamState``.
+        trainable_param_states: Per-key dict mapping each key to the actual
+            ``ParamState`` object (same reference as ``weight`` when the key
+            is ``'weight'``).
+        trainable_processing_chains: Per-key dict mapping each key to the
+            backward-trace processing chain (same semantics as
+            ``weight_processing_chain`` but per key).
     """
     primitive: Primitive
     weight: brainstate.ParamState
@@ -166,6 +183,13 @@ class HiddenParamOpRelation(NamedTuple):
     eqn_params: dict
     weight_processing_chain: Tuple[Primitive, ...] = ()
     path_classification: Dict[Path, str] = {}
+    # NEW — per-key trainable-input metadata (populated by the compiler when
+    # the primitive's spec provides trainable_invars_fn; otherwise empty).
+    trainable_vars: Dict[str, Var] = {}
+    trainable_paths: Dict[str, Path] = {}
+    trainable_leaf_indices: Dict[str, int] = {}
+    trainable_param_states: Dict[str, brainstate.ParamState] = {}
+    trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
 
     # backward compat aliases
     @property
