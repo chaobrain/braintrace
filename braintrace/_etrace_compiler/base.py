@@ -28,6 +28,7 @@ from braintrace._etrace_operators import (
     is_etp_enable_gradient_primitive,
 )
 from braintrace._typing import Path
+from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 
 __all__ = [
     'JaxprEvaluation',
@@ -117,11 +118,14 @@ def check_unsupported_op(
     # handled by backward tracing in the compiler, so we only warn.
     invar = find_element_exist_in_the_set(eqn.invars, self.weight_invars)
     if invar is not None:
-        import warnings
-        warnings.warn(
-            f'Weight state found inside a {op_name} function. '
-            f'The primitive-based compiler handles this via backward tracing.',
-            stacklevel=3,
+        emit(
+            kind=DiagnosticKind.WEIGHT_IN_CONTROL_FLOW,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'Weight state found inside a {op_name} function. '
+                f'The primitive-based compiler handles this via backward tracing.'
+            ),
+            context={'op_name': op_name, 'invar': invar},
         )
         raise NotImplementedError(
             f'Currently, we do not support the weight states are used within a {op_name} function. \n'

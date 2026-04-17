@@ -14,12 +14,11 @@
 # ==============================================================================
 
 import functools
-import warnings
 from typing import Dict, Sequence, List, Tuple, Optional, NamedTuple, Any
 
 import brainstate
-import saiunit as u
 import jax
+import saiunit as u
 
 from braintrace._compatible_imports import (
     Var,
@@ -41,6 +40,7 @@ from braintrace._typing import (
     StateVals,
     TempData,
 )
+from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 
 __all__ = [
     'ModuleInfo',
@@ -75,13 +75,23 @@ def _check_consistent_states_between_model_and_compiler(
         id(st): path
         for path, st in retrieved_model_states.items()
     }
+
     paths_to_remove = []
     for id_ in id_to_path:
         if id_ not in id_to_compiled_state:
             path = id_to_path[id_]
             paths_to_remove.append(path)
             if verbose:
-                warnings.warn(f"The state {path} is not found in the compiled model.")
+                emit(
+                    kind=DiagnosticKind.STATE_MISMATCH,
+                    level=DiagnosticLevel.WARNING,
+                    message=f"The state {path} is not found in the compiled model.",
+                    weight_path=path if isinstance(path, tuple) else None,
+                    context={
+                        'direction': 'retrieved_not_in_compiled',
+                        'state_path': path,
+                    },
+                )
     for path in paths_to_remove:
         retrieved_model_states.pop(path)
     i_unknown = 0
@@ -89,8 +99,18 @@ def _check_consistent_states_between_model_and_compiler(
         if id_ not in id_to_path:
             st = id_to_compiled_state[id_]
             if verbose:
-                warnings.warn(f"The state {st} is not found in the retrieved model. "
-                              f"We have added this state.")
+                emit(
+                    kind=DiagnosticKind.STATE_MISMATCH,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f"The state {st} is not found in the retrieved model. "
+                        f"We have added this state."
+                    ),
+                    context={
+                        'direction': 'compiled_not_in_retrieved',
+                        'state': st,
+                    },
+                )
             retrieved_model_states[unknown_state_path(i=i_unknown)] = st
             i_unknown += 1
 
