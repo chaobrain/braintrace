@@ -17,7 +17,10 @@
 
 
 from . import nn
-from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
+from ._etrace_algorithms import (
+    ETraceAlgorithm,
+    EligibilityTrace,
+)
 from ._etrace_compiler import (
     ETraceGraph,
     compile_etrace_graph,
@@ -38,7 +41,7 @@ from ._etrace_compiler import (
 )
 from ._etrace_graph_executor import ETraceGraphExecutor
 from ._etrace_input_data import SingleStepData, MultiStepData
-from ._etrace_operators import (
+from ._etrace_op import (
     ETPPrimitive,
     ETPPrimitiveSpec,
     matmul,

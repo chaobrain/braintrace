@@ -40,7 +40,7 @@ class TestLinear:
         # in_size and out_size may be scalar or sequence
         assert hasattr(linear, 'in_size')
         assert hasattr(linear, 'out_size')
-        assert hasattr(linear, 'W')
+        assert hasattr(linear, 'weight')
 
     def test_linear_forward_with_batch(self):
         """Test Linear forward pass with batch dimension."""
@@ -181,7 +181,7 @@ class TestSignedWLinear:
         linear = braintrace.nn.SignedWLinear(in_size=64, out_size=32)
         assert hasattr(linear, 'in_size')
         assert hasattr(linear, 'out_size')
-        assert hasattr(linear, 'W')
+        assert hasattr(linear, 'weight')
 
     def test_signed_w_linear_forward_with_batch(self):
         """Test SignedWLinear forward pass with batch dimension."""
@@ -272,7 +272,7 @@ class TestSparseLinear:
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         assert hasattr(linear, 'out_size')
-        assert hasattr(linear, 'weight_data')
+        assert hasattr(linear, 'weight')
 
     def test_sparse_linear_forward_with_batch(self):
         """Test SparseLinear forward pass with batch dimension."""

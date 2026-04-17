@@ -1,0 +1,253 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+"""Tests for the sparse-matmul ETP primitives and the :func:`sparse_matmul` API.
+
+The sparse structure is supplied by the user as a static parameter
+(``sparse_mat``) and must implement two methods used by the ETP rules:
+
+* ``with_data(weight_data)`` — substitute new non-zero values into the
+  structure, returning a sparse-matmul-able object.
+* ``yw_to_w_transposed(hidden_dim, trace)`` — apply the transposed
+  pattern when propagating the trace.
+
+For end-to-end forward correctness a real ``saiunit.sparse.CSR`` works.
+For rule-level tests a tiny stub class fits the contract exactly so the
+test does not depend on the upstream sparse-matrix surface area.
+"""
+
+from __future__ import annotations
+
+from collections import namedtuple
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import saiunit as u
+from saiunit import sparse as ss
+
+import braintrace
+from braintrace._etrace_op import (
+    ETP_RULES_INIT_DRTRL,
+    ETP_RULES_INIT_PP,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_YW_TO_W,
+    etp_sp_mm_p,
+    etp_sp_mv_p,
+    sparse_matmul,
+)
+
+
+_FakeVar = namedtuple('_FakeVar', ['aval'])
+_FakeAval = namedtuple('_FakeAval', ['shape', 'dtype'])
+
+
+def _fake_var(shape, dtype=jnp.float32):
+    return _FakeVar(aval=_FakeAval(shape=shape, dtype=dtype))
+
+
+class _StubSparseMat:
+    """Minimal sparse-matrix stub satisfying the rule contract.
+
+    Backed by a dense matrix internally; ``with_data`` rebuilds the dense
+    form by reshaping the flat data vector into the original shape.
+    """
+
+    def __init__(self, dense_template: jnp.ndarray):
+        self._shape = dense_template.shape
+        self._template = dense_template
+
+    @property
+    def shape(self):
+        return self._shape
+
+    def with_data(self, data: jnp.ndarray) -> jnp.ndarray:
+        return data.reshape(self._shape)
+
+    def yw_to_w_transposed(self, hidden_dim, trace):
+        return trace * jnp.expand_dims(hidden_dim, axis=0)
+
+
+def _csr_from_dense(dense: jnp.ndarray):
+    return ss.CSR.fromdense(dense)
+
+
+# ---------------------------------------------------------------------------
+# Forward correctness via real CSR
+# ---------------------------------------------------------------------------
+
+class TestForwardWithCSR:
+
+    def test_unbatched_matches_dense(self):
+        dense = jnp.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ])
+        csr = _csr_from_dense(dense)
+        x = jnp.array([1.0, 1.0, 1.0])
+        out = sparse_matmul(x, csr.data, sparse_mat=csr)
+        np.testing.assert_allclose(out, x @ dense)
+
+    def test_batched_matches_dense(self):
+        dense = jnp.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ])
+        csr = _csr_from_dense(dense)
+        x = jnp.array([
+            [1.0, 1.0, 1.0],
+            [2.0, 0.0, 0.0],
+        ])
+        out = sparse_matmul(x, csr.data, sparse_mat=csr)
+        np.testing.assert_allclose(out, x @ dense)
+
+    def test_with_bias(self):
+        dense = jnp.eye(3) * 2.0
+        csr = _csr_from_dense(dense)
+        x = jnp.ones((4, 3))
+        b = jnp.arange(3.0)
+        out = sparse_matmul(x, csr.data, sparse_mat=csr, bias=b)
+        np.testing.assert_allclose(out, x @ dense + b)
+
+
+# ---------------------------------------------------------------------------
+# Auto-dispatch
+# ---------------------------------------------------------------------------
+
+class _HashableStubMat(_StubSparseMat):
+    """Stub that is also ``__hash__``-able so JAX accepts it as a static
+    primitive parameter (CSR itself is not hashable in JAX 0.7+)."""
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
+
+
+class TestAutoDispatch:
+
+    def test_unbatched_uses_sp_mv(self):
+        stub = _HashableStubMat(jnp.zeros((3, 3)))
+        x = jnp.ones(3)
+        data = jnp.arange(9.0)
+        jaxpr = jax.make_jaxpr(
+            lambda x, d: sparse_matmul(x, d, sparse_mat=stub)
+        )(x, data)
+        assert any(eqn.primitive is etp_sp_mv_p for eqn in jaxpr.jaxpr.eqns)
+        assert not any(eqn.primitive is etp_sp_mm_p for eqn in jaxpr.jaxpr.eqns)
+
+    def test_batched_uses_sp_mm(self):
+        stub = _HashableStubMat(jnp.zeros((3, 4)))
+        x = jnp.ones((2, 3))
+        data = jnp.arange(12.0)
+        jaxpr = jax.make_jaxpr(
+            lambda x, d: sparse_matmul(x, d, sparse_mat=stub)
+        )(x, data)
+        assert any(eqn.primitive is etp_sp_mm_p for eqn in jaxpr.jaxpr.eqns)
+        assert not any(eqn.primitive is etp_sp_mv_p for eqn in jaxpr.jaxpr.eqns)
+
+
+# ---------------------------------------------------------------------------
+# saiunit
+# ---------------------------------------------------------------------------
+
+class TestSaiunit:
+
+    def test_unitless(self):
+        dense = jnp.eye(3) * 2.0
+        csr = _csr_from_dense(dense)
+        x = jnp.ones(3)
+        out = sparse_matmul(x, csr.data, sparse_mat=csr)
+        assert not isinstance(out, u.Quantity)
+
+
+# ---------------------------------------------------------------------------
+# ETP rules — yw_to_w / xy_to_dw / init_*
+# ---------------------------------------------------------------------------
+
+class TestSpMmEtpRules:
+
+    def test_yw_to_w_via_stub(self):
+        rule = ETP_RULES_YW_TO_W[etp_sp_mm_p]
+        stub = _StubSparseMat(jnp.zeros((3, 4)))
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
+        trace = jnp.ones((3, 4))
+        out = rule(hidden, trace, sparse_mat=stub)
+        # stub.yw_to_w_transposed broadcasts hidden over rows.
+        np.testing.assert_allclose(out, jnp.ones((3, 4)) * hidden[None, :])
+
+    def test_xy_to_dw_matches_jax_vjp(self):
+        rule = ETP_RULES_XY_TO_DW[etp_sp_mm_p]
+        stub = _StubSparseMat(jnp.zeros((3, 4)))
+        x = jnp.ones((2, 3))
+        w_data = jnp.arange(12.0)
+        hidden = jnp.ones((2, 4))
+        dw = rule(x, hidden, w_data, sparse_mat=stub)
+        # Equivalent to VJP through `x @ stub.with_data(w)` wrt w.
+        _, vjp_fn = jax.vjp(lambda w_: x @ stub.with_data(w_), w_data)
+        ref = vjp_fn(hidden)[0]
+        np.testing.assert_allclose(dw, ref)
+
+    def test_init_drtrl_shape(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_sp_mm_p]
+        x_var = _fake_var((4, 3))
+        y_var = _fake_var((4, 5))
+        w_var = _fake_var((7,))      # nnz
+        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        assert out.shape == (4, 7, 2)
+
+    def test_init_pp_shape(self):
+        rule = ETP_RULES_INIT_PP[etp_sp_mm_p]
+        x_var = _fake_var((4, 3))
+        y_var = _fake_var((4, 5))
+        w_var = _fake_var((7,))
+        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        assert out.shape == (4, 5, 2)
+
+
+class TestSpMvEtpRules:
+
+    def test_yw_to_w_via_stub(self):
+        rule = ETP_RULES_YW_TO_W[etp_sp_mv_p]
+        stub = _StubSparseMat(jnp.zeros((3, 4)))
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
+        trace = jnp.ones((3, 4))
+        out = rule(hidden, trace, sparse_mat=stub)
+        np.testing.assert_allclose(out, jnp.ones((3, 4)) * hidden[None, :])
+
+    def test_init_drtrl_shape(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_sp_mv_p]
+        x_var = _fake_var((3,))
+        y_var = _fake_var((5,))
+        w_var = _fake_var((7,))
+        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        assert out.shape == (7, 2)
+
+    def test_init_pp_shape(self):
+        rule = ETP_RULES_INIT_PP[etp_sp_mv_p]
+        x_var = _fake_var((3,))
+        y_var = _fake_var((5,))
+        w_var = _fake_var((7,))
+        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        assert out.shape == (5, 2)
+
+
+class TestPublicAPIRoundTrip:
+
+    def test_public_alias(self):
+        assert braintrace.sparse_matmul is sparse_matmul
