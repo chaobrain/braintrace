@@ -6,7 +6,6 @@ Online learning for recurrent networks via Eligibility Trace Propagation (ETP). 
 1. Before write any code, describe approach, wait for approval.
 2. Requirements ambiguous? Ask clarifying questions before write code.
 3. After write code, list edge cases + suggest test cases.
-4. Task touch >3 files? Stop, break into smaller tasks first.
 5. Bug? Write test that reproduce it, then fix until test pass.
 6. Every correction: reflect on mistake, plan to avoid repeat.
 

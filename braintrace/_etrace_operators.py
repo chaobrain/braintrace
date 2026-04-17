@@ -324,6 +324,7 @@ class ETPPrimitiveSpec:
     init_pp: Callable
     weight_invar_index: int
     x_invar_index: Optional[int] = 0
+    y_outvar_index: int = 0
     batched: bool = False
     gradient_enabled: bool = False
 
@@ -394,17 +395,19 @@ def _mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_mm_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_mm',
-    impl=_etp_matmul_impl,
-    yw_to_w=_mm_yw_to_w,
-    xy_to_dw=_mm_xy_to_dw,
-    init_drtrl=_mm_init_drtrl,
-    init_pp=_mm_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=True,
-))
+etp_mm_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_mm',
+        impl=_etp_matmul_impl,
+        yw_to_w=_mm_yw_to_w,
+        xy_to_dw=_mm_xy_to_dw,
+        init_drtrl=_mm_init_drtrl,
+        init_pp=_mm_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=True,
+    )
+)
 
 
 # --- mv (unbatched) ---
@@ -430,17 +433,19 @@ def _mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_mv_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_mv',
-    impl=_etp_matmul_impl,
-    yw_to_w=_mv_yw_to_w,
-    xy_to_dw=_mv_xy_to_dw,
-    init_drtrl=_mv_init_drtrl,
-    init_pp=_mv_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=False,
-))
+etp_mv_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_mv',
+        impl=_etp_matmul_impl,
+        yw_to_w=_mv_yw_to_w,
+        xy_to_dw=_mv_xy_to_dw,
+        init_drtrl=_mv_init_drtrl,
+        init_pp=_mv_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=False,
+    )
+)
 
 
 # ======================================================================
@@ -472,18 +477,20 @@ def _elemwise_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_elemwise_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_elemwise',
-    impl=_etp_elemwise_impl,
-    yw_to_w=_elemwise_yw_to_w,
-    xy_to_dw=_elemwise_xy_to_dw,
-    init_drtrl=_elemwise_init_drtrl,
-    init_pp=_elemwise_init_pp,
-    weight_invar_index=0,
-    x_invar_index=None,
-    batched=False,
-    gradient_enabled=True,
-))
+etp_elemwise_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_elemwise',
+        impl=_etp_elemwise_impl,
+        yw_to_w=_elemwise_yw_to_w,
+        xy_to_dw=_elemwise_xy_to_dw,
+        init_drtrl=_elemwise_init_drtrl,
+        init_pp=_elemwise_init_pp,
+        weight_invar_index=0,
+        x_invar_index=None,
+        batched=False,
+        gradient_enabled=True,
+    )
+)
 
 
 # ======================================================================
@@ -547,17 +554,19 @@ def _conv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_conv_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_conv',
-    impl=_etp_conv_impl,
-    yw_to_w=_conv_yw_to_w,
-    xy_to_dw=_conv_xy_to_dw,
-    init_drtrl=_conv_init_drtrl,
-    init_pp=_conv_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=True,
-))
+etp_conv_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_conv',
+        impl=_etp_conv_impl,
+        yw_to_w=_conv_yw_to_w,
+        xy_to_dw=_conv_xy_to_dw,
+        init_drtrl=_conv_init_drtrl,
+        init_pp=_conv_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=True,
+    )
+)
 
 
 # ======================================================================
@@ -605,29 +614,33 @@ def _sp_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_sp_mm_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_sp_mm',
-    impl=_etp_sp_matmul_impl,
-    yw_to_w=_sp_mm_yw_to_w,
-    xy_to_dw=_sp_xy_to_dw,
-    init_drtrl=_sp_mm_init_drtrl,
-    init_pp=_sp_mm_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=True,
-))
+etp_sp_mm_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_sp_mm',
+        impl=_etp_sp_matmul_impl,
+        yw_to_w=_sp_mm_yw_to_w,
+        xy_to_dw=_sp_xy_to_dw,
+        init_drtrl=_sp_mm_init_drtrl,
+        init_pp=_sp_mm_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=True,
+    )
+)
 
-etp_sp_mv_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_sp_mv',
-    impl=_etp_sp_matmul_impl,
-    yw_to_w=_sp_mv_yw_to_w,
-    xy_to_dw=_sp_xy_to_dw,
-    init_drtrl=_sp_mv_init_drtrl,
-    init_pp=_sp_mv_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=False,
-))
+etp_sp_mv_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_sp_mv',
+        impl=_etp_sp_matmul_impl,
+        yw_to_w=_sp_mv_yw_to_w,
+        xy_to_dw=_sp_xy_to_dw,
+        init_drtrl=_sp_mv_init_drtrl,
+        init_pp=_sp_mv_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=False,
+    )
+)
 
 
 # ======================================================================
@@ -700,29 +713,33 @@ def _lora_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_lora_mm_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_lora_mm',
-    impl=_etp_lora_impl,
-    yw_to_w=_lora_mm_yw_to_w,
-    xy_to_dw=_lora_xy_to_dw,
-    init_drtrl=_lora_mm_init_drtrl,
-    init_pp=_lora_mm_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=True,
-))
+etp_lora_mm_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_lora_mm',
+        impl=_etp_lora_impl,
+        yw_to_w=_lora_mm_yw_to_w,
+        xy_to_dw=_lora_xy_to_dw,
+        init_drtrl=_lora_mm_init_drtrl,
+        init_pp=_lora_mm_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=True,
+    )
+)
 
-etp_lora_mv_p = register_primitive_spec(ETPPrimitiveSpec(
-    name='etp_lora_mv',
-    impl=_etp_lora_impl,
-    yw_to_w=_lora_mv_yw_to_w,
-    xy_to_dw=_lora_xy_to_dw,
-    init_drtrl=_lora_mv_init_drtrl,
-    init_pp=_lora_mv_init_pp,
-    weight_invar_index=1,
-    x_invar_index=0,
-    batched=False,
-))
+etp_lora_mv_p = register_primitive_spec(
+    ETPPrimitiveSpec(
+        name='etp_lora_mv',
+        impl=_etp_lora_impl,
+        yw_to_w=_lora_mv_yw_to_w,
+        xy_to_dw=_lora_xy_to_dw,
+        init_drtrl=_lora_mv_init_drtrl,
+        init_pp=_lora_mv_init_pp,
+        weight_invar_index=1,
+        x_invar_index=0,
+        batched=False,
+    )
+)
 
 
 # ======================================================================
