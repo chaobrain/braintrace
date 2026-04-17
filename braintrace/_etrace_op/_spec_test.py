@@ -77,7 +77,7 @@ def _trivial_spec(stub, **overrides):
         xy_to_dw=lambda x, hd, w, **p: w,
         init_drtrl=lambda xv, yv, wv, n: jnp.zeros((1, n)),
         init_pp=lambda xv, yv, wv, n: jnp.zeros((1, n)),
-        weight_invar_index=1,
+        trainable_invars_fn=lambda params: {'weight': 1},
     )
     base.update(overrides)
     return ETPPrimitiveSpec(**base)
@@ -111,9 +111,7 @@ class TestDataclassShape:
         assert spec.gradient_enabled is False
 
     def test_x_invar_index_can_be_none(self):
-        spec = _trivial_spec(
-            'xnone', weight_invar_index=0, x_invar_index=None,
-        )
+        spec = _trivial_spec('xnone', x_invar_index=None)
         assert spec.x_invar_index is None
 
 
@@ -165,7 +163,7 @@ class TestRegisterPrimitiveSpec:
             xy_to_dw=lambda *a, **k: None,
             init_drtrl=lambda *a, **k: None,
             init_pp=lambda *a, **k: None,
-            weight_invar_index=0,
+            trainable_invars_fn=lambda params: {'weight': 0},
             x_invar_index=None,
         )
         p = register_primitive_spec(spec)
@@ -228,7 +226,6 @@ class TestShippedSpecsMatchRuntime:
     def test_elemwise_spec_x_invar_is_none(self):
         spec = get_primitive_spec(etp_elemwise_p)
         assert spec.x_invar_index is None
-        assert spec.weight_invar_index == 0
 
     def test_mm_spec_is_batched(self):
         spec = get_primitive_spec(etp_mm_p)
@@ -240,8 +237,7 @@ class TestShippedSpecsMatchRuntime:
         assert spec.batched is False
         assert etp_mv_p not in BATCHED_PRIMITIVES
 
-    def test_lora_spec_weight_invar_index_is_one(self):
+    def test_lora_spec_x_invar_index_is_zero(self):
         for prim in (etp_lora_mm_p, etp_lora_mv_p):
             spec = get_primitive_spec(prim)
-            assert spec.weight_invar_index == 1
             assert spec.x_invar_index == 0

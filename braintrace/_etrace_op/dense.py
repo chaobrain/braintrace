@@ -118,10 +118,9 @@ etp_mm_p = register_primitive_spec(
         xy_to_dw=_mm_xy_to_dw,
         init_drtrl=_mm_init_drtrl,
         init_pp=_mm_init_pp,
-        weight_invar_index=1,
+        trainable_invars_fn=_mm_trainable_invars,
         x_invar_index=0,
         batched=True,
-        trainable_invars_fn=_mm_trainable_invars,
     )
 )
 
@@ -190,10 +189,9 @@ etp_mv_p = register_primitive_spec(
         xy_to_dw=_mv_xy_to_dw,
         init_drtrl=_mv_init_drtrl,
         init_pp=_mv_init_pp,
-        weight_invar_index=1,
+        trainable_invars_fn=_mv_trainable_invars,
         x_invar_index=0,
         batched=False,
-        trainable_invars_fn=_mv_trainable_invars,
     )
 )
 

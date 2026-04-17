@@ -110,11 +110,10 @@ etp_elemwise_p = register_primitive_spec(
         xy_to_dw=_elemwise_xy_to_dw,
         init_drtrl=_elemwise_init_drtrl,
         init_pp=_elemwise_init_pp,
-        weight_invar_index=0,
+        trainable_invars_fn=_elem_trainable_invars,
         x_invar_index=None,
         batched=False,
         gradient_enabled=True,
-        trainable_invars_fn=_elem_trainable_invars,
     )
 )
 

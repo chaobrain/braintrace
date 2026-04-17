@@ -152,10 +152,9 @@ etp_lora_mm_p = register_primitive_spec(
         xy_to_dw=_lora_xy_to_dw,
         init_drtrl=_lora_mm_init_drtrl,
         init_pp=_lora_mm_init_pp,
-        weight_invar_index=1,
+        trainable_invars_fn=_lora_trainable_invars,
         x_invar_index=0,
         batched=True,
-        trainable_invars_fn=_lora_trainable_invars,
     )
 )
 
@@ -167,10 +166,9 @@ etp_lora_mv_p = register_primitive_spec(
         xy_to_dw=_lora_xy_to_dw,
         init_drtrl=_lora_mv_init_drtrl,
         init_pp=_lora_mv_init_pp,
-        weight_invar_index=1,
+        trainable_invars_fn=_lora_trainable_invars,
         x_invar_index=0,
         batched=False,
-        trainable_invars_fn=_lora_trainable_invars,
     )
 )
 

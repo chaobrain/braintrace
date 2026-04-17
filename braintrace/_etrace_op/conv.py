@@ -222,10 +222,9 @@ etp_conv_p = register_primitive_spec(
         xy_to_dw=_conv_xy_to_dw,
         init_drtrl=_conv_init_drtrl,
         init_pp=_conv_init_pp,
-        weight_invar_index=1,
+        trainable_invars_fn=_conv_trainable_invars,
         x_invar_index=0,
         batched=True,
-        trainable_invars_fn=_conv_trainable_invars,
     )
 )
 

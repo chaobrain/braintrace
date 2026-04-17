@@ -82,7 +82,7 @@ etp_rtest_mv_p = register_primitive_spec(ETPPrimitiveSpec(
     xy_to_dw=_rtest_mv_xy_to_dw,
     init_drtrl=_rtest_mv_init_drtrl,
     init_pp=_rtest_mv_init_pp,
-    weight_invar_index=1,
+    trainable_invars_fn=lambda params: {'weight': 1},
     x_invar_index=0,
     batched=False,
 ))
@@ -140,7 +140,6 @@ class TestSpecRegistry:
         spec = get_primitive_spec(etp_elemwise_p)
         assert spec.gradient_enabled is True
         assert spec.x_invar_index is None
-        assert spec.weight_invar_index == 0
 
     def test_mm_mv_conv_lora_are_not_gradient_enabled(self):
         from braintrace._etrace_op import (
@@ -205,7 +204,7 @@ class TestPluginPrimitiveEndToEnd:
 
         rel = graph.hidden_param_op_relations[0]
         # Spec-driven dispatch must have picked invar[1] as the weight
-        # (weight_invar_index=1) and invar[0] as x (x_invar_index=0).
+        # (trainable_invars_fn -> {'weight': 1}) and invar[0] as x (x_invar_index=0).
         assert rel.weight_var is not None
         assert rel.x_var is not None
         # Weight shape follows (n_in + n_out, n_out).
@@ -256,17 +255,18 @@ class TestLegacyRegistrationStillWorks:
 
 class TestTrainableInvarsFn:
 
-    def test_field_defaults_to_none(self):
-        spec = ETPPrimitiveSpec(
-            name='dummy',
-            impl=lambda *a, **k: a[0],
-            yw_to_w=lambda *a, **k: a[1],
-            xy_to_dw=lambda *a, **k: a[0],
-            init_drtrl=lambda *a, **k: None,
-            init_pp=lambda *a, **k: None,
-            weight_invar_index=1,
-        )
-        assert spec.trainable_invars_fn is None
+    def test_trainable_invars_fn_is_required(self):
+        import pytest
+        with pytest.raises(TypeError):
+            # trainable_invars_fn is now required; omitting it is a TypeError.
+            ETPPrimitiveSpec(
+                name='dummy',
+                impl=lambda *a, **k: a[0],
+                yw_to_w=lambda *a, **k: a[1],
+                xy_to_dw=lambda *a, **k: a[0],
+                init_drtrl=lambda *a, **k: None,
+                init_pp=lambda *a, **k: None,
+            )
 
     def test_custom_fn_is_preserved(self):
         fn = lambda params: {'weight': 1, 'bias': 2} if params.get('has_bias') else {'weight': 1}
@@ -277,15 +277,13 @@ class TestTrainableInvarsFn:
             xy_to_dw=lambda *a, **k: a[0],
             init_drtrl=lambda *a, **k: None,
             init_pp=lambda *a, **k: None,
-            weight_invar_index=1,
             trainable_invars_fn=fn,
         )
         assert spec.trainable_invars_fn({'has_bias': True}) == {'weight': 1, 'bias': 2}
         assert spec.trainable_invars_fn({}) == {'weight': 1}
 
-    def test_legacy_derived_uses_weight_invar_index(self):
-        # When trainable_invars_fn is None, the spec exposes a helper that
-        # returns the legacy single-weight layout: {'weight': weight_invar_index}.
+    def test_resolve_trainable_invars_delegates_to_fn(self):
+        fn = lambda params: {'lora_b': 1, 'lora_a': 2}
         spec = ETPPrimitiveSpec(
             name='dummy',
             impl=lambda *a, **k: a[0],
@@ -293,6 +291,6 @@ class TestTrainableInvarsFn:
             xy_to_dw=lambda *a, **k: a[0],
             init_drtrl=lambda *a, **k: None,
             init_pp=lambda *a, **k: None,
-            weight_invar_index=2,
+            trainable_invars_fn=fn,
         )
-        assert spec.resolve_trainable_invars({}) == {'weight': 2}
+        assert spec.resolve_trainable_invars({}) == {'lora_b': 1, 'lora_a': 2}

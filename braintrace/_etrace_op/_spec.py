@@ -53,10 +53,10 @@ class ETPPrimitiveSpec:
         xy_to_dw: Weight-gradient rule.
         init_drtrl: D-RTRL parameter-dimension trace initialiser.
         init_pp: pp_prop IO-dimension df trace initialiser.
-        weight_invar_index: Position in ``eqn.invars`` of the weight the
-            compiler should trace back to a ``ParamState``. For ``mm/mv/conv``
-            this is 1; for ``elemwise`` it is 0; for LoRA it is 1 (the B
-            factor — the originating ``ParamState`` holds both B and A).
+        trainable_invars_fn: Function ``eqn.params -> {key: invar_index}``
+            declaring the primitive's full trainable-input layout. Used by
+            the compiler and executors to support N-trainable-input primitives
+            (e.g. ``{weight, bias}`` for Linear, ``{B, A, bias}`` for LoRA).
         x_invar_index: Position of the input ``x`` in ``eqn.invars``, or
             ``None`` for primitives that have no external input (currently
             only ``etp_elemwise_p``).
@@ -68,12 +68,6 @@ class ETPPrimitiveSpec:
             for any trainable op), the primitive acts as a tail boundary —
             a preceding ETP weight whose only path to ``h`` passes through
             this primitive is excluded from ETP.
-        trainable_invars_fn: Optional function ``eqn.params -> {key: invar_index}``
-            declaring the primitive's full trainable-input layout. Used by
-            the compiler and executors to support N-trainable-input primitives
-            (e.g. ``{weight, bias}`` for Linear, ``{B, A, bias}`` for LoRA).
-            When ``None``, the single-weight legacy layout is synthesized from
-            ``weight_invar_index``.
     """
 
     name: str
@@ -82,22 +76,15 @@ class ETPPrimitiveSpec:
     xy_to_dw: Callable
     init_drtrl: Callable
     init_pp: Callable
-    weight_invar_index: int
+    trainable_invars_fn: Callable[[dict], Dict[str, int]]
     x_invar_index: Optional[int] = 0
     y_outvar_index: int = 0
     batched: bool = False
     gradient_enabled: bool = False
-    trainable_invars_fn: Optional[Callable[[dict], Dict[str, int]]] = None
 
     def resolve_trainable_invars(self, eqn_params: dict) -> Dict[str, int]:
-        """Return ``{key: invar_index}`` for this equation.
-
-        If ``trainable_invars_fn`` is set, delegates to it. Otherwise returns
-        the legacy single-weight layout ``{'weight': weight_invar_index}``.
-        """
-        if self.trainable_invars_fn is not None:
-            return self.trainable_invars_fn(eqn_params)
-        return {'weight': self.weight_invar_index}
+        """Return ``{key: invar_index}`` for this equation."""
+        return self.trainable_invars_fn(eqn_params)
 
 
 def register_primitive_spec(spec: ETPPrimitiveSpec) -> ETPPrimitive:

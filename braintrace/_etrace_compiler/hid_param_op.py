@@ -65,7 +65,6 @@ from braintrace._compatible_imports import (
 )
 from braintrace._etrace_op import (
     ETP_PRIMITIVES,
-    etp_elemwise_p,
     get_primitive_spec,
     is_etp_primitive,
     is_etp_enable_gradient_primitive,
@@ -259,20 +258,15 @@ def _build_consumer_map(jaxpr: Jaxpr) -> Dict[Var, List[JaxprEqn]]:
 def _resolve_eqn_trainable_invars(
     eqn: JaxprEqn,
 ) -> Dict[str, Var]:
-    """Return ``{key: invar_var}`` for every trainable input of *eqn*.
-
-    Uses the spec's ``resolve_trainable_invars`` when available. For the
-    legacy ``etp_elemwise_p`` special case (no spec, weight at invar[0]),
-    returns the single-key ``{'weight': eqn.invars[0]}`` form.
-    """
+    """Return ``{key: invar_var}`` for every trainable input of *eqn*."""
     primitive = eqn.primitive
     spec = get_primitive_spec(primitive)
-    if spec is not None:
-        key_to_idx = spec.resolve_trainable_invars(eqn.params)
-        return {k: eqn.invars[i] for k, i in key_to_idx.items()}
-    if primitive is etp_elemwise_p:
-        return {'weight': eqn.invars[0]}
-    return {'weight': eqn.invars[1]}
+    if spec is None:
+        raise RuntimeError(
+            f'ETP primitive {primitive.name} has no registered spec'
+        )
+    key_to_idx = spec.resolve_trainable_invars(eqn.params)
+    return {k: eqn.invars[i] for k, i in key_to_idx.items()}
 
 
 def _resolve_eqn_vars(
@@ -280,43 +274,41 @@ def _resolve_eqn_vars(
 ) -> Tuple[Var, Optional[Var], Var]:
     """Return ``(weight_var, x_var, y_var)`` for an ETP primitive equation.
 
-    Spec-driven dispatch lets third-party primitives declare their own invar
-    layout without touching the compiler. Legacy primitives registered through
-    the old API fall back to the historical convention (weight at invar[1]
-    unless the primitive is ``etp_elemwise_p``); the y-output is always
-    ``outvars[0]``.
+    The "primary weight" returned as ``weight_var`` is the first key in
+    ``spec.trainable_invars_fn(eqn.params)`` insertion order — typically
+    ``'weight'`` for dense/conv/sparse, ``'lora_b'`` for LoRA, ``'weight'``
+    for elemwise. This preserves backward-compatibility with the legacy
+    ``HiddenParamOpRelation.weight_var`` field until it is removed in
+    Task 13.
     """
     primitive = eqn.primitive
     spec = get_primitive_spec(primitive)
-    if spec is not None:
-        weight_var = eqn.invars[spec.weight_invar_index]
-        if spec.x_invar_index is None:
-            x_var = None
-        else:
-            candidate = eqn.invars[spec.x_invar_index]
-            x_var = candidate if isinstance(candidate, Var) else None
-        y_var = eqn.outvars[spec.y_outvar_index]
-        if len(eqn.outvars) > 1:
-            emit(
-                kind=DiagnosticKind.MULTI_OUTPUT_PRIMITIVE_DETECTED,
-                level=DiagnosticLevel.INFO,
-                message=(
-                    f'ETP primitive {primitive.name} has '
-                    f'{len(eqn.outvars)} outputs; using outvar index '
-                    f'{spec.y_outvar_index} as y per spec.'
-                ),
-                primitive=primitive,
-                context={'num_outvars': len(eqn.outvars),
-                         'y_outvar_index': spec.y_outvar_index},
-            )
-    elif primitive is etp_elemwise_p:
-        weight_var = eqn.invars[0]
+    if spec is None:
+        raise RuntimeError(
+            f'ETP primitive {primitive.name} has no registered spec'
+        )
+    key_to_idx = spec.resolve_trainable_invars(eqn.params)
+    first_key = next(iter(key_to_idx))
+    weight_var = eqn.invars[key_to_idx[first_key]]
+    if spec.x_invar_index is None:
         x_var = None
-        y_var = eqn.outvars[0]
     else:
-        x_var = eqn.invars[0] if isinstance(eqn.invars[0], Var) else None
-        weight_var = eqn.invars[1]
-        y_var = eqn.outvars[0]
+        candidate = eqn.invars[spec.x_invar_index]
+        x_var = candidate if isinstance(candidate, Var) else None
+    y_var = eqn.outvars[spec.y_outvar_index]
+    if len(eqn.outvars) > 1:
+        emit(
+            kind=DiagnosticKind.MULTI_OUTPUT_PRIMITIVE_DETECTED,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'ETP primitive {primitive.name} has '
+                f'{len(eqn.outvars)} outputs; using outvar index '
+                f'{spec.y_outvar_index} as y per spec.'
+            ),
+            primitive=primitive,
+            context={'num_outvars': len(eqn.outvars),
+                     'y_outvar_index': spec.y_outvar_index},
+        )
     return weight_var, x_var, y_var
 
 
