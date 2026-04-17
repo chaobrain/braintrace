@@ -43,6 +43,7 @@ from braintrace._etrace_operators import (
     ETP_PRIMITIVES,
     etp_elemwise_p,
     is_etp_primitive,
+    is_etp_enable_gradient_primitive,
 )
 from braintrace._misc import git_issue_addr
 from braintrace._typing import (
@@ -72,6 +73,12 @@ class HiddenParamOpRelation(NamedTuple):
         primitive: The JAX primitive (``etp_mm_p``, ``etp_mv_p``, etc.).
         weight: The ``ParamState`` object.
         weight_path: Path to the ``ParamState`` in the module hierarchy.
+        weight_var: Jaxpr ``Var`` for the weight input of the primitive. When
+            the ``ParamState`` stores a PyTree (e.g. ``{'weight': W, 'bias':
+            b}``), this identifies which leaf is the weight.
+        weight_leaf_idx: Index of ``weight_var`` among ``jax.tree.leaves`` of
+            the owning ``ParamState``'s value. Used at runtime to extract the
+            weight array from a pytree-valued ``ParamState``.
         x_var: Jaxpr ``Var`` for the input (``None`` for element-wise ops).
         y_var: Jaxpr ``Var`` for the primitive output.
         hidden_groups: Hidden groups that this op feeds into.
@@ -82,6 +89,8 @@ class HiddenParamOpRelation(NamedTuple):
     primitive: Primitive
     weight: brainstate.ParamState
     weight_path: Path
+    weight_var: Var
+    weight_leaf_idx: int
     x_var: Optional[Var]
     y_var: Var
     hidden_groups: List[HiddenGroup]
@@ -182,19 +191,55 @@ def _find_reachable_hidden_outvars(
     start_var: Var,
     consumer_map: Dict[Var, List[JaxprEqn]],
     hidden_outvar_set: Set[Var],
+    outvar_to_group_index: Optional[Dict[Var, int]] = None,
 ) -> Set[Var]:
-    """Forward BFS from *start_var* to find reachable hidden-state outvars."""
+    """Forward BFS from *start_var* to find reachable hidden-state outvars.
+
+    When ``outvar_to_group_index`` is provided, the search restricts itself to
+    hidden outvars in the *closest* hidden group — the first one encountered.
+    Outvars from different groups (e.g. hidden states of a downstream layer in
+    a stacked model) are pruned so the relation only tracks the recurrence of
+    the layer that this primitive actually feeds.
+
+    The BFS stops at any other ETP primitive that is not gradient-enabled:
+    crossing such a primitive would encode a ``weight -> weight -> hidden``
+    pathway, which ETP does not decompose correctly (the downstream primitive
+    already owns the gradient of its input).
+    """
+    from collections import deque
+
     reachable: Set[Var] = set()
-    frontier = [start_var]
+    home_group_indices: Set[int] = set()
+    frontier: deque = deque([start_var])
     visited: Set[Var] = set()
     while frontier:
-        v = frontier.pop()
+        v = frontier.popleft()
         if v in visited:
             continue
         visited.add(v)
         if v in hidden_outvar_set:
-            reachable.add(v)
+            if outvar_to_group_index is not None:
+                g = outvar_to_group_index.get(v)
+                if not home_group_indices:
+                    # First hidden outvar reached — fix the home group(s).
+                    home_group_indices.add(g)
+                if g in home_group_indices:
+                    reachable.add(v)
+                else:
+                    # Different hidden group → do not cross further.
+                    continue
+            else:
+                reachable.add(v)
         for eqn in consumer_map.get(v, []):
+            # Do not cross another ETP primitive unless it is gradient-enabled
+            # (e.g. ``etp_elemwise_p``). This prevents the "weight -> weight
+            # -> hidden" pathway from registering a spurious relation — the
+            # downstream primitive already owns the gradient of its input.
+            if (
+                is_etp_primitive(eqn.primitive)
+                and not is_etp_enable_gradient_primitive(eqn.primitive)
+            ):
+                continue
             for ov in eqn.outvars:
                 if ov not in visited:
                     frontier.append(ov)
@@ -207,31 +252,41 @@ def _build_transition_jaxpr(
     jaxpr: Jaxpr,
     consumer_map: Dict[Var, List[JaxprEqn]],
 ) -> Jaxpr:
-    """Build the sub-Jaxpr mapping y_var → hidden group outputs."""
-    # Backward pass: find equations contributing to hidden outvars
-    eqns_needed = []
+    """Build the sub-Jaxpr mapping y_var → hidden group outputs.
+
+    Collects all equations that backward-contribute to ``group.hidden_outvars``.
+    Vars referenced by these equations but not produced by them (and not
+    ``y_var``) become constvars, whose values must be supplied at evaluation
+    time. Hidden outvars that do not depend on ``y_var`` still get computed
+    from their constvar dependencies — their jvp tangent with respect to
+    ``y_var`` is then zero, as expected.
+
+    Equations that belong to another ETP primitive (not gradient-enabled) are
+    treated as constvar boundaries: their outputs are supplied externally and
+    their internal computation (and trainable weights) is *not* pulled into
+    the transition jaxpr. This keeps ``dh/dy`` strictly through the
+    non-parametric tail.
+    """
+    # Backward pass: find all equations contributing to hidden outvars
+    selected_rev = []
     all_needed_vars = set(group.hidden_outvars)
     for eqn in reversed(jaxpr.eqns):
         if any(ov in all_needed_vars for ov in eqn.outvars):
-            eqns_needed.append(eqn)
+            if (
+                is_etp_primitive(eqn.primitive)
+                and not is_etp_enable_gradient_primitive(eqn.primitive)
+            ):
+                # Another ETP primitive on the tail — stop here. Its output
+                # becomes a constvar of this transition jaxpr.
+                continue
+            selected_rev.append(eqn)
             for iv in eqn.invars:
                 if isinstance(iv, Var):
                     all_needed_vars.add(iv)
-    eqns_needed.reverse()
+    selected = list(reversed(selected_rev))
 
-    # Filter: only keep equations reachable from y_var
-    reachable_from_y = {y_var}
-    selected = []
-    for eqn in eqns_needed:
-        if any(
-            (isinstance(iv, Var) and iv in reachable_from_y)
-            for iv in eqn.invars
-        ):
-            selected.append(eqn)
-            for ov in eqn.outvars:
-                reachable_from_y.add(ov)
-
-    # Determine const vars
+    # Determine const vars: vars used by selected eqns but not produced by
+    # them and not the jaxpr's invar (y_var).
     produced = {y_var}
     for eqn in selected:
         for ov in eqn.outvars:
@@ -281,6 +336,7 @@ def find_hidden_param_op_relations_from_jaxpr(
     path_to_state: Dict[Path, brainstate.State],
     outvar_to_hidden_path: Dict[HiddenOutVar, Path],
     hid_path_to_group: Dict[Path, HiddenGroup],
+    weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
     **_ignored,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*.
@@ -291,6 +347,16 @@ def find_hidden_param_op_relations_from_jaxpr(
     producers = _build_producer_map(jaxpr)
     consumers = _build_consumer_map(jaxpr)
     hidden_outvar_set = set(outvar_to_hidden_path.keys())
+
+    # Build an outvar → group-index lookup so the forward BFS can stop at
+    # hidden outvars that belong to a different hidden group (e.g. downstream
+    # layer in a stacked model). This keeps each relation scoped to the
+    # recurrence of the layer it actually feeds.
+    outvar_to_group_index: Dict[Var, int] = {
+        ov: hid_path_to_group[p].index
+        for ov, p in outvar_to_hidden_path.items()
+        if p in hid_path_to_group
+    }
 
     etp_eqns = _scan_jaxpr_for_etp_eqns(jaxpr)
     relations: List[HiddenParamOpRelation] = []
@@ -321,9 +387,40 @@ def find_hidden_param_op_relations_from_jaxpr(
 
         weight_state = path_to_state[weight_path]
 
+        # --- Find weight_leaf_idx: position of weight_var among the owning
+        # ParamState's invar leaves. Required at runtime so callers can pick
+        # the correct leaf out of a pytree-valued ParamState.
+        weight_leaf_idx = 0
+        if weight_path_to_invars is not None:
+            invars_list = weight_path_to_invars.get(weight_path, [])
+            # The actual weight_var may have been produced by an upstream
+            # equation (mask/weight_fn) — trace it back to the ParamState's
+            # original invar that feeds the primitive chain.
+            source_var = weight_var
+            frontier = [weight_var]
+            visited: Set[Var] = set()
+            while frontier:
+                v = frontier.pop()
+                if v in visited:
+                    continue
+                visited.add(v)
+                if v in invars_list:
+                    source_var = v
+                    break
+                eqn = producers.get(v)
+                if eqn is not None:
+                    for iv in eqn.invars:
+                        if isinstance(iv, Var) and iv not in visited:
+                            frontier.append(iv)
+            try:
+                weight_leaf_idx = invars_list.index(source_var)
+            except ValueError:
+                weight_leaf_idx = 0
+
         # --- Find connected hidden states ---
         reachable_hvars = _find_reachable_hidden_outvars(
             y_var, consumers, hidden_outvar_set,
+            outvar_to_group_index=outvar_to_group_index,
         )
 
         # Filter by shape compatibility
@@ -370,6 +467,8 @@ def find_hidden_param_op_relations_from_jaxpr(
             primitive=primitive,
             weight=weight_state,
             weight_path=weight_path,
+            weight_var=weight_var,
+            weight_leaf_idx=weight_leaf_idx,
             x_var=x_var,
             y_var=y_var,
             hidden_groups=connected_groups,
@@ -391,16 +490,22 @@ def find_hidden_param_op_relations_from_minfo(
     plain ``ParamState`` weights used with ETP primitives are recognised.
     """
 
-    # Build invar → weight_path for ALL ParamState
+    # Build invar → weight_path for ALL ParamState, plus an ordered list
+    # of leaf invars per path (needed to recover weight_leaf_idx so callers
+    # can pick the weight leaf out of a pytree-valued ParamState at runtime).
     invar_to_weight_path: Dict[Var, Path] = {}
+    weight_path_to_invars: Dict[Path, List[Var]] = {}
     for invar_tree, st in zip(
         minfo.state_tree_invars, minfo.compiled_model_states
     ):
         if isinstance(st, brainstate.ParamState):
             path = minfo.state_id_to_path[id(st)]
-            for v in jax.tree.leaves(invar_tree):
-                if isinstance(v, Var):
-                    invar_to_weight_path[v] = path
+            leaf_invars = [
+                v for v in jax.tree.leaves(invar_tree) if isinstance(v, Var)
+            ]
+            weight_path_to_invars.setdefault(path, leaf_invars)
+            for v in leaf_invars:
+                invar_to_weight_path[v] = path
 
     # Merge with the existing mapping
     for v, p in minfo.invar_to_weight_path.items():
@@ -412,6 +517,7 @@ def find_hidden_param_op_relations_from_minfo(
         path_to_state=minfo.retrieved_model_states,
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         hid_path_to_group=hid_path_to_group,
+        weight_path_to_invars=weight_path_to_invars,
     )
 
 

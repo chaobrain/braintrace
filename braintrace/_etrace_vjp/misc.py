@@ -17,7 +17,7 @@ from functools import partial
 from typing import Any, Dict, Optional
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 
 
@@ -130,6 +130,72 @@ def _sum_dim(xs: jax.Array, axis: int = -1):
     return jax.tree.map(lambda x: u.math.sum(x, axis=axis), xs)
 
 
+def _unit_safe_add(a, b):
+    """Add two leaves, stripping units only when one side has units and the other does not.
+
+    Gradient contributions for the same weight may come from paths that
+    preserve physical units (e.g. VJP through the original jaxpr) and paths
+    that already strip them (e.g. ETP ``xy_to_dw`` rules). When the two sides
+    disagree on unit representation, both are reduced to plain arrays before
+    adding; otherwise units are preserved.
+    """
+    a_is_q = isinstance(a, u.Quantity)
+    b_is_q = isinstance(b, u.Quantity)
+    if a_is_q != b_is_q:
+        a = u.get_mantissa(a) if a_is_q else a
+        b = u.get_mantissa(b) if b_is_q else b
+    return u.math.add(a, b)
+
+
+def _extract_weight_leaf(weight_val: brainstate.typing.PyTree, leaf_idx: int):
+    """Extract the weight array from a (possibly pytree) ``ParamState`` value.
+
+    When ``Linear`` (and related layers) merge weight and bias into a single
+    ``ParamState({'weight': W, 'bias': b})``, runtime code that needs only the
+    weight array must pick it out of the pytree value. ``leaf_idx`` is the
+    ``weight_leaf_idx`` recorded on the ``HiddenParamOpRelation`` at compile
+    time — it points into ``jax.tree.leaves(weight_val)`` so the right leaf is
+    returned regardless of dict-key ordering or pytree shape.
+    """
+    leaves = jax.tree.leaves(weight_val)
+    if not leaves:
+        return weight_val
+    if leaf_idx >= len(leaves):
+        # Defensive: fall back to the first leaf if the index is out of range.
+        return leaves[0]
+    return leaves[leaf_idx]
+
+
+def _wrap_leaf_as_pytree(
+    leaf_val: jax.Array,
+    reference_pytree: brainstate.typing.PyTree,
+    leaf_idx: int,
+):
+    """Insert ``leaf_val`` at position ``leaf_idx`` in a pytree with the same
+    structure as ``reference_pytree``, filling other leaves with zeros.
+
+    Used to turn an etrace-computed weight gradient (just one array) into a
+    gradient pytree that matches the ``ParamState``'s pytree value, e.g.
+    ``{'weight': dW, 'bias': zeros_like(b)}``. The bias slot is zero because
+    the current etrace rules only track the weight leaf; bias gradients from
+    this pathway are simply absent.
+
+    If ``reference_pytree`` is a bare array (no container nesting), the
+    wrapping is a no-op — the unchanged ``leaf_val`` is returned.
+    """
+    ref_treedef = jax.tree.structure(reference_pytree)
+    # Bare arrays have the trivial treedef of a single leaf. In that case the
+    # ParamState is already shaped like the raw weight, so no wrapping needed.
+    if ref_treedef.num_leaves <= 1 and ref_treedef == jax.tree.structure(0):
+        return leaf_val
+    leaves = jax.tree.leaves(reference_pytree)
+    new_leaves = [
+        leaf_val if i == leaf_idx else u.math.zeros_like(leaf)
+        for i, leaf in enumerate(leaves)
+    ]
+    return jax.tree.unflatten(ref_treedef, new_leaves)
+
+
 def _update_dict(
     the_dict: Dict,
     key: Any,
@@ -148,15 +214,18 @@ def _update_dict(
       error_when_no_key: bool, whether to raise an error when the key does not exist.
 
     """
-    old_value = the_dict.get(key, None)
-    if old_value is None:
+    if key not in the_dict:
         if error_when_no_key:
             raise ValueError(f'The key {key} does not exist in the dictionary. ')
         the_dict[key] = value
     else:
-        the_dict[key] = jax.tree.map(
-            u.math.add,
-            old_value,
-            value,
-            is_leaf=lambda x: isinstance(x, u.Quantity)
-        )
+        old_value = the_dict[key]
+        if old_value is None:
+            the_dict[key] = value
+        else:
+            the_dict[key] = jax.tree.map(
+                _unit_safe_add,
+                old_value,
+                value,
+                is_leaf=lambda x: isinstance(x, u.Quantity)
+            )

@@ -29,7 +29,7 @@ from functools import partial
 from typing import Dict, Tuple, List, Optional, Sequence
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 
@@ -57,7 +57,13 @@ from braintrace._typing import (
     dG_Weight,
 )
 from .base import ETraceVjpAlgorithm
-from .misc import _reset_state_in_a_dict, _sum_dim, _update_dict
+from .misc import (
+    _extract_weight_leaf,
+    _reset_state_in_a_dict,
+    _sum_dim,
+    _update_dict,
+    _wrap_leaf_as_pytree,
+)
 
 __all__ = [
     'IODimVjpAlgorithm',  # the diagonally approximated algorithm with the input-output dimension complexity
@@ -244,7 +250,7 @@ def _init_IO_dim_state(
         #
         init_fn = ETP_RULES_INIT_PP[relation.primitive]
         etrace_dfs[key] = EligibilityTrace(
-            init_fn(relation.x_var, relation.y_var, relation.weight, group.num_state)
+            init_fn(relation.x_var, relation.y_var, relation.weight_var, group.num_state)
         )
 
 
@@ -436,6 +442,8 @@ def _solve_IO_dim_weight_gradients(
         else:
             x = None
         weight_path = relation.weight_path
+        # Extract the weight array from a (possibly pytree) ParamState value.
+        weight_leaf = _extract_weight_leaf(weight_vals[weight_path], relation.weight_leaf_idx)
         xy_to_dw = ETP_RULES_XY_TO_DW[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
@@ -447,7 +455,7 @@ def _solve_IO_dim_weight_gradients(
             df_hid = df * dG_hidden_groups[group.index]
 
             fn_vmap = jax.vmap(
-                lambda df: xy_to_dw(x, df, weight_vals[weight_path], **eqn_params),
+                lambda df: xy_to_dw(x, df, weight_leaf, **eqn_params),
                 in_axes=-1, out_axes=-1,
             )
             if (relation.primitive is etp_elemwise_p) and batched:
@@ -456,6 +464,9 @@ def _solve_IO_dim_weight_gradients(
             else:
                 dg_weight = _sum_dim(fn_vmap(df_hid))
 
+            # Wrap to match the ParamState's pytree structure so the bias
+            # slot of a merged ``{weight, bias}`` Linear gets a zero entry.
+            dg_weight = _wrap_leaf_as_pytree(dg_weight, weight_vals[weight_path], relation.weight_leaf_idx)
             # update the weight gradients
             _update_dict(dG_weights, weight_path, dg_weight)  # update the weight gradients
 

@@ -17,7 +17,7 @@ from functools import partial
 from typing import Dict, Tuple, Optional, Sequence
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 
@@ -43,7 +43,13 @@ from braintrace._typing import (
     dG_Weight,
 )
 from .base import ETraceVjpAlgorithm
-from .misc import _reset_state_in_a_dict, _sum_dim, _update_dict
+from .misc import (
+    _extract_weight_leaf,
+    _reset_state_in_a_dict,
+    _sum_dim,
+    _update_dict,
+    _wrap_leaf_as_pytree,
+)
 
 __all__ = [
     'ParamDimVjpAlgorithm',
@@ -68,7 +74,7 @@ def _init_param_dim_state(
             raise ValueError(f'The relation {bwg_key} has been added. ')
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
         etrace_bwg[bwg_key] = EligibilityTrace(
-            init_fn(relation.x_var, relation.y_var, relation.weight, group.num_state)
+            init_fn(relation.x_var, relation.y_var, relation.weight_var, group.num_state)
         )
 
 
@@ -153,7 +159,13 @@ def _update_param_dim_etrace_scan_fn(
         # 3. the operator information
         #
         weight_path = relation.weight_path
-        weight_val = weight_path_to_vals[weight_path]
+        # ``weight_path_to_vals[weight_path]`` may be a pytree (e.g. the merged
+        # ``{'weight': W, 'bias': b}`` dict that ``Linear`` exposes). The
+        # xy_to_dw rule operates on the weight array only — pick it out via
+        # the compile-time-recorded leaf index.
+        weight_val = _extract_weight_leaf(
+            weight_path_to_vals[weight_path], relation.weight_leaf_idx,
+        )
         xy_to_dw = ETP_RULES_XY_TO_DW[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
@@ -285,6 +297,7 @@ def _solve_param_dim_weight_gradients(
     dG_weights: Dict[Path, dG_Weight],  # weight gradients
     dG_hidden_groups: Sequence[jax.Array],  # hidden group gradients
     weight_hidden_relations: Sequence[HiddenParamOpRelation],
+    weight_vals: Dict[Path, PyTree],  # current ParamState pytree values for structure
 ):
     """
     Compute and update the weight gradients for parameter dimensions using eligibility trace data.
@@ -360,6 +373,13 @@ def _solve_param_dim_weight_gradients(
             # unit restoration
             dg_weight = fn_unit_restore(dg_weight)
 
+            # Wrap the etrace-computed weight gradient to match the
+            # ParamState's pytree structure (e.g. merged ``{weight, bias}``
+            # Linear). Non-weight leaves (bias) are zero-filled — bias
+            # gradients are not currently tracked by the D-RTRL rules.
+            dg_weight = _wrap_leaf_as_pytree(
+                dg_weight, weight_vals[weight_path], relation.weight_leaf_idx,
+            )
             # update the weight gradients
             _update_dict(temp_data, weight_path, dg_weight)
 
@@ -685,6 +705,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             dG_weights,
             dl_to_hidden_groups,
             self.graph.hidden_param_op_relations,
+            weight_vals,
         )
 
         # update the non-etrace weight gradients
