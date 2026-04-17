@@ -747,8 +747,25 @@ def find_hidden_param_op_relations_from_jaxpr(
                 cache=weight_trace_cache,
             )
             if t_path is None:
-                # Trainable invar doesn't trace to any ParamState —
-                # skip it; later tasks emit a diagnostic here.
+                # Trainable invar doesn't trace to any ParamState (e.g. a
+                # constant bias passed directly as a jnp.array). Emit an INFO
+                # diagnostic so users know no gradient will be produced for
+                # this input, then skip it.
+                try:
+                    invar_index = eqn.invars.index(invar)
+                except ValueError:
+                    invar_index = -1
+                emit(
+                    kind=DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE,
+                    level=DiagnosticLevel.INFO,
+                    message=(
+                        f"ETP primitive {eqn.primitive.name}: trainable input "
+                        f"'{key}' at invar index {invar_index} does not trace to any "
+                        f"ParamState. No online gradient will be produced for this input."
+                    ),
+                    primitive=eqn.primitive,
+                    context={'key': key},
+                )
                 continue
             t_leaf = _resolve_weight_leaf_idx(
                 invar, t_path, producers, weight_path_to_invars,

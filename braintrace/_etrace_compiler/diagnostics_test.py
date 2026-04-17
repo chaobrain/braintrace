@@ -140,3 +140,103 @@ class TestPrincipleTypeIdentityDispatch:
             assert record.primitive is etp_mv_p, (
                 f'Expected primitive identity etp_mv_p, got {record.primitive}'
             )
+
+
+class TestTrainableInvarNotParamState:
+    """When a trainable invar (e.g. a constant bias) does not trace back to
+    any ParamState, the compiler must emit
+    :attr:`DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE` at INFO level.
+
+    The relation itself is still registered (the weight ParamState is still
+    found), but the bias key is silently dropped from ``trainable_vars`` /
+    ``trainable_paths`` and an INFO diagnostic is emitted so users know
+    that wrapping the bias in a ParamState is required to train it.
+    """
+
+    def test_constant_bias_emits_diagnostic(self):
+        import jax.numpy as jnp
+
+        bias_const = jnp.ones((4,))  # NOT wrapped in a ParamState
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value, bias_const)
+                )
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        graph = compile_etrace_graph(
+            cell, jnp.zeros((1, 4)), include_hidden_perturb=False
+        )
+
+        kinds = [d.kind for d in graph.diagnostics]
+        assert DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE in kinds, (
+            f'Expected TRAINABLE_INVAR_NOT_PARAMSTATE in diagnostics; got {kinds}'
+        )
+
+    def test_constant_bias_diagnostic_names_key(self):
+        """The diagnostic message includes the key name ('bias')."""
+        import jax.numpy as jnp
+
+        bias_const = jnp.ones((4,))
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value, bias_const)
+                )
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        graph = compile_etrace_graph(
+            cell, jnp.zeros((1, 4)), include_hidden_perturb=False
+        )
+
+        records = graph.explain(kind=DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE)
+        assert len(records) >= 1
+        record = records[0]
+        assert record.level is DiagnosticLevel.INFO
+        assert record.context is not None
+        assert record.context.get('key') == 'bias'
+
+    def test_paramstate_bias_does_not_emit_diagnostic(self):
+        """When bias IS a ParamState, the diagnostic must NOT be emitted."""
+        import jax.numpy as jnp
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)))
+                self.b = brainstate.ParamState(jnp.zeros((4,)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value, self.b.value)
+                )
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        graph = compile_etrace_graph(
+            cell, jnp.zeros((1, 4)), include_hidden_perturb=False
+        )
+
+        records = graph.explain(kind=DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE)
+        assert len(records) == 0, (
+            f'Expected no TRAINABLE_INVAR_NOT_PARAMSTATE when bias is a ParamState; '
+            f'got {records}'
+        )

@@ -72,6 +72,9 @@ class DiagnosticKind(str, Enum):
     # Path classification (informational; relation still included)
     RELATION_PARTIAL_PATH = 'relation_partial_path'
 
+    # Trainable invar did not trace back to any ParamState (e.g. a constant bias)
+    TRAINABLE_INVAR_NOT_PARAMSTATE = 'trainable_invar_not_paramstate'
+
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
     PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'
