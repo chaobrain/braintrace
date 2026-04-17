@@ -187,11 +187,23 @@ For each equation in the jaxpr:
 1. Check `eqn.primitive in ETP_PRIMITIVES` (type identity, not string match)
 2. Extract weight var from invars (index 1 for matmul/conv, index 0 for elemwise)
 3. Trace weight var **backward** through jaxpr to find originating `ParamState`
-4. BFS **forward** from output var to find reachable hidden-state outvars
+4. BFS **forward** from output var to find reachable hidden-state outvars — **stops at any other non-gradient-enabled ETP primitive** (see invariant below)
 5. Filter by shape compatibility (broadcast check)
-6. Build transition jaxpr: y → h (for computing df = dh/dy)
+6. Build transition jaxpr: y → h — **equations belonging to other non-gradient-enabled ETP primitives are treated as constvar boundaries**, not recursed into
 
 Result: `HiddenParamOpRelation` — connects a `ParamState` to its reachable hidden states via an ETP primitive.
+
+### Invariant: no "weight → weight → hidden" pathway
+
+Each ETP primitive's rules (`xy_to_dw`, `yw_to_w`) assume `h = g(y)` where `g` contains **no other trainable ETP weights**. If primitive `W1`'s output flows through another non-gradient-enabled ETP primitive `W2` before reaching `h`, `W1` must **not** be recorded as a relation:
+
+1. `W2` already owns the gradient of its input (which depends on `W1`) — registering `W1` too would double-count.
+2. `W2`'s `xy_to_dw` assumes its `x` is externally-supplied data, not a function of another trainable ETP weight.
+3. The only correct decomposition bundles `W1` and `W2` together, which per-primitive ETP cannot express.
+
+The filter is enforced in `_find_reachable_hidden_outvars` and `_build_transition_jaxpr` via `is_etp_enable_gradient_primitive`. Gradient-enabled primitives (only `etp_elemwise_p` today; see `register_primitive(..., gradient_enabled=True)` in `_etrace_operators.py`) are identity-like and *may* sit on the tail.
+
+**Concrete consequence — `GRUCell` has 3 Linears but only 2 ETP relations** (`Wz`, `Wh`). `Wr`'s output reaches `h` only via `Wh`'s matmul (`r = sigmoid(Wr(xh)); rh = r * old_h; h = activation(Wh(concat([x, rh])))`), so `Wr` is correctly excluded and warned as non-temporal. Tests relying on these counts (`hid_param_op_test.py::test_gru_one_layer`, `graph_test.py::test_gru_one_layer`) bake in `len(relations) == 2`. When adding or modifying an RNN cell, walk each parameter's path to `h` and count only those whose tail is non-parametric.
 
 ## Adding a new primitive
 
