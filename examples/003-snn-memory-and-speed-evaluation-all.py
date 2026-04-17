@@ -356,9 +356,6 @@ class Trainer(object):
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, mode=brainstate.mixin.Batching())
         elif self.args.method == 'diag':
             model = braintrace.D_RTRL(self.target, mode=brainstate.mixin.Batching())
-        elif self.args.method == 'hybrid':
-            model = braintrace.HybridDimVjpAlgorithm(self.target, self.args.etrace_decay,
-                                                     mode=brainstate.mixin.Batching())
         else:
             raise ValueError(f'Unknown online learning methods: {self.args.method}.')
 

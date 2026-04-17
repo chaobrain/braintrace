@@ -460,8 +460,6 @@ class Trainer(object):
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, )
         elif self.args.method == 'diag':
             model = braintrace.D_RTRL(self.target, )
-        elif self.args.method == 'hybrid':
-            model = braintrace.HybridDimVjpAlgorithm(self.target, self.args.etrace_decay, )
         else:
             raise ValueError(f'Unknown online learning methods: {self.args.method}.')
 

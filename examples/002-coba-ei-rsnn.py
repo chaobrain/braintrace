@@ -413,7 +413,7 @@ class Trainer:
         self.optimizer.register_trainable_weights(weights)
 
         # traning method
-        assert method in ['expsm_diag', 'diag', 'hybrid'], 'Unknown online learning methods.'
+        assert method in ['expsm_diag', 'diag'], 'Unknown online learning methods.'
         self.method = method
         self.acc_threshold = acc_threshold
 
@@ -430,11 +430,9 @@ class Trainer:
 
         # initialize the online learning model
         if self.method == 'expsm_diag':
-            model = braintrace.IODimVjpAlgorithm(self.target, decay_or_rank=0.99)
+            model = braintrace.ES_D_RTRL(self.target, decay_or_rank=0.99)
         elif self.method == 'diag':
-            model = braintrace.ParamDimVjpAlgorithm(self.target)
-        elif self.method == 'hybrid':
-            model = braintrace.HybridDimVjpAlgorithm(self.target, decay_or_rank=0.99)
+            model = braintrace.D_RTRL(self.target)
         else:
             raise ValueError(f'Unknown online learning methods: {self.method}.')
 

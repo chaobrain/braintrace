@@ -78,52 +78,57 @@ class SparseLinear(brainstate.nn.SparseLinear):
 class LoRA(brainstate.nn.LoRA):
     r"""A standalone LoRA layer.
 
-    LoRA (Low-Rank Adaptation) is a technique used to adapt pre-trained models
-    by introducing low-rank matrices into the model's weight matrices. This
-    allows for efficient fine-tuning of large models with a reduced number of
-    parameters.
+    LoRA (Low-Rank Adaptation) injects two low-rank factors into a layer
+    so a large pre-trained model can be fine-tuned with far fewer
+    parameters. This subclass preserves the upstream
+    :class:`brainstate.nn.LoRA` constructor and replaces only the forward
+    pass so that the multiplication is routed through
+    :func:`braintrace.lora_matmul` and therefore participates in
+    eligibility-trace computation.
 
-    The LoRA layer modifies the original weight matrix :math:`W` by adding a
-    low-rank component :math:`\frac{\alpha}{r} B A`, where :math:`B` and :math:`A`
-    are learnable matrices of rank :math:`r`, and :math:`\alpha` is a scaling factor.
+    The layer adds a low-rank component :math:`\frac{1}{r} B A` to the
+    base weight, where :math:`B` and :math:`A` are learnable factors of
+    rank :math:`r`:
 
     .. math::
 
-        W_{\mathrm{LoRA}} = W_{\text{orig}} + \frac{\alpha}{r} B A
+        W_{\mathrm{LoRA}} = W_{\text{orig}} + \frac{1}{r} B A
+
+    The scaling factor is fixed to ``1 / lora_rank``.
 
     Parameters
     ----------
-    in_features : brainstate.typing.Size
-        The number of input features.
+    in_features : int
+        Number of input features.
     lora_rank : int
-        The rank of the LoRA dimension.
-    out_features : brainstate.typing.Size
-        The number of output features.
-    alpha : float, optional
-        A scaling factor for the LoRA operation. Default is 1.
-    base_module : Callable or None, optional
-        A base module to call and substitute, if possible. Default is None.
-    B_init : Callable or ArrayLike, optional
-        Initializer function for the weight matrix B. Default is ZeroInit().
-    A_init : Callable or ArrayLike, optional
-        Initializer function for the weight matrix A. Default is LecunNormal().
-    
+        Rank of the LoRA decomposition.
+    out_features : int
+        Number of output features.
+    base_module : brainstate.nn.Module or None, optional
+        Optional base layer that is called on ``x`` and added to the LoRA
+        branch. Default ``None``.
+    kernel_init : Callable or ArrayLike, optional
+        Initializer used for **both** ``lora_a`` (in×rank) and ``lora_b``
+        (rank×out). Default is ``LecunNormal()``. To get the classic
+        "LoRA-zero" initialisation use ``init.ZeroInit()``.
+    param_type : type, optional
+        ``ParamState`` subclass used to wrap the weights. Default is
+        ``brainstate.ParamState``.
+    in_size : int or Sequence[int], optional
+        Optional explicit input size override. Default ``None``.
 
     Attributes
     ----------
-    in_features : brainstate.typing.Size
-        The number of input features.
-    lora_rank : int
-        The rank of the LoRA dimension.
-    out_features : brainstate.typing.Size
-        The number of output features.
-    alpha : float
-        A scaling factor for the LoRA operation.
-    base_module : Callable or None
-        A base module to call and substitute, if possible.
-    weight_op : ParamState
-        The parameter object that holds the LoRA weights and the operation to
-        be performed on them.
+    in_features : int
+        Number of input features.
+    out_features : int
+        Number of output features.
+    base_module : brainstate.nn.Module or None
+        The optional base layer added to the LoRA branch.
+    weight : ParamState
+        ``ParamState`` whose value is a dict with two keys: ``'lora_a'``
+        of shape ``(in_features, lora_rank)`` and ``'lora_b'`` of shape
+        ``(lora_rank, out_features)``.
 
     Examples
     --------
@@ -134,28 +139,26 @@ class LoRA(brainstate.nn.LoRA):
         >>>
         >>> # Create a standalone LoRA layer
         >>> brainstate.environ.set(precision=64)
-        >>> layer = braintrace.nn.LoRA(3, 2, 4)
+        >>> layer = braintrace.nn.LoRA(in_features=3, lora_rank=2, out_features=4)
         >>> x = brainstate.random.randn(16, 3)
         >>> y = layer(x)
         >>> print(y.shape)
         (16, 4)
         >>>
-        >>> # Wrap around existing linear layer
+        >>> # Wrap around an existing linear layer
         >>> linear = brainstate.nn.Linear(3, 4)
         >>> wrapper = braintrace.nn.LoRA(3, 2, 4, base_module=linear)
-        >>> assert wrapper.base_module == linear
+        >>> assert wrapper.base_module is linear
         >>> y = wrapper(x)
         >>> print(y.shape)
         (16, 4)
     """
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.LoRA.__doc__.replace('brainstate', 'braintrace')
 
     def update(self, x: ArrayLike):
         param = self.weight.value
-        alpha = 1.
         lora_rank = param['lora_b'].shape[0]
-        out = lora_matmul(x, param['lora_b'], param['lora_a'], alpha=alpha / lora_rank)
+        out = lora_matmul(x, param['lora_b'], param['lora_a'], alpha=1.0 / lora_rank)
         if self.base_module is not None:
             out += self.base_module(x)
         return out

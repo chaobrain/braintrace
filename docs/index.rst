@@ -121,6 +121,7 @@ See also the ecosystem
 
    changelog.md
    apis/concepts.rst
+   apis/primitives.rst
    apis/compiler.rst
    apis/algorithms.rst
    apis/nn.rst

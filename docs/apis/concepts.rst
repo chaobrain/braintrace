@@ -50,22 +50,20 @@ Controlling Parameter Participation
            self.h.value = jax.nn.tanh(inp + braintrace.matmul(self.h.value, self.w_rec.value))
            return self.h.value
 
-.. list-table:: Old vs New Parameter Selection
+.. list-table:: Parameter Selection Rules
    :header-rows: 1
-   :widths: 30 35 35
+   :widths: 40 60
 
-   * - Aspect
-     - Old System
-     - New System (ETP)
-   * - Include in online learning
-     - Use ``ETraceParam``
-     - Use ``braintrace.matmul(x, w)``
-   * - Exclude from online learning
-     - Use ``brainstate.ParamState``
-     - Use ``x @ w`` (regular JAX op)
+   * - Goal
+     - How
+   * - Include parameter in online learning
+     - Use a ``braintrace.*`` ETP primitive (e.g. ``braintrace.matmul(x, w)``)
+   * - Exclude parameter from online learning
+     - Use a regular JAX op (e.g. ``x @ w``)
    * - Selection mechanism
-     - Parameter class type
-     - Operation primitive type
+     - Operation primitive type — *not* parameter class type. Every
+       ``brainstate.ParamState`` is eligible; participation depends solely
+       on whether an ETP primitive consumed it.
 
 
 Input Data
