@@ -111,8 +111,18 @@ def is_etp_primitive(primitive):
     return primitive in ETP_PRIMITIVES
 
 
+GRADIENT_ENABLED_PRIMITIVES: set = set()  # populated as primitives are registered
+
+
 def is_etp_enable_gradient_primitive(primitive):
-    return False
+    """Check whether an ETP primitive should be evaluated (rather than skipped)
+    when encountered inside a ``pjit`` equation during Jaxpr traversal.
+
+    Primitives that mark identity-like operations (e.g. ``etp_elemwise_p``) must
+    be evaluated so that downstream consumers see the correct value flow. Other
+    ETP primitives are structural markers whose value is supplied separately.
+    """
+    return primitive in GRADIENT_ENABLED_PRIMITIVES
 
 
 BATCHED_PRIMITIVES: set = set()  # populated as primitives are registered
@@ -160,14 +170,14 @@ class ETPPrimitive(Primitive):
     def register_init_drtrl(self, fn: Callable):
         """Register a D-RTRL trace initialization rule.
 
-        Signature: ``(x_var, y_var, weight, num_hidden_state) -> zeros``.
+        Signature: ``(x_var, y_var, weight_var, num_hidden_state) -> zeros``.
         """
         ETP_RULES_INIT_DRTRL[self] = fn
 
     def register_init_pp(self, fn: Callable):
         """Register a pp_prop (IO-dim) df trace initialization rule.
 
-        Signature: ``(x_var, y_var, weight, num_hidden_state) -> zeros``.
+        Signature: ``(x_var, y_var, weight_var, num_hidden_state) -> zeros``.
         """
         ETP_RULES_INIT_PP[self] = fn
 
@@ -193,7 +203,7 @@ class ETPPrimitive(Primitive):
             ETP_RULES_INIT_PP[self] = init_pp
 
 
-def register_primitive(name, impl_fn, *, batched=False):
+def register_primitive(name, impl_fn, *, batched=False, gradient_enabled=False):
     """Create an ETP primitive with all JAX rules auto-derived from *impl_fn*.
 
     Registered automatically:
@@ -213,6 +223,10 @@ def register_primitive(name, impl_fn, *, batched=False):
         name: Primitive name (e.g., ``'etp_mm'``).
         impl_fn: Implementation function.
         batched: Whether this primitive operates on batched data.
+        gradient_enabled: If ``True``, this primitive is evaluated (rather
+            than skipped) when the compiler encounters it inside a ``pjit``
+            equation. Identity-like primitives such as ``etp_elemwise_p``
+            should set this flag so their value flows to downstream consumers.
 
     Returns:
         :class:`ETPPrimitive`: The registered primitive.
@@ -221,6 +235,8 @@ def register_primitive(name, impl_fn, *, batched=False):
     ETP_PRIMITIVES.add(p)
     if batched:
         BATCHED_PRIMITIVES.add(p)
+    if gradient_enabled:
+        GRADIENT_ENABLED_PRIMITIVES.add(p)
 
     # impl
     p.def_impl(impl_fn)
@@ -278,17 +294,17 @@ def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False):
 
 def _mm_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
     r"""VJP of ``y = x @ w``, per-sample via vmap."""
-    _, vjp_fn = jax.vjp(lambda w_: x @ w_, w)
-    return vjp_fn(hidden_dim)[0]
+    _, vjp_fn = jax.vjp(lambda w_: u.get_mantissa(x @ w_), w)
+    return u.get_mantissa(vjp_fn(hidden_dim)[0])
 
 
-def _mm_init_drtrl(x_var, y_var, weight, num_hidden_state):
+def _mm_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
     batch = x_var.aval.shape[0]
-    w_shape = jnp.shape(weight.value)
+    w_shape = weight_var.aval.shape
     return jnp.zeros((batch, *w_shape, num_hidden_state))
 
 
-def _mm_init_pp(x_var, y_var, weight, num_hidden_state):
+def _mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -309,16 +325,16 @@ def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False):
 
 def _mv_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
     r"""VJP of ``y = x @ w``."""
-    _, vjp_fn = jax.vjp(lambda w_: x @ w_, w)
-    return vjp_fn(hidden_dim)[0]
+    _, vjp_fn = jax.vjp(lambda w_: u.get_mantissa(x @ w_), w)
+    return u.get_mantissa(vjp_fn(hidden_dim)[0])
 
 
-def _mv_init_drtrl(x_var, y_var, weight, num_hidden_state):
-    w_shape = jnp.shape(weight.value)
+def _mv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+    w_shape = weight_var.aval.shape
     return jnp.zeros((*w_shape, num_hidden_state))
 
 
-def _mv_init_pp(x_var, y_var, weight, num_hidden_state):
+def _mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -349,16 +365,16 @@ def _elemwise_xy_to_dw(x, hidden_dim, w):
     return hidden_dim
 
 
-def _elemwise_init_drtrl(x_var, y_var, weight, num_hidden_state):
+def _elemwise_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
     y_shape = y_var.aval.shape
     return jnp.zeros((*y_shape, num_hidden_state))
 
 
-def _elemwise_init_pp(x_var, y_var, weight, num_hidden_state):
+def _elemwise_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_elemwise_p = register_primitive('etp_elemwise', _etp_elemwise_impl)
+etp_elemwise_p = register_primitive('etp_elemwise', _etp_elemwise_impl, gradient_enabled=True)
 etp_elemwise_p.register_yw_to_w(_elemwise_yw_to_w)
 etp_elemwise_p.register_xy_to_dw(_elemwise_xy_to_dw)
 etp_elemwise_p.register_init_drtrl(_elemwise_init_drtrl)
@@ -410,19 +426,19 @@ def _conv_xy_to_dw(x, hidden_dim, w, **params):
     conv_kw = {k: v for k, v in params.items() if k != 'has_bias'}
 
     def _fwd(w_):
-        return jax.lax.conv_general_dilated(x, w_, **conv_kw)
+        return u.get_mantissa(jax.lax.conv_general_dilated(x, w_, **conv_kw))
 
     _, vjp_fn = jax.vjp(_fwd, w)
-    return vjp_fn(hidden_dim)[0]
+    return u.get_mantissa(vjp_fn(hidden_dim)[0])
 
 
-def _conv_init_drtrl(x_var, y_var, weight, num_hidden_state):
+def _conv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
     batch = x_var.aval.shape[0]
-    kernel_shape = jnp.shape(weight.value)
+    kernel_shape = weight_var.aval.shape
     return jnp.zeros((batch, *kernel_shape, num_hidden_state))
 
 
-def _conv_init_pp(x_var, y_var, weight, num_hidden_state):
+def _conv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -455,26 +471,26 @@ def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
 
 
 def _sp_xy_to_dw(x, hidden_dim, w, *, sparse_mat=None, has_bias=False):
-    _, vjp_fn = jax.vjp(lambda w_: x @ sparse_mat.with_data(w_), w)
-    return vjp_fn(hidden_dim)[0]
+    _, vjp_fn = jax.vjp(lambda w_: u.get_mantissa(x @ sparse_mat.with_data(w_)), w)
+    return u.get_mantissa(vjp_fn(hidden_dim)[0])
 
 
-def _sp_mm_init_drtrl(x_var, y_var, weight, num_hidden_state):
+def _sp_mm_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
     batch = x_var.aval.shape[0]
-    nnz = jnp.shape(weight.value)[0]
+    nnz = weight_var.aval.shape[0]
     return jnp.zeros((batch, nnz, num_hidden_state))
 
 
-def _sp_mm_init_pp(x_var, y_var, weight, num_hidden_state):
+def _sp_mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-def _sp_mv_init_drtrl(x_var, y_var, weight, num_hidden_state):
-    nnz = jnp.shape(weight.value)[0]
+def _sp_mv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+    nnz = weight_var.aval.shape[0]
     return jnp.zeros((nnz, num_hidden_state))
 
 
-def _sp_mv_init_pp(x_var, y_var, weight, num_hidden_state):
+def _sp_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -522,36 +538,42 @@ def _lora_xy_to_dw(x, hidden_dim, w_B, w_A, *, alpha=1.0, has_bias=False):
     r"""VJP of ``y = alpha * x @ B @ A``."""
 
     def _fwd(B, A):
-        return alpha * (x @ B @ A)
+        return u.get_mantissa(alpha * (x @ B @ A))
 
     _, vjp_fn = jax.vjp(_fwd, w_B, w_A)
     dB, dA = vjp_fn(hidden_dim)
-    return {'B': dB, 'A': dA}
+    return {'B': u.get_mantissa(dB), 'A': u.get_mantissa(dA)}
 
 
-def _lora_mm_init_drtrl(x_var, y_var, weight, num_hidden_state):
-    # weight.value is a dict {'B': ..., 'A': ...}
-    w = weight.value
+def _lora_mm_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+    # weight_var is the B invar of the primitive; A's shape is (rank, out).
     batch = x_var.aval.shape[0]
+    B_shape = weight_var.aval.shape
+    rank = B_shape[1]
+    out = y_var.aval.shape[-1]
+    A_shape = (rank, out)
     return {
-        'B': jnp.zeros((batch, *jnp.shape(w['B']), num_hidden_state)),
-        'A': jnp.zeros((batch, *jnp.shape(w['A']), num_hidden_state)),
+        'B': jnp.zeros((batch, *B_shape, num_hidden_state)),
+        'A': jnp.zeros((batch, *A_shape, num_hidden_state)),
     }
 
 
-def _lora_mm_init_pp(x_var, y_var, weight, num_hidden_state):
+def _lora_mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-def _lora_mv_init_drtrl(x_var, y_var, weight, num_hidden_state):
-    w = weight.value
+def _lora_mv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+    B_shape = weight_var.aval.shape
+    rank = B_shape[1]
+    out = y_var.aval.shape[-1]
+    A_shape = (rank, out)
     return {
-        'B': jnp.zeros((*jnp.shape(w['B']), num_hidden_state)),
-        'A': jnp.zeros((*jnp.shape(w['A']), num_hidden_state)),
+        'B': jnp.zeros((*B_shape, num_hidden_state)),
+        'A': jnp.zeros((*A_shape, num_hidden_state)),
     }
 
 
-def _lora_mv_init_pp(x_var, y_var, weight, num_hidden_state):
+def _lora_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -682,7 +704,7 @@ def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
     Args:
         x: Input array.
         weight_data: Sparse matrix data (non-zero values).
-        sparse_mat: The sparse matrix structure (``brainunit.sparse.SparseMatrix``).
+        sparse_mat: The sparse matrix structure (``saiunit.sparse.SparseMatrix``).
         bias: Optional bias.
 
     Returns:
