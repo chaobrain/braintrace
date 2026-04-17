@@ -3,68 +3,17 @@
 Online learning for recurrent networks via Eligibility Trace Propagation (ETP). Version 0.2.0.
 
 
-## 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-## 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-## 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
-
+1. Before write any code, describe approach, wait for approval.
+2. Requirements ambiguous? Ask clarifying questions before write code.
+3. After write code, list edge cases + suggest test cases.
+4. Task touch >3 files? Stop, break into smaller tasks first.
+5. Bug? Write test that reproduce it, then fix until test pass.
+6. Every correction: reflect on mistake, plan to avoid repeat.
 
 
 ## What this package does
 
-Implements online learning algorithms (D-RTRL, ES-D-RTRL, postsynaptic propagation) for recurrent neural networks using JAX custom primitives. Models use `braintrace.matmul(x, w)` instead of the old `ETraceParam(w, op=MatMulOp()).execute(x)`. The compiler identifies ETP primitives by type (`eqn.primitive in ETP_PRIMITIVES`) instead of string-matching JIT function names.
+Online learning algos (D-RTRL, ES-D-RTRL, postsynaptic propagation) for RNNs via JAX custom primitives. Models use `braintrace.matmul(x, w)` instead of old `ETraceParam(w, op=MatMulOp()).execute(x)`. Compiler ID ETP primitives by type (`eqn.primitive in ETP_PRIMITIVES`) not string-match JIT names.
 
 ## Package structure
 
@@ -122,7 +71,7 @@ Layer 4: _etrace_vjp/            D-RTRL, ES-D-RTRL, postsynaptic propagation alg
 
 ### ETPPrimitive & rule registries
 
-`register_primitive()` returns an `ETPPrimitive` (subclass of JAX `Primitive`) with built-in rule registration methods. Rules are stored in four global constant dicts:
+`register_primitive()` returns `ETPPrimitive` (subclass of JAX `Primitive`) with built-in rule registration methods. Rules stored in four global constant dicts:
 
 | Registry | Method on `ETPPrimitive` | Signature |
 |---|---|---|
@@ -131,31 +80,31 @@ Layer 4: _etrace_vjp/            D-RTRL, ES-D-RTRL, postsynaptic propagation alg
 | `ETP_RULES_INIT_DRTRL` | `register_init_drtrl(fn)` | `(x_var, y_var, weight, num_hidden_state) -> zeros` |
 | `ETP_RULES_INIT_PP` | `register_init_pp(fn)` | `(x_var, y_var, weight, num_hidden_state) -> zeros` |
 
-A convenience method `register_etp_rules(*, yw_to_w, xy_to_dw, init_drtrl, init_pp)` registers multiple rules in one call.
+Convenience method `register_etp_rules(*, yw_to_w, xy_to_dw, init_drtrl, init_pp)` register multiple rules one call.
 
 ### User API functions
 
-- `matmul(x, weight, bias=None)` — auto-dispatches mm/mv based on `x.ndim`
+- `matmul(x, weight, bias=None)` — auto-dispatch mm/mv by `x.ndim`
 - `element_wise(weight, fn=lambda w: w)` — element-wise marker
-- `conv(x, kernel, bias, ...)` — convolution with full parameter support
+- `conv(x, kernel, bias, ...)` — convolution, full param support
 - `sparse_matmul(x, weight_data, *, sparse_mat, bias=None)` — sparse matmul
 - `lora_matmul(x, B, A, *, alpha=1.0, bias=None)` — LoRA decomposition
 
-All functions handle `saiunit` quantities (split mantissa/unit, recombine after computation).
+All functions handle `saiunit` quantities (split mantissa/unit, recombine after).
 
 ## Key design decisions
 
 ### Primitives are thin markers, not reimplementations
 
-Each primitive's `impl` delegates to standard JAX ops (`x @ w`, `lax.conv_general_dilated`). All JAX rules (JVP, transpose, batching, abstract_eval, lowering) are auto-derived via `register_primitive()`, which returns an `ETPPrimitive` instance. No hand-written derivative formulas.
+Each primitive's `impl` delegates to standard JAX ops (`x @ w`, `lax.conv_general_dilated`). All JAX rules (JVP, transpose, batching, abstract_eval, lowering) auto-derived via `register_primitive()`, returns `ETPPrimitive` instance. No hand-written derivative formulas.
 
 ### Batched vs unbatched dispatch
 
-Dense matmul and sparse/LoRA matmul each have two primitives (mm/mv). The user API auto-dispatches based on `x.ndim >= 2`. This replaces the old `brainstate.mixin.Batching` mode checks — the primitive type encodes whether the computation is batched.
+Dense matmul and sparse/LoRA matmul each have two primitives (mm/mv). User API auto-dispatch on `x.ndim >= 2`. Replace old `brainstate.mixin.Batching` mode checks — primitive type encode whether computation batched.
 
 ### ParamState not ETraceParam
 
-The compiler maps ALL `brainstate.ParamState` invars. Selection is **primitive-based**: a parameter participates in ETP if and only if it is used through an ETP primitive. Parameters used with regular JAX ops are excluded — no special class needed.
+Compiler map ALL `brainstate.ParamState` invars. Selection **primitive-based**: parameter in ETP iff used through ETP primitive. Parameters used with regular JAX ops excluded — no special class needed.
 
 ```python
 import brainstate, jax, braintrace
@@ -183,27 +132,27 @@ class MyRNN(brainstate.nn.Module):
 
 ## Compiler algorithm (`_etrace_compiler/hid_param_op.py`)
 
-For each equation in the jaxpr:
+For each equation in jaxpr:
 1. Check `eqn.primitive in ETP_PRIMITIVES` (type identity, not string match)
 2. Extract weight var from invars (index 1 for matmul/conv, index 0 for elemwise)
 3. Trace weight var **backward** through jaxpr to find originating `ParamState`
 4. BFS **forward** from output var to find reachable hidden-state outvars — **stops at any other non-gradient-enabled ETP primitive** (see invariant below)
 5. Filter by shape compatibility (broadcast check)
-6. Build transition jaxpr: y → h — **equations belonging to other non-gradient-enabled ETP primitives are treated as constvar boundaries**, not recursed into
+6. Build transition jaxpr: y → h — **equations belong to other non-gradient-enabled ETP primitives treated as constvar boundaries**, not recursed into
 
-Result: `HiddenParamOpRelation` — connects a `ParamState` to its reachable hidden states via an ETP primitive.
+Result: `HiddenParamOpRelation` — connect `ParamState` to reachable hidden states via ETP primitive.
 
 ### Invariant: no "weight → weight → hidden" pathway
 
-Each ETP primitive's rules (`xy_to_dw`, `yw_to_w`) assume `h = g(y)` where `g` contains **no other trainable ETP weights**. If primitive `W1`'s output flows through another non-gradient-enabled ETP primitive `W2` before reaching `h`, `W1` must **not** be recorded as a relation:
+Each ETP primitive's rules (`xy_to_dw`, `yw_to_w`) assume `h = g(y)` where `g` contain **no other trainable ETP weights**. If primitive `W1`'s output flow through another non-gradient-enabled ETP primitive `W2` before reach `h`, `W1` must **not** be recorded as relation:
 
-1. `W2` already owns the gradient of its input (which depends on `W1`) — registering `W1` too would double-count.
-2. `W2`'s `xy_to_dw` assumes its `x` is externally-supplied data, not a function of another trainable ETP weight.
-3. The only correct decomposition bundles `W1` and `W2` together, which per-primitive ETP cannot express.
+1. `W2` already own gradient of its input (depend on `W1`) — register `W1` too = double-count.
+2. `W2`'s `xy_to_dw` assume its `x` externally-supplied data, not function of another trainable ETP weight.
+3. Only correct decomposition bundle `W1` and `W2` together, which per-primitive ETP cannot express.
 
-The filter is enforced in `_find_reachable_hidden_outvars` and `_build_transition_jaxpr` via `is_etp_enable_gradient_primitive`. Gradient-enabled primitives (only `etp_elemwise_p` today; see `register_primitive(..., gradient_enabled=True)` in `_etrace_operators.py`) are identity-like and *may* sit on the tail.
+Filter enforced in `_find_reachable_hidden_outvars` and `_build_transition_jaxpr` via `is_etp_enable_gradient_primitive`. Gradient-enabled primitives (only `etp_elemwise_p` today; see `register_primitive(..., gradient_enabled=True)` in `_etrace_operators.py`) identity-like and *may* sit on tail.
 
-**Concrete consequence — `GRUCell` has 3 Linears but only 2 ETP relations** (`Wz`, `Wh`). `Wr`'s output reaches `h` only via `Wh`'s matmul (`r = sigmoid(Wr(xh)); rh = r * old_h; h = activation(Wh(concat([x, rh])))`), so `Wr` is correctly excluded and warned as non-temporal. Tests relying on these counts (`hid_param_op_test.py::test_gru_one_layer`, `graph_test.py::test_gru_one_layer`) bake in `len(relations) == 2`. When adding or modifying an RNN cell, walk each parameter's path to `h` and count only those whose tail is non-parametric.
+**Concrete consequence — `GRUCell` has 3 Linears but only 2 ETP relations** (`Wz`, `Wh`). `Wr`'s output reach `h` only via `Wh`'s matmul (`r = sigmoid(Wr(xh)); rh = r * old_h; h = activation(Wh(concat([x, rh])))`), so `Wr` correctly excluded, warned non-temporal. Tests relying on these counts (`hid_param_op_test.py::test_gru_one_layer`, `graph_test.py::test_gru_one_layer`) bake in `len(relations) == 2`. When add or modify RNN cell, walk each parameter's path to `h`, count only those with non-parametric tail.
 
 ## Adding a new primitive
 
@@ -220,7 +169,7 @@ my_p.register_init_drtrl(lambda x_var, y_var, weight, ns: jnp.zeros((x_var.aval.
 my_p.register_init_pp(lambda x_var, y_var, weight, ns: jnp.zeros((*y_var.aval.shape, ns), dtype=y_var.aval.dtype))
 ```
 
-All JAX rules (jit, grad, vmap, jvp) are auto-derived. Only the four ETP-specific rules need hand-writing via `ETPPrimitive` methods.
+All JAX rules (jit, grad, vmap, jvp) auto-derived. Only four ETP-specific rules need hand-writing via `ETPPrimitive` methods.
 
 ## Public API (`braintrace.__init__`)
 
@@ -260,12 +209,12 @@ braintrace.nn  # Linear, Conv1d/2d/3d, BatchNorm, LayerNorm, RNN, GRU, LSTM, etc
 python -m pytest braintrace/ -v
 ```
 
-~700 test functions across 21 test files covering primitives, compiler, algorithms, VJP, and neural network layers.
+~700 test functions across 21 test files cover primitives, compiler, algorithms, VJP, NN layers.
 
 ## Dependencies
 
-- **brainstate** >= 0.2.2 — state management and neural network base classes
-- **saiunit** (imported as `u`) — physical unit support for mantissa/unit splitting
+- **brainstate** >= 0.2.2 — state management + NN base classes
+- **saiunit** (imported as `u`) — physical unit support, mantissa/unit splitting
 - **JAX** — core computation framework
 - **braintools**, **brainpy-state** — additional utilities
 

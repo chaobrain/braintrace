@@ -197,14 +197,18 @@ def _find_reachable_hidden_outvars(
     consumer_map: Dict[Var, List[JaxprEqn]],
     hidden_outvar_set: Set[Var],
     outvar_to_group_index: Optional[Dict[Var, int]] = None,
-) -> Tuple[Set[Var], Tuple[JaxprEqn, ...]]:
+) -> Tuple[Dict[Var, None], Tuple[JaxprEqn, ...]]:
     """Forward BFS from *start_var* to find reachable hidden-state outvars.
 
-    Returns ``(reachable_hvars, blocking_eqns)`` where ``blocking_eqns`` is the
-    tuple (in BFS-encounter order, deduplicated) of consumer equations that
-    were NOT crossed because they are non-gradient-enabled ETP primitives.
-    The caller uses ``blocking_eqns`` to distinguish a "truly non-temporal"
-    weight from one excluded by the ``weight -> weight -> hidden`` rule.
+    Returns ``(reachable_hvars, blocking_eqns)``. ``reachable_hvars`` is an
+    insertion-ordered dict (used as an ordered set) so iteration follows
+    BFS encounter order — a plain ``set`` yields hash-ordered iteration,
+    which makes the compiler's relation output non-deterministic.
+    ``blocking_eqns`` is the tuple (in BFS-encounter order, deduplicated)
+    of consumer equations that were NOT crossed because they are
+    non-gradient-enabled ETP primitives. The caller uses ``blocking_eqns``
+    to distinguish a "truly non-temporal" weight from one excluded by the
+    ``weight -> weight -> hidden`` rule.
 
     When ``outvar_to_group_index`` is provided, the search restricts itself to
     hidden outvars in the *closest* hidden group — the first one encountered.
@@ -219,7 +223,10 @@ def _find_reachable_hidden_outvars(
     """
     from collections import deque
 
-    reachable: Set[Var] = set()
+    # ``reachable`` uses a dict (not a set) so iteration order follows the
+    # BFS encounter order — sets iterate in hash-order which makes the
+    # compiler's relation output non-deterministic across runs.
+    reachable: Dict[Var, None] = {}
     home_group_indices: Set[int] = set()
     frontier: deque = deque([start_var])
     visited: Set[Var] = set()
@@ -237,12 +244,12 @@ def _find_reachable_hidden_outvars(
                     # First hidden outvar reached — fix the home group(s).
                     home_group_indices.add(g)
                 if g in home_group_indices:
-                    reachable.add(v)
+                    reachable[v] = None
                 else:
                     # Different hidden group → do not cross further.
                     continue
             else:
-                reachable.add(v)
+                reachable[v] = None
         for eqn in consumer_map.get(v, []):
             # Do not cross another ETP primitive unless it is gradient-enabled
             # (e.g. ``etp_elemwise_p``). This prevents the "weight -> weight
@@ -462,7 +469,8 @@ def find_hidden_param_op_relations_from_jaxpr(
             outvar_to_group_index=outvar_to_group_index,
         )
 
-        # Filter by shape compatibility
+        # Filter by shape compatibility. Iterate over an insertion-ordered
+        # snapshot so ``connected_paths`` follows BFS order.
         connected_paths: List[Path] = []
         for hvar in list(reachable_hvars):
             try:
@@ -486,7 +494,7 @@ def find_hidden_param_op_relations_from_jaxpr(
                         'hidden_shape': tuple(hvar.aval.shape),
                     },
                 )
-                reachable_hvars.discard(hvar)
+                reachable_hvars.pop(hvar, None)
 
         if not connected_paths:
             # Distinguish W -> W -> h exclusion (the blocking eqn at the tail
