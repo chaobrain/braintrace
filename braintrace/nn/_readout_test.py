@@ -21,7 +21,7 @@ Tests cover:
 """
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 from braintools import init
 

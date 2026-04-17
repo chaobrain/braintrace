@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest

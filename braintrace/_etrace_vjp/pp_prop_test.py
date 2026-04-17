@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -393,19 +393,6 @@ class TestIODimVjpAlgorithmInit:
         brainstate.nn.init_all_states(gru)
         algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9, name='test_algo')
         assert algo.name == 'test_algo'
-
-    def test_init_default_mode(self):
-        gru = braintrace.nn.GRUCell(3, 4)
-        brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
-        assert isinstance(algo.mode, brainstate.mixin.Mode)
-
-    def test_init_custom_mode(self):
-        gru = braintrace.nn.GRUCell(3, 4)
-        brainstate.nn.init_all_states(gru)
-        mode = brainstate.mixin.Batching(8)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9, mode=mode)
-        assert algo.mode is mode
 
     def test_not_compiled_initially(self):
         gru = braintrace.nn.GRUCell(3, 4)

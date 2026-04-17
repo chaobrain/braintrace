@@ -20,7 +20,7 @@ from typing import Callable, Union, Sequence, Optional, Any
 
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import jax
 from brainstate import BatchState
 from brainstate.nn._normalizations import _BatchNorm

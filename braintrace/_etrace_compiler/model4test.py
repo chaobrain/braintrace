@@ -18,7 +18,7 @@ from typing import Callable
 
 import brainpy
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 

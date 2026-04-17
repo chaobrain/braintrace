@@ -19,7 +19,7 @@ from enum import Enum
 from typing import Sequence
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.tree
 
 from ._compatible_imports import Var

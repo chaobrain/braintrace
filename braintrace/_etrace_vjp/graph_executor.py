@@ -40,7 +40,7 @@
 from typing import Dict, Tuple
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.core
 import jax.numpy as jnp
 from brainstate._compatible_import import get_aval

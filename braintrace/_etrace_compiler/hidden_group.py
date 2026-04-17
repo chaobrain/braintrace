@@ -48,7 +48,7 @@ from itertools import combinations
 from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.core
 import numpy as np
 from brainstate import HiddenGroupState

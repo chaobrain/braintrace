@@ -19,7 +19,7 @@ from typing import Callable, Iterable
 import brainpy
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt

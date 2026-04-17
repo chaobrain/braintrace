@@ -87,7 +87,7 @@ global_args = parser.parse_args()
 import braintrace
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 import tonic

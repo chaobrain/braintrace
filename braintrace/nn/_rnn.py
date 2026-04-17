@@ -18,7 +18,7 @@ from typing import Callable, Union
 
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 
 from braintrace._etrace_operators import element_wise
 from braintrace._typing import ArrayLike

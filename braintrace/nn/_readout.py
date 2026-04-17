@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 
 from braintrace._etrace_operators import matmul
 from braintrace._typing import Size, ArrayLike
@@ -81,7 +81,7 @@ class LeakyRateReadout(brainstate.nn.Module):
 
         >>> import braintrace
         >>> import brainstate
-        >>> import brainunit as u
+        >>> import saiunit as u
         >>>
         >>> # Create a leaky rate readout layer
         >>> readout = braintrace.nn.LeakyRateReadout(
