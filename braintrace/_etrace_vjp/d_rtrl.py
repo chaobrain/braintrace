@@ -92,7 +92,7 @@ def _init_param_dim_state(
         else:
             init_val = {
                 'weight': init_fn(
-                    relation.x_var, relation.y_var, relation.weight_var, group.num_state,
+                    relation.x_var, relation.y_var, relation.trainable_vars['weight'], group.num_state,
                 )
             }
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
@@ -184,8 +184,8 @@ def _update_param_dim_etrace_scan_fn(
         else:
             weights_dict = {
                 'weight': _extract_leaf(
-                    weight_path_to_vals[relation.weight_path],
-                    relation.weight_leaf_idx,
+                    weight_path_to_vals[relation.trainable_paths['weight']],
+                    relation.trainable_leaf_indices['weight'],
                 )
             }
 
@@ -369,8 +369,8 @@ def _solve_param_dim_weight_gradients(
                     path = relation.trainable_paths[key]
                     leaf_idx = relation.trainable_leaf_indices[key]
                 else:
-                    path = relation.weight_path
-                    leaf_idx = relation.weight_leaf_idx
+                    path = relation.trainable_paths['weight']
+                    leaf_idx = relation.trainable_leaf_indices['weight']
                 per_path.setdefault(path, {})[leaf_idx] = grad
 
             for path, leaf_to_grad in per_path.items():
@@ -524,7 +524,8 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         etraces = dict()
         for relation in self.graph.hidden_param_op_relations:
             relation: HiddenParamOpRelation
-            if id(relation.weight) != weight_id:
+            primary_state = next(iter(relation.trainable_param_states.values()), None)
+            if primary_state is None or id(primary_state) != weight_id:
                 continue
             find_this_weight = True
 

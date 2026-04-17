@@ -122,7 +122,7 @@ class PathClassification:
 # ---------------------------------------------------------------------------
 
 class HiddenParamOpRelation(NamedTuple):
-    r"""Connection between an ETP primitive, its weight parameter, and hidden states.
+    r"""Connection between an ETP primitive, its trainable parameters, and hidden states.
 
     Records the structural relationship:
 
@@ -131,31 +131,18 @@ class HiddenParamOpRelation(NamedTuple):
 
     Attributes:
         primitive: The JAX primitive (``etp_mm_p``, ``etp_mv_p``, etc.).
-        weight: The ``ParamState`` object.
-        weight_path: Path to the ``ParamState`` in the module hierarchy.
-        weight_var: Jaxpr ``Var`` for the weight input of the primitive. When
-            the ``ParamState`` stores a PyTree (e.g. ``{'weight': W, 'bias':
-            b}``), this identifies which leaf is the weight.
-        weight_leaf_idx: Index of ``weight_var`` among ``jax.tree.leaves`` of
-            the owning ``ParamState``'s value. Used at runtime to extract the
-            weight array from a pytree-valued ``ParamState``.
         x_var: Jaxpr ``Var`` for the input (``None`` for element-wise ops).
         y_var: Jaxpr ``Var`` for the primitive output.
         hidden_groups: Hidden groups that this op feeds into.
         y_to_hidden_group_jaxprs: Transition Jaxpr from *y* to each hidden group.
         connected_hidden_paths: Hidden-state paths connected to this op.
         eqn_params: Static parameters of the primitive equation.
-        weight_processing_chain: Primitives traversed during the backward
-            trace from ``weight_var`` to the originating ``ParamState`` invar
-            (e.g. ``mask`` * ``w``, ``weight_fn(w)``). Empty when the
-            primitive consumes the ``ParamState`` invar directly.
         path_classification: ``{hidden_path: PathClassification.*}`` for each
             connected hidden state. Populated by the path-classification pass.
         trainable_vars: Per-key dict mapping a primitive-chosen key name
-            (e.g. ``'weight'``, ``'bias'``, ``'B'``, ``'A'``) to its jaxpr
-            ``Var``. Empty when the primitive's spec has no
-            ``trainable_invars_fn``; otherwise populated by the compiler
-            with one entry per declared trainable input.
+            (e.g. ``'weight'``, ``'bias'``, ``'lora_b'``, ``'lora_a'``) to its
+            jaxpr ``Var``. Populated by the compiler with one entry per declared
+            trainable input.
         trainable_paths: Per-key dict mapping each key to the owning
             ``ParamState``'s module path. When the primitive has two keys
             whose invars trace to the same ``ParamState`` (e.g. merged
@@ -163,27 +150,19 @@ class HiddenParamOpRelation(NamedTuple):
         trainable_leaf_indices: Per-key dict mapping each key to the leaf
             index in ``jax.tree.leaves`` of the owning ``ParamState``.
         trainable_param_states: Per-key dict mapping each key to the actual
-            ``ParamState`` object (same reference as ``weight`` when the key
-            is ``'weight'``).
+            ``ParamState`` object.
         trainable_processing_chains: Per-key dict mapping each key to the
-            backward-trace processing chain (same semantics as
-            ``weight_processing_chain`` but per key).
+            backward-trace processing chain (primitives traversed from the
+            trainable invar back to the originating ``ParamState`` invar).
     """
     primitive: Primitive
-    weight: brainstate.ParamState
-    weight_path: Path
-    weight_var: Var
-    weight_leaf_idx: int
     x_var: Optional[Var]
     y_var: Var
     hidden_groups: List[HiddenGroup]
     y_to_hidden_group_jaxprs: List[Jaxpr]
     connected_hidden_paths: List[Path]
     eqn_params: dict
-    weight_processing_chain: Tuple[Primitive, ...] = ()
     path_classification: Dict[Path, str] = {}
-    # NEW — per-key trainable-input metadata (populated by the compiler when
-    # the primitive's spec provides trainable_invars_fn; otherwise empty).
     trainable_vars: Dict[str, Var] = {}
     trainable_paths: Dict[str, Path] = {}
     trainable_leaf_indices: Dict[str, int] = {}
@@ -201,7 +180,7 @@ class HiddenParamOpRelation(NamedTuple):
 
     @property
     def path(self):
-        return self.weight_path
+        return next(iter(self.trainable_paths.values()), None)
 
     def y_to_hidden_groups(self, y_val, const_vals, concat_hidden_vals=True):
         """Evaluate transition jaxprs: y -> hidden group values."""
@@ -271,25 +250,14 @@ def _resolve_eqn_trainable_invars(
 
 def _resolve_eqn_vars(
     eqn: JaxprEqn,
-) -> Tuple[Var, Optional[Var], Var]:
-    """Return ``(weight_var, x_var, y_var)`` for an ETP primitive equation.
-
-    The "primary weight" returned as ``weight_var`` is the first key in
-    ``spec.trainable_invars_fn(eqn.params)`` insertion order — typically
-    ``'weight'`` for dense/conv/sparse, ``'lora_b'`` for LoRA, ``'weight'``
-    for elemwise. This preserves backward-compatibility with the legacy
-    ``HiddenParamOpRelation.weight_var`` field until it is removed in
-    Task 13.
-    """
+) -> Tuple[Optional[Var], Var]:
+    """Return ``(x_var, y_var)`` for an ETP primitive equation."""
     primitive = eqn.primitive
     spec = get_primitive_spec(primitive)
     if spec is None:
         raise RuntimeError(
             f'ETP primitive {primitive.name} has no registered spec'
         )
-    key_to_idx = spec.resolve_trainable_invars(eqn.params)
-    first_key = next(iter(key_to_idx))
-    weight_var = eqn.invars[key_to_idx[first_key]]
     if spec.x_invar_index is None:
         x_var = None
     else:
@@ -309,7 +277,7 @@ def _resolve_eqn_vars(
             context={'num_outvars': len(eqn.outvars),
                      'y_outvar_index': spec.y_outvar_index},
         )
-    return weight_var, x_var, y_var
+    return x_var, y_var
 
 
 # ---------------------------------------------------------------------------
@@ -738,14 +706,31 @@ def find_hidden_param_op_relations_from_jaxpr(
 
     for eqn in etp_eqns:
         primitive = eqn.primitive
-        weight_var, x_var, y_var = _resolve_eqn_vars(eqn)
+        x_var, y_var = _resolve_eqn_vars(eqn)
 
-        # --- Trace weight back to ParamState ---
-        weight_path, processing_chain = _trace_var_to_param(
-            weight_var, producers, invar_to_weight_path,
-            cache=weight_trace_cache,
-        )
+        # --- Resolve every trainable invar declared by the primitive ---
+        trainable_invars_map = _resolve_eqn_trainable_invars(eqn)
+        trainable_vars: Dict[str, Var] = {}
+        trainable_paths: Dict[str, Path] = {}
+        trainable_leaf_indices: Dict[str, int] = {}
+        trainable_param_states: Dict[str, brainstate.ParamState] = {}
+        trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
+
+        # Use the first trainable key for the primary weight trace (needed for
+        # diagnostics and shape-mismatch error messages below).
+        first_key = next(iter(trainable_invars_map)) if trainable_invars_map else None
+        weight_path: Optional[Path] = None
+        if first_key is not None:
+            primary_invar = trainable_invars_map[first_key]
+            weight_path, _ = _trace_var_to_param(
+                primary_invar, producers, invar_to_weight_path,
+                cache=weight_trace_cache,
+            )
+
         if weight_path is None:
+            first_invar_repr = (
+                trainable_invars_map[first_key] if first_key else None
+            )
             emit(
                 kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
                 level=DiagnosticLevel.WARNING,
@@ -754,41 +739,23 @@ def find_hidden_param_op_relations_from_jaxpr(
                     f'that could not be traced back to any ParamState. Skipping.'
                 ),
                 primitive=primitive,
-                context={'weight_var': weight_var},
+                context={'weight_var': first_invar_repr},
             )
             continue
-        weight_state = path_to_state[weight_path]
 
-        weight_leaf_idx = _resolve_weight_leaf_idx(
-            weight_var, weight_path, producers, weight_path_to_invars,
-        )
-
-        # --- NEW: resolve every trainable invar declared by the primitive ---
-        trainable_invars_map = _resolve_eqn_trainable_invars(eqn)
-        trainable_vars: Dict[str, Var] = {}
-        trainable_paths: Dict[str, Path] = {}
-        trainable_leaf_indices: Dict[str, int] = {}
-        trainable_param_states: Dict[str, brainstate.ParamState] = {}
-        trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
         for key, invar in trainable_invars_map.items():
-            if invar is weight_var:
-                # Reuse the already-resolved primary key metadata.
-                t_path, t_chain = weight_path, processing_chain
-                t_leaf = weight_leaf_idx
-                t_state = weight_state
-            else:
-                t_path, t_chain = _trace_var_to_param(
-                    invar, producers, invar_to_weight_path,
-                    cache=weight_trace_cache,
-                )
-                if t_path is None:
-                    # Trainable invar doesn't trace to any ParamState —
-                    # skip it; later tasks emit a diagnostic here.
-                    continue
-                t_leaf = _resolve_weight_leaf_idx(
-                    invar, t_path, producers, weight_path_to_invars,
-                )
-                t_state = path_to_state.get(t_path)
+            t_path, t_chain = _trace_var_to_param(
+                invar, producers, invar_to_weight_path,
+                cache=weight_trace_cache,
+            )
+            if t_path is None:
+                # Trainable invar doesn't trace to any ParamState —
+                # skip it; later tasks emit a diagnostic here.
+                continue
+            t_leaf = _resolve_weight_leaf_idx(
+                invar, t_path, producers, weight_path_to_invars,
+            )
+            t_state = path_to_state.get(t_path)
             trainable_vars[key] = invar
             trainable_paths[key] = t_path
             trainable_leaf_indices[key] = t_leaf
@@ -880,17 +847,12 @@ def find_hidden_param_op_relations_from_jaxpr(
 
         relations.append(HiddenParamOpRelation(
             primitive=primitive,
-            weight=weight_state,
-            weight_path=weight_path,
-            weight_var=weight_var,
-            weight_leaf_idx=weight_leaf_idx,
             x_var=x_var,
             y_var=y_var,
             hidden_groups=connected_groups,
             y_to_hidden_group_jaxprs=y_to_hid_jaxprs,
             connected_hidden_paths=connected_paths,
             eqn_params=dict(eqn.params),
-            weight_processing_chain=processing_chain,
             path_classification=dict(path_class),
             trainable_vars=dict(trainable_vars),
             trainable_paths=dict(trainable_paths),
@@ -936,10 +898,15 @@ def _emit_no_relation_diag(
         blocking_primitives = tuple(e.primitive for e in blocking_eqns)
         blocking_paths: List[Optional[Path]] = []
         for be in blocking_eqns:
-            wvar, _, _ = _resolve_eqn_vars(be)
-            bp, _ = _trace_var_to_param(
-                wvar, producers, invar_to_weight_path, cache=cache,
-            )
+            # Use the first trainable invar for tracing back to the ParamState.
+            trainable_map = _resolve_eqn_trainable_invars(be)
+            first_invar = next(iter(trainable_map.values())) if trainable_map else None
+            if first_invar is not None:
+                bp, _ = _trace_var_to_param(
+                    first_invar, producers, invar_to_weight_path, cache=cache,
+                )
+            else:
+                bp = None
             blocking_paths.append(bp)
         emit(
             kind=DiagnosticKind.RELATION_EXCLUDED_WEIGHT_TO_WEIGHT,

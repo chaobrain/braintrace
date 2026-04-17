@@ -89,7 +89,7 @@ def _summary(graph):
     return (
         tuple(
             (
-                r.weight_path,
+                next(iter(r.trainable_paths.values()), None),
                 tuple(r.connected_hidden_paths),
                 r.primitive,
                 tuple(sorted(r.path_classification.items())),
@@ -195,7 +195,7 @@ class TestTiedWeightMultiplicity:
 
         assert len(rels) == 2
         for r in rels:
-            assert r.weight_path == ('w',)
+            assert next(iter(r.trainable_paths.values())) == ('w',)
             assert r.connected_hidden_paths == [('h',)]
 
 
@@ -260,7 +260,7 @@ class TestChainExclusion:
 
         graph = _silent_compile(model, inp)
         rels = graph.hidden_param_op_relations
-        included_paths = {r.weight_path for r in rels}
+        included_paths = {next(iter(r.trainable_paths.values()), None) for r in rels}
         last = (f'w{chain_len - 1}',)
 
         assert included_paths == {last}, (
@@ -295,7 +295,7 @@ class TestPartialPathStability:
         inp = jnp.zeros(n_in)
 
         graph = _silent_compile(model, inp)
-        by_path = {r.weight_path: r for r in graph.hidden_param_op_relations}
+        by_path = {next(iter(r.trainable_paths.values()), None): r for r in graph.hidden_param_op_relations}
 
         assert by_path[('w1',)].path_classification == {
             ('h',): PathClassification.MIXED,

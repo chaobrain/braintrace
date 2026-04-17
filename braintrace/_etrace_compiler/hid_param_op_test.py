@@ -138,17 +138,12 @@ class TestTrainableDictsDefault:
         from braintrace._etrace_compiler.hid_param_op import HiddenParamOpRelation
         r = HiddenParamOpRelation(
             primitive=None,
-            weight=None,
-            weight_path=('w',),
-            weight_var=None,
-            weight_leaf_idx=0,
             x_var=None,
             y_var=None,
             hidden_groups=[],
             y_to_hidden_group_jaxprs=[],
             connected_hidden_paths=[],
             eqn_params={},
-            weight_processing_chain=(),
             path_classification={},
             trainable_vars={'weight': 'v'},
             trainable_paths={'weight': ('w',)},
@@ -195,8 +190,8 @@ class TestTrainableInvarsPopulatedForDense:
         assert len(relations) == 1
         r = relations[0]
         assert list(r.trainable_vars.keys()) == ['weight']
-        assert r.trainable_vars['weight'] is r.weight_var
-        assert r.trainable_paths['weight'] == r.weight_path
-        assert r.trainable_leaf_indices['weight'] == r.weight_leaf_idx
-        assert r.trainable_processing_chains['weight'] == r.weight_processing_chain
-        assert r.trainable_param_states['weight'] is r.weight
+        assert r.trainable_vars['weight'] is not None
+        assert r.trainable_paths['weight'] == ('w',)
+        assert r.trainable_leaf_indices['weight'] == 0
+        assert r.trainable_processing_chains['weight'] == ()
+        assert r.trainable_param_states['weight'] is not None

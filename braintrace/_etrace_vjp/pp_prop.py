@@ -218,7 +218,8 @@ def _init_IO_dim_state(
         # weight operation for transforming the hidden states
         # therefore we record the target paths of the weight x
         #
-        etrace_xs_to_weights[id(relation.x_var)].append(state_id_to_path[id(relation.weight)])
+        primary_state = next(iter(relation.trainable_param_states.values()), None)
+        etrace_xs_to_weights[id(relation.x_var)].append(state_id_to_path[id(primary_state)])
 
     y_shape = relation.y_var.aval.shape
     y_dtype = relation.y_var.aval.dtype
@@ -253,7 +254,7 @@ def _init_IO_dim_state(
         #
         init_fn = ETP_RULES_INIT_PP[relation.primitive]
         etrace_dfs[key] = EligibilityTrace(
-            init_fn(relation.x_var, relation.y_var, relation.weight_var, group.num_state)
+            init_fn(relation.x_var, relation.y_var, relation.trainable_vars.get('weight', next(iter(relation.trainable_vars.values()), None)), group.num_state)
         )
 
 
@@ -460,8 +461,8 @@ def _solve_IO_dim_weight_gradients(
         else:
             weights_dict = {
                 'weight': _extract_leaf(
-                    weight_vals[relation.weight_path],
-                    relation.weight_leaf_idx,
+                    weight_vals[relation.trainable_paths['weight']],
+                    relation.trainable_leaf_indices['weight'],
                 )
             }
 
@@ -498,8 +499,8 @@ def _solve_IO_dim_weight_gradients(
                     path = relation.trainable_paths[key]
                     leaf_idx = relation.trainable_leaf_indices[key]
                 else:
-                    path = relation.weight_path
-                    leaf_idx = relation.weight_leaf_idx
+                    path = relation.trainable_paths['weight']
+                    leaf_idx = relation.trainable_leaf_indices['weight']
                 per_path.setdefault(path, {})[leaf_idx] = grad
 
             for path, leaf_to_grad in per_path.items():
@@ -632,7 +633,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         find_this_weight = False
         for relation in self.graph.hidden_param_op_relations:
             relation: HiddenParamOpRelation
-            if id(relation.weight) != weight_id:
+            primary_state = next(iter(relation.trainable_param_states.values()), None)
+            if primary_state is None or id(primary_state) != weight_id:
                 continue
             find_this_weight = True
 

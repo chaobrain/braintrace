@@ -205,10 +205,10 @@ class TestPluginPrimitiveEndToEnd:
         rel = graph.hidden_param_op_relations[0]
         # Spec-driven dispatch must have picked invar[1] as the weight
         # (trainable_invars_fn -> {'weight': 1}) and invar[0] as x (x_invar_index=0).
-        assert rel.weight_var is not None
+        assert rel.trainable_vars.get('weight') is not None
         assert rel.x_var is not None
         # Weight shape follows (n_in + n_out, n_out).
-        assert tuple(rel.weight_var.aval.shape) == (7, 4)
+        assert tuple(rel.trainable_vars['weight'].aval.shape) == (7, 4)
         # x is the (concat(x, h)) vector of length 7.
         assert tuple(rel.x_var.aval.shape) == (7,)
 
