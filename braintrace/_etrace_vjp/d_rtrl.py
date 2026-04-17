@@ -29,6 +29,7 @@ from braintrace._etrace_op import (
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
+    get_primitive_spec,
 )
 from braintrace._misc import etrace_param_key, etrace_df_key
 from braintrace._typing import (
@@ -45,10 +46,12 @@ from braintrace._typing import (
 from .base import ETraceVjpAlgorithm
 from .misc import (
     _extract_weight_leaf,
+    _extract_leaf,
     _reset_state_in_a_dict,
     _sum_dim,
     _update_dict,
     _wrap_leaf_as_pytree,
+    _wrap_leaves_as_pytree,
 )
 
 __all__ = [
@@ -64,18 +67,35 @@ def _init_param_dim_state(
     """
     Initialize the eligibility trace states for parameter dimensions.
 
-    Uses the primitive's ``init_state`` rule to determine the correct
-    trace shape (batched vs unbatched is encoded in the primitive type).
+    Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
+    trainable-input names. For primitives not yet migrated to the
+    dict-based rule API, the legacy single-array init is wrapped as
+    ``{'weight': <array>}`` for uniform storage.
     """
+    spec = get_primitive_spec(relation.primitive)
+    use_dict_api = spec is not None and spec.trainable_invars_fn is not None
     for group in relation.hidden_groups:
         group: HiddenGroup
-        bwg_key = etrace_param_key(relation.weight_path, relation.y_var, group.index)
+        bwg_key = (id(relation.y_var), group.index)
         if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
-        etrace_bwg[bwg_key] = EligibilityTrace(
-            init_fn(relation.x_var, relation.y_var, relation.weight_var, group.num_state)
-        )
+        if use_dict_api:
+            init_val = init_fn(
+                relation.x_var, relation.y_var, relation.trainable_vars, group.num_state,
+            )
+            if not isinstance(init_val, dict):
+                raise TypeError(
+                    f'Primitive {relation.primitive.name} declares trainable_invars_fn '
+                    f'so init_drtrl must return a dict; got {type(init_val).__name__}.'
+                )
+        else:
+            init_val = {
+                'weight': init_fn(
+                    relation.x_var, relation.y_var, relation.weight_var, group.num_state,
+                )
+            }
+        etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
 
 def _update_param_dim_etrace_scan_fn(
@@ -149,24 +169,28 @@ def _update_param_dim_etrace_scan_fn(
     for relation in hidden_param_op_relations:
         relation: HiddenParamOpRelation
 
-        #
-        # Step 1:
-        #
-        # Necessary information for the etrace computation
-        #
-        # 1. the etrace operation for computing etrace updates
-        # 2. the weight information
-        # 3. the operator information
-        #
-        weight_path = relation.weight_path
-        # ``weight_path_to_vals[weight_path]`` may be a pytree (e.g. the merged
-        # ``{'weight': W, 'bias': b}`` dict that ``Linear`` exposes). The
-        # xy_to_dw rule operates on the weight array only — pick it out via
-        # the compile-time-recorded leaf index.
-        weight_val = _extract_weight_leaf(
-            weight_path_to_vals[weight_path], relation.weight_leaf_idx,
-        )
-        xy_to_dw = ETP_RULES_XY_TO_DW[relation.primitive]
+        spec = get_primitive_spec(relation.primitive)
+        use_dict_api = spec is not None and spec.trainable_invars_fn is not None
+
+        # Build the weights dict the rules consume.
+        if use_dict_api:
+            weights_dict = {
+                key: _extract_leaf(
+                    weight_path_to_vals[relation.trainable_paths[key]],
+                    relation.trainable_leaf_indices[key],
+                )
+                for key in relation.trainable_vars
+            }
+        else:
+            weights_dict = {
+                'weight': _extract_leaf(
+                    weight_path_to_vals[relation.weight_path],
+                    relation.weight_leaf_idx,
+                )
+            }
+
+        xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
+        yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
         batched = is_batched_primitive(relation.primitive)
@@ -176,80 +200,56 @@ def _update_param_dim_etrace_scan_fn(
         else:
             x = etrace_xs_at_t[id(relation.x_var)]
 
-        def comp_dw_with_x(x_, df_):
-            return xy_to_dw(x_, df_, weight_val, **eqn_params)
+        # Wrappers that always take/return dicts regardless of the underlying rule's API.
+        def _call_xy_to_dw_dict(x_, df_, weights_, _use_dict=use_dict_api, _rule=xy_to_dw_rule, _params=eqn_params):
+            if _use_dict:
+                return _rule(x_, df_, weights_, **_params)
+            single = _rule(x_, df_, weights_['weight'], **_params)
+            return {'weight': single}
+
+        def _call_yw_to_w_dict(d, trace_, _use_dict=use_dict_api, _rule=yw_to_w_rule, _params=eqn_params):
+            if _use_dict:
+                return _rule(d, trace_, **_params)
+            single = _rule(d, trace_['weight'], **_params)
+            return {'weight': single}
+
+        def comp_dw_with_x(x_, df_, _wdict=weights_dict):
+            return _call_xy_to_dw_dict(x_, df_, _wdict)
 
         @partial(jax.vmap, in_axes=-1, out_axes=-1)
-        def comp_dw_without_x(df_):
-            if batched:
-                return jax.vmap(comp_dw_with_x)(x, df_)
+        def comp_dw_without_x(df_, _x=x, _batched=batched):
+            if _batched:
+                return jax.vmap(comp_dw_with_x)(_x, df_)
             else:
-                return comp_dw_with_x(x, df_)
+                return comp_dw_with_x(_x, df_)
 
         for group in relation.hidden_groups:
             group: HiddenGroup
 
-            #
-            # Step 2:
-            #
-            # compute the current step weight gradients:
-            #
-            #       \partial h^t / \partial W^t = vjp(f(x, w))(df)
-            #
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
-            # jax.debug.print('df = {g}', g=jax.tree.map(lambda x: jnp.abs(x).max(), df))
 
-            #
-            # vmap over the different hidden states,
-            #
-            # x: (n_input, ..., )
-            # df: (n_hidden, ..., n_state)
-            # phg_to_pw: (n_param, ..., n_state)
+            # phg_to_pw is a Dict[str, Array].
             phg_to_pw = comp_dw_without_x(df)
             phg_to_pw = jax.tree.map(_normalize_vector, phg_to_pw)
-            # jax.debug.print('phg_to_pw = {g}', g=jax.tree.map(lambda x: jnp.abs(x).max(), phg_to_pw))
 
-            #
-            # Step 3:
-            #
-            # computing the following vector-Jacobian product:
-            #  ϵ^t_{pre} = D_h ⊙ ϵ^{t-1}
-            #
-            # i.e., the hidden-to-hidden Jacobian diagonal matrix * the hidden df at the previous time step
-            #
-            #  ∂V^t/∂θ1 = ∂V^t/∂V^t-1 * ∂V^t-1/∂θ1 + ∂V^t/∂a^t-1 * ∂a^t-1/∂θ1 + ...
-            #
-            w_key = etrace_param_key(weight_path, relation.y_var, group.index)
+            w_key = (id(relation.y_var), group.index)
             diag = hid_group_jacobians[group.index]
 
-            #
-            # vmap over j, over the different hidden states \partial h_i^t / \partial h_j^t
-            #
-            # d: (n_hidden, ..., [n_state])
-            # old_bwg: (n_param, ..., [n_state])
-            old_bwg = hist_etrace_vals[w_key]
-            yw_to_w = ETP_RULES_YW_TO_W[relation.primitive]
-            fn_bwg_pre = lambda d: _sum_dim(
+            old_bwg = hist_etrace_vals[w_key]   # Dict[str, Array]
+
+            fn_bwg_pre = lambda d, _old=old_bwg: jax.tree.map(
+                lambda arr: _sum_dim(arr, axis=-1),
                 jax.vmap(
-                    partial(yw_to_w, **eqn_params), in_axes=-1, out_axes=-1
-                )(d, old_bwg), axis=-1
+                    _call_yw_to_w_dict, in_axes=-1, out_axes=-1,
+                )(d, _old),
             )
 
-            #
-            # vmap over i, over the different hidden states \partial h_i^t / \partial h_j^t
-            #
-            # diag: (n_hidden, ..., [n_state], n_state)
-            # old_bwg: (n_param, ..., n_state)
-            # new_bwg_pre: (n_param, ..., n_state)
             new_bwg_pre = jax.vmap(fn_bwg_pre, in_axes=-2, out_axes=-1)(diag)
 
-            #
-            # Step 4:
-            #
-            # update: eligibility trace * hidden diagonal Jacobian + new hidden df
-            #        ϵ^t = ϵ^t_{pre} + df^t, where D_h is the hidden-to-hidden Jacobian diagonal matrix.
-            #
-            new_bwg = jax.tree.map(u.math.add, new_bwg_pre, phg_to_pw, is_leaf=u.math.is_quantity)
+            # new_bwg_pre + phg_to_pw per-leaf.
+            new_bwg = jax.tree.map(
+                u.math.add, new_bwg_pre, phg_to_pw, is_leaf=u.math.is_quantity,
+            )
             if normalize_matrix_spectrum:
                 new_bwg = jax.tree.map(_normalize_vector, new_bwg)
             new_etrace_bwg[w_key] = new_bwg
@@ -321,67 +321,61 @@ def _solve_param_dim_weight_gradients(
         None: The function updates the dG_weights dictionary in place with the computed weight gradients.
     """
     # update the etrace weight gradients
-    temp_data = dict()
+    temp_data: Dict[Path, PyTree] = dict()
     for relation in weight_hidden_relations:
+        spec = get_primitive_spec(relation.primitive)
+        use_dict_api = spec is not None and spec.trainable_invars_fn is not None
 
-        #
-        # Step 1:
-        #
-        # Necessary information for the etrace computation
-        #
-        # 1. the etrace operation for computing etrace updates
-        # 2. the weight information
-        # 3. the operator information
-        #
-        weight_path = relation.weight_path
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
+
+        def _call_yw_to_w_dict(d, trace_, _use_dict=use_dict_api, _rule=yw_to_w_rule, _params=eqn_params):
+            if _use_dict:
+                return _rule(d, trace_, **_params)
+            single = _rule(d, trace_['weight'], **_params)
+            return {'weight': single}
+
         yw_to_w = (
-            jax.vmap(partial(yw_to_w_rule, **eqn_params))
+            jax.vmap(_call_yw_to_w_dict)
             if batched
-            else partial(yw_to_w_rule, **eqn_params)
+            else _call_yw_to_w_dict
         )
 
         for group in relation.hidden_groups:
             group: HiddenGroup
 
-            #
-            # Step 2:
-            #
-            # compute the weight gradients:
-            #
-            #   dE/dW = dE/dH * dH/dW, computing the final weight gradients
-            #
-            w_key = etrace_param_key(weight_path, relation.y_var, group.index)
-            etrace_data = hist_etrace_data[w_key]
+            w_key = (id(relation.y_var), group.index)
+            etrace_data = hist_etrace_data[w_key]   # Dict[str, Array]
             dg_hidden = dG_hidden_groups[group.index]
-            # dimensionless processing
-            etrace_data, fn_unit_restore = _remove_units(etrace_data)
-            dg_hidden, _ = _remove_units(dg_hidden)
 
-            #
-            # etrace_data: [n_batch, n_param, ..., n_state]
-            #               or,
-            #              [n_param, ..., n_state]
-            # dg_hidden:   [n_batch, n_hidden, ..., n_state]
-            #               or,
-            #              [n_hidden, ..., n_state]
-            dg_weight = _sum_dim(
-                jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(dg_hidden, etrace_data)
-            )
-            # unit restoration
-            dg_weight = fn_unit_restore(dg_weight)
+            # dimensionless processing (unit strip + restore). Apply per-leaf.
+            etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
+            dg_hidden_unitless, _ = _remove_units(dg_hidden)
 
-            # Wrap the etrace-computed weight gradient to match the
-            # ParamState's pytree structure (e.g. merged ``{weight, bias}``
-            # Linear). Non-weight leaves (bias) are zero-filled — bias
-            # gradients are not currently tracked by the D-RTRL rules.
-            dg_weight = _wrap_leaf_as_pytree(
-                dg_weight, weight_vals[weight_path], relation.weight_leaf_idx,
+            # dg_weight_dict: Dict[str, Array]
+            dg_weight_dict = jax.tree.map(
+                lambda arr: _sum_dim(arr, axis=-1),
+                jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(
+                    dg_hidden_unitless, etrace_data_unitless
+                ),
             )
-            # update the weight gradients
-            _update_dict(temp_data, weight_path, dg_weight)
+            dg_weight_dict = fn_unit_restore(dg_weight_dict)
+
+            # Route per-key to owning ParamState path.
+            per_path: Dict[Path, Dict[int, jax.Array]] = {}
+            for key, grad in dg_weight_dict.items():
+                if use_dict_api:
+                    path = relation.trainable_paths[key]
+                    leaf_idx = relation.trainable_leaf_indices[key]
+                else:
+                    path = relation.weight_path
+                    leaf_idx = relation.weight_leaf_idx
+                per_path.setdefault(path, {})[leaf_idx] = grad
+
+            for path, leaf_to_grad in per_path.items():
+                wrapped = _wrap_leaves_as_pytree(weight_vals[path], leaf_to_grad)
+                _update_dict(temp_data, path, wrapped)
 
     #
     # Step 3:
@@ -537,7 +531,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             # retrieve the etrace data
             for group in relation.hidden_groups:
                 group: HiddenGroup
-                key = etrace_param_key(relation.weight_path, relation.y_var, group.index)
+                key = (id(relation.y_var), group.index)
                 etraces[key] = self.etrace_bwg[key].value
 
         if not find_this_weight:
