@@ -18,7 +18,7 @@
 from typing import Callable, Union, Sequence, Optional
 
 import brainstate
-import brainunit as u
+import saiunit as u
 from braintools import init
 
 from braintrace._etrace_operators import matmul, sparse_matmul, lora_matmul
@@ -106,18 +106,17 @@ class Linear(brainstate.nn.Module):
         b_shape = (self.out_size[-1],)
         self.w_mask = init.param(w_mask, w_shape)
 
-        # weights as separate ParamState
-        self.W = brainstate.ParamState(init.param(w_init, w_shape, allow_none=False))
-        self.b = (
-            brainstate.ParamState(init.param(b_init, b_shape, allow_none=False))
-            if b_init is not None else None
-        )
+        # Weight and bias live in ONE ParamState as a dict pytree.
+        params = {'weight': init.param(w_init, w_shape, allow_none=False)}
+        if b_init is not None:
+            params['bias'] = init.param(b_init, b_shape, allow_none=False)
+        self.weight = brainstate.ParamState(params)
 
     def update(self, x):
-        w = self.W.value
+        w = self.weight.value['weight']
         if self.w_mask is not None:
             w = w * self.w_mask
-        b = self.b.value if self.b is not None else None
+        b = self.weight.value.get('bias')
         return matmul(x, w, b)
 
 
@@ -271,24 +270,25 @@ class ScaledWSLinear(brainstate.nn.Module):
 
         w_shape = (self.in_size[-1], self.out_size[-1])
         b_shape = (self.out_size[-1],)
-        self.W = brainstate.ParamState(init.param(w_init, w_shape, allow_none=False))
-        self.b = (
-            brainstate.ParamState(init.param(b_init, b_shape, allow_none=False))
-            if b_init is not None else None
-        )
+        # Weight and bias live in ONE ParamState as a dict pytree.
+        w_val = init.param(w_init, w_shape, allow_none=False)
+        params = {'weight': w_val}
+        if b_init is not None:
+            params['bias'] = init.param(b_init, b_shape, allow_none=False)
+        self.weight = brainstate.ParamState(params)
         self.gain = (
-            brainstate.ParamState(u.math.ones((1, w_shape[-1]), dtype=self.W.value.dtype))
+            brainstate.ParamState(u.math.ones((1, w_shape[-1]), dtype=w_val.dtype))
             if ws_gain else None
         )
 
     def update(self, x):
         w = brainstate.nn.weight_standardization(
-            self.W.value, self.eps,
+            self.weight.value['weight'], self.eps,
             self.gain.value if self.gain is not None else None
         )
         if self.w_mask is not None:
             w = w * self.w_mask
-        b = self.b.value if self.b is not None else None
+        b = self.weight.value.get('bias')
         return matmul(x, w, b)
 
 
@@ -297,15 +297,15 @@ class SparseLinear(brainstate.nn.Module):
 
     This class represents a linear transformation layer where the weight matrix
     is sparse, allowing for efficient storage and computation. It supports various
-    sparse matrix formats such as CSR, CSC, and COO, provided by the `brainunit.sparse`
+    sparse matrix formats such as CSR, CSC, and COO, provided by the `saiunit.sparse`
     module.
 
     Parameters
     ----------
-    sparse_mat : brainunit.sparse.SparseMatrix
+    sparse_mat : saiunit.sparse.SparseMatrix
         The sparse weight matrix to be used in the linear transformation.
-        Can be ``brainunit.sparse.CSR``, ``brainunit.sparse.CSC``,
-        ``brainunit.sparse.COO``, or any other sparse matrix format.
+        Can be ``saiunit.sparse.CSR``, ``saiunit.sparse.CSC``,
+        ``saiunit.sparse.COO``, or any other sparse matrix format.
     b_init : Callable or ArrayLike or None, optional
         The initializer for the bias. If None, no bias is used. Default is None.
     in_size : brainstate.typing.Size or None, optional
@@ -339,7 +339,7 @@ class SparseLinear(brainstate.nn.Module):
 
         >>> import braintrace
         >>> import brainstate
-        >>> import brainunit as u
+        >>> import saiunit as u
         >>>
         >>> # Create a sparse weight matrix
         >>> brainstate.environ.set(precision=64)
@@ -375,7 +375,7 @@ class SparseLinear(brainstate.nn.Module):
                 'The first n-1 dimensions of "in_size" '
                 'and "out_size" must be the same.'
             )
-        assert isinstance(sparse_mat, u.sparse.SparseMatrix), '"weight" must be a brainunit.sparse.SparseMatrix.'
+        assert isinstance(sparse_mat, u.sparse.SparseMatrix), '"weight" must be a saiunit.sparse.SparseMatrix.'
         self.sparse_mat = sparse_mat
         self.weight_data = brainstate.ParamState(sparse_mat.data)
         self.bias = (
