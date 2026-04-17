@@ -709,7 +709,9 @@ def find_hidden_param_op_relations_from_jaxpr(
         x_var, y_var = _resolve_eqn_vars(eqn)
 
         # --- Resolve every trainable invar declared by the primitive ---
-        trainable_invars_map = _resolve_eqn_trainable_invars(eqn)
+        spec = get_primitive_spec(primitive)
+        key_to_idx = spec.resolve_trainable_invars(eqn.params)
+        trainable_invars_map = {k: eqn.invars[i] for k, i in key_to_idx.items()}
         trainable_vars: Dict[str, Var] = {}
         trainable_paths: Dict[str, Path] = {}
         trainable_leaf_indices: Dict[str, int] = {}
@@ -751,20 +753,16 @@ def find_hidden_param_op_relations_from_jaxpr(
                 # constant bias passed directly as a jnp.array). Emit an INFO
                 # diagnostic so users know no gradient will be produced for
                 # this input, then skip it.
-                try:
-                    invar_index = eqn.invars.index(invar)
-                except ValueError:
-                    invar_index = -1
                 emit(
                     kind=DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE,
                     level=DiagnosticLevel.INFO,
                     message=(
                         f"ETP primitive {eqn.primitive.name}: trainable input "
-                        f"'{key}' at invar index {invar_index} does not trace to any "
+                        f"'{key}' at invar index {key_to_idx[key]} does not trace to any "
                         f"ParamState. No online gradient will be produced for this input."
                     ),
                     primitive=eqn.primitive,
-                    context={'key': key},
+                    context={'key': key, 'invar_index': key_to_idx[key]},
                 )
                 continue
             t_leaf = _resolve_weight_leaf_idx(
