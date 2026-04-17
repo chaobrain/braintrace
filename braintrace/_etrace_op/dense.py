@@ -19,6 +19,17 @@ r"""Dense matmul ETP primitives.
 ``etp_mv_p`` is the unbatched primitive (``x`` shape ``(in,)``). Both
 optionally add a bias vector along the output dimension. The user-facing
 :func:`matmul` selects the right primitive from ``x.ndim``.
+
+**Dict rule API (N-trainable-input refactor)**
+
+Both primitives now declare ``trainable_invars_fn``, which returns
+``{'weight': 1}`` when ``has_bias=False`` and ``{'weight': 1, 'bias': 2}``
+when ``has_bias=True``. The four ETP rules accept / return
+``Dict[str, Array]`` instead of bare arrays so the executor can route
+gradients to *both* weight and bias ``ParamState`` objects in one pass.
+
+When ``has_bias=False`` the ``'bias'`` key is simply absent from every
+dict, so the legacy (no-bias) code path is unchanged in behaviour.
 """
 
 import jax
@@ -46,24 +57,56 @@ def _etp_matmul_impl(*args, has_bias=False):
 # etp_mm_p — batched
 # ---------------------------------------------------------------------------
 
+def _mm_trainable_invars(params):
+    """Return ``{key: invar_index}`` depending on ``has_bias``."""
+    base = {'weight': 1}
+    if params.get('has_bias', False):
+        base['bias'] = 2
+    return base
+
+
 def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False):
-    r"""Batched: hidden_dim (batch, out), trace (batch, in, out, n_state)."""
-    return trace * jnp.expand_dims(hidden_dim, axis=1)
+    r"""Batched: hidden_dim (batch, out), trace Dict[str, Array].
+
+    For the weight:  trace['weight'] (batch, in, out, n_state)
+                     hidden_dim (batch, out) -> expand axis=1 -> (batch, 1, out, ...)
+    For the bias:    trace['bias']   (batch, out, n_state)
+                     hidden_dim (batch, out) -> multiply element-wise
+    """
+    out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=1)}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
 
 
-def _mm_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
-    r"""VJP of ``y = x @ w``, per-sample via vmap."""
-    _, vjp_fn = jax.vjp(lambda w_: u.get_mantissa(x @ w_), w)
-    return u.get_mantissa(vjp_fn(hidden_dim)[0])
+def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
+    r"""VJP of ``y = x @ w (+ b)`` in one pass, returning a dict."""
+    def _fwd(w_dict):
+        y = x @ w_dict['weight']
+        if has_bias:
+            y = y + w_dict['bias']
+        return u.get_mantissa(y)
+
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _mm_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+def _mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled Dict[str, Array] for the D-RTRL parameter-dim trace."""
     batch = x_var.aval.shape[0]
-    w_shape = weight_var.aval.shape
-    return jnp.zeros((batch, *w_shape, num_hidden_state))
+    out = {
+        'weight': jnp.zeros(
+            (batch, *weight_vars['weight'].aval.shape, num_hidden_state)
+        )
+    }
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+        )
+    return out
 
 
-def _mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -78,6 +121,7 @@ etp_mm_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=True,
+        trainable_invars_fn=_mm_trainable_invars,
     )
 )
 
@@ -86,23 +130,55 @@ etp_mm_p = register_primitive_spec(
 # etp_mv_p — unbatched
 # ---------------------------------------------------------------------------
 
+def _mv_trainable_invars(params):
+    """Return ``{key: invar_index}`` depending on ``has_bias``."""
+    base = {'weight': 1}
+    if params.get('has_bias', False):
+        base['bias'] = 2
+    return base
+
+
 def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False):
-    r"""Unbatched: hidden_dim (out,), trace (in, out, n_state)."""
-    return trace * jnp.expand_dims(hidden_dim, axis=0)
+    r"""Unbatched: hidden_dim (out,), trace Dict[str, Array].
+
+    For the weight:  trace['weight'] (in, out, n_state)
+                     hidden_dim (out,) -> expand axis=0 -> (1, out, ...)
+    For the bias:    trace['bias']   (out, n_state)
+                     hidden_dim (out,) -> multiply element-wise
+    """
+    out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=0)}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
 
 
-def _mv_xy_to_dw(x, hidden_dim, w, *, has_bias=False):
-    r"""VJP of ``y = x @ w``."""
-    _, vjp_fn = jax.vjp(lambda w_: u.get_mantissa(x @ w_), w)
-    return u.get_mantissa(vjp_fn(hidden_dim)[0])
+def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
+    r"""VJP of ``y = x @ w (+ b)`` in one pass, returning a dict."""
+    def _fwd(w_dict):
+        y = x @ w_dict['weight']
+        if has_bias:
+            y = y + w_dict['bias']
+        return u.get_mantissa(y)
+
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _mv_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
-    w_shape = weight_var.aval.shape
-    return jnp.zeros((*w_shape, num_hidden_state))
+def _mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    """Return zero-filled Dict[str, Array] for the D-RTRL parameter-dim trace."""
+    out = {
+        'weight': jnp.zeros(
+            (*weight_vars['weight'].aval.shape, num_hidden_state)
+        )
+    }
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (*weight_vars['bias'].aval.shape, num_hidden_state)
+        )
+    return out
 
 
-def _mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -117,6 +193,7 @@ etp_mv_p = register_primitive_spec(
         weight_invar_index=1,
         x_invar_index=0,
         batched=False,
+        trainable_invars_fn=_mv_trainable_invars,
     )
 )
 

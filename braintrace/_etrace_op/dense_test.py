@@ -206,82 +206,158 @@ class TestJAXRules:
 class TestMmEtpRules:
 
     def test_yw_to_w_broadcasts_hidden(self):
-        """``yw_to_w`` multiplies ``trace`` element-wise by ``hidden_dim``
-        broadcast along axis 1. The rule is exercised inside a larger
-        ``vmap`` chain at runtime — here we drive it directly with shapes
-        that broadcast cleanly to verify the multiplication is correct."""
+        """``yw_to_w`` multiplies ``trace['weight']`` element-wise by ``hidden_dim``
+        broadcast along axis 1. The rule accepts and returns a dict."""
         rule = ETP_RULES_YW_TO_W[etp_mm_p]
-        # trace shape (out, in_eq), hidden (out,) — expand_dims axis=1 → (out, 1)
+        # trace['weight'] shape (out, in_eq), hidden (out,) — expand_dims axis=1 → (out, 1)
         # broadcasts against (out, in_eq) → output (out, in_eq).
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
-        trace = jnp.ones((4, 5))
+        trace = {'weight': jnp.ones((4, 5))}
         out = rule(hidden, trace)
-        assert out.shape == (4, 5)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (4, 5)
         # row j scaled by hidden[j]
-        np.testing.assert_allclose(out, hidden[:, None] * jnp.ones((4, 5)))
+        np.testing.assert_allclose(out['weight'], hidden[:, None] * jnp.ones((4, 5)))
+
+    def test_yw_to_w_with_bias(self):
+        """When has_bias=True, ``yw_to_w`` also scales ``trace['bias']``."""
+        rule = ETP_RULES_YW_TO_W[etp_mm_p]
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
+        trace = {'weight': jnp.ones((4, 5)), 'bias': jnp.ones((4,))}
+        out = rule(hidden, trace, has_bias=True)
+        assert isinstance(out, dict)
+        assert 'bias' in out
+        np.testing.assert_allclose(out['bias'], hidden)
 
     def test_xy_to_dw_matches_jax_vjp(self):
         rule = ETP_RULES_XY_TO_DW[etp_mm_p]
         x = jnp.arange(6.0).reshape(2, 3)
         w = jnp.arange(12.0).reshape(3, 4)
         hidden = jnp.ones((2, 4))
-        dw = rule(x, hidden, w)
+        weights = {'weight': w}
+        dw_dict = rule(x, hidden, weights)
+        assert isinstance(dw_dict, dict)
         # VJP of y = x @ w wrt w with cotangent ones((2,4)) is x.T @ ones((2,4))
         expected = x.T @ hidden
-        np.testing.assert_allclose(dw, expected)
+        np.testing.assert_allclose(dw_dict['weight'], expected)
+
+    def test_xy_to_dw_with_bias(self):
+        """With has_bias=True the dict result also contains a 'bias' entry."""
+        rule = ETP_RULES_XY_TO_DW[etp_mm_p]
+        x = jnp.ones((2, 3))
+        w = jnp.arange(12.0).reshape(3, 4)
+        b = jnp.zeros(4)
+        hidden = jnp.ones((2, 4))
+        weights = {'weight': w, 'bias': b}
+        dw_dict = rule(x, hidden, weights, has_bias=True)
+        assert isinstance(dw_dict, dict)
+        assert 'weight' in dw_dict
+        assert 'bias' in dw_dict
+        # db = sum of hidden over batch axis = ones(4)
+        np.testing.assert_allclose(dw_dict['bias'], hidden.sum(axis=0))
 
     def test_init_drtrl_shape(self):
         rule = ETP_RULES_INIT_DRTRL[etp_mm_p]
         x_var = _fake_var((4, 3))           # (batch, in)
         y_var = _fake_var((4, 5))
-        w_var = _fake_var((3, 5))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
-        assert out.shape == (4, 3, 5, 2)
+        weight_vars = {'weight': _fake_var((3, 5))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (4, 3, 5, 2)
+
+    def test_init_drtrl_shape_with_bias(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_mm_p]
+        x_var = _fake_var((4, 3))
+        y_var = _fake_var((4, 5))
+        weight_vars = {'weight': _fake_var((3, 5)), 'bias': _fake_var((5,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (4, 3, 5, 2)
+        assert out['bias'].shape == (4, 5, 2)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_mm_p]
         x_var = _fake_var((4, 3))
         y_var = _fake_var((4, 5))
-        w_var = _fake_var((3, 5))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        weight_vars = {'weight': _fake_var((3, 5))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (4, 5, 2)
 
 
 class TestMvEtpRules:
 
     def test_yw_to_w_broadcasts_hidden(self):
-        """``yw_to_w`` multiplies ``trace`` by ``hidden`` broadcast along
-        the column axis."""
+        """``yw_to_w`` multiplies ``trace['weight']`` by ``hidden`` broadcast
+        along the column axis. The rule accepts and returns a dict."""
         rule = ETP_RULES_YW_TO_W[etp_mv_p]
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
-        trace = jnp.ones((3, 4))                  # (in, out)
+        trace = {'weight': jnp.ones((3, 4))}       # (in, out)
         out = rule(hidden, trace)
-        assert out.shape == (3, 4)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (3, 4)
         # column j scaled by hidden[j]
-        np.testing.assert_allclose(out, jnp.ones((3, 4)) * hidden[None, :])
+        np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
+
+    def test_yw_to_w_with_bias(self):
+        """When has_bias=True, ``yw_to_w`` also scales ``trace['bias']``."""
+        rule = ETP_RULES_YW_TO_W[etp_mv_p]
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
+        trace = {'weight': jnp.ones((3, 4)), 'bias': jnp.ones((4,))}
+        out = rule(hidden, trace, has_bias=True)
+        assert isinstance(out, dict)
+        assert 'bias' in out
+        np.testing.assert_allclose(out['bias'], hidden)
 
     def test_xy_to_dw_matches_outer_product(self):
         rule = ETP_RULES_XY_TO_DW[etp_mv_p]
         x = jnp.arange(3.0)
         w = jnp.arange(12.0).reshape(3, 4)
         hidden = jnp.arange(4.0)
-        dw = rule(x, hidden, w)
-        np.testing.assert_allclose(dw, jnp.outer(x, hidden))
+        weights = {'weight': w}
+        dw_dict = rule(x, hidden, weights)
+        assert isinstance(dw_dict, dict)
+        np.testing.assert_allclose(dw_dict['weight'], jnp.outer(x, hidden))
+
+    def test_xy_to_dw_with_bias(self):
+        """With has_bias=True the dict result also contains a 'bias' entry."""
+        rule = ETP_RULES_XY_TO_DW[etp_mv_p]
+        x = jnp.arange(3.0)
+        w = jnp.arange(12.0).reshape(3, 4)
+        b = jnp.zeros(4)
+        hidden = jnp.arange(4.0)
+        weights = {'weight': w, 'bias': b}
+        dw_dict = rule(x, hidden, weights, has_bias=True)
+        assert isinstance(dw_dict, dict)
+        assert 'weight' in dw_dict
+        assert 'bias' in dw_dict
+        # db = hidden (unbatched VJP)
+        np.testing.assert_allclose(dw_dict['bias'], hidden)
 
     def test_init_drtrl_shape(self):
         rule = ETP_RULES_INIT_DRTRL[etp_mv_p]
         x_var = _fake_var((3,))
         y_var = _fake_var((5,))
-        w_var = _fake_var((3, 5))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
-        assert out.shape == (3, 5, 2)
+        weight_vars = {'weight': _fake_var((3, 5))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (3, 5, 2)
+
+    def test_init_drtrl_shape_with_bias(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_mv_p]
+        x_var = _fake_var((3,))
+        y_var = _fake_var((5,))
+        weight_vars = {'weight': _fake_var((3, 5)), 'bias': _fake_var((5,))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (3, 5, 2)
+        assert out['bias'].shape == (5, 2)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_mv_p]
         x_var = _fake_var((3,))
         y_var = _fake_var((5,))
-        w_var = _fake_var((3, 5))
-        out = rule(x_var, y_var, w_var, num_hidden_state=2)
+        weight_vars = {'weight': _fake_var((3, 5))}
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (5, 2)
 
 
