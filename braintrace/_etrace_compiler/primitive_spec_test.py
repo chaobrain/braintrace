@@ -121,7 +121,7 @@ class TestSpecRegistry:
     """The spec is queryable for every primitive registered through it."""
 
     def test_all_builtin_primitives_have_spec(self):
-        from braintrace._etrace_operators import (
+        from braintrace._etrace_op import (
             etp_mm_p, etp_mv_p, etp_elemwise_p, etp_conv_p,
             etp_sp_mm_p, etp_sp_mv_p, etp_lora_mm_p, etp_lora_mv_p,
         )
@@ -136,14 +136,14 @@ class TestSpecRegistry:
     def test_elemwise_spec_is_gradient_enabled_and_x_is_none(self):
         """Principle 2: only ``etp_elemwise_p``-class primitives are
         gradient-enabled traversable on the tail."""
-        from braintrace._etrace_operators import etp_elemwise_p
+        from braintrace._etrace_op import etp_elemwise_p
         spec = get_primitive_spec(etp_elemwise_p)
         assert spec.gradient_enabled is True
         assert spec.x_invar_index is None
         assert spec.weight_invar_index == 0
 
     def test_mm_mv_conv_lora_are_not_gradient_enabled(self):
-        from braintrace._etrace_operators import (
+        from braintrace._etrace_op import (
             etp_mm_p, etp_mv_p, etp_conv_p,
             etp_sp_mm_p, etp_sp_mv_p,
             etp_lora_mm_p, etp_lora_mv_p,
@@ -221,7 +221,7 @@ class TestLegacyRegistrationStillWorks:
     is registered."""
 
     def test_legacy_primitive_falls_back_to_default_convention(self):
-        from braintrace._etrace_operators import (
+        from braintrace._etrace_op import (
             ETP_PRIMITIVE_SPECS,
             register_primitive,
         )

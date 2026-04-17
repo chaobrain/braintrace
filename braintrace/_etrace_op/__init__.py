@@ -15,7 +15,7 @@
 
 r"""ETP (Eligibility Trace Propagation) primitives + rule registries + user API.
 
-This package replaces the legacy single-file ``braintrace._etrace_operators``
+This package replaces the legacy single-file ``braintrace._etrace_op``
 module. The submodule layout is:
 
 * :mod:`._registries` — global registries + flag-checking helpers
@@ -28,7 +28,7 @@ module. The submodule layout is:
 * :mod:`.lora` — ``etp_lora_mm_p``, ``etp_lora_mv_p``, :func:`lora_matmul`
 
 The public surface mirrors the legacy module: every name previously
-exported from ``braintrace._etrace_operators`` is also available here.
+exported from ``braintrace._etrace_op`` is also available here.
 """
 
 from ._primitive import ETPPrimitive, register_primitive

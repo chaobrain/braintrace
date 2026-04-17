@@ -22,7 +22,7 @@ import brainstate
 import jax
 from braintools import init
 
-from braintrace._etrace_operators import conv as etp_conv
+from braintrace._etrace_op import conv as etp_conv
 from braintrace._typing import ArrayLike
 
 __all__ = [
@@ -147,7 +147,7 @@ class _Conv(brainstate.nn.Module):
             self.bias = None
 
         # Evaluate the output shape
-        from braintrace._etrace_operators import _etp_conv_impl
+        from braintrace._etrace_op import _etp_conv_impl
         xinfo = jax.ShapeDtypeStruct((1,) + self.in_size, self.kernel.value.dtype)
         abstract_y = jax.eval_shape(
             lambda x_, k_: _etp_conv_impl(

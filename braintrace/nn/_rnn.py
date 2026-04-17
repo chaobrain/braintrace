@@ -20,7 +20,7 @@ import brainstate
 import braintools
 import saiunit as u
 
-from braintrace._etrace_operators import element_wise
+from braintrace._etrace_op import element_wise
 from braintrace._typing import ArrayLike
 from ._linear import Linear
 

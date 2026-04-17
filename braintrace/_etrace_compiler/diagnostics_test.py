@@ -38,7 +38,7 @@ from braintrace import (
     DiagnosticLevel,
     compile_etrace_graph,
 )
-from braintrace._etrace_operators import etp_mm_p, etp_mv_p
+from braintrace._etrace_op import etp_mm_p, etp_mv_p
 
 
 class TestDiagnosticsBasics:

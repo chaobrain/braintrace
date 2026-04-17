@@ -23,7 +23,7 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     is_cond_primitive,
 )
-from braintrace._etrace_operators import (
+from braintrace._etrace_op import (
     is_etp_primitive,
     is_etp_enable_gradient_primitive,
 )

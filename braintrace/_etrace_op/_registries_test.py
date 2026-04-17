@@ -150,17 +150,17 @@ class TestRegistriesAreSharedAcrossImports:
     not a copy."""
 
     def test_shim_and_package_share_etp_primitives(self):
-        from braintrace import _etrace_operators as legacy
+        from braintrace import _etrace_op as legacy
         assert legacy.ETP_PRIMITIVES is ETP_PRIMITIVES
 
     def test_shim_and_package_share_rule_dicts(self):
-        from braintrace import _etrace_operators as legacy
+        from braintrace import _etrace_op as legacy
         assert legacy.ETP_RULES_YW_TO_W is ETP_RULES_YW_TO_W
         assert legacy.ETP_RULES_XY_TO_DW is ETP_RULES_XY_TO_DW
         assert legacy.ETP_RULES_INIT_DRTRL is ETP_RULES_INIT_DRTRL
         assert legacy.ETP_RULES_INIT_PP is ETP_RULES_INIT_PP
 
     def test_shim_and_package_share_flag_sets(self):
-        from braintrace import _etrace_operators as legacy
+        from braintrace import _etrace_op as legacy
         assert legacy.GRADIENT_ENABLED_PRIMITIVES is GRADIENT_ENABLED_PRIMITIVES
         assert legacy.BATCHED_PRIMITIVES is BATCHED_PRIMITIVES

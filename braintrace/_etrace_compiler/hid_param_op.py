@@ -63,7 +63,7 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     is_cond_primitive,
 )
-from braintrace._etrace_operators import (
+from braintrace._etrace_op import (
     ETP_PRIMITIVES,
     etp_elemwise_p,
     get_primitive_spec,

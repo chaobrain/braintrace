@@ -22,7 +22,7 @@ import brainstate
 import braintools
 import saiunit as u
 
-from braintrace._etrace_operators import matmul
+from braintrace._etrace_op import matmul
 from braintrace._typing import Size, ArrayLike
 
 __all__ = [

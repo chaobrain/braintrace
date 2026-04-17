@@ -19,7 +19,7 @@ Comprehensive tests for convolutional neural network layers.
 Note: There is a known issue in ConvOp where batch dimensions are not properly
 handled. The tests are written to test layer creation and the basic structure,
 with integration tests marked as expected failures until the underlying issue
-in _etrace_operators.py is fixed.
+in _etrace_op.py is fixed.
 """
 
 import pytest

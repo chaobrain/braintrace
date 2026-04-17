@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
-from braintrace._etrace_operators import (
+from braintrace._etrace_op import (
     etp_elemwise_p,
     ETP_RULES_YW_TO_W,
     ETP_RULES_XY_TO_DW,

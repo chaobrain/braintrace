@@ -45,7 +45,7 @@ from braintrace import (
     DiagnosticKind,
     compile_etrace_graph,
 )
-from braintrace._etrace_operators import (
+from braintrace._etrace_op import (
     etp_conv_p,
     etp_elemwise_p,
     etp_mm_p,
