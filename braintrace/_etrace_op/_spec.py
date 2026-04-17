@@ -68,6 +68,12 @@ class ETPPrimitiveSpec:
             for any trainable op), the primitive acts as a tail boundary —
             a preceding ETP weight whose only path to ``h`` passes through
             this primitive is excluded from ETP.
+        trainable_invars_fn: Optional function ``eqn.params -> {key: invar_index}``
+            declaring the primitive's full trainable-input layout. Used by
+            the compiler and executors to support N-trainable-input primitives
+            (e.g. ``{weight, bias}`` for Linear, ``{B, A, bias}`` for LoRA).
+            When ``None``, the single-weight legacy layout is synthesized from
+            ``weight_invar_index``.
     """
 
     name: str
@@ -81,6 +87,17 @@ class ETPPrimitiveSpec:
     y_outvar_index: int = 0
     batched: bool = False
     gradient_enabled: bool = False
+    trainable_invars_fn: Optional[Callable[[dict], Dict[str, int]]] = None
+
+    def resolve_trainable_invars(self, eqn_params: dict) -> Dict[str, int]:
+        """Return ``{key: invar_index}`` for this equation.
+
+        If ``trainable_invars_fn`` is set, delegates to it. Otherwise returns
+        the legacy single-weight layout ``{'weight': weight_invar_index}``.
+        """
+        if self.trainable_invars_fn is not None:
+            return self.trainable_invars_fn(eqn_params)
+        return {'weight': self.weight_invar_index}
 
 
 def register_primitive_spec(spec: ETPPrimitiveSpec) -> ETPPrimitive:

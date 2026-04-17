@@ -252,3 +252,47 @@ class TestLegacyRegistrationStillWorks:
         # Legacy API does not touch the spec registry.
         assert prim not in ETP_PRIMITIVE_SPECS
         assert get_primitive_spec(prim) is None
+
+
+class TestTrainableInvarsFn:
+
+    def test_field_defaults_to_none(self):
+        spec = ETPPrimitiveSpec(
+            name='dummy',
+            impl=lambda *a, **k: a[0],
+            yw_to_w=lambda *a, **k: a[1],
+            xy_to_dw=lambda *a, **k: a[0],
+            init_drtrl=lambda *a, **k: None,
+            init_pp=lambda *a, **k: None,
+            weight_invar_index=1,
+        )
+        assert spec.trainable_invars_fn is None
+
+    def test_custom_fn_is_preserved(self):
+        fn = lambda params: {'weight': 1, 'bias': 2} if params.get('has_bias') else {'weight': 1}
+        spec = ETPPrimitiveSpec(
+            name='dummy',
+            impl=lambda *a, **k: a[0],
+            yw_to_w=lambda *a, **k: a[1],
+            xy_to_dw=lambda *a, **k: a[0],
+            init_drtrl=lambda *a, **k: None,
+            init_pp=lambda *a, **k: None,
+            weight_invar_index=1,
+            trainable_invars_fn=fn,
+        )
+        assert spec.trainable_invars_fn({'has_bias': True}) == {'weight': 1, 'bias': 2}
+        assert spec.trainable_invars_fn({}) == {'weight': 1}
+
+    def test_legacy_derived_uses_weight_invar_index(self):
+        # When trainable_invars_fn is None, the spec exposes a helper that
+        # returns the legacy single-weight layout: {'weight': weight_invar_index}.
+        spec = ETPPrimitiveSpec(
+            name='dummy',
+            impl=lambda *a, **k: a[0],
+            yw_to_w=lambda *a, **k: a[1],
+            xy_to_dw=lambda *a, **k: a[0],
+            init_drtrl=lambda *a, **k: None,
+            init_pp=lambda *a, **k: None,
+            weight_invar_index=2,
+        )
+        assert spec.resolve_trainable_invars({}) == {'weight': 2}
