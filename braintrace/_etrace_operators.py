@@ -55,6 +55,7 @@ User API
 ``lora_matmul(x, B, A, ..)`` — LoRA matmul
 """
 
+from dataclasses import dataclass
 from functools import partial
 from typing import Callable, Dict, Optional, Sequence, Any
 
@@ -69,7 +70,10 @@ from braintrace._compatible_imports import Primitive
 __all__ = [
     # ETP primitive class & registration
     'ETPPrimitive',
+    'ETPPrimitiveSpec',
     'register_primitive',
+    'register_primitive_spec',
+    'get_primitive_spec',
 
     # user API
     'matmul',
@@ -273,6 +277,88 @@ def register_primitive(name, impl_fn, *, batched=False, gradient_enabled=False):
 
 
 # ======================================================================
+# ETPPrimitiveSpec — declarative, plug-in-style primitive registration
+# ======================================================================
+
+ETP_PRIMITIVE_SPECS: Dict[Primitive, 'ETPPrimitiveSpec'] = {}
+
+
+@dataclass(frozen=True)
+class ETPPrimitiveSpec:
+    """Declarative specification of an ETP primitive.
+
+    A single record carrying every datum the compiler and runtime need to
+    identify the primitive, locate its weight and input invars, and dispatch
+    the four ETP rules. Register via :func:`register_primitive_spec` to
+    create the primitive and populate every registry in one call.
+
+    Attributes:
+        name: Primitive name (e.g. ``'etp_mm'``).
+        impl: Implementation function. All standard JAX rules (abstract_eval,
+            lowering, JVP, transpose, batching) are auto-derived from this.
+        batched: Whether the primitive operates on batched inputs.
+        gradient_enabled: If True, the compiler *may* traverse this primitive
+            when walking ``y -> h`` (identity-like ops such as
+            ``etp_elemwise_p``). If False (default for any trainable op),
+            the primitive acts as a tail boundary — a preceding ETP weight
+            whose only path to ``h`` passes through this primitive is
+            excluded from ETP.
+        weight_invar_index: Position in ``eqn.invars`` of the weight the
+            compiler should trace back to a ``ParamState``. For ``mm/mv/conv``
+            this is 1; for ``elemwise`` it is 0; for LoRA it is 1 (the B
+            factor — the originating ``ParamState`` holds both B and A).
+        x_invar_index: Position of the input ``x`` in ``eqn.invars``, or
+            ``None`` for primitives that have no external input (currently
+            only ``etp_elemwise_p``).
+        yw_to_w: D-RTRL trace propagation rule.
+        xy_to_dw: Weight-gradient rule.
+        init_drtrl: D-RTRL parameter-dimension trace initialiser.
+        init_pp: pp_prop IO-dimension df trace initialiser.
+    """
+
+    name: str
+    impl: Callable
+    yw_to_w: Callable
+    xy_to_dw: Callable
+    init_drtrl: Callable
+    init_pp: Callable
+    weight_invar_index: int
+    x_invar_index: Optional[int] = 0
+    batched: bool = False
+    gradient_enabled: bool = False
+
+
+def register_primitive_spec(spec: ETPPrimitiveSpec) -> 'ETPPrimitive':
+    """Create an ETP primitive and install it + all four ETP rules from *spec*.
+
+    Returns the created :class:`ETPPrimitive`. Also records ``spec`` in
+    :data:`ETP_PRIMITIVE_SPECS` so the compiler can query the primitive's
+    invar layout without hard-coding identity checks.
+    """
+    p = register_primitive(
+        spec.name,
+        spec.impl,
+        batched=spec.batched,
+        gradient_enabled=spec.gradient_enabled,
+    )
+    p.register_etp_rules(
+        yw_to_w=spec.yw_to_w,
+        xy_to_dw=spec.xy_to_dw,
+        init_drtrl=spec.init_drtrl,
+        init_pp=spec.init_pp,
+    )
+    ETP_PRIMITIVE_SPECS[p] = spec
+    return p
+
+
+def get_primitive_spec(primitive: Primitive) -> Optional[ETPPrimitiveSpec]:
+    """Return the :class:`ETPPrimitiveSpec` for *primitive*, or ``None`` if
+    the primitive was registered through the legacy ``register_primitive`` +
+    ``register_*`` API without a spec."""
+    return ETP_PRIMITIVE_SPECS.get(primitive)
+
+
+# ======================================================================
 # etp_mm_p / etp_mv_p  —  y = x @ w (+ b)
 # ======================================================================
 
@@ -308,11 +394,17 @@ def _mm_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_mm_p = register_primitive('etp_mm', _etp_matmul_impl, batched=True)
-etp_mm_p.register_yw_to_w(_mm_yw_to_w)
-etp_mm_p.register_xy_to_dw(_mm_xy_to_dw)
-etp_mm_p.register_init_drtrl(_mm_init_drtrl)
-etp_mm_p.register_init_pp(_mm_init_pp)
+etp_mm_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_mm',
+    impl=_etp_matmul_impl,
+    yw_to_w=_mm_yw_to_w,
+    xy_to_dw=_mm_xy_to_dw,
+    init_drtrl=_mm_init_drtrl,
+    init_pp=_mm_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=True,
+))
 
 
 # --- mv (unbatched) ---
@@ -338,11 +430,17 @@ def _mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_mv_p = register_primitive('etp_mv', _etp_matmul_impl, batched=False)
-etp_mv_p.register_yw_to_w(_mv_yw_to_w)
-etp_mv_p.register_xy_to_dw(_mv_xy_to_dw)
-etp_mv_p.register_init_drtrl(_mv_init_drtrl)
-etp_mv_p.register_init_pp(_mv_init_pp)
+etp_mv_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_mv',
+    impl=_etp_matmul_impl,
+    yw_to_w=_mv_yw_to_w,
+    xy_to_dw=_mv_xy_to_dw,
+    init_drtrl=_mv_init_drtrl,
+    init_pp=_mv_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=False,
+))
 
 
 # ======================================================================
@@ -374,11 +472,18 @@ def _elemwise_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_elemwise_p = register_primitive('etp_elemwise', _etp_elemwise_impl, gradient_enabled=True)
-etp_elemwise_p.register_yw_to_w(_elemwise_yw_to_w)
-etp_elemwise_p.register_xy_to_dw(_elemwise_xy_to_dw)
-etp_elemwise_p.register_init_drtrl(_elemwise_init_drtrl)
-etp_elemwise_p.register_init_pp(_elemwise_init_pp)
+etp_elemwise_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_elemwise',
+    impl=_etp_elemwise_impl,
+    yw_to_w=_elemwise_yw_to_w,
+    xy_to_dw=_elemwise_xy_to_dw,
+    init_drtrl=_elemwise_init_drtrl,
+    init_pp=_elemwise_init_pp,
+    weight_invar_index=0,
+    x_invar_index=None,
+    batched=False,
+    gradient_enabled=True,
+))
 
 
 # ======================================================================
@@ -442,11 +547,17 @@ def _conv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_conv_p = register_primitive('etp_conv', _etp_conv_impl, batched=True)
-etp_conv_p.register_yw_to_w(_conv_yw_to_w)
-etp_conv_p.register_xy_to_dw(_conv_xy_to_dw)
-etp_conv_p.register_init_drtrl(_conv_init_drtrl)
-etp_conv_p.register_init_pp(_conv_init_pp)
+etp_conv_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_conv',
+    impl=_etp_conv_impl,
+    yw_to_w=_conv_yw_to_w,
+    xy_to_dw=_conv_xy_to_dw,
+    init_drtrl=_conv_init_drtrl,
+    init_pp=_conv_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=True,
+))
 
 
 # ======================================================================
@@ -494,17 +605,29 @@ def _sp_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_sp_mm_p = register_primitive('etp_sp_mm', _etp_sp_matmul_impl, batched=True)
-etp_sp_mm_p.register_yw_to_w(_sp_mm_yw_to_w)
-etp_sp_mm_p.register_xy_to_dw(_sp_xy_to_dw)
-etp_sp_mm_p.register_init_drtrl(_sp_mm_init_drtrl)
-etp_sp_mm_p.register_init_pp(_sp_mm_init_pp)
+etp_sp_mm_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_sp_mm',
+    impl=_etp_sp_matmul_impl,
+    yw_to_w=_sp_mm_yw_to_w,
+    xy_to_dw=_sp_xy_to_dw,
+    init_drtrl=_sp_mm_init_drtrl,
+    init_pp=_sp_mm_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=True,
+))
 
-etp_sp_mv_p = register_primitive('etp_sp_mv', _etp_sp_matmul_impl, batched=False)
-etp_sp_mv_p.register_yw_to_w(_sp_mv_yw_to_w)
-etp_sp_mv_p.register_xy_to_dw(_sp_xy_to_dw)
-etp_sp_mv_p.register_init_drtrl(_sp_mv_init_drtrl)
-etp_sp_mv_p.register_init_pp(_sp_mv_init_pp)
+etp_sp_mv_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_sp_mv',
+    impl=_etp_sp_matmul_impl,
+    yw_to_w=_sp_mv_yw_to_w,
+    xy_to_dw=_sp_xy_to_dw,
+    init_drtrl=_sp_mv_init_drtrl,
+    init_pp=_sp_mv_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=False,
+))
 
 
 # ======================================================================
@@ -577,17 +700,29 @@ def _lora_mv_init_pp(x_var, y_var, weight_var, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_lora_mm_p = register_primitive('etp_lora_mm', _etp_lora_impl, batched=True)
-etp_lora_mm_p.register_yw_to_w(_lora_mm_yw_to_w)
-etp_lora_mm_p.register_xy_to_dw(_lora_xy_to_dw)
-etp_lora_mm_p.register_init_drtrl(_lora_mm_init_drtrl)
-etp_lora_mm_p.register_init_pp(_lora_mm_init_pp)
+etp_lora_mm_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_lora_mm',
+    impl=_etp_lora_impl,
+    yw_to_w=_lora_mm_yw_to_w,
+    xy_to_dw=_lora_xy_to_dw,
+    init_drtrl=_lora_mm_init_drtrl,
+    init_pp=_lora_mm_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=True,
+))
 
-etp_lora_mv_p = register_primitive('etp_lora_mv', _etp_lora_impl, batched=False)
-etp_lora_mv_p.register_yw_to_w(_lora_mv_yw_to_w)
-etp_lora_mv_p.register_xy_to_dw(_lora_xy_to_dw)
-etp_lora_mv_p.register_init_drtrl(_lora_mv_init_drtrl)
-etp_lora_mv_p.register_init_pp(_lora_mv_init_pp)
+etp_lora_mv_p = register_primitive_spec(ETPPrimitiveSpec(
+    name='etp_lora_mv',
+    impl=_etp_lora_impl,
+    yw_to_w=_lora_mv_yw_to_w,
+    xy_to_dw=_lora_xy_to_dw,
+    init_drtrl=_lora_mv_init_drtrl,
+    init_pp=_lora_mv_init_pp,
+    weight_invar_index=1,
+    x_invar_index=0,
+    batched=False,
+))
 
 
 # ======================================================================

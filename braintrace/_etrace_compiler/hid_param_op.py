@@ -25,7 +25,6 @@ with direct primitive type checking in the Jaxpr. The compiler:
 4. Builds transition Jaxprs (y → h) for each connected hidden group.
 """
 
-import warnings
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, Any
 
 import brainstate
@@ -42,6 +41,7 @@ from braintrace._compatible_imports import (
 from braintrace._etrace_operators import (
     ETP_PRIMITIVES,
     etp_elemwise_p,
+    get_primitive_spec,
     is_etp_primitive,
     is_etp_enable_gradient_primitive,
 )
@@ -49,6 +49,11 @@ from braintrace._misc import git_issue_addr
 from braintrace._typing import (
     Path,
     HiddenOutVar,
+)
+from .diagnostics import (
+    DiagnosticKind,
+    DiagnosticLevel,
+    emit,
 )
 from .hidden_group import HiddenGroup, find_hidden_groups_from_minfo
 from .module_info import ModuleInfo, extract_module_info
@@ -192,8 +197,14 @@ def _find_reachable_hidden_outvars(
     consumer_map: Dict[Var, List[JaxprEqn]],
     hidden_outvar_set: Set[Var],
     outvar_to_group_index: Optional[Dict[Var, int]] = None,
-) -> Set[Var]:
+) -> Tuple[Set[Var], Tuple[JaxprEqn, ...]]:
     """Forward BFS from *start_var* to find reachable hidden-state outvars.
+
+    Returns ``(reachable_hvars, blocking_eqns)`` where ``blocking_eqns`` is the
+    tuple (in BFS-encounter order, deduplicated) of consumer equations that
+    were NOT crossed because they are non-gradient-enabled ETP primitives.
+    The caller uses ``blocking_eqns`` to distinguish a "truly non-temporal"
+    weight from one excluded by the ``weight -> weight -> hidden`` rule.
 
     When ``outvar_to_group_index`` is provided, the search restricts itself to
     hidden outvars in the *closest* hidden group — the first one encountered.
@@ -212,6 +223,8 @@ def _find_reachable_hidden_outvars(
     home_group_indices: Set[int] = set()
     frontier: deque = deque([start_var])
     visited: Set[Var] = set()
+    blocking_eqns: List[JaxprEqn] = []
+    blocking_seen: Set[int] = set()
     while frontier:
         v = frontier.popleft()
         if v in visited:
@@ -239,11 +252,15 @@ def _find_reachable_hidden_outvars(
                 is_etp_primitive(eqn.primitive)
                 and not is_etp_enable_gradient_primitive(eqn.primitive)
             ):
+                key = id(eqn)
+                if key not in blocking_seen:
+                    blocking_seen.add(key)
+                    blocking_eqns.append(eqn)
                 continue
             for ov in eqn.outvars:
                 if ov not in visited:
                     frontier.append(ov)
-    return reachable
+    return reachable, tuple(blocking_eqns)
 
 
 def _build_transition_jaxpr(
@@ -316,12 +333,16 @@ def _scan_jaxpr_for_etp_eqns(jaxpr: Jaxpr) -> List[JaxprEqn]:
             inner_jaxpr = eqn.params['jaxpr'].jaxpr
             inner_etp = _scan_jaxpr_for_etp_eqns(inner_jaxpr)
             if inner_etp:
-                warnings.warn(
-                    f'Found ETP primitives inside a nested jit/pjit. '
-                    f'This is currently handled by tracing through the outer jaxpr. '
-                    f'If you see incorrect results, please avoid wrapping individual '
-                    f'ETP calls in jax.jit. Report issues at {git_issue_addr}.',
-                    stacklevel=3,
+                emit(
+                    kind=DiagnosticKind.PRIMITIVE_INSIDE_NESTED_JIT,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        'Found ETP primitives inside a nested jit/pjit. '
+                        'This is currently handled by tracing through the outer jaxpr. '
+                        'If you see incorrect results, please avoid wrapping individual '
+                        f'ETP calls in jax.jit. Report issues at {git_issue_addr}.'
+                    ),
+                    context={'inner_primitives': tuple(e.primitive for e in inner_etp)},
                 )
     return etp_eqns
 
@@ -365,8 +386,21 @@ def find_hidden_param_op_relations_from_jaxpr(
         primitive = eqn.primitive
         y_var = eqn.outvars[0]
 
-        # --- Identify weight variable ---
-        if primitive is etp_elemwise_p:
+        # --- Identify weight and x variables from the primitive's spec ---
+        # Spec-driven dispatch lets third-party primitives declare their own
+        # invar layout without touching the compiler. Legacy primitives
+        # registered through the old API fall back to the historical
+        # convention (weight at invar[1] unless the primitive is
+        # ``etp_elemwise_p``).
+        spec = get_primitive_spec(primitive)
+        if spec is not None:
+            weight_var = eqn.invars[spec.weight_invar_index]
+            if spec.x_invar_index is None:
+                x_var = None
+            else:
+                candidate = eqn.invars[spec.x_invar_index]
+                x_var = candidate if isinstance(candidate, Var) else None
+        elif primitive is etp_elemwise_p:
             weight_var = eqn.invars[0]
             x_var = None
         else:
@@ -378,10 +412,15 @@ def find_hidden_param_op_relations_from_jaxpr(
             weight_var, producers, invar_to_weight_path,
         )
         if weight_path is None:
-            warnings.warn(
-                f'ETP primitive {primitive.name} at {eqn} has a weight input '
-                f'that could not be traced back to any ParamState. Skipping.',
-                stacklevel=2,
+            emit(
+                kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'ETP primitive {primitive.name} at {eqn} has a weight input '
+                    f'that could not be traced back to any ParamState. Skipping.'
+                ),
+                primitive=primitive,
+                context={'weight_var': weight_var},
             )
             continue
 
@@ -418,7 +457,7 @@ def find_hidden_param_op_relations_from_jaxpr(
                 weight_leaf_idx = 0
 
         # --- Find connected hidden states ---
-        reachable_hvars = _find_reachable_hidden_outvars(
+        reachable_hvars, blocking_eqns = _find_reachable_hidden_outvars(
             y_var, consumers, hidden_outvar_set,
             outvar_to_group_index=outvar_to_group_index,
         )
@@ -430,22 +469,79 @@ def find_hidden_param_op_relations_from_jaxpr(
                 jax.numpy.broadcast_shapes(y_var.aval.shape, hvar.aval.shape)
                 connected_paths.append(outvar_to_hidden_path[hvar])
             except ValueError:
-                warnings.warn(
-                    f'ETP op {primitive.name}: weight={weight_path}, '
-                    f'y shape={y_var.aval.shape} not broadcastable with '
-                    f'hidden shape={hvar.aval.shape} at '
-                    f'{outvar_to_hidden_path[hvar]}. Removing connection.',
-                    stacklevel=2,
+                emit(
+                    kind=DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'ETP op {primitive.name}: weight={weight_path}, '
+                        f'y shape={y_var.aval.shape} not broadcastable with '
+                        f'hidden shape={hvar.aval.shape} at '
+                        f'{outvar_to_hidden_path[hvar]}. Removing connection.'
+                    ),
+                    primitive=primitive,
+                    weight_path=weight_path,
+                    hidden_paths=(outvar_to_hidden_path[hvar],),
+                    context={
+                        'y_shape': tuple(y_var.aval.shape),
+                        'hidden_shape': tuple(hvar.aval.shape),
+                    },
                 )
                 reachable_hvars.discard(hvar)
 
         if not connected_paths:
-            warnings.warn(
-                f'ETP primitive {primitive.name} (weight={weight_path}) '
-                f'has no connected hidden states. It will be treated as '
-                f'a non-temporal parameter.',
-                stacklevel=2,
-            )
+            # Distinguish W -> W -> h exclusion (the blocking eqn at the tail
+            # was another non-gradient-enabled ETP primitive) from a truly
+            # non-temporal weight (no ETP op blocks the path; hidden states
+            # just don't depend on this weight).
+            if blocking_eqns:
+                blocking_primitives = tuple(e.primitive for e in blocking_eqns)
+                # Try to recover the *paths* of the blocking weights so the
+                # diagnostic names which weight stood in the way. Any that
+                # fail to resolve are dropped from the context.
+                blocking_paths: List[Optional[Path]] = []
+                for be in blocking_eqns:
+                    be_spec = get_primitive_spec(be.primitive)
+                    if be_spec is not None:
+                        wvar = be.invars[be_spec.weight_invar_index]
+                    elif be.primitive is etp_elemwise_p:
+                        wvar = be.invars[0]
+                    else:
+                        wvar = be.invars[1]
+                    bp = _trace_var_to_param(
+                        wvar, producers, invar_to_weight_path,
+                    )
+                    blocking_paths.append(bp)
+                emit(
+                    kind=DiagnosticKind.RELATION_EXCLUDED_WEIGHT_TO_WEIGHT,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'ETP primitive {primitive.name} (weight={weight_path}) '
+                        f'reaches a hidden state only through another trainable '
+                        f'ETP primitive ({", ".join(p.name for p in blocking_primitives)}). '
+                        f'Per the non-parametric-tail invariant this weight is '
+                        f'excluded from ETP; learn it by BPTT or rewire the '
+                        f'architecture so its output flows directly into a hidden '
+                        f'state.'
+                    ),
+                    primitive=primitive,
+                    weight_path=weight_path,
+                    context={
+                        'blocking_primitives': blocking_primitives,
+                        'blocking_weight_paths': tuple(blocking_paths),
+                    },
+                )
+            else:
+                emit(
+                    kind=DiagnosticKind.RELATION_EXCLUDED_NON_TEMPORAL,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'ETP primitive {primitive.name} (weight={weight_path}) '
+                        f'has no connected hidden states. It will be treated as '
+                        f'a non-temporal parameter.'
+                    ),
+                    primitive=primitive,
+                    weight_path=weight_path,
+                )
             continue
 
         # --- Group by hidden group ---
@@ -476,6 +572,20 @@ def find_hidden_param_op_relations_from_jaxpr(
             connected_hidden_paths=connected_paths,
             eqn_params=dict(eqn.params),
         ))
+        emit(
+            kind=DiagnosticKind.RELATION_INCLUDED,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'{primitive.name}({weight_path}) -> '
+                f'{[g.index for g in connected_groups]}'
+            ),
+            primitive=primitive,
+            weight_path=weight_path,
+            hidden_paths=tuple(connected_paths),
+            context={
+                'hidden_group_indices': tuple(g.index for g in connected_groups),
+            },
+        )
 
     return tuple(relations)
 

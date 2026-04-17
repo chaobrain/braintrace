@@ -32,17 +32,23 @@ from ._etrace_compiler import (
     add_hidden_perturbation_in_module,
     ModuleInfo,
     extract_module_info,
+    CompilationRecord,
+    DiagnosticKind,
+    DiagnosticLevel,
 )
 from ._etrace_graph_executor import ETraceGraphExecutor
 from ._etrace_input_data import SingleStepData, MultiStepData
 from ._etrace_operators import (
     ETPPrimitive,
+    ETPPrimitiveSpec,
     matmul,
     element_wise,
     conv,
     sparse_matmul,
     lora_matmul,
     register_primitive,
+    register_primitive_spec,
+    get_primitive_spec,
 )
 from ._etrace_vjp import (
     ETraceVjpAlgorithm,
@@ -82,7 +88,10 @@ __all__ = [
 
     # ETP primitive class & rule registration
     'ETPPrimitive',
+    'ETPPrimitiveSpec',
     'register_primitive',
+    'register_primitive_spec',
+    'get_primitive_spec',
 
     # input data
     'SingleStepData',
@@ -105,6 +114,11 @@ __all__ = [
     'HiddenPerturbation',
     'add_hidden_perturbation_from_minfo',
     'add_hidden_perturbation_in_module',
+
+    # compiler diagnostics
+    'CompilationRecord',
+    'DiagnosticKind',
+    'DiagnosticLevel',
 
     # gradient utilities
     'GradExpon',
