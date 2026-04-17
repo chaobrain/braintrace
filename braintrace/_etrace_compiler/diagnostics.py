@@ -69,8 +69,14 @@ class DiagnosticKind(str, Enum):
     RELATION_EXCLUDED_SHAPE_MISMATCH = 'relation_excluded_shape_mismatch'
     RELATION_EXCLUDED_WEIGHT_TO_WEIGHT = 'relation_excluded_weight_to_weight'
 
+    # Path classification (informational; relation still included)
+    RELATION_PARTIAL_PATH = 'relation_partial_path'
+
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
+    PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'
+    MULTI_OUTPUT_PRIMITIVE_DETECTED = 'multi_output_primitive_detected'
+    PYTREE_WEIGHT_LEAF_AMBIGUOUS = 'pytree_weight_leaf_ambiguous'
     TRANSITION_TAIL_BOUNDED = 'transition_tail_bounded'
     HIDDEN_GROUP_MERGED = 'hidden_group_merged'
     STATE_MISMATCH = 'state_mismatch'

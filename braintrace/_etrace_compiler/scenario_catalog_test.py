@@ -53,7 +53,7 @@ from braintrace._etrace_operators import (
 )
 
 
-def _compile(model, inp):
+def _compile(model, *inputs):
     """Compile, suppressing expected weight-exclusion UserWarnings.
 
     Tests still assert on the structured ``DiagnosticKind`` records, so we
@@ -61,7 +61,7 @@ def _compile(model, inp):
     """
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', UserWarning)
-        return compile_etrace_graph(model, inp, include_hidden_perturb=False)
+        return compile_etrace_graph(model, *inputs, include_hidden_perturb=False)
 
 
 def _relation_set(graph):
@@ -654,6 +654,296 @@ class TestCategoryF_Determinism:
 # execute and return tensors whose shape matches the hidden group's
 # concatenated-hidden shape.  If this fails, the transition jaxpr is
 # malformed and downstream VJP algorithms will crash at runtime.
+
+from braintrace._etrace_compiler.diagnostics import diagnostic_context
+from braintrace._etrace_compiler.hid_param_op import (
+    PathClassification,
+    _scan_jaxpr_for_etp_eqns,
+)
+from braintrace._etrace_compiler.scenario_catalog import (
+    PytreeParamRNN,
+    MaskedWeightRNN,
+    StackedDeepRNN,
+    SharedTiedWeightRNN,
+    MixedBatchedRNN,
+    PartialPathRNN,
+    make_scan_body_etp_jaxpr,
+    make_cond_branches_etp_jaxpr,
+    make_while_body_etp_jaxpr,
+)
+
+
+# ---------------------------------------------------------------------------
+# Category H — Pytree-valued ParamState
+# ---------------------------------------------------------------------------
+
+class TestCategoryH_PytreeWeight:
+    """One ``ParamState`` holds ``{'W': ..., 'b': ...}``; only ``W`` is fed
+    to the ETP primitive. The compiler must register a single relation
+    pointing at the ParamState path and resolve ``weight_leaf_idx``
+    to the index of ``W`` in the pytree-leaves enumeration."""
+
+    def test_pytree_weight_resolves_to_paramstate(self):
+        model = PytreeParamRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {(('theta',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+        # The weight tensor we matmul'd has shape (n_in + n_out, n_out).
+        assert tuple(rel.weight_var.aval.shape) == (3 + 4, 4)
+        # weight_leaf_idx must point at *some* leaf of the ParamState
+        # value (jax.tree.leaves of {'W': ..., 'b': ...} has two leaves).
+        assert 0 <= rel.weight_leaf_idx <= 1
+
+    def test_pytree_weight_processing_chain_empty(self):
+        """``W`` is consumed directly — no mask/weight_fn equations.
+        The ``weight_processing_chain`` must therefore be empty."""
+        model = PytreeParamRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.weight_processing_chain == ()
+
+
+# ---------------------------------------------------------------------------
+# Category I — Masked / processed weight
+# ---------------------------------------------------------------------------
+
+class TestCategoryI_MaskedWeight:
+    """``mask * w`` flows into the matmul. The compiler must trace the
+    weight backward through the elementwise mul and report a non-empty
+    ``weight_processing_chain`` so callers can reason about the chain."""
+
+    def test_masked_weight_records_processing_chain(self):
+        model = MaskedWeightRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {(('w',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        # The mask multiplication appears in the processing chain.
+        chain_names = {p.name for p in rel.weight_processing_chain}
+        assert 'mul' in chain_names, (
+            f'Expected a "mul" primitive in the weight processing chain; '
+            f'got {chain_names}'
+        )
+
+
+# ---------------------------------------------------------------------------
+# Category J — Stacked deep recurrent network
+# ---------------------------------------------------------------------------
+
+class TestCategoryJ_StackedDeep:
+    """Three independent recurrent cells. Each weight must reach exactly
+    its own cell's hidden state — never the next cell's hidden state.
+
+    The home-group restriction in ``_bfs_forward`` is what makes this
+    work; without it, ``cell0``'s weight would also register a relation
+    with ``cell1.h`` and ``cell2.h`` (since they are downstream)."""
+
+    def test_each_weight_scoped_to_own_layer(self):
+        model = StackedDeepRNN(3, 4, depth=3)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {
+            (('cell0', 'w'), ('cell0', 'h')),
+            (('cell1', 'w'), ('cell1', 'h')),
+            (('cell2', 'w'), ('cell2', 'h')),
+        }
+        for r in graph.hidden_param_op_relations:
+            assert len(r.connected_hidden_paths) == 1
+            assert r.primitive is etp_mv_p
+
+
+# ---------------------------------------------------------------------------
+# Category K — Shared / tied weight
+# ---------------------------------------------------------------------------
+
+class TestCategoryK_SharedTiedWeight:
+    """One ParamState consumed by *two* ``braintrace.matmul`` call sites.
+    Two relations expected, both pointing at the same weight_path. The
+    relations must remain distinct objects — selection is per-call-site,
+    not per-ParamState."""
+
+    def test_two_relations_per_call_site(self):
+        model = SharedTiedWeightRNN(4, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 2, (
+            f'Expected exactly two relations for shared weight; got {len(rels)}'
+        )
+        for r in rels:
+            assert r.weight_path == ('w',)
+            assert r.connected_hidden_paths == [('h',)]
+            assert r.primitive is etp_mv_p
+        # The two relations must use different y_var instances (different
+        # call sites produce different intermediate vars).
+        assert rels[0].y_var is not rels[1].y_var
+
+
+# ---------------------------------------------------------------------------
+# Category L — Mixed batching modes coexisting in one model
+# ---------------------------------------------------------------------------
+
+class TestCategoryL_MixedBatching:
+    """Compiler dispatches by primitive identity, so a model holding both a
+    batched (``etp_mm_p``) and an unbatched (``etp_mv_p``) call must
+    register one relation per call with the correct primitive identity."""
+
+    def test_each_relation_uses_its_own_primitive(self):
+        model = MixedBatchedRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        x_u = brainstate.random.rand(3)
+        x_b = brainstate.random.rand(2, 3)
+
+        graph = _compile(model, x_u, x_b)
+
+        by_path = {
+            r.weight_path: r.primitive
+            for r in graph.hidden_param_op_relations
+        }
+        assert by_path == {
+            ('w_unbatched',): etp_mv_p,
+            ('w_batched',): etp_mm_p,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Category M — Partial path (MIXED classification)
+# ---------------------------------------------------------------------------
+
+class TestCategoryM_PartialPath:
+    """``w1`` reaches ``h`` via *both* a direct tail and an indirect path
+    that crosses ``w2``. Per the user's requirement we *preserve* the
+    historical inclusion behavior for ``w1`` but emit a structured
+    ``RELATION_PARTIAL_PATH`` informational record so downstream
+    consumers can reason about the partial gradient capture."""
+
+    def test_w1_classified_mixed_w2_classified_direct(self):
+        model = PartialPathRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        # Both weights register relations.
+        assert _relation_set(graph) == {
+            (('w1',), ('h',)),
+            (('w2',), ('h',)),
+        }
+
+        by_path = {r.weight_path: r for r in graph.hidden_param_op_relations}
+        assert by_path[('w1',)].path_classification == {
+            ('h',): PathClassification.MIXED,
+        }
+        assert by_path[('w2',)].path_classification == {
+            ('h',): PathClassification.ALL_DIRECT,
+        }
+
+    def test_partial_path_diagnostic_emitted(self):
+        model = PartialPathRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        partial = graph.explain(
+            kind=DiagnosticKind.RELATION_PARTIAL_PATH,
+            weight_path=('w1',),
+        )
+        assert len(partial) == 1, (
+            f'w1 must emit exactly one PARTIAL_PATH record; got {partial}'
+        )
+        assert partial[0].context['classification'] == PathClassification.MIXED
+
+    def test_w2_emits_no_partial_record(self):
+        model = PartialPathRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        partial = graph.explain(
+            kind=DiagnosticKind.RELATION_PARTIAL_PATH,
+            weight_path=('w2',),
+        )
+        assert len(partial) == 0
+
+
+# ---------------------------------------------------------------------------
+# Category N — Control flow (scan / while / cond)
+# ---------------------------------------------------------------------------
+
+class TestCategoryN_ControlFlow:
+    """ETP primitives inside ``scan`` / ``while`` / ``cond`` bodies are
+    detected by the scanner and reported via
+    ``PRIMITIVE_INSIDE_CONTROL_FLOW``. They are *not* lifted into the
+    top-level relation set (carry-variable lineage is not yet supported);
+    skipping them is the safe behavior, and the structured diagnostic
+    surfaces the location for the user."""
+
+    def test_scan_body_etp_emits_diagnostic(self):
+        jaxpr = make_scan_body_etp_jaxpr(3, 4)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                top = _scan_jaxpr_for_etp_eqns(jaxpr)
+
+        assert top == [], 'ETP inside scan body must NOT bubble up'
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW in kinds
+
+    def test_cond_branches_etp_emits_diagnostic_per_branch(self):
+        jaxpr = make_cond_branches_etp_jaxpr(3, 4)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                top = _scan_jaxpr_for_etp_eqns(jaxpr)
+
+        assert top == []
+        n_cf = sum(
+            r.kind is DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW
+            for r in reporter.records()
+        )
+        assert n_cf == 2, (
+            f'Expected exactly two control-flow records (one per branch); '
+            f'got {n_cf}'
+        )
+
+    def test_while_body_etp_emits_diagnostic(self):
+        jaxpr = make_while_body_etp_jaxpr(4, 4)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                top = _scan_jaxpr_for_etp_eqns(jaxpr)
+
+        assert top == []
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW in kinds
+
+
+# ---------------------------------------------------------------------------
+# Category G — Structural smoke test (kept as last category for clarity)
+# ---------------------------------------------------------------------------
+
 
 class TestCategoryG_StructuralSmoke:
 
