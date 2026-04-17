@@ -70,57 +70,61 @@ def _conv_trainable_invars(params):
     return base
 
 
-def _conv_layout(params, y_ndim):
-    """Return ``(n_spatial, channel_axis, batch_axis)`` for the conv output layout.
+def _conv_layout(params):
+    """Return ``(n_spatial, channel_axis, batch_axis, kernel_out_axis)``.
 
-    ``n_spatial``:    spatial rank (1, 2, or 3).
-    ``channel_axis``: position of the output-channel axis in an output array
-                      of rank ``y_ndim``.
-    ``batch_axis``:   position of the batch axis in an output array of rank
-                      ``y_ndim``.
+    ``n_spatial``:       spatial rank (1, 2, or 3).
+    ``channel_axis``:    position of the output-channel axis in the OUTPUT
+                         tensor (``y`` / ``hidden_dim`` in batched form).
+    ``batch_axis``:      position of the batch axis in the OUTPUT tensor.
+    ``kernel_out_axis``: position of the out-channel dimension in the KERNEL
+                         tensor (shape of ``w_trace`` *without* any batch
+                         prefix, i.e. as stored in the weight array).
 
     Sources used (in priority order):
 
     1. ``params['dimension_numbers']`` — when a ``ConvDimensionNumbers``
        namedtuple is present, ``out_spec[0]`` is the batch position and
-       ``out_spec[1]`` is the channel position in the output.
+       ``out_spec[1]`` is the channel position in the output; ``rhs_spec[0]``
+       is the out-channel position in the kernel.
     2. ``params['strides']`` — ``len(strides)`` gives ``n_spatial``.
     3. When ``dimension_numbers`` is ``None`` JAX defaults to ``iota``
-       (``(0,1,2,...)``) which maps to the NCHW / NCH convention:
-       batch at axis 0, channel at axis 1.
+       (``(0,1,2,...)``) which maps to NCHW / NCH for the output (batch=0,
+       channel=1) and OIHW / OIH for the kernel (out-channel=0).
 
-    Notes on ``ConvDimensionNumbers.out_spec``::
+    Notes on ``ConvDimensionNumbers``::
 
         ConvDimensionNumbers(lhs_spec, rhs_spec, out_spec)
 
-    ``out_spec`` is a tuple of length ``n_spatial + 2`` where each element
-    is the *physical* axis index in the output array corresponding to the
-    logical dimension in the order ``(N, C, spatial...)``.  Concretely::
+    ``out_spec[0]``  → position of N (batch)   in the output
+    ``out_spec[1]``  → position of C (channel) in the output
+    ``rhs_spec[0]``  → position of out-channel  in the kernel (logical order)
 
-        out_spec[0]  → position of N (batch)   in the output
-        out_spec[1]  → position of C (channel) in the output
-        out_spec[2:] → positions of spatial dims in the output
-
-    Example: NHWC gives ``out_spec = (0, 3, 1, 2)`` so
-    ``batch_axis=0``, ``channel_axis=3``.
+    Example: ``('NHWC', 'HWIO', 'NHWC')`` gives ``batch_axis=0``,
+    ``channel_axis=3``, ``kernel_out_axis=2`` (index of 'O' in 'HWIO').
     """
     n_spatial = len(params.get('strides', (1,)))
     dn = params.get('dimension_numbers', None)
     if dn is None:
-        # JAX default: iota = (0,1,2,...) → NCHW / NCH convention.
+        # JAX default: iota = (0,1,2,...) → NCHW/NCH output, OIHW/OIH kernel.
         batch_axis = 0
         channel_axis = 1
+        kernel_out_axis = 0  # out-channel at axis 0 of kernel (OIHW-style)
     elif isinstance(dn, tuple) and len(dn) == 3 and isinstance(dn[2], str):
         # String-tuple form e.g. ('NHWC', 'HWIO', 'NHWC').
         out_spec_str = dn[2]
         batch_axis = out_spec_str.index('N')
         channel_axis = out_spec_str.index('C')
+        rhs_spec_str = dn[1]
+        kernel_out_axis = rhs_spec_str.index('O')
     else:
-        # ConvDimensionNumbers namedtuple: out_spec[0]=batch_pos, out_spec[1]=channel_pos.
+        # ConvDimensionNumbers namedtuple.
         out_spec = dn.out_spec
         batch_axis = out_spec[0]
         channel_axis = out_spec[1]
-    return n_spatial, channel_axis, batch_axis
+        rhs_spec = dn.rhs_spec
+        kernel_out_axis = rhs_spec[0]  # logical out-channel position in kernel
+    return n_spatial, channel_axis, batch_axis, kernel_out_axis
 
 
 def _conv_yw_to_w(hidden_dim, trace, **params):
@@ -128,14 +132,14 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
 
     This function is called in two different vmap contexts:
 
-    1. **scan / etrace-update path** (no outer batch vmap):
+    1. **scan / etrace-update path** (batch vmap NOT applied):
        ``hidden_dim``      = ``(batch, *spatial_out, out_ch)`` (or permuted),
-       ``trace['weight']`` = ``(batch, *kernel_dims, out_ch)``,
+       ``trace['weight']`` = ``(batch, *kernel_dims)`` (batch prefix present),
        ``trace['bias']``   = ``(batch, *spatial_out, out_ch)`` if present.
 
     2. **gradient-computation path** (outer batch vmap applied):
        ``hidden_dim``      = ``(*spatial_out, out_ch)`` (batch axis stripped),
-       ``trace['weight']`` = ``(*kernel_dims, out_ch)`` (batch axis stripped),
+       ``trace['weight']`` = ``(*kernel_dims)`` (batch axis stripped),
        ``trace['bias']``   = ``(*spatial_out, out_ch)`` if present.
 
     The bias shares parameters across spatial positions, so the bias gradient
@@ -143,9 +147,10 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
     as the output y** (per element ∂h/∂b = ∂h/∂y), and ``yw_to_w`` sums the
     elementwise product ``hidden_dim * trace['bias']`` over the spatial axes.
 
-    Layout awareness: spatial axes are derived from the actual
-    ``dimension_numbers`` / ``strides`` params rather than assuming any
-    fixed channel-last convention.
+    Layout awareness: spatial axes and kernel out-channel axis are derived
+    from the actual ``dimension_numbers`` / ``strides`` params, handling
+    arbitrary output-spec and rhs-spec permutations (NHWC/HWIO, NCHW/OIHW,
+    etc.).
 
     For scalar ``hidden_dim`` (0-D) the function multiplies elementwise and
     returns immediately.
@@ -161,17 +166,10 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
         return out
 
     # ── Determine layout from params ──────────────────────────────────────────
-    # y_ndim for the *batched* output (scan context) is hidden_dim.ndim when
-    # a batch prefix is present, or hidden_dim.ndim + 1 when it is stripped
-    # (grad context).  We infer which context we are in from whether
-    # hidden_dim has a batch prefix:
+    # Detect which call context we are in from hidden_dim rank:
     #   scan context:  hidden_dim.ndim == n_spatial + 2  (batch + spatial + ch)
     #   grad context:  hidden_dim.ndim == n_spatial + 1  (spatial + ch only)
-    n_spatial, channel_axis_batched, batch_axis_batched = _conv_layout(
-        params, y_ndim=None  # y_ndim not needed; we use n_spatial directly
-    )
-    # hidden_dim.ndim in scan context = n_spatial + 2 (batch + spatial + channel)
-    # hidden_dim.ndim in grad context = n_spatial + 1 (spatial + channel, no batch)
+    n_spatial, channel_axis_batched, batch_axis_batched, kernel_out_axis = _conv_layout(params)
     has_batch_prefix = (hidden_dim.ndim == n_spatial + 2)
 
     # Compute spatial axes in hidden_dim (same permutation as y output).
@@ -194,14 +192,21 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
         spatial_axes_hd = tuple(i for i in range(len(remaining)) if i != ch_axis_hd)
 
     # ── Weight: reduce hidden_dim over spatial axes, then broadcast ───────────
-    # Target shape after reduction: axes {ch_axis_hd} remain, spatial removed.
+    # Target shape after reduction: only batch (if present) and ch_axis_hd survive.
     hd_reduced = jnp.sum(hidden_dim, axis=spatial_axes_hd) if spatial_axes_hd else hidden_dim
     # hd_reduced shape: (*batch_prefix, out_ch)  [only batch and ch axes survive]
 
-    n_expand = w_trace.ndim - hd_reduced.ndim
-    hd_for_weight = hd_reduced
-    for _ in range(n_expand):
-        hd_for_weight = jnp.expand_dims(hd_for_weight, axis=-2)
+    # Determine where out_ch sits in w_trace:
+    #   scan context: w_trace has batch prefix at axis 0, so kernel_out_axis shifts by 1.
+    #   grad context: w_trace has no batch prefix, use kernel_out_axis directly.
+    w_out_axis = kernel_out_axis + 1 if has_batch_prefix else kernel_out_axis
+
+    # Build broadcast shape: all-ones except batch (axis 0 when present) and out_ch axis.
+    target_shape = [1] * w_trace.ndim
+    if has_batch_prefix:
+        target_shape[0] = w_trace.shape[0]   # batch size
+    target_shape[w_out_axis] = w_trace.shape[w_out_axis]  # out_ch size
+    hd_for_weight = jnp.reshape(hd_reduced, target_shape)
 
     out = {'weight': w_trace * hd_for_weight}
 

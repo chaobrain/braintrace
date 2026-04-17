@@ -206,21 +206,31 @@ class TestConvEtpRules:
 
     def test_yw_to_w_broadcasts_hidden_no_bias(self):
         rule = ETP_RULES_YW_TO_W[etp_conv_p]
-        # Simulate call with batch dim retained (as in D-RTRL executor).
-        # 1-D NHC-HIO conv: kernel (H_k=3, in_ch=4, out_ch=4).
-        # After n_state vmap only: hidden_dim (batch, out_ch), trace (batch, H_k, in_ch, out_ch).
-        # dimension_numbers and strides must be supplied — _conv_layout uses them to derive
-        # the spatial rank and channel-axis position.
+        # Simulate the scan/etrace-update call (batch prefix retained).
+        # 1-D NHC-HIO conv: kernel (H_k=3, in_ch=4, out_ch=4), output (N, H_out=6, C=4).
+        # In the update path hidden_dim has the full batched output shape
+        # (batch, H_out, out_ch) before spatial reduction.
+        # trace['weight'] = (batch, H_k, in_ch, out_ch) — batch prefix present.
+        # dimension_numbers and strides must be supplied so _conv_layout can derive
+        # the spatial rank and kernel out-channel axis.
         batch = 1
-        hidden = jnp.ones((batch, 4)) * jnp.arange(1, 5)   # (1, 4)
-        w_trace = jnp.ones((batch, 3, 4, 4))                # (1, H_k, in_ch, out_ch)
+        out_ch = 4
+        H_out = 6
+        # hidden_dim has full batched-output shape: (batch, H_out, out_ch)
+        hidden = jnp.ones((batch, H_out, out_ch)) * jnp.arange(1, 5)  # (1, 6, 4)
+        w_trace = jnp.ones((batch, 3, 4, out_ch))  # (1, H_k, in_ch, out_ch)
         trace = {'weight': w_trace}
         params = dict(has_bias=False, strides=(1,), dimension_numbers=('NHC', 'HIO', 'NHC'))
         out = rule(hidden, trace, **params)
         assert out['weight'].shape == (1, 3, 4, 4)
         assert 'bias' not in out
-        # hidden (1,4) expands to (1,1,1,4); w_trace * = (1,3,4,4)
-        np.testing.assert_allclose(out['weight'], w_trace * hidden[:, None, None, :])
+        # For NHC/HIO: has_batch_prefix=True (ndim=3 == n_spatial+2=3).
+        # Spatial is summed: hd_reduced = hidden.sum(axis=1) → (1, 4).
+        # w_out_axis = kernel_out_axis + 1 = 2+1 = 3 (O is at index 2 in HIO, +1 for batch).
+        # target_shape = [1, 1, 1, 4] broadcast against (1, 3, 4, 4).
+        hd_reduced = hidden.sum(axis=1)  # (1, 4) — sum over H_out
+        expected = w_trace * hd_reduced[:, None, None, :]  # (1, 3, 4, 4)
+        np.testing.assert_allclose(out['weight'], expected)
 
     def test_yw_to_w_broadcasts_hidden_with_bias(self):
         rule = ETP_RULES_YW_TO_W[etp_conv_p]

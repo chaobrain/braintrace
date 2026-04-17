@@ -257,7 +257,6 @@ class TestConv2dBiasGradient:
             f'BPTT bias gradient is unexpectedly near-zero: {bptt["bias"]}'
         )
 
-        import numpy.testing as npt
         npt.assert_allclose(grad_p['weight'], bptt['weight'], atol=1e-5,
                             err_msg='D-RTRL dkernel does not match BPTT')
         npt.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
