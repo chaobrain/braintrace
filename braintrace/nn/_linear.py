@@ -15,11 +15,8 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Callable, Union, Sequence, Optional
-
 import brainstate
 import saiunit as u
-from braintools import init
 
 from braintrace._etrace_operators import matmul, sparse_matmul, lora_matmul
 from braintrace._typing import ArrayLike
@@ -32,7 +29,7 @@ __all__ = [
 ]
 
 
-class Linear(brainstate.nn.Module):
+class Linear(brainstate.nn.Linear):
     """A Linear layer that performs a linear transformation on the input data.
 
     This class represents a fully connected linear layer, which applies a linear
@@ -85,33 +82,6 @@ class Linear(brainstate.nn.Module):
     """
     __module__ = 'braintrace.nn'
 
-    def __init__(
-        self,
-        in_size: Union[int, Sequence[int]],
-        out_size: Union[int, Sequence[int]],
-        w_init: Union[Callable, ArrayLike] = init.KaimingNormal(),
-        b_init: Optional[Union[Callable, ArrayLike]] = init.ZeroInit(),
-        w_mask: Optional[Union[ArrayLike, Callable]] = None,
-        name: Optional[str] = None,
-        **kwargs,
-    ):
-        super().__init__(name=name)
-
-        # input and output shape
-        self.in_size = in_size
-        self.out_size = out_size
-
-        # w_mask
-        w_shape = (self.in_size[-1], self.out_size[-1])
-        b_shape = (self.out_size[-1],)
-        self.w_mask = init.param(w_mask, w_shape)
-
-        # Weight and bias live in ONE ParamState as a dict pytree.
-        params = {'weight': init.param(w_init, w_shape, allow_none=False)}
-        if b_init is not None:
-            params['bias'] = init.param(b_init, b_shape, allow_none=False)
-        self.weight = brainstate.ParamState(params)
-
     def update(self, x):
         w = self.weight.value['weight']
         if self.w_mask is not None:
@@ -120,7 +90,7 @@ class Linear(brainstate.nn.Module):
         return matmul(x, w, b)
 
 
-class SignedWLinear(brainstate.nn.Module):
+class SignedWLinear(brainstate.nn.SignedWLinear):
     """A Linear layer with signed weights.
 
     This class represents a linear layer where the weights can be constrained
@@ -170,22 +140,6 @@ class SignedWLinear(brainstate.nn.Module):
     """
     __module__ = 'braintrace.nn'
 
-    def __init__(
-        self,
-        in_size: Union[int, Sequence[int]],
-        out_size: Union[int, Sequence[int]],
-        w_init: Union[Callable, ArrayLike] = init.KaimingNormal(),
-        w_sign: Optional[ArrayLike] = None,
-        name: Optional[str] = None,
-        **kwargs,
-    ):
-        super().__init__(name=name)
-        self.in_size = in_size
-        self.out_size = out_size
-        w_shape = (self.in_size[-1], self.out_size[-1])
-        self.W = brainstate.ParamState(init.param(w_init, w_shape, allow_none=False))
-        self.w_sign = w_sign
-
     def update(self, x):
         w = u.math.abs(self.W.value)
         if self.w_sign is not None:
@@ -193,7 +147,7 @@ class SignedWLinear(brainstate.nn.Module):
         return matmul(x, w)
 
 
-class ScaledWSLinear(brainstate.nn.Module):
+class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
     """Linear layer with Weight Standardization.
 
     Applies weight standardization to the weights of the linear layer.
@@ -250,49 +204,16 @@ class ScaledWSLinear(brainstate.nn.Module):
     """
     __module__ = 'braintrace.nn'
 
-    def __init__(
-        self,
-        in_size: Union[int, Sequence[int]],
-        out_size: Union[int, Sequence[int]],
-        w_init: Callable = init.KaimingNormal(),
-        b_init: Callable = init.ZeroInit(),
-        w_mask: Optional[Union[ArrayLike, Callable]] = None,
-        ws_gain: bool = True,
-        eps: float = 1e-4,
-        name: Optional[str] = None,
-        **kwargs,
-    ):
-        super().__init__(name=name)
-        self.in_size = (in_size,) if isinstance(in_size, int) else tuple(in_size)
-        self.out_size = (out_size,) if isinstance(out_size, int) else tuple(out_size)
-        self.w_mask = init.param(w_mask, (self.in_size[0], 1))
-        self.eps = eps
-
-        w_shape = (self.in_size[-1], self.out_size[-1])
-        b_shape = (self.out_size[-1],)
-        # Weight and bias live in ONE ParamState as a dict pytree.
-        w_val = init.param(w_init, w_shape, allow_none=False)
-        params = {'weight': w_val}
-        if b_init is not None:
-            params['bias'] = init.param(b_init, b_shape, allow_none=False)
-        self.weight = brainstate.ParamState(params)
-        self.gain = (
-            brainstate.ParamState(u.math.ones((1, w_shape[-1]), dtype=w_val.dtype))
-            if ws_gain else None
-        )
-
     def update(self, x):
-        w = brainstate.nn.weight_standardization(
-            self.weight.value['weight'], self.eps,
-            self.gain.value if self.gain is not None else None
-        )
+        params = self.weight.value
+        w = brainstate.nn.weight_standardization(params['weight'], self.eps, params.get('gain', None))
         if self.w_mask is not None:
             w = w * self.w_mask
-        b = self.weight.value.get('bias')
+        b = params.get('bias', None)
         return matmul(x, w, b)
 
 
-class SparseLinear(brainstate.nn.Module):
+class SparseLinear(brainstate.nn.SparseLinear):
     """A Linear layer that utilizes a sparse matrix for efficient computation.
 
     This class represents a linear transformation layer where the weight matrix
@@ -358,37 +279,13 @@ class SparseLinear(brainstate.nn.Module):
     """
     __module__ = 'braintrace.nn'
 
-    def __init__(
-        self,
-        sparse_mat: u.sparse.SparseMatrix,
-        b_init: Optional[Union[Callable, ArrayLike]] = None,
-        in_size: brainstate.typing.Size = None,
-        name: Optional[str] = None,
-        **kwargs,
-    ):
-        super().__init__(name=name)
-        if in_size is not None:
-            self.in_size = in_size if isinstance(in_size, (tuple, list)) else (in_size,)
-        self.out_size = (sparse_mat.shape[-1],)
-        if in_size is not None:
-            assert self.in_size[:-1] == self.out_size[:-1], (
-                'The first n-1 dimensions of "in_size" '
-                'and "out_size" must be the same.'
-            )
-        assert isinstance(sparse_mat, u.sparse.SparseMatrix), '"weight" must be a saiunit.sparse.SparseMatrix.'
-        self.sparse_mat = sparse_mat
-        self.weight_data = brainstate.ParamState(sparse_mat.data)
-        self.bias = (
-            brainstate.ParamState(init.param(b_init, self.out_size[-1], allow_none=False))
-            if b_init is not None else None
-        )
-
     def update(self, x):
-        b = self.bias.value if self.bias is not None else None
-        return sparse_matmul(x, self.weight_data.value, sparse_mat=self.sparse_mat, bias=b)
+        weight = self.weight.value['weight']
+        bias = self.weight.value.get('bias', None)
+        return sparse_matmul(x, weight, sparse_mat=self.spar_mat, bias=bias)
 
 
-class LoRA(brainstate.nn.Module):
+class LoRA(brainstate.nn.LoRA):
     r"""A standalone LoRA layer.
 
     LoRA (Low-Rank Adaptation) is a technique used to adapt pre-trained models
@@ -461,34 +358,13 @@ class LoRA(brainstate.nn.Module):
         >>> print(y.shape)
         (16, 4)
     """
-
-    def __init__(
-        self,
-        in_features: brainstate.typing.Size,
-        lora_rank: int,
-        out_features: brainstate.typing.Size,
-        *,
-        alpha: float = 1.,
-        base_module: Optional[Callable] = None,
-        B_init: Union[Callable, ArrayLike] = init.ZeroInit(),
-        A_init: Union[Callable, ArrayLike] = init.LecunNormal(),
-        **kwargs,
-    ):
-        super().__init__()
-        self.in_size = in_features
-        self.out_size = out_features
-        self.in_features = in_features
-        self.out_features = out_features
-        self.lora_rank = lora_rank
-        self.alpha = alpha
-        if base_module is not None:
-            assert callable(base_module), '"base_module" must be callable.'
-        self.base_module = base_module
-        self.B = brainstate.ParamState(B_init((self.in_size[-1], lora_rank)))
-        self.A = brainstate.ParamState(A_init((lora_rank, self.out_size[-1])))
+    __module__ = 'braintrace.nn'
 
     def update(self, x: ArrayLike):
-        out = lora_matmul(x, self.B.value, self.A.value, alpha=self.alpha / self.lora_rank)
+        param = self.weight.value
+        alpha = 1.
+        lora_rank = param['lora_b'].shape[0]
+        out = lora_matmul(x, param['lora_b'], param['lora_a'], alpha=alpha / lora_rank)
         if self.base_module is not None:
             out += self.base_module(x)
         return out
