@@ -40,6 +40,7 @@ from braintrace._etrace_op import (
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_PP,
     is_batched_primitive,
+    get_primitive_spec,
 )
 from braintrace._misc import (
     check_dict_keys,
@@ -59,10 +60,12 @@ from braintrace._typing import (
 from .base import ETraceVjpAlgorithm
 from .misc import (
     _extract_weight_leaf,
+    _extract_leaf,
     _reset_state_in_a_dict,
     _sum_dim,
     _update_dict,
     _wrap_leaf_as_pytree,
+    _wrap_leaves_as_pytree,
 )
 
 __all__ = [
@@ -437,16 +440,40 @@ def _solve_IO_dim_weight_gradients(
     for relation in weight_hidden_relations:
         relation: HiddenParamOpRelation
 
+        spec = get_primitive_spec(relation.primitive)
+        use_dict_api = spec is not None and spec.trainable_invars_fn is not None
+
         if not (relation.primitive is etp_elemwise_p):
             x = xs[id(relation.x_var)]
         else:
             x = None
-        weight_path = relation.weight_path
-        # Extract the weight array from a (possibly pytree) ParamState value.
-        weight_leaf = _extract_weight_leaf(weight_vals[weight_path], relation.weight_leaf_idx)
-        xy_to_dw = ETP_RULES_XY_TO_DW[relation.primitive]
+
+        # Build the weights dict consumed by xy_to_dw.
+        if use_dict_api:
+            weights_dict = {
+                key: _extract_leaf(
+                    weight_vals[relation.trainable_paths[key]],
+                    relation.trainable_leaf_indices[key],
+                )
+                for key in relation.trainable_vars
+            }
+        else:
+            weights_dict = {
+                'weight': _extract_leaf(
+                    weight_vals[relation.weight_path],
+                    relation.weight_leaf_idx,
+                )
+            }
+
+        xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
+
+        def _call(df_, w_,
+                  _use_dict=use_dict_api, _rule=xy_to_dw_rule, _params=eqn_params, _x=x):
+            if _use_dict:
+                return _rule(_x, df_, w_, **_params)
+            return {'weight': _rule(_x, df_, w_['weight'], **_params)}
 
         for group in relation.hidden_groups:
             group: HiddenGroup
@@ -454,21 +481,30 @@ def _solve_IO_dim_weight_gradients(
             df = dfs[df_key] / correction_factor
             df_hid = df * dG_hidden_groups[group.index]
 
-            fn_vmap = jax.vmap(
-                lambda df: xy_to_dw(x, df, weight_leaf, **eqn_params),
-                in_axes=-1, out_axes=-1,
-            )
+            fn_vmap = jax.vmap(lambda df_: _call(df_, weights_dict), in_axes=-1, out_axes=-1)
             if (relation.primitive is etp_elemwise_p) and batched:
-                fn_vmap = jax.vmap(fn_vmap)
-                dg_weight = _sum_dim(_sum_dim(fn_vmap(df_hid), axis=-1), axis=0)
+                fn_vmap2 = jax.vmap(fn_vmap)
+                dg_dict = jax.tree.map(
+                    lambda a: _sum_dim(_sum_dim(a, axis=-1), axis=0),
+                    fn_vmap2(df_hid),
+                )
             else:
-                dg_weight = _sum_dim(fn_vmap(df_hid))
+                dg_dict = jax.tree.map(_sum_dim, fn_vmap(df_hid))
 
-            # Wrap to match the ParamState's pytree structure so the bias
-            # slot of a merged ``{weight, bias}`` Linear gets a zero entry.
-            dg_weight = _wrap_leaf_as_pytree(dg_weight, weight_vals[weight_path], relation.weight_leaf_idx)
-            # update the weight gradients
-            _update_dict(dG_weights, weight_path, dg_weight)  # update the weight gradients
+            # Split dict entries by owning ParamState path and assemble per-path pytrees.
+            per_path: Dict[Path, Dict[int, jax.Array]] = {}
+            for key, grad in dg_dict.items():
+                if use_dict_api:
+                    path = relation.trainable_paths[key]
+                    leaf_idx = relation.trainable_leaf_indices[key]
+                else:
+                    path = relation.weight_path
+                    leaf_idx = relation.weight_leaf_idx
+                per_path.setdefault(path, {})[leaf_idx] = grad
+
+            for path, leaf_to_grad in per_path.items():
+                wrapped = _wrap_leaves_as_pytree(weight_vals[path], leaf_to_grad)
+                _update_dict(dG_weights, path, wrapped)
 
 
 class IODimVjpAlgorithm(ETraceVjpAlgorithm):

@@ -917,3 +917,62 @@ class TestDiagOn:
             print()
             grads = grad_single_step_vjp(inputs[1:2])
             print(brainstate.util.PrettyDict(grads))
+
+
+# ===========================================================================
+#  Smoke test: dict-based xy_to_dw call (Task 6 adapter)
+# ===========================================================================
+
+class TestPPPropDictGradientRouting:
+    """Smoke test: after the Task 6 adapter, a full ES_D_RTRL run over a
+    no-bias mm recurrent cell finishes cleanly with the dict-based
+    xy_to_dw call plumbed in. Gradient shapes must be correct."""
+
+    def test_mm_smoke_after_dict_adapter(self):
+        import brainstate
+        import jax
+        import jax.numpy as jnp
+        import braintrace
+
+        brainstate.random.seed(42)
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(
+                    brainstate.random.normal(size=(4, 4)) * 0.1
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value)
+                )
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        alg = braintrace.ES_D_RTRL(cell, decay_or_rank=0.9)
+        alg.compile_graph(jnp.zeros((1, 4)))
+
+        x_seq = brainstate.random.normal(size=(5, 1, 4)) * 0.1
+
+        @brainstate.transform.jit
+        def compute_grads(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState)
+            )(inp)
+
+        # Run several steps so the etrace state evolves.
+        for i in range(5):
+            grads = compute_grads(x_seq[i])
+
+        flat = jax.tree.leaves(grads)
+        # We expect at least one gradient leaf with the weight shape (4, 4).
+        assert any(leaf.shape == (4, 4) for leaf in flat), (
+            f"Expected a (4, 4) gradient leaf, got shapes: {[leaf.shape for leaf in flat]}"
+        )
+        # All gradient leaves should be finite.
+        for leaf in flat:
+            assert jnp.all(jnp.isfinite(leaf)), f"Non-finite gradient leaf with shape {leaf.shape}"
