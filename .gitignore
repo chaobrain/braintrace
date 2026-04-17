@@ -175,6 +175,7 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+/CLAUDE.md
 # Pyre type checker
 .pyre/
 
