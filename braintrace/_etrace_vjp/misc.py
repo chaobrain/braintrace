@@ -196,6 +196,56 @@ def _wrap_leaf_as_pytree(
     return jax.tree.unflatten(ref_treedef, new_leaves)
 
 
+def _extract_leaf(pytree_val: brainstate.typing.PyTree, leaf_idx: int):
+    """Return the leaf at ``leaf_idx`` in ``jax.tree.leaves(pytree_val)``.
+
+    Bare arrays (treedef with a single leaf) return the array unchanged.
+    Raises ``IndexError`` if ``leaf_idx`` is outside ``len(leaves)``.
+    """
+    leaves = jax.tree.leaves(pytree_val)
+    if not leaves:
+        return pytree_val
+    if leaf_idx < 0 or leaf_idx >= len(leaves):
+        raise IndexError(
+            f'leaf_idx {leaf_idx} out of range for pytree with {len(leaves)} leaves'
+        )
+    return leaves[leaf_idx]
+
+
+def _wrap_leaves_as_pytree(
+    reference_pytree: brainstate.typing.PyTree,
+    leaf_grads: Dict[int, jax.Array],
+):
+    """Build a pytree matching ``reference_pytree`` with ``leaf_grads``
+    inserted at the given leaf indices; any other leaf is zero-filled.
+
+    Generalization of ``_wrap_leaf_as_pytree`` to multiple leaves. When the
+    reference is a bare array, ``leaf_grads`` must contain at most one entry
+    at index 0 and that value is returned directly (no wrapping).
+
+    Raises ``IndexError`` if any supplied index is outside
+    ``len(jax.tree.leaves(reference_pytree))``.
+    """
+    ref_treedef = jax.tree.structure(reference_pytree)
+    # Bare-array fast path.
+    if ref_treedef.num_leaves <= 1 and ref_treedef == jax.tree.structure(0):
+        if 0 in leaf_grads:
+            return leaf_grads[0]
+        return u.math.zeros_like(reference_pytree)
+    leaves = jax.tree.leaves(reference_pytree)
+    n = len(leaves)
+    for idx in leaf_grads:
+        if idx < 0 or idx >= n:
+            raise IndexError(
+                f'leaf_idx {idx} out of range for pytree with {n} leaves'
+            )
+    new_leaves = [
+        leaf_grads[i] if i in leaf_grads else u.math.zeros_like(leaf)
+        for i, leaf in enumerate(leaves)
+    ]
+    return jax.tree.unflatten(ref_treedef, new_leaves)
+
+
 def _update_dict(
     the_dict: Dict,
     key: Any,
