@@ -182,28 +182,33 @@ class TestEtpRules:
     def test_yw_to_w_is_elementwise_multiply(self):
         rule = ETP_RULES_YW_TO_W[etp_elemwise_p]
         hidden = jnp.array([1.0, 2.0, 3.0])
-        trace = jnp.array([10.0, 20.0, 30.0])
+        trace = {'weight': jnp.array([10.0, 20.0, 30.0])}
         out = rule(hidden, trace)
-        np.testing.assert_allclose(out, hidden * trace)
+        assert isinstance(out, dict)
+        np.testing.assert_allclose(out['weight'], hidden * trace['weight'])
 
     def test_xy_to_dw_returns_hidden(self):
         rule = ETP_RULES_XY_TO_DW[etp_elemwise_p]
         # x is None for elemwise (x_invar_index=None) — but the function
         # signature still accepts it; just ignored.
         hidden = jnp.array([1.0, 2.0, 3.0])
-        out = rule(None, hidden, None)
-        np.testing.assert_allclose(out, hidden)
+        weights = {'weight': None}  # Not actually used in the body
+        out = rule(None, hidden, weights)
+        assert isinstance(out, dict)
+        np.testing.assert_allclose(out['weight'], hidden)
 
     def test_init_drtrl_shape(self):
         rule = ETP_RULES_INIT_DRTRL[etp_elemwise_p]
         y_var = _fake_var((4,))
         out = rule(None, y_var, None, num_hidden_state=3)
-        assert out.shape == (4, 3)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (4, 3)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_elemwise_p]
         y_var = _fake_var((4,))
         out = rule(None, y_var, None, num_hidden_state=3)
+        # init_pp returns a single array, not a dict
         assert out.shape == (4, 3)
 
 
@@ -211,3 +216,33 @@ class TestPublicAPIRoundTrip:
 
     def test_public_alias(self):
         assert braintrace.element_wise is element_wise
+
+
+# ---------------------------------------------------------------------------
+# Dict-based rule API
+# ---------------------------------------------------------------------------
+
+class TestElemwiseDictRules:
+
+    def test_spec_declares_trainable_invars_fn(self):
+        from braintrace._etrace_op import get_primitive_spec
+        spec = get_primitive_spec(etp_elemwise_p)
+        assert spec.trainable_invars_fn is not None
+        assert spec.resolve_trainable_invars({}) == {'weight': 0}
+
+    def test_xy_to_dw_returns_dict(self):
+        hidden_dim = jnp.ones((3, 4))
+        weights = {'weight': jnp.ones((3, 4))}
+        out = ETP_RULES_XY_TO_DW[etp_elemwise_p](None, hidden_dim, weights)
+        assert isinstance(out, dict)
+        assert set(out.keys()) == {'weight'}
+        assert out['weight'].shape == (3, 4)
+
+    def test_yw_to_w_returns_dict(self):
+        hidden_dim = jnp.full((3, 4), 2.0)
+        trace = {'weight': jnp.full((3, 4), 5.0)}
+        out = ETP_RULES_YW_TO_W[etp_elemwise_p](hidden_dim, trace)
+        assert isinstance(out, dict)
+        assert out['weight'].shape == (3, 4)
+        # 5 * 2 = 10
+        assert float(out['weight'][0, 0]) == 10.0

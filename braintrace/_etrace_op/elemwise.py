@@ -37,26 +37,68 @@ def _etp_elemwise_impl(y):
     return y
 
 
+def _elem_trainable_invars(params):
+    return {'weight': 0}
+
+
 def _elemwise_yw_to_w(hidden_dim, trace):
-    r"""Element-wise multiply."""
-    return trace * hidden_dim
+    r"""Element-wise multiply (dict API).
+
+    Args:
+        hidden_dim: Array of shape matching weight.
+        trace: Dict with key 'weight', value is array of same shape.
+
+    Returns:
+        Dict with key 'weight' and element-wise product.
+    """
+    return {'weight': trace['weight'] * hidden_dim}
 
 
-def _elemwise_xy_to_dw(x, hidden_dim, w):
-    r"""Identity marker — gradient is just ``hidden_dim``.
+def _elemwise_xy_to_dw(x, hidden_dim, weights):
+    r"""Identity marker — gradient is just ``hidden_dim`` (dict API).
 
     The chain rule through ``fn`` is handled by JAX on the ops *before*
     the primitive binds.
+
+    Args:
+        x: Unused (x_invar_index=None).
+        hidden_dim: Array of shape matching weight.
+        weights: Dict with key 'weight' (unused in body, but matches dict API).
+
+    Returns:
+        Dict with key 'weight' and the hidden_dim array.
     """
-    return hidden_dim
+    return {'weight': hidden_dim}
 
 
-def _elemwise_init_drtrl(x_var, y_var, weight_var, num_hidden_state):
+def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+    r"""Initialize D-RTRL trace (dict API).
+
+    Args:
+        x_var: Unused (x_invar_index=None).
+        y_var: Output variable descriptor with shape.
+        weight_vars: Dict with key 'weight' (unused in body).
+        num_hidden_state: Number of hidden states.
+
+    Returns:
+        Dict with key 'weight' and zeros of shape (*y_shape, num_hidden_state).
+    """
     y_shape = y_var.aval.shape
-    return jnp.zeros((*y_shape, num_hidden_state))
+    return {'weight': jnp.zeros((*y_shape, num_hidden_state))}
 
 
-def _elemwise_init_pp(x_var, y_var, weight_var, num_hidden_state):
+def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+    r"""Initialize pp_prop trace (single array, not dict).
+
+    Args:
+        x_var: Unused (x_invar_index=None).
+        y_var: Output variable descriptor with shape.
+        weight_vars: Dict with key 'weight' (unused in body).
+        num_hidden_state: Number of hidden states.
+
+    Returns:
+        Single array of shape (*y_shape, num_hidden_state).
+    """
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
@@ -72,6 +114,7 @@ etp_elemwise_p = register_primitive_spec(
         x_invar_index=None,
         batched=False,
         gradient_enabled=True,
+        trainable_invars_fn=_elem_trainable_invars,
     )
 )
 
