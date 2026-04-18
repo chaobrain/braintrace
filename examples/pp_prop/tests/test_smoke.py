@@ -18,6 +18,7 @@ EXAMPLE_FILES = [
     "07-vjp-single-step.py",
     "08-vjp-multi-step.py",
     "09-operator-sparse.py",
+    "10-operator-lora.py",
 ]
 
 
