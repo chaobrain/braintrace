@@ -241,7 +241,7 @@ def _init_IO_dim_state(
             init_fn(
                 relation.x_var,
                 relation.y_var,
-                relation.trainable_vars['weight'],
+                relation.trainable_vars,
                 group.num_state
             )
         )
