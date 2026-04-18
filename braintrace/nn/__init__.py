@@ -15,7 +15,6 @@
 
 from ._conv import Conv1d, Conv2d, Conv3d
 from ._linear import Linear, SignedWLinear, SparseLinear, LoRA
-from ._normalizations import BatchNorm0d, BatchNorm1d, BatchNorm2d, BatchNorm3d, LayerNorm, RMSNorm, GroupNorm
 from ._readout import LeakyRateReadout
 from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
 
@@ -24,9 +23,6 @@ __all__ = [
     'Conv1d', 'Conv2d', 'Conv3d',
     # linear
     'Linear', 'SignedWLinear', 'SparseLinear', 'LoRA',
-    # normalizations
-    'BatchNorm0d', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
-    'LayerNorm', 'RMSNorm', 'GroupNorm',
     # readout
     'LeakyRateReadout',
     # rnn
@@ -59,6 +55,9 @@ def __getattr__(name):
         'MaxPool1d', 'MaxPool2d', 'MaxPool3d',
         'AdaptiveAvgPool1d', 'AdaptiveAvgPool2d', 'AdaptiveAvgPool3d',
         'AdaptiveMaxPool1d', 'AdaptiveMaxPool2d', 'AdaptiveMaxPool3d',
+
+        'BatchNorm0d', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
+        'LayerNorm', 'RMSNorm', 'GroupNorm',
     ]:
         warnings.warn(
             f'braintrace.nn.{name} is deprecated. Use brainstate.nn.{name} instead.',
