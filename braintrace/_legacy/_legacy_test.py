@@ -23,7 +23,7 @@ Coverage:
 * ``DeprecationWarning`` fires on first construction.
 """
 
-from __future__ import annotations
+
 
 import warnings
 
@@ -31,8 +31,6 @@ import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
-import saiunit as u
 
 import braintrace
 from braintrace._legacy import (
@@ -286,7 +284,7 @@ class TestDeprecationWarnings:
         matmul_warnings = [
             w for w in captured
             if issubclass(w.category, DeprecationWarning)
-            and 'MatMulOp' in str(w.message)
+               and 'MatMulOp' in str(w.message)
         ]
         assert len(matmul_warnings) == 1
 

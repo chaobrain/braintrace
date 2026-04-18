@@ -22,10 +22,10 @@ from typing import Callable, Union
 import brainpy
 import brainstate
 import braintools
-import saiunit as u
 import jax
 import jax.numpy as jnp
 import numpy as np
+import saiunit as u
 
 import braintrace
 

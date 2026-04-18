@@ -5,7 +5,6 @@ Alternative batching path: the algorithm sees the batch axis directly
 instead of relying on vmap. Init once with ``batch_size=...``, compile
 on a batched sample.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -66,8 +65,11 @@ def main(*, n_epochs: int = 30, batch_size: int = 64, plot: bool = True) -> dict
         losses.append(float(f_train(x, y)))
 
     if plot:
-        plt.plot(losses); plt.xlabel('epoch'); plt.ylabel('MSE')
-        plt.title('03 · Batching via brainstate.mixin.Batching'); plt.show()
+        plt.plot(losses);
+        plt.xlabel('epoch');
+        plt.ylabel('MSE')
+        plt.title('03 · Batching via brainstate.mixin.Batching');
+        plt.show()
     return {"losses": losses}
 
 

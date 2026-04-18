@@ -10,7 +10,6 @@ and shows three training curves:
 
 Task: delayed XOR (short sequence, still long enough to surface instability).
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -18,7 +17,6 @@ import sys
 import brainstate
 import braintools
 import jax
-import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -49,7 +47,8 @@ def _clone_weights(src, dst):
 
 
 def _online_train(model, weights, iter_batches, *, normalize: bool, n_epochs: int):
-    opt = braintools.optim.Adam(3e-3); opt.register_trainable_weights(weights)
+    opt = braintools.optim.Adam(3e-3);
+    opt.register_trainable_weights(weights)
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
@@ -79,7 +78,8 @@ def _online_train(model, weights, iter_batches, *, normalize: bool, n_epochs: in
 
 
 def _bptt_train(model, weights, iter_batches, *, n_epochs: int):
-    opt = braintools.optim.Adam(3e-3); opt.register_trainable_weights(weights)
+    opt = braintools.optim.Adam(3e-3);
+    opt.register_trainable_weights(weights)
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
@@ -112,16 +112,21 @@ def main(*, n_epochs: int = 30, batch_size: int = 32, plot: bool = True) -> dict
     _clone_weights(model_base, model_fix)
     _clone_weights(model_base, model_bptt)
 
-    loss_base = _online_train(model_base, model_base.states(brainstate.ParamState), iter_batches, normalize=False, n_epochs=n_epochs)
-    loss_fix = _online_train(model_fix, model_fix.states(brainstate.ParamState), iter_batches, normalize=True, n_epochs=n_epochs)
+    loss_base = _online_train(model_base, model_base.states(brainstate.ParamState), iter_batches, normalize=False,
+                              n_epochs=n_epochs)
+    loss_fix = _online_train(model_fix, model_fix.states(brainstate.ParamState), iter_batches, normalize=True,
+                             n_epochs=n_epochs)
     loss_bptt = _bptt_train(model_bptt, model_bptt.states(brainstate.ParamState), iter_batches, n_epochs=n_epochs)
 
     if plot:
         plt.plot(loss_base, label='D_RTRL (normalize=False)')
         plt.plot(loss_fix, label='D_RTRL (normalize=True)')
         plt.plot(loss_bptt, label='BPTT')
-        plt.xlabel('epoch'); plt.ylabel('cross-entropy')
-        plt.legend(); plt.title('12 · normalize_matrix_spectrum — delayed XOR'); plt.show()
+        plt.xlabel('epoch');
+        plt.ylabel('cross-entropy')
+        plt.legend();
+        plt.title('12 · normalize_matrix_spectrum — delayed XOR');
+        plt.show()
 
     return {
         "losses": loss_fix,

@@ -5,7 +5,6 @@ Trains three identical LIF RSNNs on the same DMS data:
 one with vjp_method='single-step', one with 'multi-step', one with BPTT.
 Reports per-epoch loss and final accuracy for all three.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -15,8 +14,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

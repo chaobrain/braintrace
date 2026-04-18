@@ -50,8 +50,8 @@ from ._spec import (
     get_primitive_spec,
     register_primitive_spec,
 )
-from .conv import conv, etp_conv_p
 from .conv import _etp_conv_impl
+from .conv import conv, etp_conv_p
 from .dense import etp_mm_p, etp_mv_p, matmul
 from .elemwise import element_wise, etp_elemwise_p
 from .lora import etp_lora_mm_p, etp_lora_mv_p, lora_matmul

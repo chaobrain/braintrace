@@ -5,7 +5,6 @@ Trains a single-layer LIF RSNN on a Poisson-to-cumulative-rate regression task
 using braintrace.pp_prop (aka IODimVjpAlgorithm). Smallest possible entry
 point to the pp_prop API.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -15,8 +14,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

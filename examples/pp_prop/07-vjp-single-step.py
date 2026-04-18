@@ -6,7 +6,6 @@ state is computed at each current time step only (no lookback), which keeps
 the online cost small and is the mode used when each step provides its own
 target signal.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -16,8 +15,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

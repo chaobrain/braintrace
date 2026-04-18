@@ -25,11 +25,11 @@
   wrappers (NOT ``ParamState``), invisible to the compiler.
 """
 
-from __future__ import annotations
+
 
 import warnings
 from enum import Enum
-from typing import Callable, Optional
+from typing import Optional
 
 import brainstate
 
@@ -42,7 +42,6 @@ __all__ = [
     'FakeETraceParam',
     'FakeElemWiseParam',
 ]
-
 
 _warned: set = set()
 

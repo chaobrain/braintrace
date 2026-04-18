@@ -28,7 +28,7 @@ verifies:
 * Four ETP rules return the documented values / shapes.
 """
 
-from __future__ import annotations
+
 
 from collections import namedtuple
 
@@ -48,7 +48,6 @@ from braintrace._etrace_op import (
     etp_elemwise_p,
     is_etp_enable_gradient_primitive,
 )
-
 
 _FakeVar = namedtuple('_FakeVar', ['aval'])
 _FakeAval = namedtuple('_FakeAval', ['shape', 'dtype'])
@@ -111,7 +110,6 @@ class TestPrimitiveInJaxpr:
         the elemwise bind."""
         w = jnp.ones((3,))
         jaxpr = jax.make_jaxpr(lambda w: element_wise(w, fn=lambda x: x * 2))(w)
-        from jax import lax
         # mul (or scalar broadcast + mul) appears.
         assert any(
             eqn.primitive is etp_elemwise_p for eqn in jaxpr.jaxpr.eqns

@@ -394,4 +394,3 @@ class Conv3d(_Conv):
     """
     __module__ = 'braintrace.nn'
     num_spatial_dims: int = 3
-

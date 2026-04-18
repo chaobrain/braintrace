@@ -16,8 +16,8 @@
 from pprint import pprint
 
 import brainstate
-import saiunit as u
 import pytest
+import saiunit as u
 
 import braintrace
 from braintrace._etrace_compiler.hidden_pertubation import add_hidden_perturbation_in_module

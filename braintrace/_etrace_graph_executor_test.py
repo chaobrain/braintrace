@@ -16,8 +16,8 @@
 import unittest
 
 import brainstate
-import saiunit as u
 import jax.numpy as jnp
+import saiunit as u
 
 import braintrace
 from braintrace._etrace_model_test import (

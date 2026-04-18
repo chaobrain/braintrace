@@ -18,10 +18,10 @@ import unittest
 from pprint import pprint
 
 import brainstate
-import saiunit as u
 import jax
 import numpy as np
 import pytest
+import saiunit as u
 
 import braintrace
 from braintrace._etrace_compiler import model4test as group_etrace_model

@@ -6,7 +6,6 @@ negative ones (soft Dale, enforced by initialisation). pp_prop trains the
 full recurrent matrix without violating the sign constraint because the
 signs are fixed by the initialiser, not by the gradient step.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -16,8 +15,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

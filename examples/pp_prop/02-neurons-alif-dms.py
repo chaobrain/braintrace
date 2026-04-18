@@ -5,7 +5,6 @@ Same pp_prop recipe as 01 but with brainpy.state.ALIF replacing LIF. The
 adaptive threshold gives the network an intrinsic time constant that matters
 for delay-bridging tasks like DMS.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -15,8 +14,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

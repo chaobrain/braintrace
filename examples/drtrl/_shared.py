@@ -1,8 +1,6 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
 """Shared data generators and thin training helpers for examples/drtrl/*.py."""
 
-from __future__ import annotations
-
 from typing import Callable, Tuple
 
 import brainstate
@@ -92,8 +90,8 @@ def make_char_batches(
     data = np.asarray([char2idx[c] for c in text], dtype=np.int32)
     rng = np.random.default_rng(seed)
     starts = rng.integers(0, len(data) - seq_len - 1, size=(batch_size,))
-    x_ids = np.stack([data[s : s + seq_len] for s in starts], axis=1)  # (T, B)
-    y_ids = np.stack([data[s + 1 : s + 1 + seq_len] for s in starts], axis=1)
+    x_ids = np.stack([data[s: s + seq_len] for s in starts], axis=1)  # (T, B)
+    y_ids = np.stack([data[s + 1: s + 1 + seq_len] for s in starts], axis=1)
     one_hot = np.eye(len(vocab), dtype=np.float32)[x_ids]
     return ''.join(vocab), jnp.asarray(one_hot), jnp.asarray(y_ids)
 

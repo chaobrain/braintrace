@@ -17,8 +17,8 @@
 from typing import Dict, Set, Sequence, NamedTuple, Any
 
 import brainstate
-import saiunit as u
 import jax.core
+import saiunit as u
 
 from braintrace._compatible_imports import (
     Var,
@@ -26,6 +26,14 @@ from braintrace._compatible_imports import (
     Jaxpr,
     ClosedJaxpr,
     new_var
+)
+from braintrace._misc import (
+    git_issue_addr,
+)
+from braintrace._typing import (
+    HiddenInVar,
+    HiddenOutVar,
+    Path,
 )
 from .base import (
     JaxprEvaluation,
@@ -36,14 +44,6 @@ from .hidden_group import (
 from .module_info import (
     extract_module_info,
     ModuleInfo,
-)
-from braintrace._misc import (
-    git_issue_addr,
-)
-from braintrace._typing import (
-    HiddenInVar,
-    HiddenOutVar,
-    Path,
 )
 
 __all__ = [
@@ -241,7 +241,8 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
 
         # finalizing
         perturb_hidden_paths = [self.outvar_to_hidden_path[v] for v in self._hidden_outvars_ordered]
-        perturb_hidden_states = [self.path_to_state[self.outvar_to_hidden_path[v]] for v in self._hidden_outvars_ordered]
+        perturb_hidden_states = [self.path_to_state[self.outvar_to_hidden_path[v]] for v in
+                                 self._hidden_outvars_ordered]
         info = HiddenPerturbation(
             perturb_vars=brainstate.util.PrettyList(self.perturb_invars.values()),
             perturb_hidden_paths=brainstate.util.PrettyList(perturb_hidden_paths),

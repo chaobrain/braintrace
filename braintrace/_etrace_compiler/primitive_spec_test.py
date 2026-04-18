@@ -34,7 +34,6 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-import braintrace
 from braintrace import (
     CompilationRecord,
     DiagnosticKind,
@@ -126,8 +125,8 @@ class TestSpecRegistry:
             etp_sp_mm_p, etp_sp_mv_p, etp_lora_mm_p, etp_lora_mv_p,
         )
         for prim in (
-            etp_mm_p, etp_mv_p, etp_elemwise_p, etp_conv_p,
-            etp_sp_mm_p, etp_sp_mv_p, etp_lora_mm_p, etp_lora_mv_p,
+                etp_mm_p, etp_mv_p, etp_elemwise_p, etp_conv_p,
+                etp_sp_mm_p, etp_sp_mv_p, etp_lora_mm_p, etp_lora_mv_p,
         ):
             spec = get_primitive_spec(prim)
             assert spec is not None, f'No spec registered for {prim}'
@@ -148,9 +147,9 @@ class TestSpecRegistry:
             etp_lora_mm_p, etp_lora_mv_p,
         )
         for prim in (
-            etp_mm_p, etp_mv_p, etp_conv_p,
-            etp_sp_mm_p, etp_sp_mv_p,
-            etp_lora_mm_p, etp_lora_mv_p,
+                etp_mm_p, etp_mv_p, etp_conv_p,
+                etp_sp_mm_p, etp_sp_mv_p,
+                etp_lora_mm_p, etp_lora_mv_p,
         ):
             spec = get_primitive_spec(prim)
             assert spec.gradient_enabled is False, (

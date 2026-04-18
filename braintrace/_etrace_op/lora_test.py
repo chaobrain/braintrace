@@ -22,7 +22,7 @@ LoRA factorises a dense weight into two low-rank factors
 ``ParamState`` pytree structure used by ``braintrace.nn.LoRALinear``.
 """
 
-from __future__ import annotations
+
 
 from collections import namedtuple
 
@@ -42,7 +42,6 @@ from braintrace._etrace_op import (
     lora_matmul,
 )
 
-
 _FakeVar = namedtuple('_FakeVar', ['aval'])
 _FakeAval = namedtuple('_FakeAval', ['shape', 'dtype'])
 
@@ -59,8 +58,8 @@ class TestForwardCorrectness:
 
     def test_unbatched_matches_reference(self):
         x = jnp.array([1.0, 2.0, 3.0])
-        B = jnp.arange(6.0).reshape(3, 2)          # in=3, rank=2
-        A = jnp.arange(8.0).reshape(2, 4)          # rank=2, out=4
+        B = jnp.arange(6.0).reshape(3, 2)  # in=3, rank=2
+        A = jnp.arange(8.0).reshape(2, 4)  # rank=2, out=4
         out = lora_matmul(x, B, A)
         ref = x @ B @ A
         np.testing.assert_allclose(out, ref)
@@ -205,9 +204,9 @@ class TestLoraMmEtpRules:
         rule = ETP_RULES_YW_TO_W[etp_lora_mm_p]
 
         # Test 1: unbatched gradient-solve context — hidden=(out=4,), trace_A=(rank=2, out=4)
-        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])    # (out=4,)
-        trace_B = jnp.ones((4, 2))                    # (in=4, rank=2)
-        trace_A = jnp.ones((2, 4))                    # (rank=2, out=4)
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out=4,)
+        trace_B = jnp.ones((4, 2))  # (in=4, rank=2)
+        trace_A = jnp.ones((2, 4))  # (rank=2, out=4)
         out = rule(hidden, {'lora_b': trace_B, 'lora_a': trace_A})
         assert set(out.keys()) == {'lora_b', 'lora_a'}
         np.testing.assert_allclose(out['lora_b'], trace_B)
@@ -215,7 +214,7 @@ class TestLoraMmEtpRules:
         np.testing.assert_allclose(out['lora_a'], trace_A * hidden[None, :])
 
         # Test 2: batched trace-update context — hidden=(batch=1, out=4), trace_A=(batch=1, rank=2, out=4)
-        hidden_b = jnp.ones((1, 4))                    # (batch=1, out=4)
+        hidden_b = jnp.ones((1, 4))  # (batch=1, out=4)
         trace_A_b = jnp.arange(8.0).reshape(1, 2, 4)  # (batch=1, rank=2, out=4)
         out_b = rule(hidden_b, {'lora_b': jnp.ones((1, 4, 2)), 'lora_a': trace_A_b})
         # expected: trace_A_b * hidden_b[:, None, :] = (1, 2, 4) * (1, 1, 4) = (1, 2, 4)
@@ -287,8 +286,8 @@ class TestLoraMvEtpRules:
         rank axis of ``trace['lora_a']``."""
         rule = ETP_RULES_YW_TO_W[etp_lora_mv_p]
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out=4,)
-        trace_B = jnp.ones((3, 2))                  # (in=3, rank=2)
-        trace_A = jnp.ones((2, 4))                  # (rank=2, out=4)
+        trace_B = jnp.ones((3, 2))  # (in=3, rank=2)
+        trace_A = jnp.ones((2, 4))  # (rank=2, out=4)
         out = rule(hidden, {'lora_b': trace_B, 'lora_a': trace_A})
         assert set(out.keys()) == {'lora_b', 'lora_a'}
         np.testing.assert_allclose(out['lora_b'], trace_B)
@@ -391,7 +390,7 @@ class TestLoRAOnlineLearning:
         bptt = jax.grad(bptt_loss)({
             'lora_b': cell.p.value['lora_b'],
             'lora_a': cell.p.value['lora_a'],
-            'bias':   cell.p.value['bias'],
+            'bias': cell.p.value['bias'],
         })
 
         # Non-zero sanity check on bias gradient

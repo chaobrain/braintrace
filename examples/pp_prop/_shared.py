@@ -1,8 +1,6 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
 """Shared SNN data generators, cell wrappers, and train-step helpers for examples/pp_prop."""
 
-from __future__ import annotations
-
 from typing import Callable, Sequence, Tuple
 
 import brainpy.state
@@ -12,7 +10,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import saiunit as u
-
 
 DEFAULT_DT = 1.0 * u.ms
 DEFAULT_SEED = 42

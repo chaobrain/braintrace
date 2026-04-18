@@ -22,14 +22,13 @@ ops, used by :class:`NonTempParam` / :class:`FakeETraceParam` to keep
 the weight *out* of the ETP graph.
 """
 
-from __future__ import annotations
+
 
 import contextlib
 import threading
 import warnings
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
-import brainstate
 import jax
 import numpy as np
 import saiunit as u
@@ -52,7 +51,6 @@ __all__ = [
     'general_y2w',
     'stop_param_gradients',
 ]
-
 
 _warned: set = set()
 

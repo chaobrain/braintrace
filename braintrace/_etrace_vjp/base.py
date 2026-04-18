@@ -17,9 +17,9 @@
 from typing import Dict, Tuple, Any, List, Optional, Sequence
 
 import brainstate
-import saiunit as u
 import jax
 import jax.numpy as jnp
+import saiunit as u
 
 from braintrace._etrace_algorithms import ETraceAlgorithm
 from braintrace._etrace_input_data import has_multistep_data

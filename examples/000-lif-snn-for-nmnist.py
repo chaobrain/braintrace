@@ -18,9 +18,9 @@
 
 import brainstate
 import braintools
-import saiunit as u
 import matplotlib.pyplot as plt
 import numpy as np
+import saiunit as u
 import tonic
 from tonic.datasets import NMNIST
 from torch.utils.data import DataLoader

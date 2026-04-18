@@ -31,7 +31,6 @@ from jax.core import ShapedArray
 from jax.interpreters import ad, batching, mlir
 
 from braintrace._compatible_imports import Primitive
-
 from ._registries import (
     BATCHED_PRIMITIVES,
     ETP_PRIMITIVES,

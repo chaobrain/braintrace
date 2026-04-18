@@ -28,7 +28,7 @@ For rule-level tests a tiny stub class fits the contract exactly so the
 test does not depend on the upstream sparse-matrix surface area.
 """
 
-from __future__ import annotations
+
 
 from collections import namedtuple
 
@@ -48,7 +48,6 @@ from braintrace._etrace_op import (
     etp_sp_mv_p,
     sparse_matmul,
 )
-
 
 _FakeVar = namedtuple('_FakeVar', ['aval'])
 _FakeAval = namedtuple('_FakeAval', ['shape', 'dtype'])
@@ -248,10 +247,12 @@ class TestSpMmEtpRules:
         hidden = jnp.ones((2, 4))
         weights = {'weight': w_data, 'bias': b_data}
         dw = rule(x, hidden, weights, sparse_mat=stub, has_bias=True)
+
         # Bias gradient via VJP: g = hidden (2,4), db = sum(g, axis=0) = (4,).
         # Verify against the JAX VJP reference.
         def _fwd(w_dict):
             return x @ stub.with_data(w_dict['weight']) + w_dict['bias']
+
         _, vjp_fn = jax.vjp(_fwd, weights)
         ref = vjp_fn(hidden)[0]
         np.testing.assert_allclose(dw['bias'], ref['bias'])
@@ -261,7 +262,7 @@ class TestSpMmEtpRules:
         x_var = _fake_var((4, 3))
         y_var = _fake_var((4, 5))
         # weight_vars is now a dict
-        weight_vars = {'weight': _fake_var((7,))}      # nnz
+        weight_vars = {'weight': _fake_var((7,))}  # nnz
         out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out['weight'].shape == (4, 7, 2)
 

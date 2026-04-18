@@ -178,6 +178,7 @@ def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False):
     Both weight and bias pullbacks are fused into one ``jax.vjp`` over a
     dict-valued forward function.
     """
+
     def _fwd(w_dict):
         y = x @ sparse_mat.with_data(w_dict['weight'])
         if has_bias:

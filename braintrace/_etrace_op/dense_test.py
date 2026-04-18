@@ -27,14 +27,13 @@ Coverage:
   return tensors of the documented shape and value.
 """
 
-from __future__ import annotations
+
 
 from collections import namedtuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 import saiunit as u
 
 import braintrace
@@ -47,7 +46,6 @@ from braintrace._etrace_op import (
     etp_mv_p,
     matmul,
 )
-
 
 _FakeVar = namedtuple('_FakeVar', ['aval'])
 _FakeAval = namedtuple('_FakeAval', ['shape', 'dtype'])
@@ -214,7 +212,7 @@ class TestMmEtpRules:
         Correct for non-square (in != out)."""
         rule = ETP_RULES_YW_TO_W[etp_mm_p]
         in_dim, out_dim = 5, 3
-        hidden = jnp.array([1.0, 2.0, 3.0])       # (out,)
+        hidden = jnp.array([1.0, 2.0, 3.0])  # (out,)
         trace = {'weight': jnp.ones((in_dim, out_dim))}
         out = rule(hidden, trace)
         assert isinstance(out, dict)
@@ -228,10 +226,10 @@ class TestMmEtpRules:
         """When has_bias=True, ``yw_to_w`` also scales ``trace['bias']``."""
         rule = ETP_RULES_YW_TO_W[etp_mm_p]
         in_dim, out_dim = 5, 4
-        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])       # (out,)
+        hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
         trace = {
-            'weight': jnp.ones((in_dim, out_dim)),      # (in, out)
-            'bias': jnp.ones((out_dim,)),               # (out,)
+            'weight': jnp.ones((in_dim, out_dim)),  # (in, out)
+            'bias': jnp.ones((out_dim,)),  # (out,)
         }
         out = rule(hidden, trace, has_bias=True)
         assert isinstance(out, dict)
@@ -267,7 +265,7 @@ class TestMmEtpRules:
 
     def test_init_drtrl_shape(self):
         rule = ETP_RULES_INIT_DRTRL[etp_mm_p]
-        x_var = _fake_var((4, 3))           # (batch, in)
+        x_var = _fake_var((4, 3))  # (batch, in)
         y_var = _fake_var((4, 5))
         weight_vars = {'weight': _fake_var((3, 5))}
         out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
@@ -300,7 +298,7 @@ class TestMvEtpRules:
         along the column axis. The rule accepts and returns a dict."""
         rule = ETP_RULES_YW_TO_W[etp_mv_p]
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
-        trace = {'weight': jnp.ones((3, 4))}       # (in, out)
+        trace = {'weight': jnp.ones((3, 4))}  # (in, out)
         out = rule(hidden, trace)
         assert isinstance(out, dict)
         assert out['weight'].shape == (3, 4)

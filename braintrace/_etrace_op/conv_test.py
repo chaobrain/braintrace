@@ -28,7 +28,7 @@ Coverage:
   documented shape.
 """
 
-from __future__ import annotations
+
 
 from collections import namedtuple
 
@@ -46,7 +46,6 @@ from braintrace._etrace_op import (
     conv,
     etp_conv_p,
 )
-
 
 _FakeVar = namedtuple('_FakeVar', ['aval'])
 _FakeAval = namedtuple('_FakeAval', ['shape', 'dtype'])
@@ -73,8 +72,6 @@ _BASE_CONV_KW = dict(
 )
 
 
-
-
 # ---------------------------------------------------------------------------
 # Forward correctness
 # ---------------------------------------------------------------------------
@@ -82,8 +79,8 @@ _BASE_CONV_KW = dict(
 class TestForwardCorrectness:
 
     def test_same_padding_no_bias(self):
-        x = jnp.ones((1, 3, 8))               # (batch, in_ch, L)
-        k = jnp.arange(36.0).reshape(4, 3, 3) # (out_ch, in_ch, kw)
+        x = jnp.ones((1, 3, 8))  # (batch, in_ch, L)
+        k = jnp.arange(36.0).reshape(4, 3, 3)  # (out_ch, in_ch, kw)
         out = conv(x, k)
         ref = _ref_conv(x, k, **_BASE_CONV_KW)
         np.testing.assert_allclose(out, ref)
@@ -241,8 +238,8 @@ class TestConvEtpRules:
         # dimension_numbers and strides must be supplied so _conv_layout can derive
         # the spatial rank and channel-axis position.
         batch = 1
-        hidden = jnp.ones((batch, 6, 4))         # (1, H_out, out_ch)
-        w_trace = jnp.ones((batch, 3, 4, 4))     # (1, H_k, in_ch, out_ch)
+        hidden = jnp.ones((batch, 6, 4))  # (1, H_out, out_ch)
+        w_trace = jnp.ones((batch, 3, 4, 4))  # (1, H_k, in_ch, out_ch)
         b_trace = jnp.ones((batch, 6, 4)) * 2.0  # (1, H_out, out_ch) — per-position trace
         trace = {'weight': w_trace, 'bias': b_trace}
         params = dict(has_bias=True, strides=(1,), dimension_numbers=('NHC', 'HIO', 'NHC'))
@@ -286,7 +283,7 @@ class TestConvEtpRules:
         k = jnp.arange(36.0).reshape(4, 3, 3)
         b = jnp.ones(4)
         ref_y_shape = _ref_conv(x, k, **_BASE_CONV_KW).shape
-        hidden = jnp.ones(ref_y_shape)       # (1, 4, 8) in NCH layout
+        hidden = jnp.ones(ref_y_shape)  # (1, 4, 8) in NCH layout
         weights = {'weight': k, 'bias': b}
         dk_dict = rule(x, hidden, weights, has_bias=True, **_BASE_CONV_KW)
         assert 'weight' in dk_dict

@@ -5,7 +5,6 @@ Inputs carry a batch dimension directly. braintrace.matmul dispatches to the
 batched primitive etp_mm_p when x.ndim >= 2, so the network runs natively
 batched and IODimVjpAlgorithm does not need to wrap the model in Vmap.
 """
-from __future__ import annotations
 
 import pathlib
 import sys

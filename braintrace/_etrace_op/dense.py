@@ -191,6 +191,7 @@ def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
     weight and bias pullbacks in one pass, avoiding a second VJP call
     when ``has_bias=True``.
     """
+
     def _fwd(w_dict):
         y = x @ w_dict['weight']
         if has_bias:
@@ -324,6 +325,7 @@ def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
     One fused ``jax.vjp`` over a dict-valued forward returns both weight
     and bias gradients in one pass.
     """
+
     def _fwd(w_dict):
         y = x @ w_dict['weight']
         if has_bias:

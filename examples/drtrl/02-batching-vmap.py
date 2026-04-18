@@ -9,7 +9,6 @@ Shows the per-sample-init pattern explicitly:
 Pick this pattern when every sample needs its own eligibility trace state
 (the usual case).
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -76,8 +75,11 @@ def main(*, n_epochs: int = 30, batch_size: int = 64, plot: bool = True) -> dict
         losses.append(float(f_train(x, y)))
 
     if plot:
-        plt.plot(losses); plt.xlabel('epoch'); plt.ylabel('MSE')
-        plt.title('02 · Batching via vmap_new_states'); plt.show()
+        plt.plot(losses);
+        plt.xlabel('epoch');
+        plt.ylabel('MSE')
+        plt.title('02 · Batching via vmap_new_states');
+        plt.show()
     return {"losses": losses}
 
 

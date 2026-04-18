@@ -4,7 +4,6 @@
 Trains a MiniGRU on a short embedded corpus string with D_RTRL and BPTT,
 then autoregressively samples a short continuation from each trained model.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -21,12 +20,11 @@ import braintrace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402
 
-
 CORPUS = (
-    "the quick brown fox jumps over the lazy dog. "
-    "pack my box with five dozen liquor jugs. "
-    "how vexingly quick daft zebras jump! "
-) * 6
+             "the quick brown fox jumps over the lazy dog. "
+             "pack my box with five dozen liquor jugs. "
+             "how vexingly quick daft zebras jump! "
+         ) * 6
 
 
 class CharRNN(brainstate.nn.Module):
@@ -65,8 +63,10 @@ def main(*, n_epochs: int = 20, batch_size: int = 16, plot: bool = True) -> dict
     for (_, a), (_, b) in zip(w_online.items(), w_bptt.items()):
         b.value = jax.tree.map(lambda x: x, a.value)
 
-    opt_online = braintools.optim.Adam(3e-3); opt_online.register_trainable_weights(w_online)
-    opt_bptt = braintools.optim.Adam(3e-3); opt_bptt.register_trainable_weights(w_bptt)
+    opt_online = braintools.optim.Adam(3e-3);
+    opt_online.register_trainable_weights(w_online)
+    opt_bptt = braintools.optim.Adam(3e-3);
+    opt_bptt.register_trainable_weights(w_bptt)
 
     @brainstate.transform.jit
     def online_step(inputs, targets):
@@ -119,8 +119,11 @@ def main(*, n_epochs: int = 20, batch_size: int = 16, plot: bool = True) -> dict
     if plot:
         plt.plot(online_losses, label='D_RTRL')
         plt.plot(bptt_losses, label='BPTT')
-        plt.xlabel('epoch'); plt.ylabel('cross-entropy')
-        plt.legend(); plt.title('10 · toy char-LM'); plt.show()
+        plt.xlabel('epoch');
+        plt.ylabel('cross-entropy')
+        plt.legend();
+        plt.title('10 · toy char-LM');
+        plt.show()
 
     return {
         "losses": online_losses,

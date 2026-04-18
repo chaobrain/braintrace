@@ -26,7 +26,7 @@ construction must raise. Default values for ``x_invar_index``,
 the dense matmul / elementwise primitives rely on at runtime.
 """
 
-from __future__ import annotations
+
 
 import dataclasses
 
@@ -57,7 +57,6 @@ from braintrace._etrace_op import (
     register_primitive,
     register_primitive_spec,
 )
-
 
 _PRIM_COUNTER = 0
 
@@ -172,6 +171,7 @@ class TestRegisterPrimitiveSpec:
     def test_impl_runs_via_bind(self):
         def _impl(x, w):
             return x @ w
+
         spec = _trivial_spec('impl', impl=_impl)
         p = register_primitive_spec(spec)
         x = jnp.ones((3, 2))
@@ -188,8 +188,8 @@ class TestGetPrimitiveSpec:
 
     def test_round_trip_for_each_shipped_primitive(self):
         for prim in (
-            etp_mm_p, etp_mv_p, etp_elemwise_p, etp_conv_p,
-            etp_sp_mm_p, etp_sp_mv_p, etp_lora_mm_p, etp_lora_mv_p,
+                etp_mm_p, etp_mv_p, etp_elemwise_p, etp_conv_p,
+                etp_sp_mm_p, etp_sp_mv_p, etp_lora_mm_p, etp_lora_mv_p,
         ):
             spec = get_primitive_spec(prim)
             assert spec is not None

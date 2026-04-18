@@ -8,7 +8,6 @@ internally, so only ``lora_a``/``lora_b`` appear in the eligibility trace.
 
 Task: random-frequency sine wave one-step-ahead prediction.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -52,8 +51,8 @@ class LoRACell(brainstate.nn.RNNCell):
 
     def update(self, x):
         xh = jnp.concatenate([x, self.h.value], axis=-1)
-        base = xh @ self.frozen_base.value   # plain matmul — excluded from ETP
-        residual = self.lora(xh)             # ETP-aware via lora_matmul
+        base = xh @ self.frozen_base.value  # plain matmul — excluded from ETP
+        residual = self.lora(xh)  # ETP-aware via lora_matmul
         self.h.value = jax.nn.tanh(base + residual)
         return self.h.value
 
@@ -72,7 +71,8 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
     num_step, n_hidden = 40, 32
     model = Net(1, n_hidden)
     weights = model.states(brainstate.ParamState)
-    opt = braintools.optim.Adam(5e-3); opt.register_trainable_weights(weights)
+    opt = braintools.optim.Adam(5e-3);
+    opt.register_trainable_weights(weights)
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
@@ -107,8 +107,11 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
         losses.append(float(f_train(x, y)))
 
     if plot:
-        plt.plot(losses); plt.xlabel('epoch'); plt.ylabel('MSE')
-        plt.title('07 · LoRA adapter on frozen base — sine'); plt.show()
+        plt.plot(losses);
+        plt.xlabel('epoch');
+        plt.ylabel('MSE')
+        plt.title('07 · LoRA adapter on frozen base — sine');
+        plt.show()
     return {"losses": losses}
 
 

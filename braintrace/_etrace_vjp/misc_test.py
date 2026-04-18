@@ -14,10 +14,10 @@
 # ==============================================================================
 
 import brainstate
-import saiunit as u
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
+import saiunit as u
 
 from braintrace._etrace_vjp.misc import (
     _batched_zeros_like,

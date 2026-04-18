@@ -6,7 +6,6 @@ Multi-step VJP lets pp_prop combine gradients computed at multiple time steps
 (one label per sequence) and we still want temporal credit assignment on top
 of the eligibility-trace diagonal approximation.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -16,8 +15,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

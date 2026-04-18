@@ -9,7 +9,6 @@ The fast path applies when every ETP primitive in the graph has an
 elementwise ``yw_to_w`` rule (matmul, mv, element_wise). For this example
 (ValinaRNN + Linear) all primitives qualify.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -104,15 +103,16 @@ def main(*, n_epochs: int = 5, batch_size: int = 16, plot: bool = True) -> dict:
         )
     )
 
-    print(f"fast_solve=True  mean time/epoch: {fast_time*1000:.2f} ms")
-    print(f"fast_solve=False mean time/epoch: {slow_time*1000:.2f} ms")
+    print(f"fast_solve=True  mean time/epoch: {fast_time * 1000:.2f} ms")
+    print(f"fast_solve=False mean time/epoch: {slow_time * 1000:.2f} ms")
     print(f"max |grad_fast - grad_slow|     : {max_diff:.3e}")
     print(f"allclose (atol=1e-5, rtol=1e-4) : {allclose}")
 
     if plot:
         plt.bar(['fast_solve=True', 'fast_solve=False'], [fast_time * 1000, slow_time * 1000])
         plt.ylabel('ms / epoch')
-        plt.title(f'11 · fast_solve runtime (max-grad-diff {max_diff:.1e})'); plt.show()
+        plt.title(f'11 · fast_solve runtime (max-grad-diff {max_diff:.1e})');
+        plt.show()
 
     return {
         "losses": [],

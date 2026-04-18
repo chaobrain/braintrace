@@ -12,7 +12,6 @@ COO/CSR formats lack JAX batching rules today (same constraint noted for
 `examples/drtrl/06-operator-sparse.py`). This masked-dense fallback still
 exercises `pp_prop` over a sparse connectivity pattern end-to-end.
 """
-from __future__ import annotations
 
 import pathlib
 import sys

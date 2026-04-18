@@ -6,7 +6,6 @@ decay, 0 < alpha < 1) or an int (approximation rank). The two parameterisations
 are duals: num_rank = 2/(1-decay) - 1. This file trains multiple models, one
 per value, and plots their final-epoch losses side-by-side.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -16,8 +15,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

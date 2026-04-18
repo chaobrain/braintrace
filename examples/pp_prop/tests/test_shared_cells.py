@@ -1,5 +1,4 @@
 """Unit tests for examples/pp_prop/_shared.py SNN cells."""
-from __future__ import annotations
 
 import importlib.util
 import pathlib

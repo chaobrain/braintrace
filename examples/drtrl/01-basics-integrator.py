@@ -5,7 +5,6 @@ The smallest working example. Trains a vanilla RNN on noisy cumulative-sum
 regression and compares D_RTRL against BPTT on the same initialisation.
 Read the inline comments top to bottom.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -108,8 +107,10 @@ def main(*, n_epochs: int = 50, batch_size: int = 64, plot: bool = True) -> dict
     if plot:
         plt.plot(online_losses, label='D_RTRL')
         plt.plot(bptt_losses, label='BPTT')
-        plt.xlabel('epoch'); plt.ylabel('MSE')
-        plt.legend(); plt.title('01 · Basics — integrator')
+        plt.xlabel('epoch');
+        plt.ylabel('MSE')
+        plt.legend();
+        plt.title('01 · Basics — integrator')
         plt.show()
     return {"losses": online_losses, "bptt_losses": bptt_losses}
 

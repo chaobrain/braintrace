@@ -1,5 +1,4 @@
 """Smoke tests: each example's main() must run one epoch end-to-end."""
-from __future__ import annotations
 
 import importlib.util
 import pathlib

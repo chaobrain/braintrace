@@ -7,14 +7,12 @@ classifies. The Conv kernel is a standard ParamState but routes through
 ``etp_conv_p`` via ``braintrace.nn.Conv1d``, so it appears in the eligibility
 trace.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
 
 import brainstate
 import braintools
-import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
@@ -22,7 +20,6 @@ import numpy as np
 import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import _shared  # noqa: E402
 
 
 def _make_poisson_rows(batch_size: int, n_classes: int = 4, seed: int = 0):
@@ -60,7 +57,8 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
     n_classes, n_hidden = 4, 32
     model = ConvRNN(n_hidden, n_classes)
     weights = model.states(brainstate.ParamState)
-    opt = braintools.optim.Adam(3e-3); opt.register_trainable_weights(weights)
+    opt = braintools.optim.Adam(3e-3);
+    opt.register_trainable_weights(weights)
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
@@ -89,8 +87,11 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
         losses.append(float(f_train(x, y)))
 
     if plot:
-        plt.plot(losses); plt.xlabel('epoch'); plt.ylabel('cross-entropy')
-        plt.title('08 · Conv1d + MiniGRU'); plt.show()
+        plt.plot(losses);
+        plt.xlabel('epoch');
+        plt.ylabel('cross-entropy')
+        plt.title('08 · Conv1d + MiniGRU');
+        plt.show()
     return {"losses": losses}
 
 

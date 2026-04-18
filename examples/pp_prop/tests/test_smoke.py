@@ -1,5 +1,4 @@
 """Smoke tests: each example's main() runs one epoch end-to-end without exceptions."""
-from __future__ import annotations
 
 import importlib.util
 import pathlib

@@ -27,7 +27,7 @@ The four ETP rule registration helpers (`register_yw_to_w`,
 APIs.
 """
 
-from __future__ import annotations
+
 
 import jax
 import jax.numpy as jnp
@@ -46,7 +46,6 @@ from braintrace._etrace_op import (
     ETPPrimitive,
     register_primitive,
 )
-
 
 # A counter to keep test-only primitives uniquely named so they don't
 # collide with one another or with shipped primitives.
@@ -115,6 +114,7 @@ class TestEagerImpl:
     def test_impl_with_kwargs(self):
         def _add_const(x, *, c):
             return x + c
+
         p = register_primitive(_fresh_name('kwarg'), _add_const)
         out = p.bind(jnp.asarray(2.0), c=10)
         np.testing.assert_allclose(out, 12.0)

@@ -5,7 +5,6 @@ Single Conv2d -> Expon -> LIF -> global-avg-pool -> readout. pp_prop
 dispatches to the convolutional ETP primitive etp_conv_p for gradient
 computation on the conv kernel.
 """
-from __future__ import annotations
 
 import pathlib
 import sys

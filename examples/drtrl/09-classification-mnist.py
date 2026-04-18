@@ -6,7 +6,6 @@ and classifies the digit. Compares D_RTRL and BPTT on matched hyperparams.
 
 Requires ``torchvision``. First run downloads MNIST to ``examples/data/MNIST``.
 """
-from __future__ import annotations
 
 import pathlib
 
@@ -60,8 +59,10 @@ def main(*, n_epochs: int = 1, batch_size: int = 64, max_batches: int | None = 1
 
     w_online = model_online.states(brainstate.ParamState)
     w_bptt = model_bptt.states(brainstate.ParamState)
-    opt_online = braintools.optim.Adam(1e-3); opt_online.register_trainable_weights(w_online)
-    opt_bptt = braintools.optim.Adam(1e-3); opt_bptt.register_trainable_weights(w_bptt)
+    opt_online = braintools.optim.Adam(1e-3);
+    opt_online.register_trainable_weights(w_online)
+    opt_bptt = braintools.optim.Adam(1e-3);
+    opt_bptt.register_trainable_weights(w_bptt)
 
     train_loader, _ = _load_mnist(batch_size)
 
@@ -110,8 +111,11 @@ def main(*, n_epochs: int = 1, batch_size: int = 64, max_batches: int | None = 1
     if plot:
         plt.plot(online_losses, label='D_RTRL')
         plt.plot(bptt_losses, label='BPTT')
-        plt.xlabel('batch'); plt.ylabel('cross-entropy')
-        plt.legend(); plt.title('09 · row-scan MNIST'); plt.show()
+        plt.xlabel('batch');
+        plt.ylabel('cross-entropy')
+        plt.legend();
+        plt.title('09 · row-scan MNIST');
+        plt.show()
 
     return {"losses": online_losses, "bptt_losses": bptt_losses}
 

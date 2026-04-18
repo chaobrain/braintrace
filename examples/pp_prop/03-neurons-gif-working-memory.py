@@ -5,7 +5,6 @@ GIF's slow adaptation current gives per-neuron memory timescales. pp_prop
 tracks the trace through the slow state via the same diagonal approximation
 it uses for membrane voltage.
 """
-from __future__ import annotations
 
 import pathlib
 import sys
@@ -15,8 +14,6 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import saiunit as u
-
-import braintrace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

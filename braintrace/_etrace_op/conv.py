@@ -282,7 +282,7 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
     # Build broadcast shape: all-ones except batch (axis 0 when present) and out_ch axis.
     target_shape = [1] * w_trace.ndim
     if has_batch_prefix:
-        target_shape[0] = w_trace.shape[0]   # batch size
+        target_shape[0] = w_trace.shape[0]  # batch size
     target_shape[w_out_axis] = w_trace.shape[w_out_axis]  # out_ch size
     hd_for_weight = jnp.reshape(hd_reduced, target_shape)
 

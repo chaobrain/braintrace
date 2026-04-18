@@ -16,6 +16,7 @@
 # -*- coding: utf-8 -*-
 
 
+from . import _legacy
 from . import nn
 from ._etrace_algorithms import (
     ETraceAlgorithm,
@@ -76,7 +77,6 @@ from ._legacy import (
     NonTempParam,
     SpMatMulOp,
 )
-from . import _legacy
 from ._misc import NotSupportedError, CompilationError
 from ._version import __version__, __version_info__
 

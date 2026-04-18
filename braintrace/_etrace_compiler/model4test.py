@@ -18,12 +18,12 @@ from typing import Callable
 
 import brainpy
 import brainstate
-import saiunit as u
+import braintools
 import jax
 import jax.numpy as jnp
+import saiunit as u
 
 import braintrace
-import braintools
 
 
 class ALIF(brainpy.state.Neuron):
