@@ -18,6 +18,7 @@ def _load(fname: str):
 
 @pytest.mark.parametrize("fname", [
     "01-basics-integrator.py",
+    "02-batching-vmap.py",
 ])
 def test_example_runs(fname):
     mod = _load(fname)
