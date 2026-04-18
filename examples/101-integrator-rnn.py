@@ -135,7 +135,7 @@ def train_online(n_epochs=5):
     model = RNN(1, num_hidden)
     weights = model.states(brainstate.ParamState)
 
-    lr = braintools.optim.ExponentialDecayLR(1e-3, decay_steps=1, decay_rate=0.99975)
+    lr = braintools.optim.ExponentialDecayLR(5e-3, decay_steps=1, decay_rate=0.99975)
     opt = braintools.optim.Adam(lr=lr, eps=1e-1)
     opt.register_trainable_weights(weights)
 
@@ -211,7 +211,7 @@ def train_online(n_epochs=5):
 print("=" * 60)
 print("Training with BPTT")
 print("=" * 60)
-bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
+# bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
 
 print()
 print("=" * 60)
