@@ -105,3 +105,215 @@ def make_poisson_mnist(
     p = flat[None, :, :] * rate_hz * dt
     spikes = (rng.random((num_step, num_batch, 64)) < p).astype(np.float32)
     return jnp.asarray(spikes), jnp.asarray(label_idx)
+
+
+# --- SNN cells -----------------------------------------------------------
+#
+# All cells use the AlignPostProj + Expon + CUBA pattern with consistent
+# saiunit units. Pattern:
+#
+#     linear (mA) -> Expon syn (mA) -> CUBA (scales to current) -> LIF/ALIF/GIF (mV)
+#
+# `braintrace.nn.Linear` is the ETP-tracked op; CUBA + LIF share the expected
+# mV/mA/ohm unit algebra inside the neuron model.
+
+
+class LIFCell(brainstate.nn.Module):
+    """LIF recurrent block: concat(input, last-spike) -> Linear -> Expon -> CUBA -> LIF -> spikes."""
+
+    def __init__(
+        self,
+        n_in: int,
+        n_rec: int,
+        tau_mem: u.Quantity = 20.0 * u.ms,
+        tau_syn: u.Quantity = 10.0 * u.ms,
+        V_th: u.Quantity = 1.0 * u.mV,
+        ff_scale: float = 2.0,
+        rec_scale: float = 1.0,
+    ):
+        super().__init__()
+        import braintrace
+        self.neu = brainpy.state.LIF(
+            n_rec, R=1. * u.ohm, tau=tau_mem, V_th=V_th,
+            V_reset=0. * u.mV, V_rest=0. * u.mV,
+            V_initializer=braintools.init.ZeroInit(unit=u.mV),
+        )
+        ff = braintools.init.KaimingNormal(ff_scale, unit=u.mA)
+        rec = braintools.init.KaimingNormal(rec_scale, unit=u.mA)
+        w = u.math.concatenate([ff((n_in, n_rec)), rec((n_rec, n_rec))], axis=0)
+        self.syn = brainpy.state.AlignPostProj(
+            comm=braintrace.nn.Linear(
+                n_in + n_rec, n_rec, w_init=w,
+                b_init=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            syn=brainpy.state.Expon(
+                n_rec, tau=tau_syn,
+                g_initializer=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            out=brainpy.state.CUBA(scale=1.),
+            post=self.neu,
+        )
+
+    def update(self, x):
+        self.syn(u.math.concatenate([x, self.neu.get_spike()], axis=-1))
+        self.neu(0. * u.mA)
+        return self.neu.get_spike()
+
+
+class ALIFCell(brainstate.nn.Module):
+    """ALIF (adaptive threshold) recurrent block. Same interface as LIFCell."""
+
+    def __init__(
+        self,
+        n_in: int,
+        n_rec: int,
+        tau_mem: u.Quantity = 20.0 * u.ms,
+        tau_syn: u.Quantity = 10.0 * u.ms,
+        tau_a: u.Quantity = 100.0 * u.ms,
+        V_th: u.Quantity = 1.0 * u.mV,
+        beta: u.Quantity = 1.8 * u.mV,
+        ff_scale: float = 2.0,
+        rec_scale: float = 1.0,
+    ):
+        super().__init__()
+        import braintrace
+        self.neu = brainpy.state.ALIF(
+            n_rec, R=1. * u.ohm, tau=tau_mem, tau_a=tau_a, V_th=V_th, beta=beta,
+            V_reset=0. * u.mV, V_rest=0. * u.mV,
+            V_initializer=braintools.init.ZeroInit(unit=u.mV),
+        )
+        ff = braintools.init.KaimingNormal(ff_scale, unit=u.mA)
+        rec = braintools.init.KaimingNormal(rec_scale, unit=u.mA)
+        w = u.math.concatenate([ff((n_in, n_rec)), rec((n_rec, n_rec))], axis=0)
+        self.syn = brainpy.state.AlignPostProj(
+            comm=braintrace.nn.Linear(
+                n_in + n_rec, n_rec, w_init=w,
+                b_init=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            syn=brainpy.state.Expon(
+                n_rec, tau=tau_syn,
+                g_initializer=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            out=brainpy.state.CUBA(scale=1.),
+            post=self.neu,
+        )
+
+    def update(self, x):
+        self.syn(u.math.concatenate([x, self.neu.get_spike()], axis=-1))
+        self.neu(0. * u.mA)
+        return self.neu.get_spike()
+
+
+class GIFCell(brainstate.nn.Module):
+    """GIF (generalized integrate-and-fire) with heterogeneous tau_I2. Same interface."""
+
+    def __init__(
+        self,
+        n_in: int,
+        n_rec: int,
+        tau_mem: u.Quantity = 20.0 * u.ms,
+        tau_syn: u.Quantity = 10.0 * u.ms,
+        V_th: u.Quantity = 1.0 * u.mV,
+        A2: u.Quantity = -0.5 * u.mA,
+        tau_I2_low: u.Quantity = 80.0 * u.ms,
+        tau_I2_high: u.Quantity = 200.0 * u.ms,
+        ff_scale: float = 2.0,
+        rec_scale: float = 1.0,
+    ):
+        super().__init__()
+        import pathlib
+        import sys
+        # lazy import of local GIF class (tau_I2 heterogeneity)
+        repo_examples = pathlib.Path(__file__).resolve().parent.parent
+        if str(repo_examples) not in sys.path:
+            sys.path.insert(0, str(repo_examples))
+        from snn_models import GIF  # type: ignore
+        import braintrace
+        self.neu = GIF(
+            n_rec,
+            V_th_inf=V_th,
+            tau=tau_mem,
+            tau_I2=brainstate.random.uniform(tau_I2_low, tau_I2_high, n_rec),
+            A2=A2,
+        )
+        ff = braintools.init.KaimingNormal(ff_scale, unit=u.mA)
+        rec = braintools.init.KaimingNormal(rec_scale, unit=u.mA)
+        w = u.math.concatenate([ff((n_in, n_rec)), rec((n_rec, n_rec))], axis=0)
+        self.syn = brainpy.state.AlignPostProj(
+            comm=braintrace.nn.Linear(
+                n_in + n_rec, n_rec, w_init=w,
+                b_init=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            syn=brainpy.state.Expon(
+                n_rec, tau=tau_syn,
+                g_initializer=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            out=brainpy.state.CUBA(scale=1.),
+            post=self.neu,
+        )
+
+    def update(self, x):
+        self.syn(u.math.concatenate([x, self.neu.get_spike()], axis=-1))
+        self.neu(0. * u.mA)
+        return self.neu.get_spike()
+
+
+class COBAEICell(brainstate.nn.Module):
+    """Dale-law E/I recurrent block using signed init on braintrace.nn.Linear."""
+
+    def __init__(
+        self,
+        n_in: int,
+        n_exc: int,
+        n_inh: int,
+        tau_mem: u.Quantity = 20.0 * u.ms,
+        tau_syn: u.Quantity = 10.0 * u.ms,
+        V_th: u.Quantity = 1.0 * u.mV,
+        ff_scale: float = 2.0,
+        rec_scale: float = 1.0,
+    ):
+        super().__init__()
+        import braintrace
+        n_rec = n_exc + n_inh
+        self.n_exc = n_exc
+        ff = braintools.init.KaimingNormal(ff_scale, unit=u.mA)((n_in, n_rec))
+        rec_pos = u.math.abs(braintools.init.KaimingNormal(rec_scale, unit=u.mA)((n_exc, n_rec)))
+        rec_neg = -u.math.abs(braintools.init.KaimingNormal(rec_scale, unit=u.mA)((n_inh, n_rec)))
+        w = u.math.concatenate([ff, rec_pos, rec_neg], axis=0)
+        self.neu = brainpy.state.LIF(
+            n_rec, R=1. * u.ohm, tau=tau_mem, V_th=V_th,
+            V_reset=0. * u.mV, V_rest=0. * u.mV,
+            V_initializer=braintools.init.ZeroInit(unit=u.mV),
+        )
+        self.syn = brainpy.state.AlignPostProj(
+            comm=braintrace.nn.Linear(
+                n_in + n_rec, n_rec, w_init=w,
+                b_init=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            syn=brainpy.state.Expon(
+                n_rec, tau=tau_syn,
+                g_initializer=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            out=brainpy.state.CUBA(scale=1.),
+            post=self.neu,
+        )
+
+    def update(self, x):
+        self.syn(u.math.concatenate([x, self.neu.get_spike()], axis=-1))
+        self.neu(0. * u.mA)
+        return self.neu.get_spike()
+
+
+class LeakyReadout(brainstate.nn.Module):
+    """Leaky-rate readout for regression / classification."""
+
+    def __init__(self, n_rec: int, n_out: int, tau_o: u.Quantity = 10.0 * u.ms):
+        super().__init__()
+        import braintrace
+        self.readout = braintrace.nn.LeakyRateReadout(
+            in_size=n_rec, out_size=n_out, tau=tau_o,
+            w_init=braintools.init.KaimingNormal(),
+        )
+
+    def update(self, spikes):
+        return self.readout(spikes)
