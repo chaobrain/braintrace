@@ -29,83 +29,6 @@ jnp = pytest.importorskip("jax.numpy")
 braintools = pytest.importorskip("braintools")
 init = braintools.init
 braintrace = pytest.importorskip("braintrace")
-from braintrace.nn._conv import to_dimension_numbers, replicate
-
-
-class TestUtilityFunctions:
-    """Test utility functions used in convolution modules."""
-
-    def test_to_dimension_numbers_1d_channels_last(self):
-        """Test 1D convolution dimension numbers with channels_last=True."""
-        dim_numbers = to_dimension_numbers(num_spatial_dims=1, channels_last=True, transpose=False)
-        assert dim_numbers.lhs_spec == (0, 2, 1)  # (batch, channels, spatial)
-        assert dim_numbers.rhs_spec == (2, 1, 0)  # (out_channels, in_channels, spatial)
-        assert dim_numbers.out_spec == (0, 2, 1)  # (batch, channels, spatial)
-
-    def test_to_dimension_numbers_1d_channels_first(self):
-        """Test 1D convolution dimension numbers with channels_last=False."""
-        dim_numbers = to_dimension_numbers(num_spatial_dims=1, channels_last=False, transpose=False)
-        assert dim_numbers.lhs_spec == (0, 1, 2)  # (batch, channels, spatial)
-        assert dim_numbers.rhs_spec == (2, 1, 0)  # (out_channels, in_channels, spatial)
-        assert dim_numbers.out_spec == (0, 1, 2)  # (batch, channels, spatial)
-
-    def test_to_dimension_numbers_2d_channels_last(self):
-        """Test 2D convolution dimension numbers with channels_last=True."""
-        dim_numbers = to_dimension_numbers(num_spatial_dims=2, channels_last=True, transpose=False)
-        assert dim_numbers.lhs_spec == (0, 3, 1, 2)  # (batch, channels, H, W)
-        assert dim_numbers.rhs_spec == (3, 2, 0, 1)  # (out_channels, in_channels, H, W)
-        assert dim_numbers.out_spec == (0, 3, 1, 2)  # (batch, channels, H, W)
-
-    def test_to_dimension_numbers_2d_channels_first(self):
-        """Test 2D convolution dimension numbers with channels_last=False."""
-        dim_numbers = to_dimension_numbers(num_spatial_dims=2, channels_last=False, transpose=False)
-        assert dim_numbers.lhs_spec == (0, 1, 2, 3)  # (batch, channels, H, W)
-        assert dim_numbers.rhs_spec == (3, 2, 0, 1)  # (out_channels, in_channels, H, W)
-        assert dim_numbers.out_spec == (0, 1, 2, 3)  # (batch, channels, H, W)
-
-    def test_to_dimension_numbers_3d_channels_last(self):
-        """Test 3D convolution dimension numbers with channels_last=True."""
-        dim_numbers = to_dimension_numbers(num_spatial_dims=3, channels_last=True, transpose=False)
-        assert dim_numbers.lhs_spec == (0, 4, 1, 2, 3)  # (batch, channels, H, W, D)
-        assert dim_numbers.rhs_spec == (4, 3, 0, 1, 2)  # (out_channels, in_channels, H, W, D)
-        assert dim_numbers.out_spec == (0, 4, 1, 2, 3)  # (batch, channels, H, W, D)
-
-    def test_to_dimension_numbers_transpose(self):
-        """Test dimension numbers with transpose=True."""
-        dim_numbers = to_dimension_numbers(num_spatial_dims=2, channels_last=True, transpose=True)
-        assert dim_numbers.lhs_spec == (0, 3, 1, 2)  # (batch, channels, H, W)
-        assert dim_numbers.rhs_spec == (2, 3, 0, 1)  # (in_channels, out_channels, H, W)
-        assert dim_numbers.out_spec == (0, 3, 1, 2)  # (batch, channels, H, W)
-
-    def test_replicate_scalar_to_tuple(self):
-        """Test replicate function with scalar input."""
-        result = replicate(3, 2, "test_param")
-        assert result == (3, 3)
-
-    def test_replicate_single_element_sequence(self):
-        """Test replicate function with single element sequence."""
-        result = replicate([5], 3, "test_param")
-        assert result == (5, 5, 5)
-
-    def test_replicate_full_sequence(self):
-        """Test replicate function with full sequence."""
-        result = replicate([1, 2, 3], 3, "test_param")
-        assert result == (1, 2, 3)
-
-    def test_replicate_string(self):
-        """Test replicate function with string input."""
-        result = replicate("same", 2, "test_param")
-        assert result == ("same", "same")
-
-    def test_replicate_bytes(self):
-        """Test replicate function with bytes input."""
-        result = replicate(b"test", 2, "test_param")
-        assert result == (b"test", b"test")
-
-    def test_replicate_error_wrong_length(self):
-        """Test replicate function raises error with wrong length sequence."""
-        with pytest.raises(TypeError):
-            replicate([1, 2], 3, "test_param")
 
 
 class TestConv1d:
@@ -866,3 +789,35 @@ class TestConvIntegration:
         y2 = conv2(x)
 
         assert jnp.allclose(y1, y2)
+
+
+class TestConvParameterLayout:
+    """Tests for the fused weight-dict parameter layout after the brainstate inheritance refactor."""
+
+    def test_conv2d_weight_dict_has_weight_key(self):
+        """Conv2d exposes a dict-valued `self.weight` ParamState with a 'weight' entry."""
+        conv = braintrace.nn.Conv2d(in_size=(8, 8, 3), out_channels=4, kernel_size=3)
+        assert isinstance(conv.weight.value, dict)
+        assert 'weight' in conv.weight.value
+        assert conv.weight.value['weight'].shape == (3, 3, 3, 4)
+
+    def test_conv2d_weight_dict_has_bias_when_enabled(self):
+        """Conv2d with a non-None b_init exposes a 'bias' dict entry of shape (1, 1, out_channels)."""
+        conv = braintrace.nn.Conv2d(
+            in_size=(8, 8, 3),
+            out_channels=4,
+            kernel_size=3,
+            b_init=init.Constant(0.0),
+        )
+        assert 'bias' in conv.weight.value
+        assert conv.weight.value['bias'].shape == (1, 1, 4)
+
+    def test_conv2d_weight_dict_omits_bias_when_disabled(self):
+        """Conv2d with b_init=None omits the 'bias' dict entry entirely."""
+        conv = braintrace.nn.Conv2d(
+            in_size=(8, 8, 3),
+            out_channels=4,
+            kernel_size=3,
+            b_init=None,
+        )
+        assert 'bias' not in conv.weight.value
