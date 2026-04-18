@@ -24,6 +24,10 @@ def _load(fname: str):
     "05-vjp-multi-step.py",
     "07-operator-lora.py",
     "08-operator-conv.py",
+    pytest.param("09-classification-mnist.py", marks=pytest.mark.skipif(
+        True,
+        reason="MNIST example is network-dependent; covered by __main__ only",
+    )),
 ])
 def test_example_runs(fname):
     mod = _load(fname)
