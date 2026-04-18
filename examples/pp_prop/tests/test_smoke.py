@@ -9,7 +9,7 @@ import pytest
 EXAMPLES_DIR = pathlib.Path(__file__).resolve().parents[1]
 
 EXAMPLE_FILES = [
-    # Populated task-by-task as examples are added.
+    "01-basics-lif-integrator.py",
 ]
 
 

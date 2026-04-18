@@ -330,8 +330,8 @@ def online_train_epoch(
     loss_fn: Callable,
     decay_or_rank=0.95,
     vjp_method: str = "single-step",
-) -> float:
-    """Run one online-training epoch using pp_prop. Returns mean step loss."""
+) -> jnp.ndarray:
+    """Run one online-training epoch using pp_prop. Returns traced mean step loss (wrap in jit)."""
     import braintrace
     weights = model.states(brainstate.ParamState)
     online_model = braintrace.IODimVjpAlgorithm(
@@ -360,7 +360,7 @@ def online_train_epoch(
     grads, step_losses = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
     grads = brainstate.nn.clip_grad_norm(grads, 1.0)
     opt.update(grads)
-    return float(step_losses.mean())
+    return step_losses.mean()
 
 
 def online_train_epoch_fixed_target(
@@ -370,7 +370,7 @@ def online_train_epoch_fixed_target(
     target_labels: jnp.ndarray,
     decay_or_rank=0.95,
     vjp_method: str = "single-step",
-) -> float:
+) -> jnp.ndarray:
     """Classification variant: fixed label per batch, softmax-xent loss applied each step."""
     import braintrace
     weights = model.states(brainstate.ParamState)
@@ -402,7 +402,7 @@ def online_train_epoch_fixed_target(
     grads, step_losses = brainstate.transform.scan(grad_step, init_grads, inputs)
     grads = brainstate.nn.clip_grad_norm(grads, 1.0)
     opt.update(grads)
-    return float(step_losses.mean())
+    return step_losses.mean()
 
 
 def bptt_train_epoch_fixed_target(
@@ -410,7 +410,7 @@ def bptt_train_epoch_fixed_target(
     opt,
     inputs: jnp.ndarray,
     target_labels: jnp.ndarray,
-) -> float:
+) -> jnp.ndarray:
     """BPTT baseline with per-step softmax-cross-entropy over a fixed label."""
     weights = model.states(brainstate.ParamState)
 
@@ -435,7 +435,7 @@ def bptt_train_epoch_fixed_target(
     grads, loss = brainstate.transform.grad(bptt_body, weights, return_value=True)()
     grads = brainstate.nn.clip_grad_norm(grads, 1.0)
     opt.update(grads)
-    return float(loss)
+    return loss
 
 
 def plot_loss_curve(losses, title: str, save_path: str | None = None):
