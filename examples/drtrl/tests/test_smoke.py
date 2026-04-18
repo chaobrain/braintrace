@@ -23,6 +23,7 @@ def _load(fname: str):
     "04-vjp-single-step.py",
     "05-vjp-multi-step.py",
     "07-operator-lora.py",
+    "08-operator-conv.py",
 ])
 def test_example_runs(fname):
     mod = _load(fname)
