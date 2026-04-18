@@ -15,6 +15,7 @@ EXAMPLE_FILES = [
     "04-neurons-coba-ei-rsnn.py",
     "05-batching-vmap.py",
     "06-batching-batched.py",
+    "07-vjp-single-step.py",
 ]
 
 
