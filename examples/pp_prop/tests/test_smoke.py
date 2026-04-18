@@ -10,6 +10,7 @@ EXAMPLES_DIR = pathlib.Path(__file__).resolve().parents[1]
 
 EXAMPLE_FILES = [
     "01-basics-lif-integrator.py",
+    "02-neurons-alif-dms.py",
 ]
 
 
