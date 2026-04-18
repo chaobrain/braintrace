@@ -74,7 +74,10 @@ def _init_param_dim_state(
             raise ValueError(f'The relation {bwg_key} has been added. ')
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
         init_val = init_fn(
-            relation.x_var, relation.y_var, relation.trainable_vars, group.num_state,
+            relation.x_var,
+            relation.y_var,
+            relation.trainable_vars,
+            group.num_state,
         )
         if not isinstance(init_val, dict):
             raise TypeError(

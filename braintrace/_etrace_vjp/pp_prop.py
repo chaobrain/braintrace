@@ -29,9 +29,9 @@ from functools import partial
 from typing import Dict, Tuple, List, Optional, Sequence
 
 import brainstate
-import saiunit as u
 import jax
 import jax.numpy as jnp
+import saiunit as u
 
 from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
@@ -251,9 +251,12 @@ def _init_IO_dim_state(
         #
         init_fn = ETP_RULES_INIT_PP[relation.primitive]
         etrace_dfs[key] = EligibilityTrace(
-            init_fn(relation.x_var, relation.y_var,
-                    relation.trainable_vars['weight'],
-                    group.num_state)
+            init_fn(
+                relation.x_var,
+                relation.y_var,
+                relation.trainable_vars['weight'],
+                group.num_state
+            )
         )
 
 

@@ -18,6 +18,55 @@ r"""Convolution ETP primitive (``etp_conv_p``).
 Always expects a batch dimension on the input. The full keyword surface
 of ``jax.lax.conv_general_dilated`` is preserved; the wrapper splits and
 recombines saiunit quantities for the input and kernel.
+
+**Forward operation**
+
+.. math::
+
+    y_{b, \mathbf{s}, k}
+      = \sum_{\mathbf{u}, c} x_{b, \mathbf{s}+\mathbf{u}, c}\,
+                              K_{\mathbf{u}, c, k}
+        \;+\; b_k
+
+where :math:`\mathbf{s}` runs over spatial output positions,
+:math:`\mathbf{u}` over the kernel spatial window, :math:`c` is the input
+channel, :math:`k` the output channel, and the kernel layout follows the
+``dimension_numbers`` supplied at bind-time. Because the bias is a single
+value per output channel shared across every spatial position, its
+Jacobian is fundamentally different from the kernel's.
+
+**Role of each ETP rule**
+
+Let :math:`\mathbf{D}_f^t = \partial h / \partial y` (one cotangent per
+output element). The conv primitive implements:
+
+* ``xy_to_dw`` — for the *kernel*, uses the conv VJP to produce the full
+  weight Jacobian :math:`\partial h / \partial K` (requires :math:`x`).
+  For the *bias*, stores the per-position cotangent
+  :math:`\partial h / \partial b_k = (\partial h / \partial y)_{b,\mathbf{s},k}`
+  **without** summing over spatial positions. The spatial summation is
+  deferred to ``yw_to_w`` during trace propagation — because the bias is
+  spatially shared, the "true" bias gradient requires summing the
+  cotangent along spatial axes, but doing the sum *inside* the trace
+  rather than at the instantaneous step keeps the linear algebra
+  consistent with the D-RTRL recurrence (the trace must accumulate
+  :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}` with the *same*
+  spatial shape the executor feeds in).
+
+* ``yw_to_w`` — applies :math:`\partial h / \partial y` to the trace.
+  For the kernel: reduces ``hidden_dim`` over spatial axes
+  (the kernel is spatially shared) and broadcasts the result across the
+  kernel's spatial dims. For the bias: elementwise multiply with
+  ``hidden_dim`` then sum over spatial axes — this is the deferred
+  spatial reduction that implements :math:`\sum_{\mathbf{s}} \partial h/\partial b_k`.
+
+* ``init_drtrl`` — allocates weight-shaped :math:`\boldsymbol{\epsilon}_K`
+  plus per-position :math:`\boldsymbol{\epsilon}_b` with output-shape
+  (kept spatial so the trace can accumulate before the deferred sum).
+
+* ``init_pp`` — allocates the pp-prop output-shaped df trace; the
+  :math:`\boldsymbol{\epsilon}_x` factor in ES-D-RTRL is the full
+  batched input tensor held by the executor.
 """
 
 from typing import Any, Optional, Sequence
@@ -128,32 +177,61 @@ def _conv_layout(params):
 
 
 def _conv_yw_to_w(hidden_dim, trace, **params):
-    r"""Propagate the hidden-state Jacobian through the weight-shaped trace.
+    r"""Propagate :math:`\partial h / \partial y` through the conv trace.
 
-    This function is called in two different vmap contexts:
+    **Role in D-RTRL.** Implements the :math:`y \to (K, b)` chain factor
+    in the :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}` term. Unlike
+    dense matmul, the kernel is *spatially shared*: every output position
+    reads the same :math:`K`. Differentiating the forward equation gives
 
-    1. **scan / etrace-update path** (batch vmap NOT applied):
-       ``hidden_dim``      = ``(batch, *spatial_out, out_ch)`` (or permuted),
-       ``trace['weight']`` = ``(batch, *kernel_dims)`` (batch prefix present),
-       ``trace['bias']``   = ``(batch, *spatial_out, out_ch)`` if present.
+    .. math::
 
-    2. **gradient-computation path** (outer batch vmap applied):
-       ``hidden_dim``      = ``(*spatial_out, out_ch)`` (batch axis stripped),
-       ``trace['weight']`` = ``(*kernel_dims)`` (batch axis stripped),
-       ``trace['bias']``   = ``(*spatial_out, out_ch)`` if present.
+        \frac{\partial y_{b, \mathbf{s}, k}}{\partial K_{\mathbf{u}, c, k'}}
+          \;=\; \delta_{k k'}\, x_{b,\, \mathbf{s}+\mathbf{u},\, c}, \qquad
+        \frac{\partial y_{b, \mathbf{s}, k}}{\partial b_{k'}}
+          \;=\; \delta_{k k'}.
 
-    The bias shares parameters across spatial positions, so the bias gradient
-    requires summing over spatial dims.  The bias trace has the **same shape
-    as the output y** (per element ∂h/∂b = ∂h/∂y), and ``yw_to_w`` sums the
-    elementwise product ``hidden_dim * trace['bias']`` over the spatial axes.
+    Pulling back a hidden cotangent :math:`g = \partial h / \partial y`
+    therefore contracts :math:`\mathbf{s}` for the kernel and the bias
+    (they are shared along spatial axes):
 
-    Layout awareness: spatial axes and kernel out-channel axis are derived
-    from the actual ``dimension_numbers`` / ``strides`` params, handling
-    arbitrary output-spec and rhs-spec permutations (NHWC/HWIO, NCHW/OIHW,
-    etc.).
+    .. math::
 
-    For scalar ``hidden_dim`` (0-D) the function multiplies elementwise and
-    returns immediately.
+        \frac{\partial h}{\partial K_{\mathbf{u}, c, k}}
+          \;=\; \sum_{\mathbf{s}} g_{b, \mathbf{s}, k}\, x_{b, \mathbf{s}+\mathbf{u}, c}, \qquad
+        \frac{\partial h}{\partial b_k}
+          \;=\; \sum_{\mathbf{s}} g_{b, \mathbf{s}, k}.
+
+    Applied to a trace :math:`\boldsymbol{\epsilon}^{t-1}`, only the
+    out-channel axis :math:`k` survives on the hidden-dim side of the
+    product; spatial axes are summed. The kernel's spatial axes remain
+    free (the trace stores one slot per kernel position), so after
+    reducing :math:`g` over :math:`\mathbf{s}` we broadcast the resulting
+    per-out-channel vector over the kernel's spatial and in-channel axes.
+
+    **Two execution contexts (detected from ``hidden_dim.ndim``):**
+
+    1. trace-update path (batch retained):
+       ``hidden_dim   : (batch, *spatial_out, out_ch)`` (or permuted),
+       ``trace['weight'] : (batch, *kernel_dims)`` (batch prefix present),
+       ``trace['bias']   : (batch, *spatial_out, out_ch)``.
+
+    2. gradient-solve path (outer batch-vmap strips batch):
+       ``hidden_dim   : (*spatial_out, out_ch)`` (batch-free),
+       ``trace['weight'] : (*kernel_dims)``,
+       ``trace['bias']   : (*spatial_out, out_ch)``.
+
+    **Bias gradient is deferred.** ``xy_to_dw`` stores the per-position
+    cotangent as ``trace['bias']`` (no spatial sum). Here we complete the
+    bias Jacobian by multiplying by :math:`g` and summing spatial axes —
+    that deferral keeps the D-RTRL trace recurrence consistent
+    (each :math:`\boldsymbol{\epsilon}^{t-1}` leaf has the same shape as
+    :math:`(\partial h/\partial y)^{t-1}` before the reduction).
+
+    **Layout awareness.** Spatial axes and the kernel out-channel axis
+    are derived from ``dimension_numbers`` / ``strides``, handling NHWC /
+    HWIO / NCHW / OIHW etc. The 0-D ``hidden_dim`` degenerate case is
+    handled directly by elementwise multiply.
     """
     has_bias = params.get('has_bias', False)
     w_trace = trace['weight']
@@ -220,17 +298,45 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
 
 
 def _conv_xy_to_dw(x, hidden_dim, weights, **params):
-    r"""Direct-trace initial contribution: ``∂h/∂w`` and ``∂h/∂b``.
+    r"""Instantaneous conv Jacobian :math:`\partial h / \partial (K, b)`.
 
-    For the **kernel** ``w``: uses VJP of ``y = conv(x, w)`` — this is a true
-    function of ``x`` and requires the full conv VJP.
+    **Role in D-RTRL.** Produces the
+    :math:`\operatorname{diag}(\mathbf{D}_f^t) \otimes \mathbf{x}^t` term
+    for the conv primitive. The derivative pieces are
 
-    For the **bias** ``b``: ``y_{nhk} = conv(x)_{nhk} + b_k``, so
-    ``∂y_{nhk}/∂b_k = 1``.  Therefore ``∂h_{nhk}/∂b_k = hidden_dim_{nhk}``
-    (the cotangent ∂h/∂y at that position), with **no spatial summation**.
-    The bias trace stores per-position values (same shape as ``y``); the
-    summation over spatial positions is deferred to ``_conv_yw_to_w`` during
-    the gradient-computation pass.
+    .. math::
+
+        \frac{\partial y_{b, \mathbf{s}, k}}{\partial K_{\mathbf{u}, c, k'}}
+          = \delta_{k k'}\, x_{b, \mathbf{s}+\mathbf{u}, c}, \qquad
+        \frac{\partial y_{b, \mathbf{s}, k}}{\partial b_{k'}}
+          = \delta_{k k'},
+
+    so pulling back a hidden cotangent ``hidden_dim`` gives
+
+    .. math::
+
+        \left.\frac{\partial h}{\partial K}\right|_t
+          \;=\; \text{VJP}_K\bigl(\mathrm{conv}(x, K)\bigr)(\partial h/\partial y), \qquad
+        \left.\frac{\partial h}{\partial b_k}\right|_{t, \mathbf{s}}
+          \;=\; (\partial h/\partial y)_{b, \mathbf{s}, k}.
+
+    **Kernel path.** Uses ``jax.vjp`` of ``jax.lax.conv_general_dilated``
+    — the kernel genuinely depends on :math:`x`, so the full conv VJP is
+    required. The remap ``strides → window_strides`` matches the
+    low-level API.
+
+    **Bias path.** The bias appears additively with no spatial coupling,
+    so its instantaneous Jacobian is the cotangent itself at each
+    spatial position. We store this per-position (no spatial sum here);
+    the sum is performed inside :func:`_conv_yw_to_w` during trace
+    propagation — this keeps the bias-trace shape identical to
+    :math:`\partial h / \partial y` so the :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}`
+    recurrence can be applied element-by-element.
+
+    **Unbatched detection.** The D-RTRL executor vmaps over the batch
+    axis, so ``x`` may arrive as ``ndim == n_spatial + 1`` (no batch).
+    We prepend a leading axis before calling ``conv_general_dilated``,
+    then strip it on the way out implicitly via the VJP.
     """
     has_bias = params.get('has_bias', False)
     # Build conv_general_dilated kwargs; remap 'strides' -> 'window_strides'.
@@ -276,12 +382,22 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
 
 
 def _conv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
-    """Return zero-filled Dict[str, Array] for the D-RTRL parameter-dim trace.
+    r"""Initialise conv D-RTRL weight-shaped trace.
 
-    The bias trace has shape ``(batch, *y_spatial_and_ch, n_state)`` where
-    ``y_spatial_and_ch = y_var.aval.shape[1:]`` (all output dims except batch).
-    This stores the per-position Jacobian ``∂h_{nhk}/∂b_k``; the spatial
-    summation happens in ``_conv_yw_to_w`` during gradient computation.
+    .. math::
+
+        \boldsymbol{\epsilon}_K \in
+          \mathbb{R}^{B \times \text{(kernel dims)} \times n_{\text{state}}}, \qquad
+        \boldsymbol{\epsilon}_b \in
+          \mathbb{R}^{B \times \text{(spatial out)} \times O \times n_{\text{state}}}.
+
+    The bias trace intentionally keeps spatial dims so that
+    :func:`_conv_yw_to_w` can apply the :math:`\partial h / \partial y`
+    cotangent elementwise before collapsing them. The spatial sum
+    implementing :math:`\sum_{\mathbf{s}} \partial h/\partial b_k` is
+    performed on the trace-update side, not at the ``xy_to_dw`` step.
+
+    Zero-initialised (matches :math:`\boldsymbol{\epsilon}^0 = \mathbf{0}`).
     """
     batch = x_var.aval.shape[0]
     out = {
@@ -298,6 +414,17 @@ def _conv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
 
 
 def _conv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+    r"""Initialise conv pp-prop / ES-D-RTRL df trace.
+
+    .. math::
+
+        \boldsymbol{\epsilon}_f \in \mathbb{R}^{B \times \text{(spatial)} \times O \times n_{\text{state}}}.
+
+    Output-shaped like :math:`y`. The matching :math:`\boldsymbol{\epsilon}_x`
+    in ES-D-RTRL is the raw batched input tensor held by the executor's
+    x-trace; :func:`_conv_xy_to_dw` combines the two via conv VJP at
+    solve-time.
+    """
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
