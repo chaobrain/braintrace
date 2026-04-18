@@ -16,7 +16,6 @@
 # -*- coding: utf-8 -*-
 
 
-from . import _legacy
 from . import nn
 from ._etrace_algorithms import (
     ETraceAlgorithm,
@@ -159,5 +158,4 @@ __all__ = [
 
     # submodules
     'nn',
-    '_legacy',
 ]
