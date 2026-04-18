@@ -14,13 +14,14 @@ training targets, and teach the reader how to apply and reason about D-RTRL
 
 ## Goals
 
-- 10 quick-running example programs (~1-2 min CPU runtime each) covering
-  different operators, targets, and batching / vjp patterns.
+- 12 quick-running example programs (~1-2 min CPU runtime each) covering
+  different operators, targets, batching / vjp patterns, and the tunable
+  parameters `fast_solve` and `normalize_matrix_spectrum`.
 - 3 of the examples carry a BPTT baseline for comparison.
 - 1 tutorial walking through the same examples chapter-by-chapter, including
   an explicit limitations section.
 - Examples organized in tutorial-linear reading order so the tutorial reader
-  follows numbered files from 01 → 10.
+  follows numbered files from 01 → 12.
 - Plots guarded by `if __name__ == "__main__":`; plotting never blocks CI.
 
 ## Non-Goals
@@ -47,7 +48,9 @@ examples/drtrl/
 ├── 07-operator-lora.py           braintrace.lora_matmul adapter on frozen base
 ├── 08-operator-conv.py           braintrace.conv over input rows + MiniGRU
 ├── 09-classification-mnist.py    LSTM + row-scan MNIST, BPTT baseline
-└── 10-char-lm-generation.py      Autoregressive toy char-LM, BPTT baseline
+├── 10-char-lm-generation.py      Autoregressive toy char-LM, BPTT baseline
+├── 11-knob-fast-solve.py         fast_solve=True vs False: equivalence + speed
+└── 12-knob-normalize-spectrum.py normalize_matrix_spectrum: stability demo
 
 docs/tutorials/drtrl.md           Tutorial + limitations
 ```
@@ -152,17 +155,54 @@ Shared utilities only — not a framework. Keep small.
 - Algorithm: `D_RTRL(model)` and BPTT baseline.
 - After training: show 200-char sampled continuation from each model.
 
+### `11-knob-fast-solve.py`
+
+- Task: short integrator run (reuse `make_integrator_batch`).
+- Model: `ValinaRNNCell` + `Linear` readout.
+- Run two D_RTRL configs on identical init:
+  - `D_RTRL(model, fast_solve=True)`  (default — einsum fast path)
+  - `D_RTRL(model, fast_solve=False)` (legacy nested-vmap path)
+- Outputs:
+  - `jnp.allclose` check on final gradients of both configs (tolerance
+    `atol=1e-5, rtol=1e-4`) to confirm numerical equivalence.
+  - Wall-clock per update for each config (warmup + N measured iterations).
+  - Bar chart: runtime per config; text print of max-abs gradient difference.
+- No BPTT baseline.
+- Comments: when the fast path applies (elementwise-yw primitives:
+  `matmul`, `element_wise`), when it falls back.
+
+### `12-knob-normalize-spectrum.py`
+
+- Task: delayed-XOR or long integrator (whichever surfaces instability faster
+  — XOR preferred; chosen at implementation time).
+- Model: `ValinaRNNCell` initialized with spectral radius ~1.5 (deliberate
+  instability).
+- Run three D_RTRL configs:
+  - Baseline: `D_RTRL(model, normalize_matrix_spectrum=False)` — expect
+    trace growth / loss divergence.
+  - Fixed: `D_RTRL(model, normalize_matrix_spectrum=True)` — expect stable
+    training.
+  - Reference: BPTT on same init (shows true gradient direction).
+- Outputs:
+  - Plot loss curves for the three configs.
+  - Print max-abs eligibility-trace norm per step for baseline vs fixed to
+    show the clipping behavior.
+- Comments: what the flag does (branch-free spectral clip inside
+  `_normalize_matrix_spectrum`); why it is off by default.
+
 ### `README.md`
 
 - Summary of D_RTRL and when it helps.
 - Table mapping axis → file:
-  | Axis            | Files |
-  |-----------------|-------|
-  | Operator        | 06, 07, 08 |
-  | Target          | 01, 04, 05, 09, 10 |
-  | Batching mode   | 02, 03 |
-  | vjp method      | 04, 05 |
-  | BPTT baseline   | 01, 09, 10 |
+  | Axis                      | Files |
+  |---------------------------|-------|
+  | Operator                  | 06, 07, 08 |
+  | Target                    | 01, 04, 05, 09, 10 |
+  | Batching mode             | 02, 03 |
+  | vjp method                | 04, 05 |
+  | fast_solve                | 11 |
+  | normalize_matrix_spectrum | 12 |
+  | BPTT baseline             | 01, 09, 10, 12 |
 - How to run.
 - Link to tutorial.
 
@@ -183,8 +223,9 @@ Chapter structure:
    `conv`, `element_wise` with example file refs.
 7. **Target types** — regression, classification, autoregressive generation;
    loss and readout patterns.
-8. **Performance knobs** — `fast_solve`, `normalize_matrix_spectrum`,
-   `num_state==1` shortcut.
+8. **Performance + stability knobs** — `fast_solve` (ref
+   `11-knob-fast-solve.py`), `normalize_matrix_spectrum` (ref
+   `12-knob-normalize-spectrum.py`), `num_state==1` shortcut (automatic).
 9. **Limitations** (explicit):
    - Approximation error — D-RTRL drops off-diagonal jacobian terms; diverges
      from true RTRL on strongly coupled recurrences.
