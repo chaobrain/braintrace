@@ -28,6 +28,7 @@ def _load(fname: str):
         True,
         reason="MNIST example is network-dependent; covered by __main__ only",
     )),
+    "10-char-lm-generation.py",
 ])
 def test_example_runs(fname):
     mod = _load(fname)
