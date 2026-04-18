@@ -20,6 +20,7 @@ EXAMPLE_FILES = [
     "09-operator-sparse.py",
     "10-operator-lora.py",
     "11-operator-conv.py",
+    "12-classification-neuromorphic.py",
 ]
 
 
