@@ -19,6 +19,7 @@ EXAMPLE_FILES = [
     "08-vjp-multi-step.py",
     "09-operator-sparse.py",
     "10-operator-lora.py",
+    "11-operator-conv.py",
 ]
 
 
