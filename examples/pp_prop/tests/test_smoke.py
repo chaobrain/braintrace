@@ -22,6 +22,7 @@ EXAMPLE_FILES = [
     "11-operator-conv.py",
     "12-classification-neuromorphic.py",
     "13-knob-decay-vs-rank.py",
+    "14-knob-vjp-method-contrast.py",
 ]
 
 
