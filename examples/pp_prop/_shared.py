@@ -317,3 +317,137 @@ class LeakyReadout(brainstate.nn.Module):
 
     def update(self, spikes):
         return self.readout(spikes)
+
+
+# --- Training helpers ----------------------------------------------------
+
+
+def online_train_epoch(
+    model: brainstate.nn.Module,
+    opt,
+    inputs: jnp.ndarray,
+    targets: jnp.ndarray,
+    loss_fn: Callable,
+    decay_or_rank=0.95,
+    vjp_method: str = "single-step",
+) -> float:
+    """Run one online-training epoch using pp_prop. Returns mean step loss."""
+    import braintrace
+    weights = model.states(brainstate.ParamState)
+    online_model = braintrace.IODimVjpAlgorithm(
+        model, decay_or_rank=decay_or_rank, vjp_method=vjp_method
+    )
+
+    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
+    def init():
+        brainstate.nn.init_all_states(model)
+        online_model.compile_graph(inputs[0, 0])
+
+    init()
+    vmap_model = brainstate.nn.Vmap(online_model, vmap_states="new")
+
+    def step_loss(inp, tar):
+        out = vmap_model(inp)
+        return loss_fn(out, tar), out
+
+    def grad_step(prev_grads, pair):
+        inp, tar = pair
+        f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
+        cur_grads, local_loss, _ = f_grad(inp, tar)
+        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
+
+    init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
+    grads, step_losses = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
+    grads = brainstate.nn.clip_grad_norm(grads, 1.0)
+    opt.update(grads)
+    return float(step_losses.mean())
+
+
+def online_train_epoch_fixed_target(
+    model: brainstate.nn.Module,
+    opt,
+    inputs: jnp.ndarray,
+    target_labels: jnp.ndarray,
+    decay_or_rank=0.95,
+    vjp_method: str = "single-step",
+) -> float:
+    """Classification variant: fixed label per batch, softmax-xent loss applied each step."""
+    import braintrace
+    weights = model.states(brainstate.ParamState)
+    online_model = braintrace.IODimVjpAlgorithm(
+        model, decay_or_rank=decay_or_rank, vjp_method=vjp_method
+    )
+
+    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
+    def init():
+        brainstate.nn.init_all_states(model)
+        online_model.compile_graph(inputs[0, 0])
+
+    init()
+    vmap_model = brainstate.nn.Vmap(online_model, vmap_states="new")
+
+    def step_loss(inp):
+        out = vmap_model(inp)
+        loss = braintools.metric.softmax_cross_entropy_with_integer_labels(
+            out, target_labels
+        ).mean()
+        return loss, out
+
+    def grad_step(prev_grads, inp):
+        f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
+        cur_grads, local_loss, _ = f_grad(inp)
+        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
+
+    init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
+    grads, step_losses = brainstate.transform.scan(grad_step, init_grads, inputs)
+    grads = brainstate.nn.clip_grad_norm(grads, 1.0)
+    opt.update(grads)
+    return float(step_losses.mean())
+
+
+def bptt_train_epoch_fixed_target(
+    model: brainstate.nn.Module,
+    opt,
+    inputs: jnp.ndarray,
+    target_labels: jnp.ndarray,
+) -> float:
+    """BPTT baseline with per-step softmax-cross-entropy over a fixed label."""
+    weights = model.states(brainstate.ParamState)
+
+    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
+    def init():
+        brainstate.nn.init_all_states(model)
+
+    init()
+    vmap_model = brainstate.nn.Vmap(model, vmap_states="new")
+
+    def run_step(inp):
+        out = vmap_model(inp)
+        loss = braintools.metric.softmax_cross_entropy_with_integer_labels(
+            out, target_labels
+        ).mean()
+        return out, loss
+
+    def bptt_body():
+        _, losses = brainstate.transform.for_loop(run_step, inputs)
+        return losses.mean()
+
+    grads, loss = brainstate.transform.grad(bptt_body, weights, return_value=True)()
+    grads = brainstate.nn.clip_grad_norm(grads, 1.0)
+    opt.update(grads)
+    return float(loss)
+
+
+def plot_loss_curve(losses, title: str, save_path: str | None = None):
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.plot(losses)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title(title)
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=120)
+    else:
+        plt.show()
+    plt.close(fig)
