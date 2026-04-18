@@ -401,6 +401,7 @@ def _solve_IO_dim_weight_gradients(
     weight_vals: Dict[Path, WeightVals],
     running_index: int,
     decay: float,
+    fast_solve: bool = True,
 ):
     """
     Compute and update the weight gradients for input-output dimensions using eligibility trace data.
@@ -470,15 +471,31 @@ def _solve_IO_dim_weight_gradients(
             df = dfs[df_key] / correction_factor
             df_hid = df * dG_hidden_groups[group.index]
 
-            fn_vmap = jax.vmap(lambda df_: _call(df_, weights_dict), in_axes=-1, out_axes=-1)
-            if (relation.primitive is etp_elemwise_p) and batched:
-                fn_vmap2 = jax.vmap(fn_vmap)
-                dg_dict = jax.tree.map(
-                    lambda a: _sum_dim(_sum_dim(a, axis=-1), axis=0),
-                    fn_vmap2(df_hid),
-                )
+            if fast_solve:
+                # Fast path: sum over n_state first, then ONE xy_to_dw call.
+                # Valid because every xy_to_dw rule is a VJP of a linear map
+                # in its cotangent argument, so sum-then-apply == apply-then-sum.
+                df_summed = u.math.sum(df_hid, axis=-1)
+                if (relation.primitive is etp_elemwise_p) and batched:
+                    # Elemwise-in-batched-hidden: strip batch dim via a single
+                    # vmap over batch, then sum batch after.
+                    dg_dict = jax.tree.map(
+                        lambda a: _sum_dim(a, axis=0),
+                        jax.vmap(lambda d_: _call(d_, weights_dict))(df_summed),
+                    )
+                else:
+                    dg_dict = _call(df_summed, weights_dict)
             else:
-                dg_dict = jax.tree.map(_sum_dim, fn_vmap(df_hid))
+                # Legacy path: vmap xy_to_dw across n_state slices, then sum.
+                fn_vmap = jax.vmap(lambda df_: _call(df_, weights_dict), in_axes=-1, out_axes=-1)
+                if (relation.primitive is etp_elemwise_p) and batched:
+                    fn_vmap2 = jax.vmap(fn_vmap)
+                    dg_dict = jax.tree.map(
+                        lambda a: _sum_dim(_sum_dim(a, axis=-1), axis=0),
+                        fn_vmap2(df_hid),
+                    )
+                else:
+                    dg_dict = jax.tree.map(_sum_dim, fn_vmap(df_hid))
 
             # Route per-key to owning ParamState path and assemble per-path pytrees.
             _route_grads_by_path(relation, dg_dict, weight_vals, dG_weights)
@@ -553,10 +570,12 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         decay_or_rank: float | int,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
+        fast_solve: bool = True,
         **kwargs,
     ):
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
+        self.fast_solve = fast_solve
 
     def init_etrace_state(self, *args, **kwargs):
         """
@@ -843,6 +862,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             weight_vals,
             running_index,
             self.decay,
+            fast_solve=self.fast_solve,
         )
 
         # update the non-etrace parameters
