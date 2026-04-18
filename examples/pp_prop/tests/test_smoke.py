@@ -21,6 +21,7 @@ EXAMPLE_FILES = [
     "10-operator-lora.py",
     "11-operator-conv.py",
     "12-classification-neuromorphic.py",
+    "13-knob-decay-vs-rank.py",
 ]
 
 
