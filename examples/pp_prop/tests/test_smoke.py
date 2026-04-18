@@ -14,6 +14,7 @@ EXAMPLE_FILES = [
     "03-neurons-gif-working-memory.py",
     "04-neurons-coba-ei-rsnn.py",
     "05-batching-vmap.py",
+    "06-batching-batched.py",
 ]
 
 
