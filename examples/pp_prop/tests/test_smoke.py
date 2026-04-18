@@ -12,6 +12,7 @@ EXAMPLE_FILES = [
     "01-basics-lif-integrator.py",
     "02-neurons-alif-dms.py",
     "03-neurons-gif-working-memory.py",
+    "04-neurons-coba-ei-rsnn.py",
 ]
 
 
