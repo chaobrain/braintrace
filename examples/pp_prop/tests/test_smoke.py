@@ -17,6 +17,7 @@ EXAMPLE_FILES = [
     "06-batching-batched.py",
     "07-vjp-single-step.py",
     "08-vjp-multi-step.py",
+    "09-operator-sparse.py",
 ]
 
 
