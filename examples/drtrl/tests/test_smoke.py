@@ -21,6 +21,7 @@ def _load(fname: str):
     "02-batching-vmap.py",
     "03-batching-batched.py",
     "04-vjp-single-step.py",
+    "05-vjp-multi-step.py",
 ])
 def test_example_runs(fname):
     mod = _load(fname)
