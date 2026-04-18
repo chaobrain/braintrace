@@ -30,13 +30,13 @@ which internally use ETP primitives (``braintrace.matmul``) so the compiler
 can automatically build eligibility trace graphs for online learning.
 """
 
+import brainstate
+import braintools
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 
-import brainstate
-import braintools
 import braintrace
 
 # ---------------------------------------------------------------------------
@@ -77,11 +77,7 @@ def train_data():
 class RNN(brainstate.nn.Module):
     def __init__(self, num_in, num_hidden):
         super().__init__()
-        self.rnn = braintrace.nn.ValinaRNNCell(
-            in_size=num_in,
-            out_size=num_hidden,
-            activation='relu',
-        )
+        self.rnn = braintrace.nn.MiniGRU(in_size=num_in, out_size=num_hidden)
         self.out = braintrace.nn.Linear(num_hidden, 1)
 
     def update(self, x):
@@ -139,7 +135,7 @@ def train_online(n_epochs=5):
     model = RNN(1, num_hidden)
     weights = model.states(brainstate.ParamState)
 
-    lr = braintools.optim.ExponentialDecayLR(0.025, decay_steps=1, decay_rate=0.99975)
+    lr = braintools.optim.ExponentialDecayLR(5e-3, decay_steps=1, decay_rate=0.99975)
     opt = braintools.optim.Adam(lr=lr, eps=1e-1)
     opt.register_trainable_weights(weights)
 
@@ -215,7 +211,7 @@ def train_online(n_epochs=5):
 print("=" * 60)
 print("Training with BPTT")
 print("=" * 60)
-bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
+# bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
 
 print()
 print("=" * 60)

@@ -25,11 +25,20 @@ from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._etrace_op import (
     etp_elemwise_p,
+    etp_mm_p,
+    etp_mv_p,
     ETP_RULES_YW_TO_W,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
 )
+
+# Primitives with an elementwise ``yw_to_w`` rule, i.e. rules of the form
+# ``trace * hidden_dim_broadcast``. For these we can replace the nested
+# ``vmap(yw_to_w, -1, -1) + sum`` pattern with a single ``einsum`` contraction
+# over the hidden-state axis of ``diag`` and ``trace``. Conv / sparse / LoRA
+# primitives have non-elementwise rules and stay on the legacy path.
+_ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 from braintrace._misc import etrace_df_key
 from braintrace._typing import (
     PyTree,
@@ -87,6 +96,54 @@ def _init_param_dim_state(
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
 
+def _fast_recurrent_term(primitive, diag, old_bwg):
+    """Closed-form ``D^t * eps^{t-1}`` for primitives with an elementwise
+    ``yw_to_w`` rule.
+
+    ``diag`` has shape ``(*varshape, num_state_alpha, num_state_beta)`` with
+    ``varshape == y_shape`` for mm/mv/elemwise. ``old_bwg`` is the per-key
+    trace dict. For mm/mv the weight trace has shape
+    ``(*y_shape, in_features, num_state)`` (batched mm has a leading batch
+    axis; mv/elemwise do not); the bias trace has shape
+    ``(*y_shape, num_state)`` when present.
+
+    The contraction is
+        new[b..., i, k, alpha] = sum_beta diag[b..., k, alpha, beta]
+                                       * trace[b..., i, k, beta]
+    which maps exactly to ``einsum('...kab,...ikb->...ika')``. For elemwise
+    the ``i`` axis disappears and it reduces to ``einsum('...ab,...b->...a')``.
+    """
+    if primitive is etp_elemwise_p:
+        return {
+            'weight': jnp.einsum('...ab,...b->...a', diag, old_bwg['weight']),
+        }
+    # mm / mv: trace['weight'] has an extra in-features axis before ``out``.
+    out = {
+        'weight': jnp.einsum('...kab,...ikb->...ika', diag, old_bwg['weight']),
+    }
+    if 'bias' in old_bwg:
+        out['bias'] = jnp.einsum('...kab,...kb->...ka', diag, old_bwg['bias'])
+    return out
+
+
+def _fast_instant_term(primitive, x, df, has_bias):
+    """Closed-form ``diag(D_f^t) ⊗ x^t`` for mm/mv/elemwise primitives.
+
+    For mm/mv the instantaneous gradient of ``y = x @ W + b`` w.r.t. ``W``
+    is the outer product ``x ⊗ df`` with a ``num_state`` axis tagged on.
+    For the elemwise identity op it is simply ``df`` (no ``x`` factor).
+    """
+    if primitive is etp_elemwise_p:
+        return {'weight': df}
+    if primitive is etp_mm_p:
+        out = {'weight': jnp.einsum('...i,...ka->...ika', x, df)}
+    else:  # etp_mv_p — no batch axis
+        out = {'weight': jnp.einsum('i,ka->ika', x, df)}
+    if has_bias:
+        out['bias'] = df
+    return out
+
+
 def _update_param_dim_etrace_scan_fn(
     hist_etrace_vals: Dict[ETraceWG_Key, jax.Array],
     jacobians: Tuple[
@@ -97,6 +154,7 @@ def _update_param_dim_etrace_scan_fn(
     weight_path_to_vals: Dict[Path, PyTree],
     hidden_param_op_relations,
     normalize_matrix_spectrum: bool = False,
+    fast_solve: bool = True,
 ):
     """
     Update the eligibility trace values for parameter dimensions.
@@ -172,6 +230,9 @@ def _update_param_dim_etrace_scan_fn(
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
         batched = is_batched_primitive(relation.primitive)
+        has_bias = eqn_params.get('has_bias', False)
+        # Fast path only applies to primitives with elementwise yw_to_w.
+        use_fast = fast_solve and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
 
         if is_elemwise:
             x = None
@@ -187,35 +248,53 @@ def _update_param_dim_etrace_scan_fn(
         def comp_dw_with_x(x_, df_, _wdict=weights_dict):
             return _call_xy_to_dw_dict(x_, df_, _wdict)
 
-        @partial(jax.vmap, in_axes=-1, out_axes=-1)
-        def comp_dw_without_x(df_, _x=x, _batched=batched):
-            if _batched:
-                return jax.vmap(comp_dw_with_x)(_x, df_)
-            else:
-                return comp_dw_with_x(_x, df_)
+        def _comp_instant_legacy(df_all):
+            """Legacy nested-vmap path: vmap xy_to_dw over num_state (and batch)."""
+            @partial(jax.vmap, in_axes=-1, out_axes=-1)
+            def _inner(df_slice):
+                if batched:
+                    return jax.vmap(comp_dw_with_x)(x, df_slice)
+                return comp_dw_with_x(x, df_slice)
+            return _inner(df_all)
+
+        def _comp_recurrent_legacy(diag_, old_bwg_, num_state_):
+            """Legacy nested-vmap yw_to_w + sum path."""
+            def fn_bwg_pre(d, _old=old_bwg_):
+                return jax.tree.map(
+                    lambda arr: _sum_dim(arr, axis=-1),
+                    jax.vmap(_call_yw_to_w_dict, in_axes=-1, out_axes=-1)(d, _old),
+                )
+            # num_state == 1 shortcut: squeeze the size-1 alpha axis to skip
+            # outer vmap overhead; re-expand at the end.
+            if num_state_ == 1:
+                d_squeezed = u.math.squeeze(diag_, axis=-2)
+                res = fn_bwg_pre(d_squeezed)
+                return jax.tree.map(lambda a: u.math.expand_dims(a, axis=-1), res)
+            return jax.vmap(fn_bwg_pre, in_axes=-2, out_axes=-1)(diag_)
 
         for group in relation.hidden_groups:
             group: HiddenGroup
 
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
 
-            # phg_to_pw is a Dict[str, Array].
-            phg_to_pw = comp_dw_without_x(df)
-            phg_to_pw = jax.tree.map(_normalize_vector, phg_to_pw)
+            # Instantaneous term: diag(D_f^t) ⊗ x^t  (Dict[str, Array]).
+            if use_fast:
+                phg_to_pw = _fast_instant_term(relation.primitive, x, df, has_bias)
+            else:
+                phg_to_pw = _comp_instant_legacy(df)
+            if normalize_matrix_spectrum:
+                phg_to_pw = jax.tree.map(_normalize_vector, phg_to_pw)
 
             w_key = (id(relation.y_var), group.index)
             diag = hid_group_jacobians[group.index]
 
             old_bwg = hist_etrace_vals[w_key]   # Dict[str, Array]
 
-            fn_bwg_pre = lambda d, _old=old_bwg: jax.tree.map(
-                lambda arr: _sum_dim(arr, axis=-1),
-                jax.vmap(
-                    _call_yw_to_w_dict, in_axes=-1, out_axes=-1,
-                )(d, _old),
-            )
-
-            new_bwg_pre = jax.vmap(fn_bwg_pre, in_axes=-2, out_axes=-1)(diag)
+            # Recurrent term: D^t · ε^{t-1}.
+            if use_fast:
+                new_bwg_pre = _fast_recurrent_term(relation.primitive, diag, old_bwg)
+            else:
+                new_bwg_pre = _comp_recurrent_legacy(diag, old_bwg, group.num_state)
 
             # new_bwg_pre + phg_to_pw per-leaf.
             new_bwg = jax.tree.map(
@@ -229,38 +308,49 @@ def _update_param_dim_etrace_scan_fn(
 
 
 def _normalize_matrix_spectrum(diag):
+    """Branch-free spectral clipping: divide by max(|eigvals|, 1).
+
+    The previous implementation used ``jax.lax.cond`` which blocks XLA
+    fusion and serialises into a control-flow region per call. Dividing by
+    ``max(max_eigenvalue, 1)`` is semantically identical (the conditional
+    only clipped when ``max_eigenvalue > 1``) and stays in a single fused
+    kernel with the rest of the update.
+    """
     def base_fn(matrix):
-        # Compute the eigenvalues of the matrix
         eigenvalues = jnp.linalg.eigvals(matrix)
-
-        # Get the maximum eigenvalue
         max_eigenvalue = jnp.max(jnp.abs(eigenvalues))
-
-        # Normalize the matrix by dividing it by the maximum eigenvalue
-        normalized_matrix = jax.lax.cond(
-            max_eigenvalue > 1,
-            lambda: matrix / max_eigenvalue,
-            lambda: matrix,
-        )
-        return normalized_matrix
+        return matrix / jnp.maximum(max_eigenvalue, 1.0)
 
     fn = base_fn
-    for i in range(diag.ndim - 2):
+    for _ in range(diag.ndim - 2):
         fn = jax.vmap(fn)
     return fn(diag)
 
 
 def _normalize_vector(v):
+    """Branch-free magnitude clipping: divide by max(max_abs, 1)."""
     max_elem = jnp.abs(v).max()
-    normalized_vector = jax.lax.cond(
-        max_elem > 1,
-        lambda: v / max_elem,
-        lambda: v,
-    )
+    return v / jnp.maximum(max_elem, 1.0)
 
-    # # Normalize the vector by dividing it by its norm
-    # normalized_vector = v / jnp.linalg.norm(v)
-    return normalized_vector
+
+def _fast_solve_contract(primitive, diag_like, etrace_data):
+    """Solve-time closed-form contraction for mm/mv/elemwise.
+
+    ``diag_like`` is the dl/dh group gradient with shape ``(*y_shape, num_state)``;
+    ``etrace_data`` is the weight-shaped trace dict. The solver computes
+    ``sum_alpha diag_like[..., alpha] * yw_to_w(etrace[..., alpha])``, which
+    for elementwise ``yw_to_w`` is an einsum along the ``num_state`` axis.
+    """
+    if primitive is etp_elemwise_p:
+        return {
+            'weight': jnp.einsum('...a,...a->...', diag_like, etrace_data['weight']),
+        }
+    out = {
+        'weight': jnp.einsum('...ka,...ika->...ik', diag_like, etrace_data['weight']),
+    }
+    if 'bias' in etrace_data:
+        out['bias'] = jnp.einsum('...ka,...ka->...k', diag_like, etrace_data['bias'])
+    return out
 
 
 def _solve_param_dim_weight_gradients(
@@ -269,6 +359,7 @@ def _solve_param_dim_weight_gradients(
     dG_hidden_groups: Sequence[jax.Array],  # hidden group gradients
     weight_hidden_relations: Sequence[HiddenParamOpRelation],
     weight_vals: Dict[Path, PyTree],  # current ParamState pytree values for structure
+    fast_solve: bool = True,
 ):
     """
     Compute and update the weight gradients for parameter dimensions using eligibility trace data.
@@ -297,6 +388,7 @@ def _solve_param_dim_weight_gradients(
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
+        use_fast = fast_solve and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
 
         def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
             return _rule(d, trace_, **_params)
@@ -318,13 +410,27 @@ def _solve_param_dim_weight_gradients(
             etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
             dg_hidden_unitless, _ = _remove_units(dg_hidden)
 
-            # dg_weight_dict: Dict[str, Array]
-            dg_weight_dict = jax.tree.map(
-                lambda arr: _sum_dim(arr, axis=-1),
-                jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(
-                    dg_hidden_unitless, etrace_data_unitless
-                ),
-            )
+            if use_fast:
+                # Closed-form einsum path for mm/mv/elemwise primitives.
+                dg_weight_dict = _fast_solve_contract(
+                    relation.primitive, dg_hidden_unitless, etrace_data_unitless
+                )
+            elif group.num_state == 1:
+                # num_state==1 shortcut: skip outer vmap of size 1.
+                dg_hid_squeezed = jax.tree.map(
+                    lambda a: u.math.squeeze(a, axis=-1), dg_hidden_unitless
+                )
+                etr_squeezed = jax.tree.map(
+                    lambda a: u.math.squeeze(a, axis=-1), etrace_data_unitless
+                )
+                dg_weight_dict = yw_to_w(dg_hid_squeezed, etr_squeezed)
+            else:
+                dg_weight_dict = jax.tree.map(
+                    lambda arr: _sum_dim(arr, axis=-1),
+                    jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(
+                        dg_hidden_unitless, etrace_data_unitless
+                    ),
+                )
             dg_weight_dict = fn_unit_restore(dg_weight_dict)
 
             # Route per-key to owning ParamState path.
@@ -433,9 +539,20 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         model: brainstate.nn.Module,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
+        fast_solve: bool = True,
+        normalize_matrix_spectrum: bool = False,
         **kwargs,
     ):
         super().__init__(model, name=name, vjp_method=vjp_method)
+        # ``fast_solve=True`` enables closed-form einsum kernels for
+        # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
+        # Conv / sparse / LoRA primitives always use the legacy path.
+        self.fast_solve = fast_solve
+        # When True, clip trace magnitudes > 1 each step via a branch-free
+        # ``v / max(max_abs, 1)``. Default False (disabled). The previous
+        # implementation applied this unconditionally to the instantaneous
+        # term only, which silently distorted gradients.
+        self.normalize_matrix_spectrum = normalize_matrix_spectrum
 
     def init_etrace_state(self, *args, **kwargs):
         """
@@ -581,6 +698,8 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             _update_param_dim_etrace_scan_fn,
             weight_path_to_vals=weight_vals,
             hidden_param_op_relations=self.graph.hidden_param_op_relations,
+            normalize_matrix_spectrum=self.normalize_matrix_spectrum,
+            fast_solve=self.fast_solve,
         )
 
         if input_is_multi_step:
@@ -654,6 +773,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             dl_to_hidden_groups,
             self.graph.hidden_param_op_relations,
             weight_vals,
+            fast_solve=self.fast_solve,
         )
 
         # update the non-etrace weight gradients

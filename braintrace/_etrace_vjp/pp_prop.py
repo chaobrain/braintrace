@@ -24,9 +24,8 @@
 
 # -*- coding: utf-8 -*-
 
-from collections import defaultdict
 from functools import partial
-from typing import Dict, Tuple, List, Optional, Sequence
+from typing import Dict, Tuple, Optional, Sequence
 
 import brainstate
 import jax
@@ -166,8 +165,6 @@ def _low_pass_filter(old, new, alpha):
 def _init_IO_dim_state(
     etrace_xs: Dict[ETraceX_Key, brainstate.State],
     etrace_dfs: Dict[ETraceDF_Key, brainstate.State],
-    etrace_xs_to_weights: defaultdict[ETraceX_Key, List[Path]],
-    state_id_to_path: Dict[int, Path],
     relation: HiddenParamOpRelation,
 ):
     """
@@ -183,15 +180,10 @@ def _init_IO_dim_state(
         etrace_xs (Dict[ETraceX_Key, brainstate.State]): A dictionary to store the
             eligibility trace states for the weight x, keyed by ETraceX_Key.
         etrace_dfs (Dict[ETraceDF_Key, brainstate.State]): A dictionary to store the
-            eligibility trace states for the differential functions, keyed by 
+            eligibility trace states for the differential functions, keyed by
             ETraceDF_Key.
-        etrace_xs_to_weights (defaultdict[ETraceX_Key, List[Path]]): A 
-            defaultdict to record the target paths of the weight x, keyed by 
-            ETraceX_Key.
-        state_id_to_path (Dict[int, Path]): A dictionary mapping state IDs to 
-            their corresponding paths.
-        relation (HiddenParamOpRelation): The relation object containing 
-            information about the weights and hidden groups involved in the 
+        relation (HiddenParamOpRelation): The relation object containing
+            information about the weights and hidden groups involved in the
             computation.
 
     Raises:
@@ -206,36 +198,31 @@ def _init_IO_dim_state(
 
     # "relation.x_var" may be repeatedly used in the graph
     if not (relation.primitive is etp_elemwise_p):
-        if relation.x_var not in etrace_xs:
+        x_key = id(relation.x_var)
+        if x_key not in etrace_xs:
             shape = relation.x_var.aval.shape
             dtype = relation.x_var.aval.dtype
-            etrace_xs[id(relation.x_var)] = EligibilityTrace(u.math.zeros(shape, dtype))
-
-        # relation.x_var maybe repeatedly used to feed into the
-        # weight operation for transforming the hidden states
-        # therefore we record the target paths of the weight x
-        #
-        primary_state = next(iter(relation.trainable_param_states.values()), None)
-        etrace_xs_to_weights[id(relation.x_var)].append(state_id_to_path[id(primary_state)])
+            etrace_xs[x_key] = EligibilityTrace(u.math.zeros(shape, dtype))
 
     y_shape = relation.y_var.aval.shape
     y_dtype = relation.y_var.aval.dtype
     for group in relation.hidden_groups:
         group: HiddenGroup
-        if y_shape != group.varshape:
-            if (relation.primitive is etp_elemwise_p):
-                if not (is_batched_primitive(relation.primitive) and y_shape == group.varshape[1:]):
-                    raise ValueError(
-                        f'The shape of the hidden states should be the '
-                        f'same as the shape of the hidden group. '
-                        f'While we got {y_shape} != {group.varshape}. '
-                    )
-            else:
-                raise ValueError(
-                    f'The shape of the hidden states should be the '
-                    f'same as the shape of the hidden group. '
-                    f'While we got {y_shape} != {group.varshape}. '
-                )
+        # Exact match required, or (elemwise only) allow trailing-dim match
+        # where a batched hidden group wraps an unbatched elemwise weight.
+        shape_ok = (
+            y_shape == group.varshape
+            or (
+                relation.primitive is etp_elemwise_p
+                and y_shape == group.varshape[1:]
+            )
+        )
+        if not shape_ok:
+            raise ValueError(
+                f'The shape of the hidden states should be the '
+                f'same as the shape of the hidden group. '
+                f'While we got {y_shape} != {group.varshape}. '
+            )
         key = etrace_df_key(relation.y_var, group.index)
         if key in etrace_dfs:  # relation.y_var is a unique output of the weight operation
             raise ValueError(f'The relation {key} has been added. ')
@@ -401,6 +388,7 @@ def _solve_IO_dim_weight_gradients(
     weight_vals: Dict[Path, WeightVals],
     running_index: int,
     decay: float,
+    fast_solve: bool = True,
 ):
     """
     Compute and update the weight gradients for input-output dimensions using eligibility trace data.
@@ -430,11 +418,13 @@ def _solve_IO_dim_weight_gradients(
     Returns:
         None: The function updates the dG_weights dictionary in place with the computed weight gradients.
     """
-    # Avoid the exponential smoothing bias at the beginning.
-    # This is the correction factor for the exponential smoothing.
-    correction_factor = 1. - u.math.power(1. - decay, running_index + 1)
+    # Bias correction for exponential smoothing
+    #   ε_f^t = α ε_f^{t-1} + (1-α) x_t  =>  E[ε_f^t] = x · (1 - α^{t+1})
+    # so unbiased estimator divides by (1 - α^{t+1}) = (1 - decay^{t+1}).
+    correction_factor = 1. - u.math.power(decay, running_index + 1)
     correction_factor = u.math.where(running_index < 1000, correction_factor, 1.)
-    # Clamp to avoid division by zero when decay is very small (e.g., rank=1 gives decay=0)
+    # Clamp guards degenerate decay=0 (rank=1): correction is exactly 1 then,
+    # but keep clamp for numerical safety in the early-step power computation.
     correction_factor = u.math.maximum(correction_factor, 1e-8)
     correction_factor = jax.lax.stop_gradient(correction_factor)
 
@@ -470,15 +460,31 @@ def _solve_IO_dim_weight_gradients(
             df = dfs[df_key] / correction_factor
             df_hid = df * dG_hidden_groups[group.index]
 
-            fn_vmap = jax.vmap(lambda df_: _call(df_, weights_dict), in_axes=-1, out_axes=-1)
-            if (relation.primitive is etp_elemwise_p) and batched:
-                fn_vmap2 = jax.vmap(fn_vmap)
-                dg_dict = jax.tree.map(
-                    lambda a: _sum_dim(_sum_dim(a, axis=-1), axis=0),
-                    fn_vmap2(df_hid),
-                )
+            if fast_solve:
+                # Fast path: sum over n_state first, then ONE xy_to_dw call.
+                # Valid because every xy_to_dw rule is a VJP of a linear map
+                # in its cotangent argument, so sum-then-apply == apply-then-sum.
+                df_summed = u.math.sum(df_hid, axis=-1)
+                if (relation.primitive is etp_elemwise_p) and batched:
+                    # Elemwise-in-batched-hidden: strip batch dim via a single
+                    # vmap over batch, then sum batch after.
+                    dg_dict = jax.tree.map(
+                        lambda a: _sum_dim(a, axis=0),
+                        jax.vmap(lambda d_: _call(d_, weights_dict))(df_summed),
+                    )
+                else:
+                    dg_dict = _call(df_summed, weights_dict)
             else:
-                dg_dict = jax.tree.map(_sum_dim, fn_vmap(df_hid))
+                # Legacy path: vmap xy_to_dw across n_state slices, then sum.
+                fn_vmap = jax.vmap(lambda df_: _call(df_, weights_dict), in_axes=-1, out_axes=-1)
+                if (relation.primitive is etp_elemwise_p) and batched:
+                    fn_vmap2 = jax.vmap(fn_vmap)
+                    dg_dict = jax.tree.map(
+                        lambda a: _sum_dim(_sum_dim(a, axis=-1), axis=0),
+                        fn_vmap2(df_hid),
+                    )
+                else:
+                    dg_dict = jax.tree.map(_sum_dim, fn_vmap(df_hid))
 
             # Route per-key to owning ParamState path and assemble per-path pytrees.
             _route_grads_by_path(relation, dg_dict, weight_vals, dG_weights)
@@ -541,9 +547,6 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     # the spatial gradients of the hidden states
     etrace_dfs: Dict[ETraceDF_Key, brainstate.State]
 
-    # the mapping from the etrace x to the weight operations
-    etrace_xs_to_weights = Dict[ETraceX_Key, List[Path]]
-
     # the exponential smoothing decay factor
     decay: float
 
@@ -553,10 +556,12 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         decay_or_rank: float | int,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
+        fast_solve: bool = True,
         **kwargs,
     ):
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
+        self.fast_solve = fast_solve
 
     def init_etrace_state(self, *args, **kwargs):
         """
@@ -569,16 +574,9 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         #   2. df
         self.etrace_xs = dict()
         self.etrace_dfs = dict()
-        self.etrace_xs_to_weights = defaultdict(list)
         for relation in self.graph.hidden_param_op_relations:
             relation: HiddenParamOpRelation
-            _init_IO_dim_state(
-                self.etrace_xs,
-                self.etrace_dfs,
-                self.etrace_xs_to_weights,
-                self.graph_executor.state_id_to_path,
-                relation,
-            )
+            _init_IO_dim_state(self.etrace_xs, self.etrace_dfs, relation)
 
     def reset_state(self, batch_size: int = None, **kwargs):
         """
@@ -843,6 +841,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             weight_vals,
             running_index,
             self.decay,
+            fast_solve=self.fast_solve,
         )
 
         # update the non-etrace parameters

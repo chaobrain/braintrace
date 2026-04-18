@@ -15,17 +15,13 @@
 
 # -*- coding: utf-8 -*-
 
-from functools import partial
 from typing import Callable, Union, Sequence, Optional, Any
 
 import brainstate
 import braintools
-import saiunit as u
-import jax
 from brainstate import BatchState
 from brainstate.nn._normalizations import _BatchNorm
 
-pass  # old imports removed
 from braintrace._typing import ArrayLike, Size, Axes
 
 __all__ = [
