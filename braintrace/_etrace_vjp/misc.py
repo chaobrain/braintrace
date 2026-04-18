@@ -17,8 +17,8 @@ from functools import partial
 from typing import Any, Dict, Optional
 
 import brainstate
-import saiunit as u
 import jax
+import saiunit as u
 
 
 def _reset_state_in_a_dict(

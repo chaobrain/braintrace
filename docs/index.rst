@@ -90,10 +90,10 @@ See also the ecosystem
    :maxdepth: 2
    :caption: Tutorial
 
-   tutorial/etp_primitives.ipynb
-   tutorial/hidden_states.ipynb
-   tutorial/graph_visualization.ipynb
-   tutorial/batching.ipynb
+   tutorials/etp_primitives.ipynb
+   tutorials/hidden_states.ipynb
+   tutorials/graph_visualization.ipynb
+   tutorials/batching.ipynb
 
 
 .. toctree::

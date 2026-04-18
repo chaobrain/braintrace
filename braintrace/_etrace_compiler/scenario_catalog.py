@@ -45,13 +45,14 @@ exclude with a specific structured diagnostic).
   ``WhileBodyEtpRNN``).
 """
 
-from __future__ import annotations
+
 
 import brainstate
 import jax
 import jax.numpy as jnp
 
 import braintrace
+
 
 # ---------------------------------------------------------------------------
 # Single-primitive baselines

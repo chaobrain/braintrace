@@ -38,7 +38,6 @@ import warnings
 
 import brainstate
 import jax.numpy as jnp
-import pytest
 
 import braintrace
 from braintrace import (
@@ -90,6 +89,7 @@ def _assert_deterministic(model_factory, inp):
     calls :func:`brainstate.nn.init_all_states` to make the contract
     explicit and safe against factories that forget.
     """
+
     def _build():
         m = model_factory()
         brainstate.nn.init_all_states(m)

@@ -17,9 +17,9 @@ from functools import partial
 from typing import Dict, Tuple, Optional, Sequence
 
 import brainstate
-import saiunit as u
 import jax
 import jax.numpy as jnp
+import saiunit as u
 
 from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
@@ -250,20 +250,24 @@ def _update_param_dim_etrace_scan_fn(
 
         def _comp_instant_legacy(df_all):
             """Legacy nested-vmap path: vmap xy_to_dw over num_state (and batch)."""
+
             @partial(jax.vmap, in_axes=-1, out_axes=-1)
             def _inner(df_slice):
                 if batched:
                     return jax.vmap(comp_dw_with_x)(x, df_slice)
                 return comp_dw_with_x(x, df_slice)
+
             return _inner(df_all)
 
         def _comp_recurrent_legacy(diag_, old_bwg_, num_state_):
             """Legacy nested-vmap yw_to_w + sum path."""
+
             def fn_bwg_pre(d, _old=old_bwg_):
                 return jax.tree.map(
                     lambda arr: _sum_dim(arr, axis=-1),
                     jax.vmap(_call_yw_to_w_dict, in_axes=-1, out_axes=-1)(d, _old),
                 )
+
             # num_state == 1 shortcut: squeeze the size-1 alpha axis to skip
             # outer vmap overhead; re-expand at the end.
             if num_state_ == 1:
@@ -288,7 +292,7 @@ def _update_param_dim_etrace_scan_fn(
             w_key = (id(relation.y_var), group.index)
             diag = hid_group_jacobians[group.index]
 
-            old_bwg = hist_etrace_vals[w_key]   # Dict[str, Array]
+            old_bwg = hist_etrace_vals[w_key]  # Dict[str, Array]
 
             # Recurrent term: D^t · ε^{t-1}.
             if use_fast:
@@ -316,6 +320,7 @@ def _normalize_matrix_spectrum(diag):
     only clipped when ``max_eigenvalue > 1``) and stays in a single fused
     kernel with the rest of the update.
     """
+
     def base_fn(matrix):
         eigenvalues = jnp.linalg.eigvals(matrix)
         max_eigenvalue = jnp.max(jnp.abs(eigenvalues))
@@ -403,7 +408,7 @@ def _solve_param_dim_weight_gradients(
             group: HiddenGroup
 
             w_key = (id(relation.y_var), group.index)
-            etrace_data = hist_etrace_data[w_key]   # Dict[str, Array]
+            etrace_data = hist_etrace_data[w_key]  # Dict[str, Array]
             dg_hidden = dG_hidden_groups[group.index]
 
             # dimensionless processing (unit strip + restore). Apply per-leaf.

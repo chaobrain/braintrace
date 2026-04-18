@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Optional
 
 from braintrace._compatible_imports import Primitive
-
 from ._primitive import ETPPrimitive, register_primitive
 
 __all__ = [

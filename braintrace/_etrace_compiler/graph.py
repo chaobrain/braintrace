@@ -21,6 +21,10 @@ from typing import Dict, Sequence, Tuple, Optional, NamedTuple
 import brainstate
 import jax
 
+from braintrace._typing import (
+    Inputs,
+    Path,
+)
 from .diagnostics import (
     CompilationRecord,
     DiagnosticKind,
@@ -41,10 +45,6 @@ from .hidden_pertubation import (
 from .module_info import (
     extract_module_info,
     ModuleInfo,
-)
-from braintrace._typing import (
-    Inputs,
-    Path,
 )
 
 __all__ = [

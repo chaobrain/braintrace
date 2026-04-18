@@ -21,7 +21,7 @@ flag-sets, and the True/False semantics of the three predicates that
 the compiler relies on.
 """
 
-from __future__ import annotations
+
 
 from braintrace._compatible_imports import Primitive
 from braintrace._etrace_op import (
@@ -44,7 +44,6 @@ from braintrace._etrace_op import (
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
 )
-
 
 _ALL_SHIPPED = (
     etp_mm_p, etp_mv_p,

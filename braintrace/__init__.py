@@ -76,7 +76,6 @@ from ._legacy import (
     NonTempParam,
     SpMatMulOp,
 )
-from . import _legacy
 from ._misc import NotSupportedError, CompilationError
 from ._version import __version__, __version_info__
 
@@ -159,5 +158,4 @@ __all__ = [
 
     # submodules
     'nn',
-    '_legacy',
 ]

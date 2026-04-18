@@ -28,7 +28,6 @@ import brainstate
 import jax
 import jax.numpy as jnp
 import numpy.testing as npt
-import pytest
 
 import braintrace
 
@@ -149,7 +148,7 @@ class TestConvBiasGradient:
 
     def test_drtrl_conv_grad_matches_bptt(self):
         """D-RTRL dkernel and dbias must match BPTT for one recurrent step."""
-        kernel_init = jnp.ones((3, 4, 4)) * 0.05   # (H, in, out) for 1D conv NHC-HIO
+        kernel_init = jnp.ones((3, 4, 4)) * 0.05  # (H, in, out) for 1D conv NHC-HIO
         bias_init = jnp.ones((4,)) * 0.1
 
         class Cell(brainstate.nn.Module):
@@ -234,7 +233,7 @@ class TestConv2dBiasGradient:
         # Compute output spatial size for SAME padding (input size unchanged).
         # For VALID: floor((H - Hk) / stride + 1).
         if padding == 'SAME':
-            out_h = -(-spatial_h // strides[0])   # ceil division
+            out_h = -(-spatial_h // strides[0])  # ceil division
             out_w = -(-spatial_w // strides[1])
         else:  # VALID
             out_h = (spatial_h - kernel_h) // strides[0] + 1

@@ -55,7 +55,6 @@ import jax
 from braintrace._compatible_imports import (
     Primitive,
     Var,
-    Literal,
     JaxprEqn,
     Jaxpr,
     is_jit_primitive,
@@ -64,7 +63,6 @@ from braintrace._compatible_imports import (
     is_cond_primitive,
 )
 from braintrace._etrace_op import (
-    ETP_PRIMITIVES,
     get_primitive_spec,
     is_etp_primitive,
     is_etp_enable_gradient_primitive,

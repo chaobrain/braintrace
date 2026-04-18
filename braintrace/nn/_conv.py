@@ -20,6 +20,7 @@ from typing import Callable, Tuple, Union, Sequence, Optional, TypeVar
 
 import brainstate
 import jax
+import saiunit as u
 from braintools import init
 
 from braintrace._etrace_op import conv as etp_conv
@@ -186,8 +187,7 @@ class _Conv(brainstate.nn.Module):
         # conv requires batch dim
         squeeze = False
         if x.ndim == self.num_spatial_dims + 1:
-            import jax.numpy as jnp
-            x = jnp.expand_dims(x, 0)
+            x = u.math.expand_dims(x, 0)
             squeeze = True
         b = self.bias.value if self.bias is not None else None
         y = etp_conv(
@@ -200,8 +200,7 @@ class _Conv(brainstate.nn.Module):
             dimension_numbers=self.dimension_numbers,
         )
         if squeeze:
-            import jax.numpy as jnp
-            y = jnp.squeeze(y, 0)
+            y = u.math.squeeze(y, 0)
         return y
 
 
@@ -395,4 +394,3 @@ class Conv3d(_Conv):
     """
     __module__ = 'braintrace.nn'
     num_spatial_dims: int = 3
-

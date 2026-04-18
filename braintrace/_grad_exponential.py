@@ -15,8 +15,8 @@
 
 
 import brainstate
-import saiunit as u
 import jax.tree
+import saiunit as u
 
 __all__ = [
     'GradExpon',

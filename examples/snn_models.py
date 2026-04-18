@@ -20,11 +20,11 @@ from typing import Iterable, Union
 import brainpy.state
 import brainstate
 import braintools
-import saiunit as u
 import jax
 import matplotlib.pyplot as plt
 import numba
 import numpy as np
+import saiunit as u
 from tqdm import tqdm
 
 import braintrace

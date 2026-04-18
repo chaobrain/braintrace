@@ -108,7 +108,7 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
             self.in_size[-1] + self.out_size[-1], self.out_size[-1],
             w_init=w_init,
             b_init=b_init,
-                    )
+        )
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(

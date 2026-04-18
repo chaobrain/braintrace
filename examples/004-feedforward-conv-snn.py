@@ -14,9 +14,9 @@
 # ==============================================================================
 
 
+import sys
 from typing import Callable, Iterable
 
-import sys
 sys.path.append('../')
 
 import brainstate
@@ -120,6 +120,7 @@ class Trainer(object):
         opt (braintools.optim.Optimizer): Optimizer instance.
         n_epoch (int): Number of epochs to train.
     """
+
     def __init__(
         self,
         target: brainstate.nn.Module,

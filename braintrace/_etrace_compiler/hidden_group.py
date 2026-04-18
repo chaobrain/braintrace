@@ -48,14 +48,12 @@ from itertools import combinations
 from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any
 
 import brainstate
-import saiunit as u
 import jax.core
 import numpy as np
+import saiunit as u
 from brainstate import HiddenGroupState
 
 from braintrace._compatible_imports import Var, Literal, JaxprEqn, Jaxpr
-from .base import JaxprEvaluation, find_matched_vars
-from .module_info import extract_module_info, ModuleInfo
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     PyTree,
@@ -63,6 +61,8 @@ from braintrace._typing import (
     HiddenOutVar,
     Path,
 )
+from .base import JaxprEvaluation, find_matched_vars
+from .module_info import extract_module_info, ModuleInfo
 
 __all__ = [
     'HiddenGroup',

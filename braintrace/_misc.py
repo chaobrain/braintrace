@@ -19,12 +19,11 @@ from enum import Enum
 from typing import Sequence
 
 import brainstate
-import saiunit as u
 import jax.tree
+import saiunit as u
 
 from ._compatible_imports import Var
 from ._typing import Path, ETraceDF_Key
-
 
 __all__ = [
     'NotSupportedError',

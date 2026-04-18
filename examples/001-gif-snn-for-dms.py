@@ -17,11 +17,11 @@
 
 import brainstate
 import braintools
-import saiunit as u
 import matplotlib.pyplot as plt
 import numpy as np
+import saiunit as u
 
-from snn_models import DMSDataset, GifNet, OnlineTrainer, BPTTTrainer
+from snn_models import DMSDataset, GifNet, OnlineTrainer
 
 if __name__ == '__main__':
     with brainstate.environ.context(dt=1. * u.ms):

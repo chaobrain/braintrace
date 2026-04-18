@@ -13,11 +13,11 @@
 # limitations under the License.
 # ==============================================================================
 
-from absl.testing import parameterized
+import brainstate
 import jax.numpy as jnp
 import numpy as np
+from absl.testing import parameterized
 
-import brainstate
 import braintrace
 
 

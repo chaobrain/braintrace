@@ -19,11 +19,11 @@ from typing import Callable, Iterable
 import brainpy
 import brainstate
 import braintools
-import saiunit as u
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+import saiunit as u
 
 import braintrace
 
@@ -308,7 +308,8 @@ class _SNNEINet(brainstate.nn.Module):
             rec_mem = self.pop.V.value[:, np.arange(0, n_rec, n_rec // 50)]
             return rec_spk, rec_mem.to_decimal(u.mV), out
 
-        rec_spks, rec_mems, outs = brainstate.transform.for_loop(step, inputs, pbar=brainstate.transform.ProgressBar(10))
+        rec_spks, rec_mems, outs = brainstate.transform.for_loop(step, inputs,
+                                                                 pbar=brainstate.transform.ProgressBar(10))
 
         fig, gs = braintools.visualize.get_figure(4, n2show, 3., 4.5)
         for i in range(n2show):

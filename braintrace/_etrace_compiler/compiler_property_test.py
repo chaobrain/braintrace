@@ -39,7 +39,7 @@ Properties under test
   ``ALL_DIRECT``.
 """
 
-from __future__ import annotations
+
 
 import importlib.util
 import warnings

@@ -23,12 +23,13 @@ Tests cover:
 - LoRA: Low-Rank Adaptation layer for fine-tuning
 """
 
-import braintrace
 import brainstate
-import saiunit as u
 import jax.numpy as jnp
 import pytest
+import saiunit as u
 from braintools import init
+
+import braintrace
 
 
 class TestLinear:

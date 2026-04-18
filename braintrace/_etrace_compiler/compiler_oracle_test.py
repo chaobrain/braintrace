@@ -37,7 +37,7 @@ h`` contribution must appear as a constvar (so its Jacobian wrt ``y`` is
 zero). The analytical reference takes the same view.
 """
 
-from __future__ import annotations
+
 
 import warnings
 
@@ -46,7 +46,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import braintrace
 from braintrace import compile_etrace_graph
 from braintrace._etrace_compiler.scenario_catalog import (
     ElemwiseOnlyRNN,
