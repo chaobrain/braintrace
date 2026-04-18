@@ -63,6 +63,20 @@ from ._etrace_vjp import (
     pp_prop,
 )
 from ._grad_exponential import GradExpon
+from ._legacy import (
+    ConvOp,
+    ElemWiseOp,
+    ElemWiseParam,
+    ETraceOp,
+    ETraceParam,
+    FakeElemWiseParam,
+    FakeETraceParam,
+    LoraOp,
+    MatMulOp,
+    NonTempParam,
+    SpMatMulOp,
+)
+from . import _legacy
 from ._misc import NotSupportedError, CompilationError
 from ._version import __version__, __version_info__
 
@@ -130,6 +144,20 @@ __all__ = [
     'NotSupportedError',
     'CompilationError',
 
+    # legacy v0.1.x shims (deprecated)
+    'ETraceParam',
+    'ElemWiseParam',
+    'NonTempParam',
+    'FakeETraceParam',
+    'FakeElemWiseParam',
+    'ETraceOp',
+    'MatMulOp',
+    'ElemWiseOp',
+    'ConvOp',
+    'SpMatMulOp',
+    'LoraOp',
+
     # submodules
     'nn',
+    '_legacy',
 ]
