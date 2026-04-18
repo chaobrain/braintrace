@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
@@ -25,6 +25,8 @@ from braintrace._etrace_vjp.misc import (
     _sum_dim,
     _update_dict,
     _zeros_like_batch_or_not,
+    _extract_leaf,
+    _wrap_leaves_as_pytree,
 )
 
 
@@ -369,3 +371,68 @@ class TestUpdateDict:
         _update_dict(d, key, jnp.array([1.0]))
         assert key in d
         npt.assert_array_equal(d[key], jnp.array([1.0]))
+
+
+# ---------------------------------------------------------------------------
+# _extract_leaf
+# ---------------------------------------------------------------------------
+
+class TestExtractLeaf:
+
+    def test_bare_array_returns_itself(self):
+        x = jnp.arange(6.0).reshape(2, 3)
+        npt.assert_array_equal(_extract_leaf(x, 0), x)
+
+    def test_dict_returns_leaf_at_index_zero(self):
+        pytree = {'weight': jnp.ones((2, 3)), 'bias': jnp.zeros((3,))}
+        npt.assert_array_equal(_extract_leaf(pytree, 0), pytree['bias'])
+        # jax.tree.leaves sorts dict keys; 'bias' < 'weight'
+
+    def test_dict_returns_leaf_at_index_one(self):
+        pytree = {'weight': jnp.ones((2, 3)), 'bias': jnp.zeros((3,))}
+        npt.assert_array_equal(_extract_leaf(pytree, 1), pytree['weight'])
+
+    def test_out_of_range_raises(self):
+        with pytest.raises(IndexError):
+            _extract_leaf({'a': jnp.zeros((2,))}, 5)
+
+
+# ---------------------------------------------------------------------------
+# _wrap_leaves_as_pytree
+# ---------------------------------------------------------------------------
+
+class TestWrapLeavesAsPytree:
+
+    def test_bare_array_reference_returns_the_single_grad(self):
+        ref = jnp.ones((2, 3))
+        grad = jnp.full((2, 3), 7.0)
+        result = _wrap_leaves_as_pytree(ref, {0: grad})
+        npt.assert_array_equal(result, grad)
+
+    def test_dict_fills_all_supplied_leaves(self):
+        ref = {'weight': jnp.ones((2, 3)), 'bias': jnp.zeros((3,))}
+        dW = jnp.full((2, 3), 2.0)
+        db = jnp.full((3,), 5.0)
+        # jax.tree.leaves orders by sorted dict keys: 'bias' (0), 'weight' (1).
+        result = _wrap_leaves_as_pytree(ref, {0: db, 1: dW})
+        npt.assert_array_equal(result['bias'], db)
+        npt.assert_array_equal(result['weight'], dW)
+
+    def test_dict_zero_fills_unsupplied_leaves(self):
+        ref = {'weight': jnp.ones((2, 3)), 'bias': jnp.zeros((3,))}
+        dW = jnp.full((2, 3), 2.0)
+        # Supply only index 1 (weight); bias should come back zero-filled.
+        result = _wrap_leaves_as_pytree(ref, {1: dW})
+        npt.assert_array_equal(result['weight'], dW)
+        npt.assert_array_equal(result['bias'], jnp.zeros((3,)))
+
+    def test_dict_empty_grad_map_returns_all_zeros(self):
+        ref = {'weight': jnp.ones((2, 3)), 'bias': jnp.zeros((3,))}
+        result = _wrap_leaves_as_pytree(ref, {})
+        npt.assert_array_equal(result['weight'], jnp.zeros((2, 3)))
+        npt.assert_array_equal(result['bias'], jnp.zeros((3,)))
+
+    def test_out_of_range_index_raises(self):
+        ref = {'weight': jnp.ones((2, 3))}
+        with pytest.raises(IndexError):
+            _wrap_leaves_as_pytree(ref, {5: jnp.zeros((2, 3))})

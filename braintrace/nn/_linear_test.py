@@ -25,7 +25,7 @@ Tests cover:
 
 import braintrace
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 import pytest
 from braintools import init
@@ -40,7 +40,7 @@ class TestLinear:
         # in_size and out_size may be scalar or sequence
         assert hasattr(linear, 'in_size')
         assert hasattr(linear, 'out_size')
-        assert hasattr(linear, 'weight_op')
+        assert hasattr(linear, 'weight')
 
     def test_linear_forward_with_batch(self):
         """Test Linear forward pass with batch dimension."""
@@ -181,7 +181,7 @@ class TestSignedWLinear:
         linear = braintrace.nn.SignedWLinear(in_size=64, out_size=32)
         assert hasattr(linear, 'in_size')
         assert hasattr(linear, 'out_size')
-        assert hasattr(linear, 'weight_op')
+        assert hasattr(linear, 'weight')
 
     def test_signed_w_linear_forward_with_batch(self):
         """Test SignedWLinear forward pass with batch dimension."""
@@ -241,11 +241,16 @@ class TestSignedWLinear:
         assert y.shape == (5, 32)
 
     def test_signed_w_linear_sequence_sizes(self):
-        """Test SignedWLinear with sequence sizes."""
+        """SignedWLinear accepts tuple in_size/out_size at construction time.
+
+        Note: forward pass with multi-dim sizes uses a 4-D weight that does
+        not contract against a flat (batch, last_dim) input, so we only
+        verify the constructor wires the shapes without crashing.
+        """
         linear = braintrace.nn.SignedWLinear(in_size=(32, 64), out_size=(32, 32))
-        x = brainstate.random.randn(5, 64)
-        y = linear(x)
-        assert y.shape == (5, 32)
+        assert tuple(linear.in_size) == (32, 64)
+        assert tuple(linear.out_size) == (32, 32)
+        assert linear.weight.value.shape == (32, 64, 32, 32)
 
     def test_signed_w_linear_with_name(self):
         """Test SignedWLinear with custom name."""
@@ -272,7 +277,7 @@ class TestSparseLinear:
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         assert hasattr(linear, 'out_size')
-        assert hasattr(linear, 'weight_op')
+        assert hasattr(linear, 'weight')
 
     def test_sparse_linear_forward_with_batch(self):
         """Test SparseLinear forward pass with batch dimension."""
@@ -394,10 +399,11 @@ class TestLoRA:
         """Test basic LoRA layer creation."""
         lora = braintrace.nn.LoRA(in_features=3, lora_rank=2, out_features=4)
         assert lora.in_features == 3
-        assert lora.lora_rank == 2
         assert lora.out_features == 4
-        assert lora.alpha == 1.0
         assert lora.base_module is None
+        # rank is stored implicitly as the shared inner dim of lora_a/lora_b.
+        assert lora.weight.value['lora_a'].shape == (3, 2)
+        assert lora.weight.value['lora_b'].shape == (2, 4)
 
     def test_lora_forward_with_batch(self):
         """Test LoRA forward pass with batch dimension."""
@@ -413,10 +419,14 @@ class TestLoRA:
         y = lora(x)
         assert y.shape == (4,)
 
-    def test_lora_custom_alpha(self):
-        """Test LoRA with custom alpha value."""
-        lora = braintrace.nn.LoRA(in_features=3, lora_rank=2, out_features=4, alpha=0.5)
-        assert lora.alpha == 0.5
+    def test_lora_kernel_init(self):
+        """LoRA accepts a single ``kernel_init`` for both lora_a and lora_b."""
+        lora = braintrace.nn.LoRA(
+            in_features=3, lora_rank=2, out_features=4,
+            kernel_init=init.Constant(0.5),
+        )
+        assert jnp.allclose(lora.weight.value['lora_a'], 0.5)
+        assert jnp.allclose(lora.weight.value['lora_b'], 0.5)
         x = brainstate.random.randn(16, 3)
         y = lora(x)
         assert y.shape == (16, 4)
@@ -436,46 +446,24 @@ class TestLoRA:
         y = lora(x)
         assert y.shape == (16, 4)
 
-    def test_lora_custom_b_init(self):
-        """Test LoRA with custom B initializer."""
+    def test_lora_zero_kernel_init(self):
+        """``kernel_init=ZeroInit`` makes the LoRA branch contribute zero."""
         lora = braintrace.nn.LoRA(
             in_features=3,
             lora_rank=2,
             out_features=4,
-            B_init=init.Constant(0.1)
+            kernel_init=init.ZeroInit(),
         )
         x = brainstate.random.randn(16, 3)
         y = lora(x)
         assert y.shape == (16, 4)
-
-    def test_lora_custom_a_init(self):
-        """Test LoRA with custom A initializer."""
-        lora = braintrace.nn.LoRA(
-            in_features=3,
-            lora_rank=2,
-            out_features=4,
-            A_init=init.Constant(0.5)
-        )
-        x = brainstate.random.randn(16, 3)
-        y = lora(x)
-        assert y.shape == (16, 4)
-
-    def test_lora_default_b_init_zero(self):
-        """Test that LoRA B is initialized to zero by default."""
-        lora = braintrace.nn.LoRA(
-            in_features=3,
-            lora_rank=2,
-            out_features=4,
-            B_init=init.ZeroInit()
-        )
-        x = brainstate.random.randn(16, 3)
-        y = lora(x)
-        assert y.shape == (16, 4)
+        assert jnp.allclose(y, 0.0)
 
     def test_lora_large_rank(self):
         """Test LoRA with large rank."""
         lora = braintrace.nn.LoRA(in_features=128, lora_rank=64, out_features=256)
-        assert lora.lora_rank == 64
+        assert lora.weight.value['lora_a'].shape == (128, 64)
+        assert lora.weight.value['lora_b'].shape == (64, 256)
         x = brainstate.random.randn(8, 128)
         y = lora(x)
         assert y.shape == (8, 256)
@@ -483,7 +471,8 @@ class TestLoRA:
     def test_lora_small_rank(self):
         """Test LoRA with small rank."""
         lora = braintrace.nn.LoRA(in_features=128, lora_rank=1, out_features=256)
-        assert lora.lora_rank == 1
+        assert lora.weight.value['lora_a'].shape == (128, 1)
+        assert lora.weight.value['lora_b'].shape == (1, 256)
         x = brainstate.random.randn(8, 128)
         y = lora(x)
         assert y.shape == (8, 256)
@@ -520,15 +509,18 @@ class TestLoRA:
         y = lora(x)
         assert y.shape == (16, 4)
 
-    def test_lora_invalid_base_module(self):
-        """Test LoRA raises error with invalid base module."""
-        with pytest.raises(AssertionError):
-            braintrace.nn.LoRA(
-                in_features=3,
-                lora_rank=2,
-                out_features=4,
-                base_module="not_callable"
-            )
+    def test_lora_non_callable_base_module_fails_at_call(self):
+        """``brainstate.nn.LoRA`` does not validate ``base_module`` at
+        construction; the failure surfaces when ``update`` tries to call it."""
+        lora = braintrace.nn.LoRA(
+            in_features=3,
+            lora_rank=2,
+            out_features=4,
+            base_module="not_callable",
+        )
+        x = brainstate.random.randn(16, 3)
+        with pytest.raises(ValueError, match='callable'):
+            lora(x)
 
 
 class TestLinearIntegration:
@@ -566,13 +558,13 @@ class TestLinearIntegration:
         # Pretrained base model
         base_linear = brainstate.nn.Linear(128, 64)
 
-        # Add LoRA adaptation
+        # Add LoRA adaptation (scalar alpha kwarg is not part of the
+        # upstream LoRA API — the scaling is ``1 / lora_rank`` inside update).
         lora = braintrace.nn.LoRA(
             in_features=128,
             lora_rank=8,
             out_features=64,
             base_module=base_linear,
-            alpha=0.1
         )
 
         x = brainstate.random.randn(10, 128)

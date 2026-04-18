@@ -40,7 +40,7 @@
 from typing import Dict, Tuple
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.core
 import jax.numpy as jnp
 from brainstate._compatible_import import get_aval
@@ -133,9 +133,10 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     This class is used for executing the eligibility trace graph for the VJP-based online learning algorithms,
     including:
 
-    - :class:`IODimVjpAlgorithm` for the algorithm with input-output dimensional complexity.
-    - :class:`ParamDimVjpAlgorithm` for the algorithm with parameter dimensional complexity.
-    - :class:`HybridDimVjpAlgorithm` for the algorithm with hybrid dimensional complexity.
+    - :class:`IODimVjpAlgorithm` (alias :class:`ES_D_RTRL` / :func:`pp_prop`) for the
+      algorithm with input-output dimensional complexity.
+    - :class:`ParamDimVjpAlgorithm` (alias :class:`D_RTRL`) for the algorithm with
+      parameter dimensional complexity.
 
     Parameters
     ----------
@@ -222,14 +223,14 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         # the weight x
         xs = {}
         for relation in self.graph.hidden_param_op_relations:
-            if relation.x is not None:
-                x = etrace_x_key(relation.x)
-                xs[x] = intermediate_values[relation.x]
+            if relation.x_var is not None:
+                x = etrace_x_key(relation.x_var)
+                xs[x] = intermediate_values[relation.x_var]
 
         # the weight df
         dfs = {}
         for relation in self.graph.hidden_param_op_relations:
-            y = intermediate_values[relation.y]
+            y = intermediate_values[relation.y_var]
 
             #
             # [ KEY ]
@@ -267,7 +268,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             #    df = jvp gradient of "y -> hidden group"
             #
             for tangent, group in zip(hidden_group_tangents, relation.hidden_groups):
-                dfs[etrace_df_key(relation.y, group.index)] = tangent
+                dfs[etrace_df_key(relation.y_var, group.index)] = tangent
 
         # all x and df values
         return jax.lax.stop_gradient(xs), jax.lax.stop_gradient(dfs)

@@ -21,7 +21,7 @@ The examples require the following packages:
 - numpy
 - matplotlib
 - braintrace
-- brainunit
+- saiunit
 - brainstate
 - tqdm
 - torch

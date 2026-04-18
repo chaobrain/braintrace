@@ -175,6 +175,7 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+/CLAUDE.md
 # Pyre type checker
 .pyre/
 
@@ -197,9 +198,14 @@ cython_debug/
 /dev/
 /.VSCodeCounter/
 /docs/_static/model-dynamics-supported.pptx
-/dev/
 /temp/
 /docs/_static/etrace_op_functions.pptx
 /docs/_static/etrace_op_functions.pdf
 /.claude/
 /docs/changelog.md
+/braintrace/etp/JAX_INTERPRETER.md
+/braintrace/etp/ETP.md
+/braintrace/etp/CLAUDE.md
+/.claudegitignore
+/.codex
+/AGENTS.md

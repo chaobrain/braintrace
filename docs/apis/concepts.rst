@@ -1,5 +1,5 @@
-Online Learning Concepts
-========================
+Core Concepts
+=============
 
 .. currentmodule:: braintrace
 
@@ -8,103 +8,108 @@ Online Learning Concepts
    :depth: 1
 
 
-ETrace State
-------------
+ETP Primitives (User API)
+-------------------------
 
-
-The state classes previously available as ``ETraceState``, ``ETraceGroupState``, and
-``ETraceTreeState`` have been moved to the ``brainstate`` package. If you are trying to
-define the hidden states for eligibility trace-based learning, please use the following
-classes from ``brainstate``:
-
-- :py:class:`brainstate.HiddenState`
-- :py:class:`brainstate.HiddenGroupState`
-- :py:class:`brainstate.HiddenTreeState`
-
-
-ETrace Parameter
-----------------
-
-
-If you are trying to define the weight parameters for eligibility trace-based learning,
-you can use the following classes to define the model.
+These functions mark weight operations for inclusion in online learning.
+Use ``braintrace.matmul(x, w)`` instead of ``x @ w`` to include a weight
+in eligibility trace computation. Parameters used with regular JAX ops
+are automatically excluded — no special parameter classes needed.
 
 .. autosummary::
    :toctree: generated/
    :nosignatures:
    :template: classtemplate.rst
 
-    ETraceParam
-    ElemWiseParam
+   matmul
+   element_wise
+   conv
+   sparse_matmul
+   lora_matmul
 
 
+Controlling Parameter Participation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-If you do not want to compute weight gradients using eligibility trace-based learning,
-you can use :py:class:`NonTempParam`, which computes the gradients using the standard
-backpropagation algorithm at the current time step, while it is satisfying the
-same interface as :py:class:`ETraceParam`.
+.. code-block:: python
 
+   import braintrace
+   import brainstate
 
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
+   class MyRNN(brainstate.nn.Module):
+       def __init__(self):
+           super().__init__()
+           self.w_rec = brainstate.ParamState(...)   # want ETP
+           self.w_in = brainstate.ParamState(...)     # do NOT want ETP
+           self.h = brainstate.ShortTermState(...)
 
-    NonTempParam
+       def update(self, x):
+           # regular matmul -> w_in excluded from ETP
+           inp = x @ self.w_in.value
+           # ETP matmul -> w_rec included in ETP
+           self.h.value = jax.nn.tanh(inp + braintrace.matmul(self.h.value, self.w_rec.value))
+           return self.h.value
 
+.. list-table:: Parameter Selection Rules
+   :header-rows: 1
+   :widths: 40 60
 
-
-
-If you do not want to compute weight gradients at all, you can use :py:class:`FakeETraceParam`,
-or :py:class:`FakeElemWiseParam`, which does not compute the gradients at all.
-
-
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-    FakeETraceParam
-    FakeElemWiseParam
-
-
-
-ETrace Operator
----------------
-
-
-Eligibility trace-based operators define the operations that transform the inputs and the weights
-to the outputs.
-
+   * - Goal
+     - How
+   * - Include parameter in online learning
+     - Use a ``braintrace.*`` ETP primitive (e.g. ``braintrace.matmul(x, w)``)
+   * - Exclude parameter from online learning
+     - Use a regular JAX op (e.g. ``x @ w``)
+   * - Selection mechanism
+     - Operation primitive type — *not* parameter class type. Every
+       ``brainstate.ParamState`` is eligible; participation depends solely
+       on whether an ETP primitive consumed it.
 
 
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
+Input Data
+----------
 
-    ETraceOp
-    MatMulOp
-    ElemWiseOp
-    ConvOp
-    SpMatMulOp
-    LoraOp
-
-
-
-ETrace Input Data
------------------
-
-The input data for eligibility trace-based learning should be in the form of
-:class:`SingleStepData` or :class:`MultiStepData`.
-
-
+Wrappers that tell the online learning algorithm whether the input
+is a single time step or a sequence of time steps.
 
 .. autosummary::
    :toctree: generated/
    :nosignatures:
    :template: classtemplate.rst
 
-    SingleStepData
-    MultiStepData
+   SingleStepData
+   MultiStepData
 
+
+Eligibility Trace State
+-----------------------
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   EligibilityTrace
+
+
+Gradient Utilities
+------------------
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   GradExpon
+
+
+Errors
+------
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   NotSupportedError
+   CompilationError

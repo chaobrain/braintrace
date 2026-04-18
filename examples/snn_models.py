@@ -20,7 +20,7 @@ from typing import Iterable, Union
 import brainpy.state
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import jax
 import matplotlib.pyplot as plt
 import numba
@@ -411,6 +411,7 @@ class OnlineTrainer(Trainer):
         def init():
             brainstate.nn.init_all_states(self.target)
             model.compile_graph(inputs[0, 0])
+            model.show_graph()
 
         init()
         model = brainstate.nn.Vmap(model, vmap_states='new')

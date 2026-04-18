@@ -19,6 +19,15 @@ from braintrace._etrace_compiler.base import (
     find_element_exist_in_the_set,
     find_matched_vars,
 )
+from braintrace._etrace_compiler.diagnostics import (
+    CompilationRecord,
+    DiagnosticKind,
+    DiagnosticLevel,
+    DiagnosticReporter,
+    diagnostic_context,
+    emit,
+    get_reporter,
+)
 from braintrace._etrace_compiler.graph import (
     ETraceGraph,
     compile_etrace_graph,

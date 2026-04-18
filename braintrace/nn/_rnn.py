@@ -18,9 +18,9 @@ from typing import Callable, Union
 
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 
-from braintrace._etrace_concepts import ETraceParam, ElemWiseParam
+from braintrace._etrace_op import element_wise
 from braintrace._typing import ArrayLike
 from ._linear import Linear
 
@@ -59,8 +59,6 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
         The activation function. It can be a string or a callable function. Default is 'relu'.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -90,7 +88,6 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'relu',
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -111,8 +108,7 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
             self.in_size[-1] + self.out_size[-1], self.out_size[-1],
             w_init=w_init,
             b_init=b_init,
-            param_type=param_type
-        )
+                    )
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(
@@ -150,8 +146,6 @@ class GRUCell(brainstate.nn.RNNCell):
         The activation function. It can be a string or a callable function. Default is 'tanh'.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -181,7 +175,6 @@ class GRUCell(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -198,7 +191,7 @@ class GRUCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         self.Wz = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wr = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wh = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
@@ -243,8 +236,6 @@ class CFNCell(brainstate.nn.RNNCell):
         The activation function. It can be a string or a callable function. Default is 'tanh'.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -274,7 +265,6 @@ class CFNCell(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -291,7 +281,7 @@ class CFNCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wi = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wh = Linear(self.out_size[-1], self.out_size[-1], **params)
@@ -350,8 +340,6 @@ class MGUCell(brainstate.nn.RNNCell):
         The activation function. It can be a string or a callable function. Default is 'tanh'.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -381,7 +369,6 @@ class MGUCell(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -398,7 +385,7 @@ class MGUCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wh = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
 
@@ -457,8 +444,6 @@ class LSTMCell(brainstate.nn.RNNCell):
         The activation function. It can be a string or a callable function. Default is 'tanh'.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Notes
     -----
@@ -502,7 +487,6 @@ class LSTMCell(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -521,7 +505,7 @@ class LSTMCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         self.Wi = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wg = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
@@ -569,8 +553,6 @@ class URLSTMCell(brainstate.nn.RNNCell):
         The activation function. It can be a string or a callable function. Default is 'tanh'.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -599,7 +581,6 @@ class URLSTMCell(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -618,12 +599,12 @@ class URLSTMCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=None, param_type=param_type)
+        params = dict(w_init=w_init, b_init=None)
         self.Wu = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wr = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
         self.Wo = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.bias = param_type(self._forget_bias(), op=u.math.add, grad='full')
+        self.bias = brainstate.ParamState(self._forget_bias())
 
     def _forget_bias(self):
         rand_val = brainstate.random.uniform(1 / self.out_size[-1], 1 - 1 / self.out_size[-1], (self.out_size[-1],))
@@ -646,8 +627,8 @@ class URLSTMCell(brainstate.nn.RNNCell):
         r = self.Wr(xh)
         u_ = self.Wu(xh)
         o = self.Wo(xh)
-        f_ = brainstate.nn.sigmoid(self.bias.execute(f))
-        r_ = brainstate.nn.sigmoid(-self.bias.execute(-r))
+        f_ = brainstate.nn.sigmoid(element_wise(self.bias.value) + f)
+        r_ = brainstate.nn.sigmoid(-(element_wise(self.bias.value) + (-r)))
         g = 2 * r_ * f_ + (1 - 2 * r_) * f_ ** 2
         next_cell = g * c + (1 - g) * self.activation(u_)
         next_hidden = brainstate.nn.sigmoid(o) * self.activation(next_cell)
@@ -693,8 +674,6 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         The input activation function. Default is None.
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -724,7 +703,6 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         phi: Callable = None,
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -734,7 +712,7 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         self.in_size = in_size
 
         # functions
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         if phi is None:
             phi = Linear(self.in_size[-1], self.out_size[-1], **params)
         assert callable(phi), f"The phi function should be a callable function. But got {phi}"
@@ -786,8 +764,6 @@ class MiniGRU(brainstate.nn.RNNCell):
         The state initializer. Default is ZeroInit().
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -816,7 +792,6 @@ class MiniGRU(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -826,7 +801,7 @@ class MiniGRU(brainstate.nn.RNNCell):
         self.in_size = in_size
 
         # functions
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         self.W_x = Linear(self.in_size[-1], self.out_size[-1], **params)
 
         # weights
@@ -874,8 +849,6 @@ class MiniLSTM(brainstate.nn.RNNCell):
         The state initializer. Default is ZeroInit().
     name : str or None, optional
         The name of the module. Default is None.
-    param_type : type, optional
-        The type of the parameter. Default is ETraceParam.
 
     Examples
     --------
@@ -904,7 +877,6 @@ class MiniLSTM(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         name: str = None,
-        param_type: type = ETraceParam,
     ):
         super().__init__(name=name)
 
@@ -914,7 +886,7 @@ class MiniLSTM(brainstate.nn.RNNCell):
         self.in_size = in_size
 
         # functions
-        params = dict(w_init=w_init, b_init=b_init, param_type=param_type)
+        params = dict(w_init=w_init, b_init=b_init)
         self.W_x = Linear(self.in_size[-1], self.out_size[-1], **params)
 
         # weights
@@ -1005,7 +977,7 @@ class LRUCell(brainstate.nn.Module):
 
         # theta parameter
         theta_log = u.math.log(max_phase * brainstate.random.uniform(size=d_hidden))
-        self.theta_log = ElemWiseParam(theta_log)
+        self.theta_log = brainstate.ParamState(theta_log)
 
         # nu parameter
         nu_log = u.math.log(
@@ -1013,14 +985,14 @@ class LRUCell(brainstate.nn.Module):
                 brainstate.random.uniform(size=d_hidden) * (r_max ** 2 - r_min ** 2) + r_min ** 2
             )
         )
-        self.nu_log = ElemWiseParam(nu_log)
+        self.nu_log = brainstate.ParamState(nu_log)
 
         # -------- input weight matrix --------
 
         # gamma parameter
         diag_lambda = u.math.exp(-u.math.exp(nu_log) + 1j * u.math.exp(theta_log))
         gamma_log = u.math.log(u.math.sqrt(1 - u.math.abs(diag_lambda) ** 2))
-        self.gamma_log = ElemWiseParam(gamma_log)
+        self.gamma_log = brainstate.ParamState(gamma_log)
 
         # Glorot initialized Input/Output projection matrices
         self.B_re = Linear(d_model, d_hidden, w_init=glorot_init, b_init=None)
@@ -1032,7 +1004,7 @@ class LRUCell(brainstate.nn.Module):
         self.C_im = Linear(d_hidden, d_model, w_init=glorot_init, b_init=None)
 
         # Parameter for skip connection
-        self.D = ElemWiseParam(brainstate.random.randn(d_model))
+        self.D = brainstate.ParamState(brainstate.random.randn(d_model))
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h_re = brainstate.HiddenState(braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size))
@@ -1043,9 +1015,9 @@ class LRUCell(brainstate.nn.Module):
         self.h_im.value = braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size)
 
     def update(self, inputs):
-        a = u.math.exp(-u.math.exp(self.nu_log.execute()))
-        b = u.math.exp(self.theta_log.execute())
-        c = u.math.exp(self.gamma_log.execute())
+        a = u.math.exp(-u.math.exp(element_wise(self.nu_log.value)))
+        b = u.math.exp(element_wise(self.theta_log.value))
+        c = u.math.exp(element_wise(self.gamma_log.value))
         a_cos_b = a * u.math.cos(b)
         a_sin_b = a * u.math.sin(b)
         # Compute both new values before any state mutation to avoid stale-read bug
@@ -1054,5 +1026,5 @@ class LRUCell(brainstate.nn.Module):
         new_h_im = a_sin_b * self.h_re.value + a_cos_b * self.h_im.value + c * self.B_im(inputs)
         self.h_re.value = new_h_re
         self.h_im.value = new_h_im
-        r = self.C_re(self.h_re.value) - self.C_im(self.h_im.value) + inputs * self.D.execute()
+        r = self.C_re(self.h_re.value) - self.C_im(self.h_im.value) + inputs * element_wise(self.D.value)
         return r

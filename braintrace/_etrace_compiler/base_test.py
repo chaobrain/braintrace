@@ -474,14 +474,15 @@ class TestJaxprEvaluationEvalPjit(unittest.TestCase):
         self.assertEqual(len(evaluator.evaluated_eqns), 1)
 
     def test_etrace_op_without_gradient_returns_early(self):
-        """An etrace op without gradient should return early and not call _eval_eqn."""
+        """Regular pjits (non-ETP primitives) are evaluated as normal jaxpr eqns
+        in the primitive-based compiler, so name-based skipping no longer applies."""
         evaluator = _make_concrete_evaluator()
         v1, v2 = _make_var(0), _make_var(1)
-        # Base etrace name (no gradient suffix)
+        # Base etrace name (no gradient suffix) — now treated as a regular pjit
         eqn = _make_jit_eqn([v1], [v2], name='_etrace_operator_call')
 
         evaluator._eval_pjit(eqn)
-        self.assertEqual(len(evaluator.evaluated_eqns), 0)
+        self.assertEqual(len(evaluator.evaluated_eqns), 1)
 
     def test_non_etrace_jit_passes_to_eval_eqn(self):
         """A regular jit (non-etrace) should check unsupported and then evaluate."""

@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 import numpy.testing as npt
@@ -225,7 +225,7 @@ class TestRemoveUnits:
         npt.assert_array_almost_equal(restored, x)
 
     def test_quantity_round_trip(self):
-        """A brainunit Quantity should be stripped and restored."""
+        """A saiunit Quantity should be stripped and restored."""
         x = jnp.array([1.0, 2.0]) * u.mV
         unitless, restore = _remove_units(x)
         # unitless should be the mantissa
@@ -325,29 +325,6 @@ class TestParamDimVjpAlgorithmInit:
         model = self._make_model()
         with pytest.raises(AssertionError):
             ParamDimVjpAlgorithm(model, vjp_method='invalid-method')
-
-    def test_mode_defaults_from_environ(self):
-        model = self._make_model()
-        algo = ParamDimVjpAlgorithm(model)
-        # The mode should be set (from environ or default Mode())
-        assert isinstance(algo.mode, brainstate.mixin.Mode)
-
-    def test_mode_explicit(self):
-        model = self._make_model()
-        mode = brainstate.mixin.Mode()
-        algo = ParamDimVjpAlgorithm(model, mode=mode)
-        assert algo.mode is mode
-
-    def test_mode_batching(self):
-        model = self._make_model()
-        mode = brainstate.mixin.Batching(2)
-        algo = ParamDimVjpAlgorithm(model, mode=mode)
-        assert algo.mode.has(brainstate.mixin.Batching)
-
-    def test_invalid_mode_raises(self):
-        model = self._make_model()
-        with pytest.raises(AssertionError):
-            ParamDimVjpAlgorithm(model, mode="not_a_mode")
 
     def test_name_set(self):
         model = self._make_model()
@@ -836,3 +813,43 @@ class TestDiagOn2:
 
             for k in grads:
                 assert u.get_unit(param_states[k]) == u.get_unit(grads[k])
+
+
+class TestDRtrlDictTraceStorage:
+    """D-RTRL stores per-primitive-instance traces keyed by (id(y_var), group_index)
+    whose value is a Dict[str, Array] keyed by trainable-input names.
+
+    Because no primitive has migrated to the new API yet, the dict has only
+    the single key 'weight' and its shape matches what the legacy rule produced."""
+
+    def test_trace_is_dict_keyed_by_weight_for_mm(self):
+        import brainstate
+        import jax.numpy as jnp
+        import braintrace
+        from braintrace._etrace_vjp.d_rtrl import _init_param_dim_state
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        relations = braintrace.find_hidden_param_op_relations_from_module(
+            cell, jnp.zeros((1, 4))
+        )
+        assert len(relations) == 1
+        relation = relations[0]
+        etrace = {}
+        _init_param_dim_state(etrace, relation)
+        assert len(etrace) == 1
+        (_, entry), = etrace.items()
+        assert isinstance(entry.value, dict)
+        assert set(entry.value.keys()) == {'weight'}
+        assert entry.value['weight'].shape[0] == 1  # batch
+        assert entry.value['weight'].shape[1:3] == (4, 4)  # W shape

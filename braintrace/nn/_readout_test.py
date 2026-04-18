@@ -21,7 +21,7 @@ Tests cover:
 """
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 from braintools import init
 
@@ -41,7 +41,7 @@ class TestLeakyRateReadout:
         assert hasattr(readout, 'out_size')
         assert hasattr(readout, 'tau')
         assert hasattr(readout, 'decay')
-        assert hasattr(readout, 'weight_op')
+        assert hasattr(readout, 'W')
 
     def test_leaky_rate_readout_default_tau(self):
         """Test LeakyRateReadout with default tau value."""

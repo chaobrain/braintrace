@@ -17,7 +17,7 @@
 
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -48,7 +48,7 @@ if __name__ == '__main__':
         )
         # net.verify(next(iter(data))[0], num_show=2)
 
-        onliner = BPTTTrainer(
+        onliner = OnlineTrainer(
             target=net,
             opt=braintools.optim.Adam(lr=1e-3),
             dataset=data,

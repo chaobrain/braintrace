@@ -16,8 +16,12 @@
 # -*- coding: utf-8 -*-
 
 
-# compiler
-from braintrace._etrace_compiler import (
+from . import nn
+from ._etrace_algorithms import (
+    ETraceAlgorithm,
+    EligibilityTrace,
+)
+from ._etrace_compiler import (
     ETraceGraph,
     compile_etrace_graph,
     HiddenParamOpRelation,
@@ -31,32 +35,23 @@ from braintrace._etrace_compiler import (
     add_hidden_perturbation_in_module,
     ModuleInfo,
     extract_module_info,
+    CompilationRecord,
+    DiagnosticKind,
+    DiagnosticLevel,
 )
-from . import nn
-# algorithms
-from ._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
-# concepts
-from ._etrace_concepts import (
-    ETraceParam,
-    NonTempParam,
-    ElemWiseParam,
-    FakeETraceParam,
-    FakeElemWiseParam,
-)
-# graph executor
 from ._etrace_graph_executor import ETraceGraphExecutor
-# input data
 from ._etrace_input_data import SingleStepData, MultiStepData
-# operators
-from ._etrace_operators import (
-    ETraceOp,
-    MatMulOp,
-    ElemWiseOp,
-    ConvOp,
-    SpMatMulOp,
-    LoraOp,
-    general_y2w,
-    stop_param_gradients,
+from ._etrace_op import (
+    ETPPrimitive,
+    ETPPrimitiveSpec,
+    matmul,
+    element_wise,
+    conv,
+    sparse_matmul,
+    lora_matmul,
+    register_primitive,
+    register_primitive_spec,
+    get_primitive_spec,
 )
 from ._etrace_vjp import (
     ETraceVjpAlgorithm,
@@ -66,11 +61,8 @@ from ._etrace_vjp import (
     IODimVjpAlgorithm,
     ES_D_RTRL,
     pp_prop,
-    HybridDimVjpAlgorithm,
 )
-# gradient utilities
 from ._grad_exponential import GradExpon
-# errors
 from ._misc import NotSupportedError, CompilationError
 from ._version import __version__, __version_info__
 
@@ -89,24 +81,20 @@ __all__ = [
     'IODimVjpAlgorithm',
     'ES_D_RTRL',
     'pp_prop',
-    'HybridDimVjpAlgorithm',
 
-    # concepts
-    'ETraceParam',
-    'NonTempParam',
-    'ElemWiseParam',
-    'FakeETraceParam',
-    'FakeElemWiseParam',
+    # ETP primitives (user API)
+    'matmul',
+    'element_wise',
+    'conv',
+    'sparse_matmul',
+    'lora_matmul',
 
-    # operators
-    'ETraceOp',
-    'MatMulOp',
-    'ElemWiseOp',
-    'ConvOp',
-    'SpMatMulOp',
-    'LoraOp',
-    'general_y2w',
-    'stop_param_gradients',
+    # ETP primitive class & rule registration
+    'ETPPrimitive',
+    'ETPPrimitiveSpec',
+    'register_primitive',
+    'register_primitive_spec',
+    'get_primitive_spec',
 
     # input data
     'SingleStepData',
@@ -130,6 +118,11 @@ __all__ = [
     'add_hidden_perturbation_from_minfo',
     'add_hidden_perturbation_in_module',
 
+    # compiler diagnostics
+    'CompilationRecord',
+    'DiagnosticKind',
+    'DiagnosticLevel',
+
     # gradient utilities
     'GradExpon',
 
@@ -140,25 +133,3 @@ __all__ = [
     # submodules
     'nn',
 ]
-
-
-def __getattr__(name):
-    mapping = {
-        'ETraceState': 'HiddenState',
-        'ETraceGroupState': 'HiddenGroupState',
-        'ETraceTreeState': 'HiddenTreeState',
-    }
-
-    if name in mapping:
-        import warnings
-        import brainstate
-
-        warnings.warn(
-            f"braintrace.{name} is deprecated and will be removed in a future release. "
-            f"Please use brainstate.{mapping[name]} instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        return getattr(brainstate, mapping[name])
-    raise AttributeError(name)

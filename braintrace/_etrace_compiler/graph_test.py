@@ -18,7 +18,7 @@ import unittest
 from pprint import pprint
 
 import brainstate
-import brainunit as u
+import saiunit as u
 
 import braintrace
 from braintrace._etrace_model_test import (
@@ -53,6 +53,9 @@ class TestCompileGraphRNN(unittest.TestCase):
 
         param_states = gru.states(brainstate.ParamState)
         self.assertTrue(len(param_states) == 3)
+        # Only Wz and Wh feed directly into h. Wr's output reaches h only via
+        # Wh's matmul (another non-gradient-enabled ETP primitive), so ETP
+        # cannot record it as a temporal relation without double-counting.
         self.assertTrue(len(graph.hidden_param_op_relations) == 2)
 
         pprint(graph)
@@ -169,6 +172,11 @@ class TestCompileGraphRNN(unittest.TestCase):
                 self.assertTrue(set(relation.connected_hidden_paths) == layer2_hiddens)
 
     def test_lru_two_layers_v2(self):
+        # Variant where input and output sizes match. The forward BFS from
+        # layer-0 output ops (C_re/C_im/D) toward layer-2 hiddens crosses
+        # layer-2's B_re/B_im matmuls — another non-gradient-enabled ETP
+        # primitive — and is therefore blocked. Layer-0 output ops correctly
+        # retain only their layer-1 hidden connections.
         n_in = 4
         n_out = 4
 

@@ -17,15 +17,20 @@ from functools import partial
 from typing import Dict, Tuple, Optional, Sequence
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 
 from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
-from braintrace._etrace_concepts import ElemWiseParam
-from braintrace._etrace_operators import ETraceOp
-from braintrace._misc import etrace_param_key, etrace_df_key
+from braintrace._etrace_op import (
+    etp_elemwise_p,
+    ETP_RULES_YW_TO_W,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_INIT_DRTRL,
+    is_batched_primitive,
+)
+from braintrace._misc import etrace_df_key
 from braintrace._typing import (
     PyTree,
     WeightID,
@@ -38,7 +43,13 @@ from braintrace._typing import (
     dG_Weight,
 )
 from .base import ETraceVjpAlgorithm
-from .misc import _reset_state_in_a_dict, _batched_zeros_like, _sum_dim, _update_dict
+from .misc import (
+    _extract_leaf,
+    _reset_state_in_a_dict,
+    _route_grads_by_path,
+    _sum_dim,
+    _update_dict,
+)
 
 __all__ = [
     'ParamDimVjpAlgorithm',
@@ -47,51 +58,33 @@ __all__ = [
 
 
 def _init_param_dim_state(
-    mode: brainstate.mixin.Mode,
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State],
     relation: HiddenParamOpRelation
 ):
     """
     Initialize the eligibility trace states for parameter dimensions.
 
-    This function sets up the eligibility trace states for the weights and
-    differential functions (df) associated with a given relation. It assumes
-    that the batch size is the first dimension of the output shape if batching
-    is enabled.
-
-    Args:
-        mode (brainstate.mixin.Mode): The mode indicating whether batching is enabled.
-        etrace_bwg (Dict[ETraceWG_Key, brainstate.State]): A dictionary to store the
-            eligibility trace states, keyed by a unique identifier for each
-            weight group.
-        relation (HiddenParamOpRelation): The relation object containing
-            information about the weights and hidden groups involved in the
-            computation.
-
-    Raises:
-        ValueError: If a relation with the same key has already been added to
-            the eligibility trace states.
+    Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
+    trainable-input names (dict-based rule API).
     """
-    # For the relation
-    #
-    #   h1, h2, ... = f(x, w)
-    #
-    # we need to initialize the eligibility trace states for the weight x and the df.
-
-    # TODO: assume the batch size is the first dimension
-    y_shape = relation.y.aval.shape
-    batch_size = y_shape[0] if mode.has(brainstate.mixin.Batching) else None
     for group in relation.hidden_groups:
         group: HiddenGroup
-        bwg_key = etrace_param_key(relation.path, relation.y, group.index)
-        if bwg_key in etrace_bwg:  # The key should be unique
+        bwg_key = (id(relation.y_var), group.index)
+        if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
-        etrace_bwg[bwg_key] = EligibilityTrace(
-            jax.tree.map(
-                partial(_batched_zeros_like, batch_size, group.num_state),
-                relation.weight.value
-            )
+        init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
+        init_val = init_fn(
+            relation.x_var,
+            relation.y_var,
+            relation.trainable_vars,
+            group.num_state,
         )
+        if not isinstance(init_val, dict):
+            raise TypeError(
+                f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
+                f'got {type(init_val).__name__}.'
+            )
+        etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
 
 def _update_param_dim_etrace_scan_fn(
@@ -103,7 +96,6 @@ def _update_param_dim_etrace_scan_fn(
     ],
     weight_path_to_vals: Dict[Path, PyTree],
     hidden_param_op_relations,
-    mode: brainstate.mixin.Mode,
     normalize_matrix_spectrum: bool = False,
 ):
     """
@@ -166,125 +158,69 @@ def _update_param_dim_etrace_scan_fn(
     for relation in hidden_param_op_relations:
         relation: HiddenParamOpRelation
 
-        #
-        # Step 1:
-        #
-        # Necessary information for the etrace computation
-        #
-        # 1. the etrace operation for computing etrace updates
-        # 2. the weight information
-        # 3. the operator information
-        #
-        weight_path = relation.path
-        weight_val = weight_path_to_vals[weight_path]
-        etrace_op: ETraceOp = relation.weight.op
-        if isinstance(relation.weight, ElemWiseParam):
+        # Build the weights dict the rules consume.
+        weights_dict = {
+            key: _extract_leaf(
+                weight_path_to_vals[relation.trainable_paths[key]],
+                relation.trainable_leaf_indices[key],
+            )
+            for key in relation.trainable_vars
+        }
+
+        xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
+        yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
+        eqn_params = relation.eqn_params
+        is_elemwise = relation.primitive is etp_elemwise_p
+        batched = is_batched_primitive(relation.primitive)
+
+        if is_elemwise:
             x = None
         else:
-            x = etrace_xs_at_t[id(relation.x)]
+            x = etrace_xs_at_t[id(relation.x_var)]
 
-        def comp_dw_with_x(x_, df_):
-            """
-            Computes the vector-Jacobian product (VJP) of the output with respect to the weight parameter.
+        def _call_xy_to_dw_dict(x_, df_, weights_, _rule=xy_to_dw_rule, _params=eqn_params):
+            return _rule(x_, df_, weights_, **_params)
 
-            Args:
-                x_: The input to the weight operation (can be None for element-wise parameters).
-                df_: The cotangent (adjoint) vector for the output, used in the VJP computation.
+        def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
+            return _rule(d, trace_, **_params)
 
-            Returns:
-                The VJP result, representing the gradient of the output with respect to the weight,
-                contracted with the provided cotangent vector.
-            """
-
-            def to_y(w):
-                # Returns the mantissa (unitless value) of the output of the weight operation.
-                return u.get_mantissa(etrace_op.xw_to_y(x_, w))
-
-            # Compute the VJP of to_y with respect to weight_val, evaluated at df_.
-            return jax.vjp(to_y, weight_val)[1](df_)[0]
+        def comp_dw_with_x(x_, df_, _wdict=weights_dict):
+            return _call_xy_to_dw_dict(x_, df_, _wdict)
 
         @partial(jax.vmap, in_axes=-1, out_axes=-1)
-        def comp_dw_without_x(df_):
-            """
-            Vectorized version of fn_dw for cases where x is not None.
-
-            If batching is enabled, applies fn_dw over the batch dimension using jax.vmap.
-            Otherwise, applies fn_dw directly.
-
-            Args:
-                df_: The cotangent (adjoint) vector for the output, used in the VJP computation.
-
-            Returns:
-                The VJP result(s) for the provided df_.
-            """
-            if mode.has(brainstate.mixin.Batching):
-                return jax.vmap(comp_dw_with_x)(x, df_)
+        def comp_dw_without_x(df_, _x=x, _batched=batched):
+            if _batched:
+                return jax.vmap(comp_dw_with_x)(_x, df_)
             else:
-                return comp_dw_with_x(x, df_)
+                return comp_dw_with_x(_x, df_)
 
         for group in relation.hidden_groups:
             group: HiddenGroup
 
-            #
-            # Step 2:
-            #
-            # compute the current step weight gradients:
-            #
-            #       \partial h^t / \partial W^t = vjp(f(x, w))(df)
-            #
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
-            # jax.debug.print('df = {g}', g=jax.tree.map(lambda x: jnp.abs(x).max(), df))
 
-            #
-            # vmap over the different hidden states,
-            #
-            # x: (n_input, ..., )
-            # df: (n_hidden, ..., n_state)
-            # phg_to_pw: (n_param, ..., n_state)
+            # phg_to_pw is a Dict[str, Array].
             phg_to_pw = comp_dw_without_x(df)
             phg_to_pw = jax.tree.map(_normalize_vector, phg_to_pw)
-            # jax.debug.print('phg_to_pw = {g}', g=jax.tree.map(lambda x: jnp.abs(x).max(), phg_to_pw))
 
-            #
-            # Step 3:
-            #
-            # computing the following vector-Jacobian product:
-            #  ϵ^t_{pre} = D_h ⊙ ϵ^{t-1}
-            #
-            # i.e., the hidden-to-hidden Jacobian diagonal matrix * the hidden df at the previous time step
-            #
-            #  ∂V^t/∂θ1 = ∂V^t/∂V^t-1 * ∂V^t-1/∂θ1 + ∂V^t/∂a^t-1 * ∂a^t-1/∂θ1 + ...
-            #
-            w_key = etrace_param_key(weight_path, relation.y, group.index)
+            w_key = (id(relation.y_var), group.index)
             diag = hid_group_jacobians[group.index]
 
-            #
-            # vmap over j, over the different hidden states \partial h_i^t / \partial h_j^t
-            #
-            # d: (n_hidden, ..., [n_state])
-            # old_bwg: (n_param, ..., [n_state])
-            old_bwg = hist_etrace_vals[w_key]
-            fn_bwg_pre = lambda d: _sum_dim(
-                jax.vmap(etrace_op.yw_to_w, in_axes=-1, out_axes=-1)(d, old_bwg), axis=-1
-            )
-            if isinstance(relation.weight, ElemWiseParam) and mode.is_a(brainstate.mixin.Batching):
-                raise NotImplementedError
+            old_bwg = hist_etrace_vals[w_key]   # Dict[str, Array]
 
-            #
-            # vmap over i, over the different hidden states \partial h_i^t / \partial h_j^t
-            #
-            # diag: (n_hidden, ..., [n_state], n_state)
-            # old_bwg: (n_param, ..., n_state)
-            # new_bwg_pre: (n_param, ..., n_state)
+            fn_bwg_pre = lambda d, _old=old_bwg: jax.tree.map(
+                lambda arr: _sum_dim(arr, axis=-1),
+                jax.vmap(
+                    _call_yw_to_w_dict, in_axes=-1, out_axes=-1,
+                )(d, _old),
+            )
+
             new_bwg_pre = jax.vmap(fn_bwg_pre, in_axes=-2, out_axes=-1)(diag)
 
-            #
-            # Step 4:
-            #
-            # update: eligibility trace * hidden diagonal Jacobian + new hidden df
-            #        ϵ^t = ϵ^t_{pre} + df^t, where D_h is the hidden-to-hidden Jacobian diagonal matrix.
-            #
-            new_bwg = jax.tree.map(u.math.add, new_bwg_pre, phg_to_pw, is_leaf=u.math.is_quantity)
+            # new_bwg_pre + phg_to_pw per-leaf.
+            new_bwg = jax.tree.map(
+                u.math.add, new_bwg_pre, phg_to_pw, is_leaf=u.math.is_quantity,
+            )
             if normalize_matrix_spectrum:
                 new_bwg = jax.tree.map(_normalize_vector, new_bwg)
             new_etrace_bwg[w_key] = new_bwg
@@ -332,7 +268,7 @@ def _solve_param_dim_weight_gradients(
     dG_weights: Dict[Path, dG_Weight],  # weight gradients
     dG_hidden_groups: Sequence[jax.Array],  # hidden group gradients
     weight_hidden_relations: Sequence[HiddenParamOpRelation],
-    mode: brainstate.mixin.Mode,
+    weight_vals: Dict[Path, PyTree],  # current ParamState pytree values for structure
 ):
     """
     Compute and update the weight gradients for parameter dimensions using eligibility trace data.
@@ -356,60 +292,51 @@ def _solve_param_dim_weight_gradients(
         None: The function updates the dG_weights dictionary in place with the computed weight gradients.
     """
     # update the etrace weight gradients
-    temp_data = dict()
+    temp_data: Dict[Path, PyTree] = dict()
     for relation in weight_hidden_relations:
+        yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
+        eqn_params = relation.eqn_params
+        batched = is_batched_primitive(relation.primitive)
 
-        #
-        # Step 1:
-        #
-        # Necessary information for the etrace computation
-        #
-        # 1. the etrace operation for computing etrace updates
-        # 2. the weight information
-        # 3. the operator information
-        #
-        weight_path = relation.path
-        etrace_op: ETraceOp = relation.weight.op
-        yw_to_w = jax.vmap(etrace_op.yw_to_w) if mode.has(brainstate.mixin.Batching) else etrace_op.yw_to_w
+        def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
+            return _rule(d, trace_, **_params)
+
+        yw_to_w = (
+            jax.vmap(_call_yw_to_w_dict)
+            if batched
+            else _call_yw_to_w_dict
+        )
 
         for group in relation.hidden_groups:
             group: HiddenGroup
 
-            #
-            # Step 2:
-            #
-            # compute the weight gradients:
-            #
-            #   dE/dW = dE/dH * dH/dW, computing the final weight gradients
-            #
-            w_key = etrace_param_key(weight_path, relation.y, group.index)
-            etrace_data = hist_etrace_data[w_key]
+            w_key = (id(relation.y_var), group.index)
+            etrace_data = hist_etrace_data[w_key]   # Dict[str, Array]
             dg_hidden = dG_hidden_groups[group.index]
-            # dimensionless processing
-            etrace_data, fn_unit_restore = _remove_units(etrace_data)
-            dg_hidden, _ = _remove_units(dg_hidden)
 
-            #
-            # etrace_data: [n_batch, n_param, ..., n_state]
-            #               or,
-            #              [n_param, ..., n_state]
-            # dg_hidden:   [n_batch, n_hidden, ..., n_state]
-            #               or,
-            #              [n_hidden, ..., n_state]
-            dg_weight = _sum_dim(
-                jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(dg_hidden, etrace_data)
+            # dimensionless processing (unit strip + restore). Apply per-leaf.
+            etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
+            dg_hidden_unitless, _ = _remove_units(dg_hidden)
+
+            # dg_weight_dict: Dict[str, Array]
+            dg_weight_dict = jax.tree.map(
+                lambda arr: _sum_dim(arr, axis=-1),
+                jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(
+                    dg_hidden_unitless, etrace_data_unitless
+                ),
             )
-            # unit restoration
-            dg_weight = fn_unit_restore(dg_weight)
+            dg_weight_dict = fn_unit_restore(dg_weight_dict)
 
-            # update the weight gradients
-            _update_dict(temp_data, weight_path, dg_weight)
+            # Route per-key to owning ParamState path.
+            _route_grads_by_path(relation, dg_weight_dict, weight_vals, temp_data)
 
     #
     # Step 3:
     #
     # sum up the batched weight gradients
-    if mode.has(brainstate.mixin.Batching):
+    # Check if ANY relation uses a batched primitive
+    has_batched = any(is_batched_primitive(r.primitive) for r in weight_hidden_relations)
+    if has_batched:
         for key, val in temp_data.items():
             temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
 
@@ -504,20 +431,11 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     def __init__(
         self,
         model: brainstate.nn.Module,
-        mode: Optional[brainstate.mixin.Mode] = None,
         name: Optional[str] = None,
-        vjp_method: str = 'single-step'
+        vjp_method: str = 'single-step',
+        **kwargs,
     ):
         super().__init__(model, name=name, vjp_method=vjp_method)
-
-        # computing mode
-        if mode is None:
-            self.mode = brainstate.environ.get('mode', brainstate.mixin.Mode())
-        else:
-            self.mode = mode
-        assert isinstance(self.mode, brainstate.mixin.Mode), (
-            f'The mode should be an instance of brainstate.mixin.Mode. But we got {self.mode}.'
-        )
 
     def init_etrace_state(self, *args, **kwargs):
         """
@@ -529,7 +447,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # The states of batched weight gradients
         self.etrace_bwg = dict()
         for relation in self.graph.hidden_param_op_relations:
-            _init_param_dim_state(self.mode, self.etrace_bwg, relation)
+            _init_param_dim_state(self.etrace_bwg, relation)
 
     def reset_state(self, batch_size: int = None, **kwargs):
         """
@@ -559,14 +477,15 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         etraces = dict()
         for relation in self.graph.hidden_param_op_relations:
             relation: HiddenParamOpRelation
-            if id(relation.weight) != weight_id:
+            primary_state = next(iter(relation.trainable_param_states.values()), None)
+            if primary_state is None or id(primary_state) != weight_id:
                 continue
             find_this_weight = True
 
             # retrieve the etrace data
             for group in relation.hidden_groups:
                 group: HiddenGroup
-                key = etrace_param_key(relation.path, relation.y, group.index)
+                key = (id(relation.y_var), group.index)
                 etraces[key] = self.etrace_bwg[key].value
 
         if not find_this_weight:
@@ -662,7 +581,6 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             _update_param_dim_etrace_scan_fn,
             weight_path_to_vals=weight_vals,
             hidden_param_op_relations=self.graph.hidden_param_op_relations,
-            mode=self.mode,
         )
 
         if input_is_multi_step:
@@ -735,7 +653,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             dG_weights,
             dl_to_hidden_groups,
             self.graph.hidden_param_op_relations,
-            self.mode,
+            weight_vals,
         )
 
         # update the non-etrace weight gradients

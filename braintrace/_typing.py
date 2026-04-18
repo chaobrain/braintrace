@@ -15,7 +15,7 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Dict, Sequence, Union, FrozenSet, List, Tuple
+from typing import Dict, Sequence, Union, FrozenSet, List, Tuple, Any
 
 import brainstate
 import jax
@@ -28,6 +28,7 @@ DTypeLike = brainstate.typing.DTypeLike
 
 # --- types --- #
 PyTree = brainstate.typing.PyTree
+PyTree = Any
 StateID = int
 WeightID = int
 Size = brainstate.typing.Size

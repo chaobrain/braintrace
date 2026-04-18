@@ -21,6 +21,11 @@ from typing import Dict, Sequence, Tuple, Optional, NamedTuple
 import brainstate
 import jax
 
+from .diagnostics import (
+    CompilationRecord,
+    DiagnosticKind,
+    diagnostic_context,
+)
 from .hid_param_op import (
     find_hidden_param_op_relations_from_minfo,
     HiddenParamOpRelation,
@@ -73,8 +78,8 @@ class ETraceGraph(NamedTuple):
     The overall compiled graph for the eligibility trace.
 
     The eligibility trace graph, tracking the relationship between the etrace weights
-    :py:class:`ETraceParam`, the etrace variables :py:class:`ETraceState`, and the etrace
-    operations :py:class:`ETraceOp`.
+    ParamState, the etrace variables HiddenState, and the etrace
+    operations :pyETP primitives.
 
     The following fields are included:
 
@@ -101,6 +106,32 @@ class ETraceGraph(NamedTuple):
     hid_path_to_group: Dict[Path, HiddenGroup]
     hidden_param_op_relations: Sequence[HiddenParamOpRelation]
     hidden_perturb: HiddenPerturbation | None
+    diagnostics: Tuple[CompilationRecord, ...] = ()
+
+    def explain(
+        self,
+        *,
+        weight_path: Optional[Path] = None,
+        hidden_path: Optional[Path] = None,
+        kind: Optional[DiagnosticKind] = None,
+    ) -> Tuple[CompilationRecord, ...]:
+        """Return compilation records filtered by weight path, hidden path, or kind.
+
+        ``weight_path`` and ``hidden_path`` match the record's ``weight_path``
+        exactly and ``hidden_paths`` membership respectively. ``kind`` matches
+        ``CompilationRecord.kind``. All are optional; with no filters the full
+        diagnostic log is returned.
+        """
+        result = []
+        for record in self.diagnostics:
+            if weight_path is not None and record.weight_path != weight_path:
+                continue
+            if hidden_path is not None and hidden_path not in record.hidden_paths:
+                continue
+            if kind is not None and record.kind is not kind:
+                continue
+            result.append(record)
+        return tuple(result)
 
     def call_hidden_perturb(
         self,
@@ -191,8 +222,8 @@ def compile_etrace_graph(
 
     This is the most important method for the eligibility trace graph. It builds the
     graph for the model, tracking the relationship between the etrace weights
-    :py:class:`ETraceParam`, the etrace sattes :py:class:`ETraceState`, and the etrace
-    operations :py:class:`ETraceOp`, which will be used for computing the weight
+    ParamState, the etrace state HiddenState, and the etrace
+    operations ETP primitives, which will be used for computing the weight
     spatial gradients, the hidden state Jacobian, and the hidden state-weight Jacobian.
 
     This function is crucial for building the eligibility trace graph, which tracks the
@@ -211,7 +242,7 @@ def compile_etrace_graph(
         hidden parameter operation relations, and optional hidden perturbations.
     """
 
-    with compiler_context('compile_graph'):
+    with compiler_context('compile_graph'), diagnostic_context() as reporter:
 
         assert isinstance(model_args, tuple)
         minfo = extract_module_info(model, *model_args)
@@ -240,8 +271,8 @@ def compile_etrace_graph(
 
         # all weight x (deduplicate while preserving insertion order)
         out_wx_jaxvars = list(dict.fromkeys(
-            relation.x for relation in hidden_param_op_relations
-            if relation.x is not None
+            relation.x_var for relation in hidden_param_op_relations
+            if relation.x_var is not None
         ))
 
         # all y-to-hidden vars (deduplicate while preserving insertion order)
@@ -289,4 +320,5 @@ def compile_etrace_graph(
             hid_path_to_group=hid_path_to_group,
             hidden_param_op_relations=hidden_param_op_relations,
             hidden_perturb=hidden_perturb,
+            diagnostics=reporter.records(),
         )

@@ -13,155 +13,181 @@
 # limitations under the License.
 # ==============================================================================
 
+"""Primitive-based weight-to-hidden-state relation discovery.
 
-import warnings
-from typing import List, Dict, Tuple, Sequence, NamedTuple, Any
+Replaces the old name-matching approach with direct primitive type checking
+in the Jaxpr. The compiler:
+
+1. Walks the Jaxpr (descending into ``jit``/``pjit``, ``scan``, ``while``,
+   ``cond`` bodies) and collects equations whose primitive is registered
+   as ETP (``eqn.primitive in ETP_PRIMITIVES``).
+2. For each such equation, traces the weight invar backward to the
+   originating ``ParamState`` (handling pytree leaves, masks, weight_fn
+   chains).
+3. Traces forward from the primitive output to find reachable hidden-state
+   outvars and classifies each (weight, hidden) candidate path as
+   ``ALL_DIRECT`` / ``ALL_THROUGH_OTHER_ETP`` / ``MIXED``.
+4. Builds a transition Jaxpr ``y -> h`` for each connected hidden group,
+   stopping at non-gradient-enabled ETP boundaries so the tail is
+   non-parametric.
+
+The algorithm is deterministic: every set-typed traversal is replaced
+with insertion-ordered ``dict`` so the relation order is stable across
+runs of the same model.
+"""
+
+from collections import deque
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 import brainstate
-import jax.core
-from brainstate.transform import jaxpr_to_python_code
-from jax.extend import source_info_util
+import jax
 
 from braintrace._compatible_imports import (
+    Primitive,
     Var,
     Literal,
     JaxprEqn,
     Jaxpr,
+    is_jit_primitive,
+    is_scan_primitive,
+    is_while_primitive,
+    is_cond_primitive,
 )
-from .base import (
-    JaxprEvaluation,
-    check_unsupported_op,
-    find_matched_vars,
+from braintrace._etrace_op import (
+    ETP_PRIMITIVES,
+    get_primitive_spec,
+    is_etp_primitive,
+    is_etp_enable_gradient_primitive,
 )
-from .hidden_group import (
-    HiddenGroup,
-    find_hidden_groups_from_minfo,
-)
-from .module_info import (
-    extract_module_info,
-    ModuleInfo,
-)
-from braintrace._etrace_concepts import ETraceParam
-from braintrace._etrace_operators import (
-    is_etrace_op,
-    is_etrace_op_enable_gradient,
-    is_etrace_op_elemwise,
-)
-from braintrace._misc import (
-    git_issue_addr,
-    NotSupportedError,
-    CompilationError,
-)
+from braintrace._misc import git_issue_addr
 from braintrace._typing import (
-    WeightXVar,
-    WeightYVar,
-    HiddenInVar,
+    Path,
     HiddenOutVar,
-    Path
 )
+from .diagnostics import (
+    DiagnosticKind,
+    DiagnosticLevel,
+    emit,
+)
+from .hidden_group import HiddenGroup, find_hidden_groups_from_minfo
+from .module_info import ModuleInfo, extract_module_info
 
 __all__ = [
     'HiddenParamOpRelation',
+    'PathClassification',
     'find_hidden_param_op_relations_from_minfo',
     'find_hidden_param_op_relations_from_module',
 ]
 
-_SENTINEL = object()  # sentinel to distinguish "not provided" from explicit None
 
+# ---------------------------------------------------------------------------
+# Path classification
+# ---------------------------------------------------------------------------
 
-# TODO
-#
-# - [x] The visualization of the etrace graph.
-# - [ ] Evaluate whether the `df` is the same for different weights.
-#       For example,
-#
-#          h = f(x1 @ w1 + x2 @ w2)
-#
-#       The `df` for w1 and w2 are the same, although them have the different weight y.
+class PathClassification:
+    """Three-way classification of paths from ``y`` to a hidden outvar.
 
-class HiddenParamOpRelation(NamedTuple):
-    r"""
-    The data structure for recording the hidden group, parameter, and operator relationship.
-
-    This is one of the most important data structures for the eligibility trace compiler.
-    It summarizes the parameter, operator, and hidden group relationship, which is used for computing
-    the weight spatial gradients and the hidden state Jacobian.
-
-    Usually, the hidden state $h^t$, the weight $\theta$, and the operator $f$ are connected in the following way:
-
-    $$
-    h^t = f(y), \quad y = x @ \theta,
-    $$
-
-    where $x$ is the input data, $\theta$ is the weight, $y$ is the weight output,
-    and $h^t$ is the hidden state at time $t$. The operator $@$ is the operator that transforms
-    the input data $x$ into the weight output $y$. The operator $f$ is the operator that transforms
-    the weight output $y$ into the hidden state $h^t$.
-
-
-    An instance of :py:class:`HiddenParamOpRelation` records the following information:
-
-    - ``weight``: the instance of :class:`ETraceParam`, i.e., $\theta$
-    - ``path``: the path to the weight.
-    - ``x``: the jax Var for the weight input, i.e., $x$. It can be None if the weight is a :class:`ElemWiseParam` instance.
-    - ``y``: the jax Var for the weight output, i.e., $y$.
-    - ``hidden_groups``: the hidden groups that the weight is associated with, i.e., $h^t$.
-    - ``y_to_hidden_group_jaxprs``: the jaxpr for computing y --> hidden groups, i.e., $f$.
-    - ``connected_hidden_paths``: the connected hidden paths.
-
-    .. note::
-
-        :py:class:`HiddenParamOpRelation` is uniquely identified by the ``y`` variable.
-
-        Each parameter weight may be accompanied by multiple :class:`HiddenParamOpRelation` instances.
-        This is because the weight may be used in multiple times.
-
-    Example::
-
-        >>> import braintrace
-        >>> import brainstate
-        >>> gru = braintrace.nn.GRUCell(10, 20)
-        >>> gru.init_state()
-        >>> inputs = brainstate.random.randn(10)
-        >>> hpo_relations = braintrace.find_hidden_param_op_relations_from_module(gru, inputs)
-        >>> for relation in hpo_relations:
-        ...     print(relation)
+    Used to decide whether a (weight, hidden) candidate is registered as a
+    relation and which structured diagnostic to emit.
     """
 
-    weight: ETraceParam  # the weight itself
-    path: Path  # the path to the weight
-    x: WeightXVar | None  # the input jax var, None if the weight is ElemWiseParam
-    y: WeightYVar  # the output jax var
-    hidden_groups: List[HiddenGroup]  # the hidden groups that the weight is associated with
-    y_to_hidden_group_jaxprs: List[Jaxpr]  # the jaxpr for computing y --> hidden groups
-    connected_hidden_paths: List[Path]  # the connected hidden paths
+    #: Every path from ``y`` to ``h`` avoids any other non-gradient-enabled
+    #: ETP primitive. Relation included; emit ``RELATION_INCLUDED``.
+    ALL_DIRECT = 'all_direct'
 
-    def y_to_hidden_groups(
-        self,
-        y_val: jax.Array,
-        const_vals: Dict[Var, jax.Array],
-        concat_hidden_vals: bool = True
-    ):
-        """
-        Computing the hidden groups from the weight output.
+    #: Every path from ``y`` to ``h`` traverses another non-gradient-enabled
+    #: ETP primitive. Relation excluded; emit
+    #: ``RELATION_EXCLUDED_WEIGHT_TO_WEIGHT``.
+    ALL_THROUGH_OTHER_ETP = 'all_through_other_etp'
 
-        Args:
-            y_val: The value of the weight output.
-            const_vals: The constant values for the jax variables.
-            concat_hidden_vals: Whether to concatenate the hidden values.
+    #: Some paths are direct and some traverse another ETP primitive. The
+    #: relation is still registered (preserving prior behavior) but
+    #: ``RELATION_PARTIAL_PATH`` is emitted at INFO level so callers know
+    #: the gradient bookkeeping is only partially captured by ETP.
+    MIXED = 'mixed'
 
-        Returns:
-            The hidden states.
-        """
+
+# ---------------------------------------------------------------------------
+# Public data structure
+# ---------------------------------------------------------------------------
+
+class HiddenParamOpRelation(NamedTuple):
+    r"""Connection between an ETP primitive, its trainable parameters, and hidden states.
+
+    Records the structural relationship:
+
+    .. math::
+        h^t = f(y), \quad y = \text{primitive}(x, \theta)
+
+    Attributes:
+        primitive: The JAX primitive (``etp_mm_p``, ``etp_mv_p``, etc.).
+        x_var: Jaxpr ``Var`` for the input (``None`` for element-wise ops).
+        y_var: Jaxpr ``Var`` for the primitive output.
+        hidden_groups: Hidden groups that this op feeds into.
+        y_to_hidden_group_jaxprs: Transition Jaxpr from *y* to each hidden group.
+        connected_hidden_paths: Hidden-state paths connected to this op.
+        eqn_params: Static parameters of the primitive equation.
+        path_classification: ``{hidden_path: PathClassification.*}`` for each
+            connected hidden state. Populated by the path-classification pass.
+        trainable_vars: Per-key dict mapping a primitive-chosen key name
+            (e.g. ``'weight'``, ``'bias'``, ``'lora_b'``, ``'lora_a'``) to its
+            jaxpr ``Var``. Populated by the compiler with one entry per declared
+            trainable input.
+        trainable_paths: Per-key dict mapping each key to the owning
+            ``ParamState``'s module path. When the primitive has two keys
+            whose invars trace to the same ``ParamState`` (e.g. merged
+            ``{weight, bias}`` Linear), the entries share a path.
+        trainable_leaf_indices: Per-key dict mapping each key to the leaf
+            index in ``jax.tree.leaves`` of the owning ``ParamState``.
+        trainable_param_states: Per-key dict mapping each key to the actual
+            ``ParamState`` object.
+        trainable_processing_chains: Per-key dict mapping each key to the
+            backward-trace processing chain (primitives traversed from the
+            trainable invar back to the originating ``ParamState`` invar).
+    """
+    primitive: Primitive
+    x_var: Optional[Var]
+    y_var: Var
+    hidden_groups: List[HiddenGroup]
+    y_to_hidden_group_jaxprs: List[Jaxpr]
+    connected_hidden_paths: List[Path]
+    eqn_params: dict
+    path_classification: Dict[Path, str] = {}
+    trainable_vars: Dict[str, Var] = {}
+    trainable_paths: Dict[str, Path] = {}
+    trainable_leaf_indices: Dict[str, int] = {}
+    trainable_param_states: Dict[str, brainstate.ParamState] = {}
+    trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
+
+    # backward compat aliases
+    @property
+    def x(self):
+        return self.x_var
+
+    @property
+    def y(self):
+        return self.y_var
+
+    @property
+    def path(self):
+        return next(iter(self.trainable_paths.values()), None)
+
+    def y_to_hidden_groups(self, y_val, const_vals, concat_hidden_vals=True):
+        """Evaluate transition jaxprs: y -> hidden group values."""
         vals_of_hidden_groups = []
         for jaxpr, group in zip(self.y_to_hidden_group_jaxprs, self.hidden_groups):
-            assert len(jaxpr.invars) == 1, 'The weight y should be unique.'
             consts = [const_vals[var] for var in jaxpr.constvars]
-            hidden_vals = jax.core.eval_jaxpr(
-                jaxpr,
-                consts,
-                y_val,
-            )
+            hidden_vals = jax.core.eval_jaxpr(jaxpr, consts, y_val)
             if concat_hidden_vals:
                 hidden_vals = group.concat_hidden(hidden_vals)
             vals_of_hidden_groups.append(hidden_vals)
@@ -171,645 +197,796 @@ class HiddenParamOpRelation(NamedTuple):
         return self._asdict()
 
     def __repr__(self) -> str:
-        return repr(brainstate.util.PrettyMapping(self._asdict(), type_name=self.__class__.__name__))
+        return repr(
+            brainstate.util.PrettyMapping(
+                self._asdict(), type_name=self.__class__.__name__
+            )
+        )
 
 
 HiddenParamOpRelation.__module__ = 'braintrace'
 
 
-def _trace_simplify(
-    tracer: 'HiddenWeightOpTracer',
-    hid_path_to_group: Dict[Path, HiddenGroup],
-    state_id_to_path: Dict[int, Path],
-    outvar_to_hidden_path: Dict[Var, Path],
-) -> HiddenParamOpRelation | None:
-    """
-    Simplifying the trace from the weight output to the hidden state.
+# ---------------------------------------------------------------------------
+# Internal helpers — producer / consumer maps
+# ---------------------------------------------------------------------------
 
-    Args:
-        tracer: The traced weight operation.
-        hid_path_to_group: The mapping from the hidden state path to the hidden group.
-        state_id_to_path: The mapping from the state id to the state path.
-        outvar_to_hidden_path: The mapping from the output variable to the hidden state path.
+def _build_producer_map(jaxpr: Jaxpr) -> Dict[Var, JaxprEqn]:
+    """Map each variable to the equation that produces it."""
+    producers: Dict[Var, JaxprEqn] = {}
+    for eqn in jaxpr.eqns:
+        for v in eqn.outvars:
+            producers[v] = eqn
+    return producers
 
-    Returns:
-        The simplified traced weight operation.
-    """
 
-    # [First step]
-    # 
-    # Finding out how the shape of each hidden state is converted to the size of df.
-    y = tracer.y
-    connected_hidden_vars = []
-    connected_hidden_paths = []
-    for hidden_var in list(tracer.hidden_vars):
-        # The direct way to check whether the shapes of "y" and "hidden var" are the same is
-        # using "identity()" function. However, there may be bugs, for examples, the output is
-        # reshaped to the same shape as the hidden state, or, the split and concatenate operators
-        # are used while the shapes are the same between the outputs and hidden states.
-        #
-        # The most safe way is using automatic shape inverse transformation.
-        # However, the automatic inverse transformation may also cause errors, for example, if the following
-        # operators are used:
-        #     def f(a):
-        #         s = jnp.sum(a, axis=[1,2], keepdims=True)
-        #         return a / s
-        #
-        # this will result in the following jaxpr:
-        #     { lambda ; a:f32[10,20,5]. let
-        #         b:f32[10] = reduce_sum[axes=(1, 2)] a
-        #         c:f32[10,1,1] = broadcast_in_dim[broadcast_dimensions=(0,) shape=(10, 1, 1)] b
-        #         d:f32[10,20,5] = div a c
-        #       in (d,) }
-        #
-        # It seems that the automatic shape inverse transformation is complex for handling such cases.
-        #
-        # Therefore, currently, we only consider the simple cases, and raise an error for the complex cases.
+def _build_consumer_map(jaxpr: Jaxpr) -> Dict[Var, List[JaxprEqn]]:
+    """Map each variable to the equations that consume it."""
+    consumers: Dict[Var, List[JaxprEqn]] = {}
+    for eqn in jaxpr.eqns:
+        for v in eqn.invars:
+            if isinstance(v, Var):
+                consumers.setdefault(v, []).append(eqn)
+    return consumers
 
-        try:
-            jax.numpy.broadcast_shapes(y.aval.shape, hidden_var.aval.shape)
-            connected_hidden_paths.append(outvar_to_hidden_path[hidden_var])
-            connected_hidden_vars.append(hidden_var)
-        except ValueError:
-            msg = (
-                f'\n'
-                f'In your computational graph, we found ETraceParam {tracer.weight_path} is connected '
-                f'with hidden state {outvar_to_hidden_path[hidden_var]}.\n'
-                f'Our online learning is only applied to the case of: h^t = f(y), y = x @ w, '
-                f'where y has the broadcastable shape with h^t. \n'
-                f'while we found the shape of y is {y.aval.shape} and the shape of h^t is {hidden_var.aval.shape}.\n'
-                f'Therefore, we remove the connection between the weight {tracer.weight_path} and the hidden state '
-                f'{outvar_to_hidden_path[hidden_var]}.\n'
-                f'If you found this is a bug, please report an issue to the developers at {git_issue_addr}. \n'
-            )
-            warnings.warn(msg, UserWarning)
 
-    # [Second step]
-    # 
-    # check hidden states once again
-    tracer = tracer.replace(hidden_vars=connected_hidden_vars)
-    _post_check(tracer)
-    # if there are no connected-hidden paths, we return None
-    if len(connected_hidden_paths) == 0:
-        return None
+# ---------------------------------------------------------------------------
+# Spec dispatch — locate weight / x / y vars on a primitive equation
+# ---------------------------------------------------------------------------
 
-    # [Third step]
-    # 
-    # find out all hidden groups that this weight operation is associated with
-    hidden_group_ids = set()
-    connected_hidden_groups = []
-    for path in connected_hidden_paths:
-        group = hid_path_to_group[path]
-        if group.index not in hidden_group_ids:
-            hidden_group_ids.add(group.index)
-            connected_hidden_groups.append(group)
-
-    # [fourth step]
-    # 
-    # create the weight "y" to hidden groups jaxpr
-    # each hidden group has its own jaxpr
-    # 
-    # The key is to remove the unnecessary equations in the trace.
-    # 
-    # The unnecessary equations are the equations
-    # that do not contain the hidden states in one hidden group
-
-    tracer.invar_needed_in_oth_eqns.clear()
-    y_to_hid_group_jaxprs = []
-    for group in connected_hidden_groups:
-        group: HiddenGroup
-
-        # find the trace for this hidden group
-        new_trace = []
-        whole_trace_needed_vars = set(group.hidden_outvars)
-        visited_needed_vars = set()
-        for eqn in reversed(tracer.trace):
-            need_outvars = []
-            for outvar in eqn.outvars:
-                if outvar in whole_trace_needed_vars:
-                    need_outvars.append(outvar)
-            if len(need_outvars):
-                for outvar in need_outvars:
-                    visited_needed_vars.add(outvar)
-                new_trace.append(eqn)
-                whole_trace_needed_vars.update([invar for invar in eqn.invars if isinstance(invar, Var)])
-
-        # reverse the equations
-        equations = list(reversed(new_trace))
-
-        # Simplify the trace
-        visited_needed_vars.add(tracer.y)
-        jaxpr_opt = Jaxpr(
-            # the const vars are not the hidden states, they are
-            # intermediate data that are not used in the hidden states
-            constvars=list(whole_trace_needed_vars.difference(visited_needed_vars)),
-            # the invars are always the weight output
-            invars=[tracer.y],
-            # the outvars are always the connected hidden states of this weight
-            outvars=list(group.hidden_outvars),
-            # the new equations which are simplified
-            eqns=equations,
+def _resolve_eqn_trainable_invars(
+    eqn: JaxprEqn,
+) -> Dict[str, Var]:
+    """Return ``{key: invar_var}`` for every trainable input of *eqn*."""
+    primitive = eqn.primitive
+    spec = get_primitive_spec(primitive)
+    if spec is None:
+        raise RuntimeError(
+            f'ETP primitive {primitive.name} has no registered spec'
         )
-
-        # append the jaxpr to the list
-        y_to_hid_group_jaxprs.append(jaxpr_opt)
-
-    # [final step]
-    # 
-    # Change the "HiddenWeightOpTracer" to "HiddenParamOpRelation"
-    # 
-    return HiddenParamOpRelation(
-        weight=tracer.weight,
-        path=state_id_to_path[id(tracer.weight)],
-        x=tracer.x,
-        y=tracer.y,
-        hidden_groups=brainstate.util.PrettyList(connected_hidden_groups),
-        y_to_hidden_group_jaxprs=y_to_hid_group_jaxprs,
-        connected_hidden_paths=brainstate.util.PrettyList(connected_hidden_paths),
-    )
+    key_to_idx = spec.resolve_trainable_invars(eqn.params)
+    return {k: eqn.invars[i] for k, i in key_to_idx.items()}
 
 
-def _jax_eqn_to_jaxpr(eqn: JaxprEqn) -> Jaxpr:
-    """
-    Convert the jax equation to the jaxpr.
-
-    Args:
-        eqn: The jax equation.
-
-    Returns:
-        The jaxpr.
-    """
-    return Jaxpr(
-        constvars=[],
-        invars=eqn.invars,
-        outvars=eqn.outvars,
-        eqns=[eqn]
-    )
-
-
-def _post_check(trace: 'HiddenWeightOpTracer') -> 'HiddenWeightOpTracer':
-    # Check the hidden states of the given weight. If the hidden states are not
-    # used in the model, we raise an error. This is to avoid the situation that
-    # the weight is defined but not used in the model.
-    if len(trace.hidden_vars) == 0:
-        source_info = trace.weight.source_info
-        name_stack = source_info_util.current_name_stack() + source_info.name_stack
-        with source_info_util.user_context(source_info.traceback, name_stack=name_stack):
-            trace.weight.is_etrace = False
-            msg = (
-                f'\n'
-                f'Warning: The ETraceParam {trace.weight_path} does not found the associated hidden states. \n'
-                f'We have changed is as a weight that is not trained with eligibility trace. However, if you \n'
-                f'found this is a compilation error, please report an issue to the developers at '
-                f'{git_issue_addr}. \n\n'
-            )
-            warnings.warn(msg, UserWarning)
-    return trace
-
-
-class HiddenWeightOpTracer(NamedTuple):
-    """
-    The data structure for tracing ETraceParam operations through the computational graph.
-
-    This class keeps track of connections between weights, operations, and hidden states
-    during the compilation process of eligibility trace. It maintains information about
-    how weights are transformed by operations and how they connect to hidden states.
-
-    Attributes:
-        op (JaxprEqn): The JAX equation representing the operation that transforms x and weight into y.
-        weight (ETraceParam): The weight parameter being traced.
-        weight_path (Path): The path to the weight in the module hierarchy.
-        x (Var): The input variable to the operation (None for elementwise parameters).
-        y (Var): The output variable from the operation.
-        trace (List[JaxprEqn]): The sequence of JAX equations connecting the weight output to hidden states.
-        hidden_vars (set[Var]): The set of hidden state variables connected to this weight.
-        invar_needed_in_oth_eqns (set[Var]): Temporary set of variables needed in subsequent equations
-                                             for trace analysis.
-
-    This class is used during the compilation process to track how weights are connected to
-    hidden states through a series of operations, which is essential for computing
-    eligibility traces and implementing online learning.
-    """
-    op: JaxprEqn  # f: how x is transformed into y, i.e., y = f(x, w)
-    weight: ETraceParam  # w
-    weight_path: Path  # w
-    x: Var  # input to the operator
-    y: Var  # output of the operator
-    trace: List[JaxprEqn]
-    hidden_vars: set[Var]
-    invar_needed_in_oth_eqns: set[Var]
-
-    def replace(
-        self,
-        weight=_SENTINEL,
-        weight_path=_SENTINEL,
-        op=_SENTINEL,
-        x=_SENTINEL,
-        y=_SENTINEL,
-        trace=_SENTINEL,
-        hidden_vars=_SENTINEL,
-        invar_needed_in_oth_eqns=_SENTINEL
-    ):
-        return HiddenWeightOpTracer(
-            op=(op if op is not _SENTINEL else self.op),
-            weight=(weight if weight is not _SENTINEL else self.weight),
-            weight_path=(weight_path if weight_path is not _SENTINEL else self.weight_path),
-            x=(x if x is not _SENTINEL else self.x),
-            y=(y if y is not _SENTINEL else self.y),
-            trace=(trace if trace is not _SENTINEL else self.trace),
-            hidden_vars=(hidden_vars if hidden_vars is not _SENTINEL else self.hidden_vars),
-            invar_needed_in_oth_eqns=(invar_needed_in_oth_eqns
-                                      if invar_needed_in_oth_eqns is not _SENTINEL
-                                      else self.invar_needed_in_oth_eqns)
+def _resolve_eqn_vars(
+    eqn: JaxprEqn,
+) -> Tuple[Optional[Var], Var]:
+    """Return ``(x_var, y_var)`` for an ETP primitive equation."""
+    primitive = eqn.primitive
+    spec = get_primitive_spec(primitive)
+    if spec is None:
+        raise RuntimeError(
+            f'ETP primitive {primitive.name} has no registered spec'
         )
-
-    def dict(self) -> Dict[str, Any]:
-        return self._asdict()
-
-    def __repr__(self) -> str:
-        return repr(brainstate.util.PrettyMapping(self._asdict(), type_name=self.__class__.__name__))
-
-
-class JaxprEvalForWeightOpHiddenRelation(JaxprEvaluation):
-    """
-    Evaluating the jaxpr for extracting the etrace (hidden, operator, weight) relationships.
-
-    Args:
-        jaxpr: The jaxpr for the model.
-        weight_path_to_invars: The mapping from the weight id to the jax vars.
-        invar_to_weight_path: The mapping from the jax var to the weight id.
-        path_to_state: The mapping from the state id to the state.
-
-    Returns:
-        The list of the traced weight operations.
-    """
-    __module__ = 'braintrace'
-
-    def __init__(
-        self,
-        jaxpr: Jaxpr,
-        hidden_outvar_to_invar: Dict[HiddenOutVar, HiddenInVar],
-        weight_path_to_invars: Dict[Path, List[Var]],
-        invar_to_weight_path: Dict[Var, Path],
-        path_to_state: Dict[Path, brainstate.State],
-        state_id_to_path: Dict[int, Path],
-        weight_invars: set[Var],
-        hid_path_to_group: Dict[Path, HiddenGroup],
-        invar_to_hidden_path: Dict[HiddenInVar, Path],
-        outvar_to_hidden_path: Dict[HiddenOutVar, Path],
-    ):
-        # the jaxpr of the original model, assuming that the model is well-defined,
-        # see the doc for the model which can be online learning compiled.
-        self.jaxpr = jaxpr
-
-        #  the mapping from the weight id to the jax vars, one weight id may contain multiple jax vars
-        self.weight_path_to_invars = weight_path_to_invars
-
-        # the mapping from the jax var to the weight id, one jax var for one weight id
-        self.invar_to_weight_path = invar_to_weight_path
-
-        # the mapping from the state id to the state
-        self.path_to_state = path_to_state
-        self.state_id_to_path = state_id_to_path
-
-        # jax vars of weights
-        self.hid_path_to_group = hid_path_to_group
-
-        super().__init__(
-            weight_invars=weight_invars,
-            hidden_invars=set(hidden_outvar_to_invar.values()),
-            hidden_outvars=set(hidden_outvar_to_invar.keys()),
-            invar_to_hidden_path=invar_to_hidden_path,
-            outvar_to_hidden_path=outvar_to_hidden_path
+    if spec.x_invar_index is None:
+        x_var = None
+    else:
+        candidate = eqn.invars[spec.x_invar_index]
+        x_var = candidate if isinstance(candidate, Var) else None
+    y_var = eqn.outvars[spec.y_outvar_index]
+    if len(eqn.outvars) > 1:
+        emit(
+            kind=DiagnosticKind.MULTI_OUTPUT_PRIMITIVE_DETECTED,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'ETP primitive {primitive.name} has '
+                f'{len(eqn.outvars)} outputs; using outvar index '
+                f'{spec.y_outvar_index} as y per spec.'
+            ),
+            primitive=primitive,
+            context={'num_outvars': len(eqn.outvars),
+                     'y_outvar_index': spec.y_outvar_index},
         )
+    return x_var, y_var
 
-    def compile(self) -> Sequence[HiddenParamOpRelation]:
-        """
-        Compiling the jaxpr for the etrace relationships.
-        """
 
-        # TODO:
-        # - [x] Add the traceback information for the error messages. [done at 2024-04-06]
-        # - [ ] Add the support for the scan, while, cond, pjit, and other operators.
-        # - [ ] Add the support for the pytree inputs and outputs within one etrace operator.
-        #       Currently, there is no need to consider this.
+# ---------------------------------------------------------------------------
+# Weight backward trace (ParamState resolution)
+# ---------------------------------------------------------------------------
 
-        # the data structures for the tracing weights, variables and operations
-        self.active_tracings: List[HiddenWeightOpTracer] = []
+def _trace_var_to_param(
+    var: Var,
+    producers: Dict[Var, JaxprEqn],
+    invar_to_weight_path: Dict[Var, Path],
+    cache: Optional[Dict[Var, Optional[Tuple[Path, Tuple[Primitive, ...]]]]] = None,
+) -> Tuple[Optional[Path], Tuple[Primitive, ...]]:
+    """Trace *var* backward through the Jaxpr to its originating ``ParamState``.
 
-        # evaluating the jaxpr
-        self._eval_jaxpr(self.jaxpr)
+    Returns ``(path, processing_chain)`` where ``processing_chain`` is the
+    deduplicated, insertion-ordered tuple of intermediate primitive types
+    traversed (mask multiplication, weight_fn, etc.). When the var is the
+    raw ParamState invar, the chain is empty.
+    """
+    if cache is not None and var in cache:
+        cached = cache[var]
+        if cached is None:
+            return None, ()
+        return cached
 
-        # finalizing the traces
-        final_traces = [
-            _trace_simplify(
-                _post_check(trace),
-                hid_path_to_group=self.hid_path_to_group,
-                state_id_to_path=self.state_id_to_path,
-                outvar_to_hidden_path=self.outvar_to_hidden_path,
-            )
-            for trace in self.active_tracings
-        ]
+    frontier: deque = deque([var])
+    visited: Set[Var] = set()
+    chain: Dict[Primitive, None] = {}
+    found_path: Optional[Path] = None
+    while frontier:
+        v = frontier.popleft()
+        if v in visited:
+            continue
+        visited.add(v)
+        path = invar_to_weight_path.get(v)
+        if path is not None:
+            found_path = path
+            break
+        eqn = producers.get(v)
+        if eqn is not None:
+            chain[eqn.primitive] = None
+            for iv in eqn.invars:
+                if isinstance(iv, Var) and iv not in visited:
+                    frontier.append(iv)
+    chain_tuple = tuple(chain)
+    if cache is not None:
+        cache[var] = (found_path, chain_tuple) if found_path is not None else None
+    return found_path, chain_tuple
 
-        # reset the temporal data structures
-        self.active_tracings = []
-        return tuple([trace for trace in final_traces if trace is not None])
 
-    def _eval_pjit(self, eqn: JaxprEqn) -> None:
-        """
-        Evaluating the pjit primitive.
-        """
+def _resolve_weight_leaf_idx(
+    weight_var: Var,
+    weight_path: Path,
+    producers: Dict[Var, JaxprEqn],
+    weight_path_to_invars: Optional[Dict[Path, List[Var]]],
+) -> int:
+    """Find which leaf of the owning ``ParamState`` produced *weight_var*.
 
-        # --- part 1:  is etrace operator  --- #
+    Backtraces *weight_var* through any ``mask``/``weight_fn`` chain to the
+    raw ParamState invar and returns its position in the ParamState's leaf
+    list. Falls back to ``0`` when the ParamState only has one leaf.
+    """
+    if weight_path_to_invars is None:
+        return 0
+    invars_list = weight_path_to_invars.get(weight_path, [])
+    if len(invars_list) <= 1:
+        return 0
+    source_var = weight_var
+    frontier: List[Var] = [weight_var]
+    visited: Set[Var] = set()
+    while frontier:
+        v = frontier.pop()
+        if v in visited:
+            continue
+        visited.add(v)
+        if v in invars_list:
+            source_var = v
+            break
+        eqn = producers.get(v)
+        if eqn is not None:
+            for iv in eqn.invars:
+                if isinstance(iv, Var) and iv not in visited:
+                    frontier.append(iv)
+    try:
+        return invars_list.index(source_var)
+    except ValueError:
+        emit(
+            kind=DiagnosticKind.PYTREE_WEIGHT_LEAF_AMBIGUOUS,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'Could not resolve weight leaf for ParamState at {weight_path}; '
+                f'falling back to leaf index 0.'
+            ),
+            weight_path=weight_path,
+            context={'weight_var': weight_var,
+                     'num_leaves': len(invars_list)},
+        )
+        return 0
 
-        if is_etrace_op(eqn.params['name']):
-            # checking outvars
-            if len(eqn.outvars) != 1:
-                name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-                with source_info_util.user_context(eqn.source_info.traceback, name_stack=name_stack):
-                    raise NotSupportedError(
-                        f'Currently, the etrace operator only supports single input and single output. \n'
-                        f'But we got {len(eqn.outvars)} outputs in the following operator: \n\n'
-                        f'The Jaxpr for the operator: \n\n'
-                        f'{eqn} \n\n'
-                        f'The corresponding Python code for the operator: \n\n'
-                        f'{jaxpr_to_python_code(_jax_eqn_to_jaxpr(eqn))} \n\n'
-                        f'You may need to define the operator as multiple operators, or raise an issue '
-                        f'to the developers at {git_issue_addr} if you found this is a bug. \n'
-                        f'Moreover, see the above traceback information for where the operation is defined in your code.'
-                    )
 
-            # Check old traces
-            # If the old traces are valid, we add the new trace to the old
-            # traces. If not, we remove the old traces.
-            self._eval_old_traces_are_valid_or_not(eqn)
+# ---------------------------------------------------------------------------
+# Forward reachability + path classification
+# ---------------------------------------------------------------------------
 
-            # input, output, weight checking
-            weight_path, x = self._get_state_and_inp_and_checking(eqn)
+def _bfs_forward(
+    start_var: Var,
+    consumer_map: Dict[Var, List[JaxprEqn]],
+    hidden_outvar_set: Set[Var],
+    *,
+    stop_at_non_grad_etp: bool,
+    outvar_to_group_index: Optional[Dict[Var, int]] = None,
+) -> Tuple[Dict[Var, None], Tuple[JaxprEqn, ...]]:
+    """Forward BFS from *start_var* to hidden outvars.
 
-            # add new trace
-            self.active_tracings.append(
-                HiddenWeightOpTracer(
-                    weight=self.path_to_state[weight_path],
-                    weight_path=weight_path,
-                    x=x,
-                    y=eqn.outvars[0],
-                    # --- The jaxpr for the operator [TODO] checking whether there are bugs
-                    # Although the jaxpr var are not the same are the eqn var, we can still
-                    # use this closed jaxpr expression, since the ordering of the vars are the same.
-                    # Therefore, once the arguments and parameters are given correctly, the jaxpr
-                    # can be used to evaluate the same operator.
-                    # op=eqn.params['jaxpr'],
-                    # ---- changed it to the JaxprEqn (@chaoming0625, 16/04/2024)
-                    op=eqn,
-                    trace=[],  # the following eqns to hidden states
-                    hidden_vars=set(),  # the jax var of hidden states
-                    invar_needed_in_oth_eqns=set(eqn.outvars)  # temporary data for tracing eqn to hidden states
-                )
-            )
+    Returns ``(reachable_hvars, blocking_eqns)``. ``reachable_hvars`` is an
+    insertion-ordered dict (used as an ordered set) so iteration follows
+    BFS encounter order — a plain ``set`` yields hash-ordered iteration,
+    which makes the compiler's relation output non-deterministic.
 
-        #   --- part 2:  not etrace operator  --- #
-        else:
-            # check whether the operator is supported
-            check_unsupported_op(self, eqn, 'jit')
+    When ``stop_at_non_grad_etp`` is True, the BFS does not cross
+    non-gradient-enabled ETP primitives (preserves the historical
+    "restricted" semantics). When False, it crosses all equations and
+    returns the full reachability set (used by path classification).
 
-            # treat the pjit as a normal jaxpr equation
-            self._eval_eqn(eqn)
-
-    def _eval_eqn(self, eqn: JaxprEqn) -> None:
-        """
-        Evaluating the normal jaxpr equation.
-        """
-        if eqn.primitive.name == 'stop_gradient':
-            return
-        for trace in tuple(self.active_tracings):
-            matched = find_matched_vars(
-                eqn.invars,
-                trace.invar_needed_in_oth_eqns
-            )
-            # if matched, add the eqn to the trace
-            # if not matched, skip
-            if len(matched):
-                self._add_eqn_in_a_trace(eqn, trace)
-
-    def _eval_old_traces_are_valid_or_not(self, eqn: JaxprEqn) -> None:
-        for trace in tuple(self.active_tracings):
-            # Avoid "Weight -> Hidden -> Weight" pathway.
-            # But the "Weight -> Weight -> Hidden" pathway is allowed.
-            # However, it is hard to correctly handle the following pathways:
-            #              Hidden -> Weight
-            #            /
-            #     Weight -> Weight -> Hidden
-            #
-            # This kind of connection pathways may also not be possible in real neural circuits.
-            # But we need to consider the possibility of the existence of such pathways in the future (TODO).
-
-            matched = find_matched_vars(eqn.invars, trace.invar_needed_in_oth_eqns)
-            if len(matched) > 0:  # weight -> ? -> weight
-                # TODO: how to judge this kind of pathway?
-                # The current solution is only applied to the deep neural network models,
-                # since the weights, hidden states, and operators are well-defined along the
-                # depth. However, for a very complex recurrent graph models, the weights, hidden
-                # states, and operators may be connected in a very complex way. Therefore, we
-                # need to consider the handling of such complex models in the future.
-                if len(trace.hidden_vars) > 0:  # weight -> hidden -> weight:
-                    pass
-                else:  # weight -> weight -> ?
-                    if is_etrace_op_enable_gradient(eqn.params['name']):
-                        # weight -> diagonal weight -> ?
-                        self._add_eqn_in_a_trace(eqn, trace)
-                    else:
-                        # avoid off " weight -> weight -> ? "  pathway
-                        pass
-
-    def _add_eqn_in_a_trace(
-        self,
-        eqn: JaxprEqn,
-        trace: HiddenWeightOpTracer
-    ) -> None:
-        trace.trace.append(eqn.replace())
-        trace.invar_needed_in_oth_eqns.update(eqn.outvars)
-        # check whether the hidden states are needed in the other equations
-        for outvar in eqn.outvars:
-            if outvar in self.hidden_outvars:
-                trace.hidden_vars.add(outvar)
-
-    def _get_state_and_inp_and_checking(
-        self,
-        eqn: JaxprEqn
-    ) -> Tuple[Path, Var]:
-
-        # Currently, only single input/output are supported, i.e.,
-        #       y = f(x, w1, w2, ...)
-        # This may be changed in the future, to support multiple inputs and outputs, i.e.,
-        #       y1, y2, ... = f(x1, x2, ..., w1, w2, ...)
-        #
-        # However, I do not see any possibility or necessity for this kind of design in the
-        # current stage. In most situations, single input/output is enough for the brain dynamics model.
-
-        found_invars_in_this_op = set()
-        weight_paths = set()
-        xs = []
-        for invar in eqn.invars:
-            if isinstance(invar, Literal):
-                xs.append(invar)
-                continue
-            weight_path = self.invar_to_weight_path.get(invar, None)
-            if weight_path is None:
-                xs.append(invar)
+    When ``outvar_to_group_index`` is provided, the search restricts itself
+    to hidden outvars in the *closest* hidden group — outvars from different
+    groups are pruned so the relation only tracks the recurrence of the
+    layer this primitive actually feeds.
+    """
+    reachable: Dict[Var, None] = {}
+    home_group_indices: Set[int] = set()
+    frontier: deque = deque([start_var])
+    visited: Set[Var] = set()
+    blocking_eqns: List[JaxprEqn] = []
+    blocking_seen: Set[int] = set()
+    while frontier:
+        v = frontier.popleft()
+        if v in visited:
+            continue
+        visited.add(v)
+        if v in hidden_outvar_set:
+            if outvar_to_group_index is not None:
+                g = outvar_to_group_index.get(v)
+                if not home_group_indices:
+                    home_group_indices.add(g)
+                if g in home_group_indices:
+                    reachable[v] = None
+                else:
+                    continue
             else:
-                weight_paths.add(weight_path)
-                found_invars_in_this_op.add(invar)
+                reachable[v] = None
+        for eqn in consumer_map.get(v, []):
+            if (
+                stop_at_non_grad_etp
+                and is_etp_primitive(eqn.primitive)
+                and not is_etp_enable_gradient_primitive(eqn.primitive)
+            ):
+                key = id(eqn)
+                if key not in blocking_seen:
+                    blocking_seen.add(key)
+                    blocking_eqns.append(eqn)
+                continue
+            for ov in eqn.outvars:
+                if ov not in visited:
+                    frontier.append(ov)
+    return reachable, tuple(blocking_eqns)
 
-        # --- checking whether the weight variables are all used in the same etrace operation --- #
-        if len(weight_paths) == 0:
-            name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-            with source_info_util.user_context(eqn.source_info.traceback, name_stack=name_stack):
-                raise CompilationError(
-                    f'Error: no ETraceParam are found in this operation: \n\n'
-                    f'The Jaxpr for the operator: \n\n'
-                    f'{eqn} \n\n'
-                    f'The corresponding Python code for the operator: \n\n'
-                    f'{jaxpr_to_python_code(_jax_eqn_to_jaxpr(eqn))} \n\n'
-                    f'See the above traceback information for where the operation is defined in your code.'
+
+def _classify_path(
+    y_var: Var,
+    hidden_outvar: Var,
+    consumer_map: Dict[Var, List[JaxprEqn]],
+    producer_map: Dict[Var, JaxprEqn],
+    self_eqn: JaxprEqn,
+) -> str:
+    """Classify the set of paths from ``y_var`` to ``hidden_outvar``.
+
+    Returns one of :class:`PathClassification` constants.
+
+    Algorithm:
+      * ``forward`` = vars reachable from y_var without restriction.
+      * ``backward`` = vars that can reach hidden_outvar by following
+        consumers in reverse (i.e. equations that produce hidden_outvar).
+      * ``mid`` = forward & backward = vars on at least one path y -> h.
+      * If no equation in ``mid`` is a non-gradient-enabled ETP primitive
+        (other than ``self_eqn``), classification is ``ALL_DIRECT``.
+      * Otherwise, run a restricted BFS that severs non-grad-ETP edges and
+        check if hidden_outvar is still reachable. Yes -> ``MIXED``;
+        No -> ``ALL_THROUGH_OTHER_ETP``.
+    """
+    # Forward reachability (unrestricted).
+    forward: Set[Var] = set()
+    frontier: deque = deque([y_var])
+    while frontier:
+        v = frontier.popleft()
+        if v in forward:
+            continue
+        forward.add(v)
+        for eqn in consumer_map.get(v, []):
+            for ov in eqn.outvars:
+                if ov not in forward:
+                    frontier.append(ov)
+
+    if hidden_outvar not in forward:
+        # Should not happen — caller already established reachability.
+        return PathClassification.ALL_THROUGH_OTHER_ETP
+
+    # Backward reachability: walk up from hidden_outvar via producers.
+    backward: Set[Var] = set()
+    bfrontier: deque = deque([hidden_outvar])
+    while bfrontier:
+        v = bfrontier.popleft()
+        if v in backward:
+            continue
+        backward.add(v)
+        eqn = producer_map.get(v)
+        if eqn is None:
+            continue
+        for iv in eqn.invars:
+            if isinstance(iv, Var) and iv not in backward:
+                bfrontier.append(iv)
+
+    # Eqns on at least one path.
+    mid_eqns: List[JaxprEqn] = []
+    for v, eqn in producer_map.items():
+        if v in backward and v in forward and eqn is not self_eqn:
+            if eqn not in mid_eqns:
+                mid_eqns.append(eqn)
+
+    has_blocking = any(
+        is_etp_primitive(e.primitive)
+        and not is_etp_enable_gradient_primitive(e.primitive)
+        for e in mid_eqns
+    )
+    if not has_blocking:
+        return PathClassification.ALL_DIRECT
+
+    # Run restricted BFS to see if a direct path also exists.
+    restricted_reach, _ = _bfs_forward(
+        y_var, consumer_map,
+        hidden_outvar_set={hidden_outvar},
+        stop_at_non_grad_etp=True,
+    )
+    if hidden_outvar in restricted_reach:
+        return PathClassification.MIXED
+    return PathClassification.ALL_THROUGH_OTHER_ETP
+
+
+# ---------------------------------------------------------------------------
+# Transition jaxpr construction
+# ---------------------------------------------------------------------------
+
+def _build_transition_jaxpr(
+    y_var: Var,
+    group: HiddenGroup,
+    jaxpr: Jaxpr,
+) -> Jaxpr:
+    """Build the sub-Jaxpr mapping y_var -> hidden group outputs.
+
+    Collects all equations that backward-contribute to ``group.hidden_outvars``.
+    Vars referenced by these equations but not produced by them (and not
+    ``y_var``) become constvars, whose values must be supplied at evaluation
+    time. Hidden outvars that do not depend on ``y_var`` still get computed
+    from their constvar dependencies — their jvp tangent with respect to
+    ``y_var`` is then zero, as expected.
+
+    Equations that belong to another ETP primitive (not gradient-enabled) are
+    treated as constvar boundaries: their outputs are supplied externally and
+    their internal computation (and trainable weights) is *not* pulled into
+    the transition jaxpr. This keeps ``dh/dy`` strictly through the
+    non-parametric tail.
+    """
+    selected_rev = []
+    all_needed_vars: Set[Var] = set(group.hidden_outvars)
+    for eqn in reversed(jaxpr.eqns):
+        if any(ov in all_needed_vars for ov in eqn.outvars):
+            # Skip the equation that produces ``y_var`` — its value is
+            # supplied as the transition jaxpr's *invar*. Otherwise the
+            # backward walk would re-include the ETP primitive itself
+            # and ``dh/dy`` would silently evaluate to zero.
+            if y_var in eqn.outvars:
+                continue
+            if (
+                is_etp_primitive(eqn.primitive)
+                and not is_etp_enable_gradient_primitive(eqn.primitive)
+            ):
+                # Other ETP primitive on the tail -> stop, output becomes
+                # a constvar of the transition jaxpr.
+                continue
+            selected_rev.append(eqn)
+            for iv in eqn.invars:
+                if isinstance(iv, Var):
+                    all_needed_vars.add(iv)
+    selected = list(reversed(selected_rev))
+
+    produced: Set[Var] = {y_var}
+    for eqn in selected:
+        for ov in eqn.outvars:
+            produced.add(ov)
+    invars_needed: Dict[Var, None] = {}  # ordered set
+    for eqn in selected:
+        for iv in eqn.invars:
+            if isinstance(iv, Var) and iv not in produced:
+                invars_needed[iv] = None
+    constvars = list(invars_needed)
+
+    return Jaxpr(
+        constvars=constvars,
+        invars=[y_var],
+        outvars=list(group.hidden_outvars),
+        eqns=selected,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Jaxpr scanning (with control-flow descent)
+# ---------------------------------------------------------------------------
+
+def _scan_jaxpr_for_etp_eqns(
+    jaxpr: Jaxpr,
+    *,
+    inside_control_flow: bool = False,
+) -> List[JaxprEqn]:
+    """Walk the Jaxpr and return all equations whose primitive is ETP.
+
+    Descends into ``jit``/``pjit`` (transparently) and emits diagnostics
+    when ETP primitives are found inside control-flow primitives
+    (``scan``/``while``/``cond``). Control-flow ETP primitives are *not*
+    returned to the main relation pass — their semantics (carry vars,
+    branch unification) are not yet fully supported and a structured
+    diagnostic is emitted so users can locate them.
+    """
+    etp_eqns: List[JaxprEqn] = []
+    for eqn in jaxpr.eqns:
+        if is_etp_primitive(eqn.primitive):
+            if inside_control_flow:
+                emit(
+                    kind=DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'ETP primitive {eqn.primitive.name} found inside a '
+                        f'scan/while/cond body. Such primitives are not '
+                        f'currently registered as relations because the '
+                        f'compiler cannot yet expose carry-variable lineage '
+                        f'across the control-flow boundary. The weight will '
+                        f'not participate in ETP. Lift it out of the body or '
+                        f'use BPTT.'
+                    ),
+                    primitive=eqn.primitive,
                 )
-
-        if len(weight_paths) > 1:
-            name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-            with source_info_util.user_context(eqn.source_info.traceback, name_stack=name_stack):
-                raise CompilationError(
-                    f'Error: multiple ETraceParam ({weight_paths}) are found in this operation. '
-                    f'This is not allowed for automatic online learning: \n\n'
-                    f'The Jaxpr for the operator: \n\n'
-                    f'{eqn} \n\n'
-                    f'The corresponding Python code for the operator: \n\n'
-                    f'{jaxpr_to_python_code(_jax_eqn_to_jaxpr(eqn))} \n\n'
-                    f'See the above traceback information for where the operation is defined in your code.'
+            else:
+                etp_eqns.append(eqn)
+        elif is_jit_primitive(eqn) and 'jaxpr' in eqn.params:
+            inner_jaxpr = eqn.params['jaxpr'].jaxpr
+            inner_etp = _scan_jaxpr_for_etp_eqns(
+                inner_jaxpr, inside_control_flow=inside_control_flow,
+            )
+            if inner_etp:
+                emit(
+                    kind=DiagnosticKind.PRIMITIVE_INSIDE_NESTED_JIT,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        'Found ETP primitives inside a nested jit/pjit. '
+                        'This is currently handled by tracing through the '
+                        'outer jaxpr. If you see incorrect results, please '
+                        'avoid wrapping individual ETP calls in jax.jit. '
+                        f'Report issues at {git_issue_addr}.'
+                    ),
+                    context={'inner_primitives': tuple(
+                        e.primitive for e in inner_etp
+                    )},
                 )
-
-        weight_path = tuple(weight_paths)[0]  # the only ETraceParam found in the operation
-        if len(found_invars_in_this_op.difference(set(self.weight_path_to_invars[weight_path]))) > 0:
-            name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-            with source_info_util.user_context(eqn.source_info.traceback, name_stack=name_stack):
-                raise CompilationError(
-                    f'Error: The found jax vars are {found_invars_in_this_op}, '
-                    f'but the ETraceParam contains vars {self.weight_path_to_invars[weight_path]}. \n'
-                    f'This means that the operator has used multiple ETraceParam. '
-                    f'Please define the trainable weights in a single ETraceParam. \n\n'
-                    f'The Jaxpr for the operator: \n\n'
-                    f'{eqn} \n\n'
-                    f'The corresponding Python code for the operator: \n\n'
-                    f'{jaxpr_to_python_code(_jax_eqn_to_jaxpr(eqn))} \n\n'
-                    f'See the above traceback information for where the operation is defined in your code.'
+        elif is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn):
+            for sub_jaxpr in _control_flow_subjaxprs(eqn):
+                _scan_jaxpr_for_etp_eqns(
+                    sub_jaxpr, inside_control_flow=True,
                 )
+    return etp_eqns
 
-        if is_etrace_op_elemwise(eqn.params['name']):
-            # element-wise operator do not support input data
 
-            if len(xs) != 0:
-                name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-                with source_info_util.user_context(eqn.source_info.traceback, name_stack=name_stack):
-                    raise CompilationError(
-                        f'Currently, the element-wise etrace operator do not support input. But we got {xs} \n'
-                        f'You may need to check your model, or raise an issue to the developers at {git_issue_addr} '
-                        f'if you found this is a bug.\n\n'
-                        f'The Jaxpr for the operator: \n\n'
-                        f'{eqn} \n\n'
-                        f'The corresponding Python code for the operator: \n\n'
-                        f'{jaxpr_to_python_code(_jax_eqn_to_jaxpr(eqn))} \n\n'
-                        f'See the above traceback information for where the operation is defined in your code.'
-                    )
-            xs = [None]
-        else:
-            # other operators only support single input data
+def _control_flow_subjaxprs(eqn: JaxprEqn) -> Iterable[Jaxpr]:
+    """Yield every sub-Jaxpr stored on a control-flow equation's params.
 
-            if len(xs) != 1:
-                name_stack = source_info_util.current_name_stack() + eqn.source_info.name_stack
-                with source_info_util.user_context(eqn.source_info.traceback, name_stack=name_stack):
-                    raise CompilationError(
-                        'Currently, the etrace operator only supports single input. \n'
-                        'You may need to define the model as multiple operators, or raise an issue '
-                        f'to the developers at {git_issue_addr}.\n\n'
-                        f'The Jaxpr for the operator: \n\n'
-                        f'{eqn} \n\n'
-                        f'The corresponding Python code for the operator: \n\n'
-                        f'{jaxpr_to_python_code(_jax_eqn_to_jaxpr(eqn))} \n\n'
-                        f'See the above traceback information for where the operation is defined in your code.'
-                    )
+    ``scan`` exposes ``jaxpr`` (a ``ClosedJaxpr``); ``while`` exposes
+    ``cond_jaxpr`` and ``body_jaxpr``; ``cond`` exposes ``branches`` (a
+    sequence of ``ClosedJaxpr``).
+    """
+    params = eqn.params
+    for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
+        sub = params.get(key)
+        if sub is not None:
+            yield getattr(sub, 'jaxpr', sub)
+    branches = params.get('branches')
+    if branches is not None:
+        for b in branches:
+            yield getattr(b, 'jaxpr', b)
 
-        # --- get the weight id and the input variable --- #
-        return weight_path, xs[0]
 
+# ---------------------------------------------------------------------------
+# Main API
+# ---------------------------------------------------------------------------
 
 def find_hidden_param_op_relations_from_jaxpr(
     jaxpr: Jaxpr,
-    hidden_outvar_to_invar: Dict[HiddenOutVar, HiddenInVar],
-    weight_path_to_invars: Dict[Path, List[Var]],
     invar_to_weight_path: Dict[Var, Path],
     path_to_state: Dict[Path, brainstate.State],
-    state_id_to_path: Dict[int, Path],
-    weight_invars: set[Var],
-    hid_path_to_group: Dict[Path, HiddenGroup],
-    invar_to_hidden_path: Dict[HiddenInVar, Path],
     outvar_to_hidden_path: Dict[HiddenOutVar, Path],
+    hid_path_to_group: Dict[Path, HiddenGroup],
+    weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
+    **_ignored,
 ) -> Sequence[HiddenParamOpRelation]:
+    """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
+    producers = _build_producer_map(jaxpr)
+    consumers = _build_consumer_map(jaxpr)
+    hidden_outvar_set: Set[Var] = set(outvar_to_hidden_path.keys())
+    weight_trace_cache: Dict[Var, Optional[Tuple[Path, Tuple[Primitive, ...]]]] = {}
+
+    outvar_to_group_index: Dict[Var, int] = {
+        ov: hid_path_to_group[p].index
+        for ov, p in outvar_to_hidden_path.items()
+        if p in hid_path_to_group
+    }
+
+    etp_eqns = _scan_jaxpr_for_etp_eqns(jaxpr)
+    relations: List[HiddenParamOpRelation] = []
+
+    for eqn in etp_eqns:
+        primitive = eqn.primitive
+        x_var, y_var = _resolve_eqn_vars(eqn)
+
+        # --- Resolve every trainable invar declared by the primitive ---
+        spec = get_primitive_spec(primitive)
+        key_to_idx = spec.resolve_trainable_invars(eqn.params)
+        trainable_invars_map = {k: eqn.invars[i] for k, i in key_to_idx.items()}
+        trainable_vars: Dict[str, Var] = {}
+        trainable_paths: Dict[str, Path] = {}
+        trainable_leaf_indices: Dict[str, int] = {}
+        trainable_param_states: Dict[str, brainstate.ParamState] = {}
+        trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
+
+        # Use the first trainable key for the primary weight trace (needed for
+        # diagnostics and shape-mismatch error messages below).
+        first_key = next(iter(trainable_invars_map)) if trainable_invars_map else None
+        weight_path: Optional[Path] = None
+        if first_key is not None:
+            primary_invar = trainable_invars_map[first_key]
+            weight_path, _ = _trace_var_to_param(
+                primary_invar, producers, invar_to_weight_path,
+                cache=weight_trace_cache,
+            )
+
+        if weight_path is None:
+            first_invar_repr = trainable_invars_map[first_key]
+            emit(
+                kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'ETP primitive {primitive.name} at {eqn} has a trainable input '
+                    f'({first_key}) that could not be traced back to any ParamState. Skipping.'
+                ),
+                primitive=primitive,
+                context={'trainable_var': first_invar_repr, 'key': first_key},
+            )
+            continue
+
+        for key, invar in trainable_invars_map.items():
+            t_path, t_chain = _trace_var_to_param(
+                invar, producers, invar_to_weight_path,
+                cache=weight_trace_cache,
+            )
+            if t_path is None:
+                # Trainable invar doesn't trace to any ParamState (e.g. a
+                # constant bias passed directly as a jnp.array). Emit an INFO
+                # diagnostic so users know no gradient will be produced for
+                # this input, then skip it.
+                emit(
+                    kind=DiagnosticKind.TRAINABLE_INVAR_NOT_PARAMSTATE,
+                    level=DiagnosticLevel.INFO,
+                    message=(
+                        f"ETP primitive {eqn.primitive.name}: trainable input "
+                        f"'{key}' at invar index {key_to_idx[key]} does not trace to any "
+                        f"ParamState. No online gradient will be produced for this input."
+                    ),
+                    primitive=eqn.primitive,
+                    context={'key': key, 'invar_index': key_to_idx[key]},
+                )
+                continue
+            t_leaf = _resolve_weight_leaf_idx(
+                invar, t_path, producers, weight_path_to_invars,
+            )
+            t_state = path_to_state.get(t_path)
+            trainable_vars[key] = invar
+            trainable_paths[key] = t_path
+            trainable_leaf_indices[key] = t_leaf
+            trainable_param_states[key] = t_state
+            trainable_processing_chains[key] = t_chain
+
+        # --- Restricted reachability for relation registration ---
+        reachable_hvars, blocking_eqns = _bfs_forward(
+            y_var, consumers, hidden_outvar_set,
+            stop_at_non_grad_etp=True,
+            outvar_to_group_index=outvar_to_group_index,
+        )
+
+        # --- Filter by shape compatibility ---
+        connected_paths: List[Path] = []
+        path_class: Dict[Path, str] = {}
+        for hvar in list(reachable_hvars):
+            try:
+                jax.numpy.broadcast_shapes(y_var.aval.shape, hvar.aval.shape)
+            except ValueError:
+                emit(
+                    kind=DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'ETP op {primitive.name}: weight={weight_path}, '
+                        f'y shape={y_var.aval.shape} not broadcastable with '
+                        f'hidden shape={hvar.aval.shape} at '
+                        f'{outvar_to_hidden_path[hvar]}. Removing connection.'
+                    ),
+                    primitive=primitive,
+                    weight_path=weight_path,
+                    hidden_paths=(outvar_to_hidden_path[hvar],),
+                    context={
+                        'y_shape': tuple(y_var.aval.shape),
+                        'hidden_shape': tuple(hvar.aval.shape),
+                    },
+                )
+                reachable_hvars.pop(hvar, None)
+                continue
+            hpath = outvar_to_hidden_path[hvar]
+            connected_paths.append(hpath)
+            cls = _classify_path(
+                y_var, hvar, consumers, producers, self_eqn=eqn,
+            )
+            path_class[hpath] = cls
+
+        if not connected_paths:
+            _emit_no_relation_diag(
+                primitive, weight_path, blocking_eqns,
+                producers, invar_to_weight_path, weight_trace_cache,
+            )
+            continue
+
+        # MIXED paths: still register but emit info-level diagnostic so callers
+        # know the gradient bookkeeping is only partially captured.
+        for hpath, cls in path_class.items():
+            if cls == PathClassification.MIXED:
+                emit(
+                    kind=DiagnosticKind.RELATION_PARTIAL_PATH,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'ETP primitive {primitive.name} (weight={weight_path}) '
+                        f'reaches hidden state {hpath} through *both* a direct '
+                        f'tail and another trainable ETP primitive. The relation '
+                        f'is still registered (preserving prior behavior) but '
+                        f'the indirect path is not captured by ETP. The gradient '
+                        f'contribution through the indirect path will be missing.'
+                    ),
+                    primitive=primitive,
+                    weight_path=weight_path,
+                    hidden_paths=(hpath,),
+                    context={'classification': cls},
+                )
+
+        # --- Group by hidden group ---
+        group_ids_seen: Set[int] = set()
+        connected_groups: List[HiddenGroup] = []
+        for p in connected_paths:
+            g = hid_path_to_group[p]
+            if g.index not in group_ids_seen:
+                group_ids_seen.add(g.index)
+                connected_groups.append(g)
+
+        # --- Build transition Jaxprs ---
+        y_to_hid_jaxprs = [
+            _build_transition_jaxpr(y_var, g, jaxpr)
+            for g in connected_groups
+        ]
+
+        relations.append(HiddenParamOpRelation(
+            primitive=primitive,
+            x_var=x_var,
+            y_var=y_var,
+            hidden_groups=connected_groups,
+            y_to_hidden_group_jaxprs=y_to_hid_jaxprs,
+            connected_hidden_paths=connected_paths,
+            eqn_params=dict(eqn.params),
+            path_classification=dict(path_class),
+            trainable_vars=dict(trainable_vars),
+            trainable_paths=dict(trainable_paths),
+            trainable_leaf_indices=dict(trainable_leaf_indices),
+            trainable_param_states=dict(trainable_param_states),
+            trainable_processing_chains=dict(trainable_processing_chains),
+        ))
+        emit(
+            kind=DiagnosticKind.RELATION_INCLUDED,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'{primitive.name}({weight_path}) -> '
+                f'{[g.index for g in connected_groups]}'
+            ),
+            primitive=primitive,
+            weight_path=weight_path,
+            hidden_paths=tuple(connected_paths),
+            context={
+                'hidden_group_indices': tuple(g.index for g in connected_groups),
+                'path_classification': dict(path_class),
+            },
+        )
+
+    return tuple(relations)
+
+
+def _emit_no_relation_diag(
+    primitive: Primitive,
+    weight_path: Path,
+    blocking_eqns: Tuple[JaxprEqn, ...],
+    producers: Dict[Var, JaxprEqn],
+    invar_to_weight_path: Dict[Var, Path],
+    cache: Dict[Var, Optional[Tuple[Path, Tuple[Primitive, ...]]]],
+) -> None:
+    """Emit either a WEIGHT_TO_WEIGHT or NON_TEMPORAL diagnostic.
+
+    Distinguishes a W -> W -> h exclusion (the blocking eqn at the tail
+    was another non-gradient-enabled ETP primitive) from a truly
+    non-temporal weight (no ETP op blocks the path; hidden states just
+    don't depend on this weight).
     """
-    Finding the hidden-param-op relations from the jaxpr.
-    
-    Args:
-        jaxpr: The jaxpr.
-        hidden_outvar_to_invar: The mapping from the hidden outvar to the hidden invar.
-        weight_path_to_invars: The mapping from the weight path to the jax vars.
-        invar_to_weight_path: The mapping from the jax var to the weight path.
-        path_to_state: The mapping from the state path to the state.
-        state_id_to_path: The mapping from the state id to the state path.
-        weight_invars: The jax vars of the weights.
-        hid_path_to_group: The mapping from the hidden path to the hidden group.
-        invar_to_hidden_path: The mapping from the hidden invar to the hidden path.
-        outvar_to_hidden_path: The mapping from the hidden outvar to the hidden path.
-        
-    Returns:
-        The hidden-param-op relations.
-    """
-    return JaxprEvalForWeightOpHiddenRelation(
-        jaxpr=jaxpr,
-        hidden_outvar_to_invar=hidden_outvar_to_invar,
-        weight_path_to_invars=weight_path_to_invars,
-        invar_to_weight_path=invar_to_weight_path,
-        path_to_state=path_to_state,
-        state_id_to_path=state_id_to_path,
-        weight_invars=weight_invars,
-        hid_path_to_group=hid_path_to_group,
-        invar_to_hidden_path=invar_to_hidden_path,
-        outvar_to_hidden_path=outvar_to_hidden_path,
-    ).compile()
+    if blocking_eqns:
+        blocking_primitives = tuple(e.primitive for e in blocking_eqns)
+        blocking_paths: List[Optional[Path]] = []
+        for be in blocking_eqns:
+            # Use the first trainable invar for tracing back to the ParamState.
+            trainable_map = _resolve_eqn_trainable_invars(be)
+            first_invar = next(iter(trainable_map.values())) if trainable_map else None
+            if first_invar is not None:
+                bp, _ = _trace_var_to_param(
+                    first_invar, producers, invar_to_weight_path, cache=cache,
+                )
+            else:
+                bp = None
+            blocking_paths.append(bp)
+        emit(
+            kind=DiagnosticKind.RELATION_EXCLUDED_WEIGHT_TO_WEIGHT,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'ETP primitive {primitive.name} (weight={weight_path}) '
+                f'reaches a hidden state only through another trainable '
+                f'ETP primitive ({", ".join(p.name for p in blocking_primitives)}). '
+                f'Per the non-parametric-tail invariant this weight is '
+                f'excluded from ETP; learn it by BPTT or rewire the '
+                f'architecture so its output flows directly into a hidden '
+                f'state.'
+            ),
+            primitive=primitive,
+            weight_path=weight_path,
+            context={
+                'blocking_primitives': blocking_primitives,
+                'blocking_weight_paths': tuple(blocking_paths),
+            },
+        )
+    else:
+        emit(
+            kind=DiagnosticKind.RELATION_EXCLUDED_NON_TEMPORAL,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'ETP primitive {primitive.name} (weight={weight_path}) '
+                f'has no connected hidden states. It will be treated as '
+                f'a non-temporal parameter.'
+            ),
+            primitive=primitive,
+            weight_path=weight_path,
+        )
 
 
 def find_hidden_param_op_relations_from_minfo(
     minfo: ModuleInfo,
     hid_path_to_group: Dict[Path, HiddenGroup],
 ) -> Sequence[HiddenParamOpRelation]:
-    """
-    Finding the hidden-param-op relations from the model information.
+    """Find ETP relations from a ``ModuleInfo``.
 
-    Args:
-        minfo: The model information.
-        hid_path_to_group: The mapping from the hidden path to the hidden group.
-
-    Returns:
-        The hidden-param-op relations.
+    Builds a mapping from ALL ``brainstate.ParamState`` invars so that
+    plain ``ParamState`` weights used with ETP primitives are recognised.
     """
+    invar_to_weight_path: Dict[Var, Path] = {}
+    weight_path_to_invars: Dict[Path, List[Var]] = {}
+    for invar_tree, st in zip(
+        minfo.state_tree_invars, minfo.compiled_model_states
+    ):
+        if isinstance(st, brainstate.ParamState):
+            path = minfo.state_id_to_path[id(st)]
+            leaf_invars = [
+                v for v in jax.tree.leaves(invar_tree) if isinstance(v, Var)
+            ]
+            weight_path_to_invars.setdefault(path, leaf_invars)
+            for v in leaf_invars:
+                invar_to_weight_path[v] = path
+
+    for v, p in minfo.invar_to_weight_path.items():
+        invar_to_weight_path.setdefault(v, p)
+
     return find_hidden_param_op_relations_from_jaxpr(
         jaxpr=minfo.jaxpr,
-        hidden_outvar_to_invar=minfo.hidden_outvar_to_invar,
-        weight_path_to_invars=minfo.weight_path_to_invars,
-        invar_to_weight_path=minfo.invar_to_weight_path,
-        weight_invars=set(minfo.weight_invars),
-        invar_to_hidden_path=minfo.invar_to_hidden_path,
-        outvar_to_hidden_path=minfo.outvar_to_hidden_path,
+        invar_to_weight_path=invar_to_weight_path,
         path_to_state=minfo.retrieved_model_states,
-        state_id_to_path=minfo.state_id_to_path,
+        outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         hid_path_to_group=hid_path_to_group,
+        weight_path_to_invars=weight_path_to_invars,
     )
 
 
@@ -818,17 +995,7 @@ def find_hidden_param_op_relations_from_module(
     *model_args,
     **model_kwargs,
 ) -> Sequence[HiddenParamOpRelation]:
-    """
-    Finding the hidden-param-op relations from the model.
-
-    Args:
-        model: The model.
-        model_args: The model arguments.
-        model_kwargs: The model keyword arguments.
-
-    Returns:
-        The hidden-param-op relations.
-    """
+    """Find ETP relations from a model."""
     minfo = extract_module_info(model, *model_args, **model_kwargs)
     hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(minfo)
     return find_hidden_param_op_relations_from_minfo(minfo, hid_path_to_group)

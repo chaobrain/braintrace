@@ -1,9 +1,17 @@
-``braintrace.nn`` for neural network building
-=============================================
+Neural Network Modules
+======================
 
 .. currentmodule:: braintrace.nn
 .. automodule:: braintrace.nn
 
+``braintrace.nn`` provides neural network layers that use ETP primitives
+internally. These layers are drop-in replacements for standard layers
+but automatically participate in online learning.
+
+For example, ``braintrace.nn.Linear`` uses ``braintrace.matmul`` internally,
+so its weight is automatically included in eligibility trace computation.
+Similarly, ``braintrace.nn.GRUCell`` uses ``braintrace.matmul`` for its
+recurrent weight and ``braintrace.element_wise`` for gate operations.
 
 
 Linear Layers
@@ -20,7 +28,6 @@ Linear Layers
    LoRA
 
 
-
 Convolutional Layers
 --------------------
 
@@ -32,6 +39,25 @@ Convolutional Layers
    Conv1d
    Conv2d
    Conv3d
+
+
+Recurrent Layers
+----------------
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   ValinaRNNCell
+   GRUCell
+   MGUCell
+   LSTMCell
+   URLSTMCell
+   MinimalRNNCell
+   MiniGRU
+   MiniLSTM
+   LRUCell
 
 
 Normalization Layers
@@ -51,25 +77,6 @@ Normalization Layers
    GroupNorm
 
 
-Recurrent Neural Networks
---------------------------
-
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-   ValinaRNNCell
-   GRUCell
-   MGUCell
-   LSTMCell
-   URLSTMCell
-   MinimalRNNCell
-   MiniGRU
-   MiniLSTM
-   LRUCell
-
-
 Readout Layers
 --------------
 
@@ -79,5 +86,3 @@ Readout Layers
    :template: classtemplate.rst
 
    LeakyRateReadout
-
-

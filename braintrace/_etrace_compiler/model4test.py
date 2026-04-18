@@ -18,7 +18,7 @@ from typing import Callable
 
 import brainpy
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 import jax.numpy as jnp
 
@@ -64,7 +64,7 @@ class ALIF(brainpy.state.Neuron):
         self.a_initializer = a_initializer
 
     def init_state(self, batch_size: int = None, **kwargs):
-        self.st = braintrace.ETraceTreeState(
+        self.st = brainstate.HiddenTreeState(
             {
                 'V': braintools.init.param(self.V_initializer, self.varshape, batch_size),
                 'a': braintools.init.param(self.a_initializer, self.varshape, batch_size),

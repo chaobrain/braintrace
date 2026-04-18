@@ -16,7 +16,7 @@
 from pprint import pprint
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import pytest
 
 import braintrace

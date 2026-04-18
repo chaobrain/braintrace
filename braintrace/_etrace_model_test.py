@@ -17,7 +17,7 @@
 import brainpy
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 
 import braintrace

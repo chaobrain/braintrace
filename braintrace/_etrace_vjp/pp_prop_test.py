@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -393,19 +393,6 @@ class TestIODimVjpAlgorithmInit:
         brainstate.nn.init_all_states(gru)
         algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9, name='test_algo')
         assert algo.name == 'test_algo'
-
-    def test_init_default_mode(self):
-        gru = braintrace.nn.GRUCell(3, 4)
-        brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
-        assert isinstance(algo.mode, brainstate.mixin.Mode)
-
-    def test_init_custom_mode(self):
-        gru = braintrace.nn.GRUCell(3, 4)
-        brainstate.nn.init_all_states(gru)
-        mode = brainstate.mixin.Batching(8)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9, mode=mode)
-        assert algo.mode is mode
 
     def test_not_compiled_initially(self):
         gru = braintrace.nn.GRUCell(3, 4)
@@ -930,3 +917,62 @@ class TestDiagOn:
             print()
             grads = grad_single_step_vjp(inputs[1:2])
             print(brainstate.util.PrettyDict(grads))
+
+
+# ===========================================================================
+#  Smoke test: ES_D_RTRL end-to-end gradient routing
+# ===========================================================================
+
+class TestPPPropDictGradientRouting:
+    """Smoke test: dict-API gradient routing through ES_D_RTRL with a
+    no-bias mm recurrent cell. Verifies the per-path routing produces
+    correctly shaped gradients end-to-end."""
+
+    def test_mm_smoke_es_d_rtrl(self):
+        import brainstate
+        import jax
+        import jax.numpy as jnp
+        import braintrace
+
+        brainstate.random.seed(42)
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(
+                    brainstate.random.normal(size=(4, 4)) * 0.1
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value)
+                )
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        alg = braintrace.ES_D_RTRL(cell, decay_or_rank=0.9)
+        alg.compile_graph(jnp.zeros((1, 4)))
+
+        x_seq = brainstate.random.normal(size=(5, 1, 4)) * 0.1
+
+        @brainstate.transform.jit
+        def compute_grads(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState)
+            )(inp)
+
+        # Run several steps so the etrace state evolves.
+        for i in range(5):
+            grads = compute_grads(x_seq[i])
+
+        flat = jax.tree.leaves(grads)
+        # We expect at least one gradient leaf with the weight shape (4, 4).
+        assert any(leaf.shape == (4, 4) for leaf in flat), (
+            f"Expected a (4, 4) gradient leaf, got shapes: {[leaf.shape for leaf in flat]}"
+        )
+        # All gradient leaves should be finite.
+        for leaf in flat:
+            assert jnp.all(jnp.isfinite(leaf)), f"Non-finite gradient leaf with shape {leaf.shape}"

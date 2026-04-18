@@ -15,7 +15,7 @@
 
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax.tree
 
 __all__ = [

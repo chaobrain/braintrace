@@ -17,7 +17,7 @@ from functools import partial
 from typing import Any, Dict, Optional
 
 import brainstate
-import brainunit as u
+import saiunit as u
 import jax
 
 
@@ -130,6 +130,105 @@ def _sum_dim(xs: jax.Array, axis: int = -1):
     return jax.tree.map(lambda x: u.math.sum(x, axis=axis), xs)
 
 
+def _unit_safe_add(a, b):
+    """Add two leaves, stripping units only when one side has units and the other does not.
+
+    Gradient contributions for the same weight may come from paths that
+    preserve physical units (e.g. VJP through the original jaxpr) and paths
+    that already strip them (e.g. ETP ``xy_to_dw`` rules). When the two sides
+    disagree on unit representation, both are reduced to plain arrays before
+    adding; otherwise units are preserved.
+    """
+    a_is_q = isinstance(a, u.Quantity)
+    b_is_q = isinstance(b, u.Quantity)
+    if a_is_q != b_is_q:
+        a = u.get_mantissa(a) if a_is_q else a
+        b = u.get_mantissa(b) if b_is_q else b
+    return u.math.add(a, b)
+
+
+def _extract_leaf(pytree_val: brainstate.typing.PyTree, leaf_idx: int):
+    """Return the leaf at ``leaf_idx`` in ``jax.tree.leaves(pytree_val)``.
+
+    Bare arrays (treedef with a single leaf) return the array unchanged.
+    Raises ``IndexError`` if ``leaf_idx`` is outside ``len(leaves)``.
+    """
+    leaves = jax.tree.leaves(pytree_val)
+    if not leaves:
+        return pytree_val
+    if leaf_idx < 0 or leaf_idx >= len(leaves):
+        raise IndexError(
+            f'leaf_idx {leaf_idx} out of range for pytree with {len(leaves)} leaves'
+        )
+    return leaves[leaf_idx]
+
+
+def _wrap_leaves_as_pytree(
+    reference_pytree: brainstate.typing.PyTree,
+    leaf_grads: Dict[int, jax.Array],
+):
+    """Build a pytree matching ``reference_pytree`` with ``leaf_grads``
+    inserted at the given leaf indices; any other leaf is zero-filled.
+
+    When the reference is a bare array, ``leaf_grads`` must contain at most one
+    entry at index 0 and that value is returned directly (no wrapping).
+
+    Raises ``IndexError`` if any supplied index is outside
+    ``len(jax.tree.leaves(reference_pytree))``.
+    """
+    ref_treedef = jax.tree.structure(reference_pytree)
+    # Bare-array fast path.
+    if ref_treedef.num_leaves <= 1 and ref_treedef == jax.tree.structure(0):
+        if 0 in leaf_grads:
+            return leaf_grads[0]
+        return u.math.zeros_like(reference_pytree)
+    leaves = jax.tree.leaves(reference_pytree)
+    n = len(leaves)
+    for idx in leaf_grads:
+        if idx < 0 or idx >= n:
+            raise IndexError(
+                f'leaf_idx {idx} out of range for pytree with {n} leaves'
+            )
+    new_leaves = [
+        leaf_grads[i] if i in leaf_grads else u.math.zeros_like(leaf)
+        for i, leaf in enumerate(leaves)
+    ]
+    return jax.tree.unflatten(ref_treedef, new_leaves)
+
+
+def _route_grads_by_path(
+    relation,
+    per_key_grads: Dict[str, jax.Array],
+    weight_vals: Dict[Any, brainstate.typing.PyTree],
+    target_dict: Dict[Any, brainstate.typing.PyTree],
+) -> None:
+    """Route per-key gradients from a dict-API rule into per-path pytrees.
+
+    Both D-RTRL and ES-D-RTRL share this bookkeeping: for each key in
+    ``per_key_grads`` (returned by ``xy_to_dw`` or ``yw_to_w``), look up the
+    owning ``ParamState`` path and the leaf index from ``relation``, accumulate
+    into ``per_path``, then wrap with ``_wrap_leaves_as_pytree`` and merge into
+    ``target_dict`` via ``_update_dict``.
+
+    Args:
+        relation: HiddenParamOpRelation — provides ``trainable_paths`` and
+            ``trainable_leaf_indices``.
+        per_key_grads: Dict[str, Array] — gradient contributions keyed by
+            trainable invar name (e.g. ``'weight'``, ``'lora_b'``).
+        weight_vals: Dict[Path, PyTree] — current ParamState pytree values;
+            used as the structure template for ``_wrap_leaves_as_pytree``.
+        target_dict: Dict[Path, PyTree] — accumulation target, modified in place.
+    """
+    per_path: Dict[Any, Dict[int, jax.Array]] = {}
+    for key, grad in per_key_grads.items():
+        path = relation.trainable_paths[key]
+        leaf_idx = relation.trainable_leaf_indices[key]
+        per_path.setdefault(path, {})[leaf_idx] = grad
+    for path, leaf_to_grad in per_path.items():
+        wrapped = _wrap_leaves_as_pytree(weight_vals[path], leaf_to_grad)
+        _update_dict(target_dict, path, wrapped)
+
+
 def _update_dict(
     the_dict: Dict,
     key: Any,
@@ -148,15 +247,18 @@ def _update_dict(
       error_when_no_key: bool, whether to raise an error when the key does not exist.
 
     """
-    old_value = the_dict.get(key, None)
-    if old_value is None:
+    if key not in the_dict:
         if error_when_no_key:
             raise ValueError(f'The key {key} does not exist in the dictionary. ')
         the_dict[key] = value
     else:
-        the_dict[key] = jax.tree.map(
-            u.math.add,
-            old_value,
-            value,
-            is_leaf=lambda x: isinstance(x, u.Quantity)
-        )
+        old_value = the_dict[key]
+        if old_value is None:
+            the_dict[key] = value
+        else:
+            the_dict[key] = jax.tree.map(
+                _unit_safe_add,
+                old_value,
+                value,
+                is_leaf=lambda x: isinstance(x, u.Quantity)
+            )

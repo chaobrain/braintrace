@@ -18,7 +18,7 @@
 
 import brainstate
 import braintools
-import brainunit as u
+import saiunit as u
 import matplotlib.pyplot as plt
 import numpy as np
 import tonic

@@ -1,40 +1,40 @@
 ``braintrace`` documentation
 ============================
 
-`braintrace <https://github.com/chaobrain/braintrace>`_ is designed for the scalable online learning of biological neural networks.
+`braintrace <https://github.com/chaobrain/braintrace>`_ implements scalable online learning for recurrent neural networks (RNNs) and spiking neural networks (SNNs) using eligibility trace propagation (ETP).
+
+The key idea: mark weight operations with **ETP primitives** (``braintrace.matmul``, ``braintrace.conv``, etc.) to include them in online learning. Regular JAX operations are automatically excluded — no special parameter classes needed.
 
 ----
-
 
 
 Basic Usage
 ^^^^^^^^^^^
 
-
-Here we show how easy it is to use `braintrace` to build and train a simple SNN/RNN model.
-
-
-
-.. code-block::
+.. code-block:: python
 
    import braintrace
    import brainstate
 
-   # define models as usual
-   model = brainstate.nn.Sequential(
-       braintrace.nn.GRU(2, 2),
-       braintrace.nn.GRU(2, 1),
-   )
+   class MyRNN(brainstate.nn.Module):
+       def __init__(self):
+           super().__init__()
+           self.rnn = braintrace.nn.GRUCell(10, 64)
+           self.out = braintrace.nn.Linear(64, 10)
 
-   # initialize the model
-   brainstate.nn.init_all_states(model)
+       def update(self, x):
+           return self.out(self.rnn(x))
 
-   # the only thing you need to do just two lines of code
-   model = braintrace.ParamDimVjpAlgorithm(model)
-   model.compile_graph(your_inputs)
+   model = MyRNN()
+   model.init_all_states()
 
-   # train your model as usual
-   ...
+   # Wrap with an online learning algorithm (just 2 lines)
+   trainer = braintrace.D_RTRL(model)
+   trainer.compile_graph(example_input)
+
+   # Now use brainstate.transform.grad as usual — gradients are
+   # computed online via eligibility traces, not BPTT.
+
 
 ----
 
@@ -69,8 +69,7 @@ Installation
 See also the ecosystem
 ^^^^^^^^^^^^^^^^^^^^^^
 
-
-``braintrace`` is of part of our `brain simulation ecosystem <https://brainmodeling.readthedocs.io/>`_.
+``braintrace`` is part of the `brain simulation ecosystem <https://brainmodeling.readthedocs.io/>`_.
 
 
 ----
@@ -81,13 +80,9 @@ See also the ecosystem
    :maxdepth: 1
    :caption: Quickstart
 
-   quickstart/concepts-en.ipynb
-   quickstart/concepts-zh.ipynb
-   quickstart/snn_online_learning-en.ipynb
-   quickstart/snn_online_learning-zh.ipynb
-   quickstart/rnn_online_learning-en.ipynb
-   quickstart/rnn_online_learning-zh.ipynb
-
+   quickstart/concepts.ipynb
+   quickstart/rnn_online_learning.ipynb
+   quickstart/snn_online_learning.ipynb
 
 
 .. toctree::
@@ -95,29 +90,20 @@ See also the ecosystem
    :maxdepth: 2
    :caption: Tutorial
 
-   tutorial/show_graph-en.ipynb
-   tutorial/show_graph-zh.ipynb
-   tutorial/etraceop-en.ipynb
-   tutorial/etraceop-zh.ipynb
-   tutorial/etracestate-en.ipynb
-   tutorial/etracestate-zh.ipynb
-   tutorial/batching-en.ipynb
-   tutorial/batching-zh.ipynb
+   tutorial/etp_primitives.ipynb
+   tutorial/hidden_states.ipynb
+   tutorial/graph_visualization.ipynb
+   tutorial/batching.ipynb
 
 
 .. toctree::
    :hidden:
    :maxdepth: 2
-   :caption: Advanced Tutorial
+   :caption: Advanced
 
-   advanced/IR_analysis-en.ipynb
-   advanced/IR_analysis-zh.ipynb
-   advanced/limitations-en.ipynb
-   advanced/limitations-zh.ipynb
-   advanced/online_algorithm_customization-en.ipynb
-   advanced/online_algorithm_customization-zh.ipynb
-
-
+   advanced/compiler_internals.ipynb
+   advanced/custom_algorithms.ipynb
+   advanced/limitations.ipynb
 
 
 .. toctree::
@@ -128,7 +114,6 @@ See also the ecosystem
    examples/core_examples.rst
 
 
-
 .. toctree::
    :hidden:
    :maxdepth: 2
@@ -136,7 +121,7 @@ See also the ecosystem
 
    changelog.md
    apis/concepts.rst
+   apis/primitives.rst
    apis/compiler.rst
    apis/algorithms.rst
    apis/nn.rst
-

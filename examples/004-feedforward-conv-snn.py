@@ -22,7 +22,7 @@ sys.path.append('../')
 import brainstate
 import brainpy.state
 import braintools
-import brainunit as u
+import saiunit as u
 import jax
 import numpy as np
 import tonic
