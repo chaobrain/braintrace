@@ -16,6 +16,7 @@ EXAMPLE_FILES = [
     "05-batching-vmap.py",
     "06-batching-batched.py",
     "07-vjp-single-step.py",
+    "08-vjp-multi-step.py",
 ]
 
 
