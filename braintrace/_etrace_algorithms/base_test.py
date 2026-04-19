@@ -22,7 +22,7 @@ import jax.numpy as jnp
 
 import braintrace
 from braintrace._etrace_algorithms import ETraceAlgorithm, EligibilityTrace
-from braintrace._etrace_graph_executor import ETraceGraphExecutor
+from braintrace._etrace_algorithms.graph_executor import ETraceGraphExecutor
 
 
 # ---------------------------------------------------------------------------

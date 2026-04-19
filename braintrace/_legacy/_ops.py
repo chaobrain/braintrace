@@ -113,7 +113,7 @@ class ETraceOp:
         Prefer calling the new ETP primitive user-API functions directly
         (:func:`braintrace.matmul`, :func:`braintrace.conv`, ...).
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -163,7 +163,7 @@ class MatMulOp(ETraceOp):
 
     Weight is supplied as ``{'weight': ..., 'bias': <optional>}``.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -222,7 +222,7 @@ class MatMulOp(ETraceOp):
 
 class ElemWiseOp(ETraceOp):
     r"""Legacy element-wise op. Routes to :func:`braintrace.element_wise`."""
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(self, fn: Callable = lambda w: w):
         super().__init__(is_diagonal=True)
@@ -247,7 +247,7 @@ class ConvOp(ETraceOp):
 
     Weight is supplied as ``{'weight': ..., 'bias': <optional>}``.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -340,7 +340,7 @@ class SpMatMulOp(ETraceOp):
 
     Weight is supplied as ``{'weight': data, 'bias': <optional>}``.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -388,7 +388,7 @@ class LoraOp(ETraceOp):
 
     Weight is supplied as ``{'B': ..., 'A': ..., 'bias': <optional>}``.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(self, alpha: Optional[Any] = None):
         super().__init__(is_diagonal=False)

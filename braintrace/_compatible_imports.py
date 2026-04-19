@@ -29,11 +29,7 @@ __all__ = [
     'is_cond_primitive',
 ]
 
-if jax.__version_info__ < (0, 4, 38):
-    from jax.core import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal
-
-else:
-    from jax.extend.core import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal
+from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal
 
 
 def new_var(suffix, aval):

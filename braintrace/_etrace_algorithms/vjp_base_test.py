@@ -20,8 +20,8 @@ import pytest
 
 import braintrace
 from braintrace._etrace_algorithms import ETraceAlgorithm
-from braintrace._etrace_vjp.base import ETraceVjpAlgorithm
-from braintrace._etrace_vjp.graph_executor import ETraceVjpGraphExecutor
+from braintrace._etrace_algorithms.vjp_base import ETraceVjpAlgorithm
+from braintrace._etrace_algorithms.vjp_graph_executor import ETraceVjpGraphExecutor
 
 
 # ---------------------------------------------------------------------------
@@ -553,3 +553,64 @@ class TestGraphProperty:
         model = _make_gru()
         algo = ConcreteVjpAlgorithm(model)
         assert algo.executor is algo.graph_executor
+
+
+# ---------------------------------------------------------------------------
+# Tests: _compute_learning_signal hook
+# ---------------------------------------------------------------------------
+
+
+class TestComputeLearningSignalHook:
+    """Tests for the overridable learning-signal hook on ETraceVjpAlgorithm."""
+
+    def test_default_hook_is_identity(self):
+        """Default `_compute_learning_signal` returns input unchanged."""
+        algo = ETraceVjpAlgorithm.__new__(ETraceVjpAlgorithm)
+        dl2h = [jnp.ones((2, 3)), jnp.zeros((2, 5))]
+        out = ETraceVjpAlgorithm._compute_learning_signal(algo, dl2h, args=())
+        assert isinstance(out, (list, tuple))
+        assert len(out) == 2
+        assert jnp.allclose(out[0], dl2h[0])
+        assert jnp.allclose(out[1], dl2h[1])
+
+    def test_override_hook_replaces_learning_signal(self):
+        """Subclass override is used instead of reverse-AD dl/dh."""
+        from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
+
+        class Mini(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 3)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+            def update(self, x):
+                self.h.value = jax.nn.tanh(
+                    braintrace.matmul(self.h.value + x, self.w.value)
+                )
+                return self.h.value
+
+        captured = {}
+
+        class ConstantSignalAlgo(ParamDimVjpAlgorithm):
+            def _compute_learning_signal(self, dl_autodiff, args):
+                captured['autodiff'] = dl_autodiff
+                captured['args'] = args
+                return [jnp.ones_like(a) for a in dl_autodiff]
+
+        net = Mini()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        algo = ConstantSignalAlgo(net)
+        x0 = jnp.ones((1, 3))
+        algo.compile_graph(x0)
+        algo.init_etrace_state()
+
+        def loss(x):
+            out = algo.update(x)
+            return (out ** 2).sum()
+
+        grads, _ = brainstate.augment.grad(
+            loss, algo.param_states, return_value=True
+        )(x0)
+        assert 'autodiff' in captured  # hook was invoked
+        w_grad = grads[next(iter(grads))]
+        assert jnp.any(w_grad != 0.0)

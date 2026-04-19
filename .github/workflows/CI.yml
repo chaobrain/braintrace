@@ -22,36 +22,6 @@ concurrency:
 
 
 jobs:
-  test_linux:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: [ "3.13" ]
-
-    steps:
-      - name: Cancel Previous Runs
-        uses: styfle/cancel-workflow-action@0.13.1
-        with:
-          access_token: ${{ github.token }}
-      - uses: actions/checkout@v6
-      - name: Print concurrency group
-        run: echo '${{ github.workflow }}-${{ github.ref }}'
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v6
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          python -m pip cache purge
-          python -m pip install --upgrade pip setuptools --no-cache-dir
-          python -m pip install -r requirements-dev.txt  --no-cache-dir
-          pip install .
-      - name: Test with pytest
-        run: |
-          pytest braintrace/
-
-
   test_macos:
     runs-on: macos-latest
     strategy:

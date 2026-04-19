@@ -20,6 +20,22 @@ from . import nn
 from ._etrace_algorithms import (
     ETraceAlgorithm,
     EligibilityTrace,
+    ETraceGraphExecutor,
+    ETraceVjpAlgorithm,
+    ETraceVjpGraphExecutor,
+    ParamDimVjpAlgorithm,
+    D_RTRL,
+    IODimVjpAlgorithm,
+    ES_D_RTRL,
+    pp_prop,
+    EProp,
+    OSTL,
+    OTPE,
+    OTTT,
+    OSTTP,
+    FixedRandomFeedback,
+    KappaFilter,
+    PresynapticTrace,
 )
 from ._etrace_compiler import (
     ETraceGraph,
@@ -39,8 +55,6 @@ from ._etrace_compiler import (
     DiagnosticKind,
     DiagnosticLevel,
 )
-from ._etrace_graph_executor import ETraceGraphExecutor
-from ._etrace_input_data import SingleStepData, MultiStepData
 from ._etrace_op import (
     ETPPrimitive,
     ETPPrimitiveSpec,
@@ -53,16 +67,11 @@ from ._etrace_op import (
     register_primitive_spec,
     get_primitive_spec,
 )
-from ._etrace_vjp import (
-    ETraceVjpAlgorithm,
-    ETraceVjpGraphExecutor,
-    ParamDimVjpAlgorithm,
-    D_RTRL,
-    IODimVjpAlgorithm,
-    ES_D_RTRL,
-    pp_prop,
-)
 from ._grad_exponential import GradExpon
+from ._input_data import (
+    SingleStepData,
+    MultiStepData,
+)
 from ._legacy import (
     ConvOp,
     ElemWiseOp,
@@ -138,6 +147,16 @@ __all__ = [
 
     # gradient utilities
     'GradExpon',
+
+    # SNN online-learning algorithms
+    'EProp',
+    'OSTL',
+    'OTPE',
+    'OTTT',
+    'OSTTP',
+    'FixedRandomFeedback',
+    'KappaFilter',
+    'PresynapticTrace',
 
     # errors
     'NotSupportedError',

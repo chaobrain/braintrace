@@ -81,7 +81,7 @@ class ETraceParam(brainstate.ParamState):
         Use :class:`brainstate.ParamState` + the new ETP primitive
         functions (:func:`braintrace.matmul` etc.) directly.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -115,7 +115,7 @@ class ETraceParam(brainstate.ParamState):
 
 class ElemWiseParam(ETraceParam):
     """Legacy element-wise trace parameter."""
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -146,7 +146,7 @@ class NonTempParam(brainstate.ParamState):
         Use :class:`brainstate.ParamState` with plain JAX ops (``x @ w``)
         directly.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,
@@ -191,7 +191,7 @@ class FakeETraceParam(object):
     .. deprecated:: 0.2.0
         Use :class:`brainstate.FakeState` with plain JAX ops.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(self, value, op):
         self.value = value
@@ -219,7 +219,7 @@ class FakeElemWiseParam(object):
     .. deprecated:: 0.2.0
         Use :class:`brainstate.FakeState` with plain JAX ops.
     """
-    __module__ = 'braintrace._legacy'
+    __module__ = 'braintrace'
 
     def __init__(
         self,

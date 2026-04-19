@@ -50,8 +50,7 @@ from jax.tree_util import register_pytree_node_class
 
 from braintrace._compatible_imports import Var
 from braintrace._etrace_compiler import compile_etrace_graph, HiddenGroup
-from braintrace._etrace_graph_executor import ETraceGraphExecutor
-from braintrace._etrace_input_data import (
+from braintrace._input_data import (
     get_single_step_data,
     split_input_data_types,
     merge_data,
@@ -74,6 +73,7 @@ from braintrace._typing import (
     Hid2WeightJacobian,
     HiddenGroupJacobian,
 )
+from .graph_executor import ETraceGraphExecutor
 
 # TODO
 #

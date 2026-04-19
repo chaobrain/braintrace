@@ -20,6 +20,14 @@ import pytest
 import saiunit as u
 
 import braintrace
+from braintrace._etrace_algorithms.pp_prop import (
+    _format_decay_and_rank,
+    _expon_smooth,
+    _low_pass_filter,
+    IODimVjpAlgorithm,
+    ES_D_RTRL,
+    pp_prop,
+)
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,
@@ -31,14 +39,6 @@ from braintrace._etrace_model_test import (
     ALIF_Delta_Dense_Layer,
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
-)
-from braintrace._etrace_vjp.pp_prop import (
-    _format_decay_and_rank,
-    _expon_smooth,
-    _low_pass_filter,
-    IODimVjpAlgorithm,
-    ES_D_RTRL,
-    pp_prop,
 )
 
 

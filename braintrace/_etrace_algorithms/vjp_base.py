@@ -21,8 +21,7 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from braintrace._etrace_algorithms import ETraceAlgorithm
-from braintrace._etrace_input_data import has_multistep_data
+from braintrace._input_data import has_multistep_data
 from braintrace._state_managment import assign_state_values_v2
 from braintrace._typing import (
     PyTree,
@@ -38,7 +37,8 @@ from braintrace._typing import (
     dG_Hidden,
     dG_State,
 )
-from .graph_executor import ETraceVjpGraphExecutor
+from .base import ETraceAlgorithm
+from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 __all__ = [
     'ETraceVjpAlgorithm',  # the base class for the eligibility trace algorithm with the VJP gradient computation
@@ -416,7 +416,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 new_etrace_vals
             ),
             weight_vals,
-            running_index
+            running_index,
+            args,  # threaded to _update_fn_bwd for the learning-signal hook
         )
         return fwd_out, fwd_res
 
@@ -444,7 +445,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             residuals,  # the residuals of the VJP computation, for computing the gradients of input arguments
             etrace_vals_at_t_or_t_minus_1,  # the eligibility trace data at the current or last time step
             weight_vals,  # the weight id to its value mapping
-            running_index  # the running index
+            running_index,  # the running index
+            args,  # original update(*args) tuple, used by _compute_learning_signal
         ) = fwd_res
 
         (
@@ -538,6 +540,14 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             ]
 
         #
+        # Hook: subclasses may replace the reverse-AD learning signal with an
+        # alternative (e.g. target projection in OSTTP, κ-filtered signal in EProp).
+        #
+        dl2h_at_t_or_t_minus_1 = self._compute_learning_signal(
+            dl2h_at_t_or_t_minus_1, args
+        )
+
+        #
         # [4] Compute the gradients of the weights
         #
         # the gradients of the weights are computed through the RTRL algorithm.
@@ -566,6 +576,29 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_etrace,
             dg_running_index
         )
+
+    def _compute_learning_signal(
+        self,
+        dl_to_hidden_from_autodiff: Sequence[jax.Array],
+        args: tuple,
+    ) -> Sequence[jax.Array]:
+        """Override hook. Return the learning signal used by `_solve_weight_gradients`.
+
+        Default returns the reverse-AD gradient unchanged. Subclasses that need
+        target projection (OSTTP) or any other alternative can override this.
+
+        Args:
+            dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
+                by reverse-AD inside `_update_fn_bwd`.
+            args: The exact `*args` tuple passed to the most recent `update()` call,
+                made available so subclasses can pull auxiliary tensors (e.g.
+                ``y_target``) that were stashed elsewhere (e.g. on ``self``).
+
+        Returns:
+            Sequence of per-hidden-group gradient arrays, one per HiddenGroup. Must
+            match the shape and length of ``dl_to_hidden_from_autodiff``.
+        """
+        return dl_to_hidden_from_autodiff
 
     def _solve_weight_gradients(
         self,

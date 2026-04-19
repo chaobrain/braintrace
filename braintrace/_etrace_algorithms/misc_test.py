@@ -19,7 +19,7 @@ import numpy.testing as npt
 import pytest
 import saiunit as u
 
-from braintrace._etrace_vjp.misc import (
+from braintrace._etrace_algorithms.misc import (
     _batched_zeros_like,
     _reset_state_in_a_dict,
     _sum_dim,

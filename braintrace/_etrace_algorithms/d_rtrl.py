@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from braintrace._etrace_algorithms import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._etrace_op import (
     etp_elemwise_p,
@@ -32,13 +31,6 @@ from braintrace._etrace_op import (
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
 )
-
-# Primitives with an elementwise ``yw_to_w`` rule, i.e. rules of the form
-# ``trace * hidden_dim_broadcast``. For these we can replace the nested
-# ``vmap(yw_to_w, -1, -1) + sum`` pattern with a single ``einsum`` contraction
-# over the hidden-state axis of ``diag`` and ``trace``. Conv / sparse / LoRA
-# primitives have non-elementwise rules and stay on the legacy path.
-_ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 from braintrace._misc import etrace_df_key
 from braintrace._typing import (
     PyTree,
@@ -51,7 +43,7 @@ from braintrace._typing import (
     HiddenGroupJacobian,
     dG_Weight,
 )
-from .base import ETraceVjpAlgorithm
+from .base import EligibilityTrace
 from .misc import (
     _extract_leaf,
     _reset_state_in_a_dict,
@@ -59,11 +51,19 @@ from .misc import (
     _sum_dim,
     _update_dict,
 )
+from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [
     'ParamDimVjpAlgorithm',
     'D_RTRL',
 ]
+
+# Primitives with an elementwise ``yw_to_w`` rule, i.e. rules of the form
+# ``trace * hidden_dim_broadcast``. For these we can replace the nested
+# ``vmap(yw_to_w, -1, -1) + sum`` pattern with a single ``einsum`` contraction
+# over the hidden-state axis of ``diag`` and ``trace``. Conv / sparse / LoRA
+# primitives have non-elementwise rules and stay on the legacy path.
+_ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 
 
 def _init_param_dim_state(

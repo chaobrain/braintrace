@@ -100,12 +100,41 @@ VJP Algorithm Base
    ETraceVjpAlgorithm
 
 
+SNN Online-Learning Algorithms
+------------------------------
+
+Paper-faithful algorithms tailored to spiking neural networks. All are
+``ETraceVjpAlgorithm`` subclasses (or factories over the VJP algorithms).
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   EProp
+   OSTL
+   OTPE
+   OTTT
+   OSTTP
+
+SNN helpers reusable across the above algorithms:
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   FixedRandomFeedback
+   KappaFilter
+   PresynapticTrace
+
+
 Algorithm Comparison
 --------------------
 
 .. list-table::
    :header-rows: 1
-   :widths: 25 25 25 25
+   :widths: 20 25 25 30
 
    * - Algorithm
      - Memory
@@ -119,3 +148,23 @@ Algorithm Comparison
      - :math:`O(B(I + O))`
      - :math:`O(B \cdot I \cdot O)`
      - Large SNNs, memory-constrained
+   * - ``EProp``
+     - :math:`O(B \cdot |\theta|)`
+     - :math:`O(B \cdot I \cdot O)`
+     - SNNs with κ-filtered / random-feedback learning signals
+   * - ``OSTL``
+     - depends on regime
+     - depends on regime
+     - SNN regime-switchable factory (D-RTRL / pp_prop)
+   * - ``OTPE``
+     - :math:`O(B \cdot I \cdot O)` (full) / :math:`O(B(I+O))` (approx)
+     - :math:`O(B \cdot I \cdot O)`
+     - Deep SNNs; F-OTPE trades rank for memory
+   * - ``OTTT``
+     - :math:`O(B \cdot I)`
+     - :math:`O(B \cdot I \cdot O)`
+     - Very large SNNs; presynaptic λ-trace only
+   * - ``OSTTP``
+     - :math:`O(B \cdot |\theta|)`
+     - :math:`O(B \cdot I \cdot O)`
+     - Target-projection via fixed random feedback
