@@ -553,3 +553,22 @@ class TestGraphProperty:
         model = _make_gru()
         algo = ConcreteVjpAlgorithm(model)
         assert algo.executor is algo.graph_executor
+
+
+# ---------------------------------------------------------------------------
+# Tests: _compute_learning_signal hook
+# ---------------------------------------------------------------------------
+
+
+class TestComputeLearningSignalHook:
+    """Tests for the overridable learning-signal hook on ETraceVjpAlgorithm."""
+
+    def test_default_hook_is_identity(self):
+        """Default `_compute_learning_signal` returns input unchanged."""
+        algo = ETraceVjpAlgorithm.__new__(ETraceVjpAlgorithm)
+        dl2h = [jnp.ones((2, 3)), jnp.zeros((2, 5))]
+        out = ETraceVjpAlgorithm._compute_learning_signal(algo, dl2h, args=())
+        assert isinstance(out, (list, tuple))
+        assert len(out) == 2
+        assert jnp.allclose(out[0], dl2h[0])
+        assert jnp.allclose(out[1], dl2h[1])

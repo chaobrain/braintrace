@@ -567,6 +567,29 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_running_index
         )
 
+    def _compute_learning_signal(
+        self,
+        dl_to_hidden_from_autodiff: Sequence[jax.Array],
+        args: tuple,
+    ) -> Sequence[jax.Array]:
+        """Override hook. Return the learning signal used by `_solve_weight_gradients`.
+
+        Default returns the reverse-AD gradient unchanged. Subclasses that need
+        target projection (OSTTP) or any other alternative can override this.
+
+        Args:
+            dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
+                by reverse-AD inside `_update_fn_bwd`.
+            args: The exact `*args` tuple passed to the most recent `update()` call,
+                made available so subclasses can pull auxiliary tensors (e.g.
+                ``y_target``) that were stashed elsewhere (e.g. on ``self``).
+
+        Returns:
+            Sequence of per-hidden-group gradient arrays, one per HiddenGroup. Must
+            match the shape and length of ``dl_to_hidden_from_autodiff``.
+        """
+        return dl_to_hidden_from_autodiff
+
     def _solve_weight_gradients(
         self,
         running_index: Optional[int],
