@@ -144,7 +144,11 @@ def _resolve_leak(model, explicit: Optional[float]) -> float:
     if explicit is not None:
         return float(explicit)
     if model is not None:
-        for st in model.states():
+        states = model.states()
+        # model.states() may return a dict-like (FlattedDict) or an iterable;
+        # unwrap via .values() when available.
+        state_iter = states.values() if hasattr(states, 'values') else iter(states)
+        for st in state_iter:
             if hasattr(st, 'leak'):
                 return float(st.leak)
     raise ValueError(
