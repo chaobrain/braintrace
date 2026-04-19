@@ -28,7 +28,7 @@ import brainstate
 import jax
 import jax.numpy as jnp
 
-from braintrace._etrace_vjp.d_rtrl import ParamDimVjpAlgorithm
+from .d_rtrl import ParamDimVjpAlgorithm
 from ._common import FixedRandomFeedback, KappaFilter
 
 

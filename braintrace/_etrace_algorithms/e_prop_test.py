@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._snn_algorithms.e_prop import EProp
+from braintrace._etrace_algorithms.e_prop import EProp
 
 
 def _lsnn_like():
@@ -71,7 +71,7 @@ class TestEPropConstruction(unittest.TestCase):
 class TestEPropKappaApplied(unittest.TestCase):
     def test_kappa_zero_matches_d_rtrl(self):
         """κ=0 must reproduce D_RTRL gradients bit-for-bit on the same model."""
-        from braintrace._etrace_vjp.d_rtrl import ParamDimVjpAlgorithm
+        from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
 
         def compute(algo_cls, **extra):
             net = _lsnn_like()

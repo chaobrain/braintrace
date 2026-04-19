@@ -32,7 +32,7 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from braintrace._etrace_algorithms import EligibilityTrace
+from .base import EligibilityTrace
 from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
 from braintrace._etrace_op import (
     etp_elemwise_p,
@@ -55,7 +55,7 @@ from braintrace._typing import (
     HiddenGroupJacobian,
     dG_Weight,
 )
-from .base import ETraceVjpAlgorithm
+from .vjp_base import ETraceVjpAlgorithm
 from .misc import (
     _extract_leaf,
     _reset_state_in_a_dict,

@@ -19,7 +19,7 @@ import brainstate
 import jax
 import jax.numpy as jnp
 
-from braintrace._snn_algorithms._common import (
+from braintrace._etrace_algorithms._common import (
     FixedRandomFeedback,
     KappaFilter,
     PresynapticTrace,

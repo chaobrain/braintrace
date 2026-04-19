@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._snn_algorithms.ottt import OTTT
+from braintrace._etrace_algorithms.ottt import OTTT
 
 
 class FakeLIF(brainstate.HiddenState):

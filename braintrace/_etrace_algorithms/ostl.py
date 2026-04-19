@@ -23,8 +23,8 @@ from typing import Optional
 
 import brainstate
 
-from braintrace._etrace_vjp.d_rtrl import ParamDimVjpAlgorithm
-from braintrace._etrace_vjp.pp_prop import IODimVjpAlgorithm
+from .d_rtrl import ParamDimVjpAlgorithm
+from .pp_prop import IODimVjpAlgorithm
 
 
 __all__ = ['OSTL']

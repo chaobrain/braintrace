@@ -20,8 +20,8 @@ import pytest
 
 import braintrace
 from braintrace._etrace_algorithms import ETraceAlgorithm
-from braintrace._etrace_vjp.base import ETraceVjpAlgorithm
-from braintrace._etrace_vjp.graph_executor import ETraceVjpGraphExecutor
+from braintrace._etrace_algorithms.vjp_base import ETraceVjpAlgorithm
+from braintrace._etrace_algorithms.vjp_graph_executor import ETraceVjpGraphExecutor
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +575,7 @@ class TestComputeLearningSignalHook:
 
     def test_override_hook_replaces_learning_signal(self):
         """Subclass override is used instead of reverse-AD dl/dh."""
-        from braintrace._etrace_vjp.d_rtrl import ParamDimVjpAlgorithm
+        from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
 
         class Mini(brainstate.nn.Module):
             def __init__(self):

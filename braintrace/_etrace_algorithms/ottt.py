@@ -27,8 +27,8 @@ import jax
 import jax.numpy as jnp
 
 from braintrace._etrace_op import is_batched_primitive
-from braintrace._etrace_vjp.base import ETraceVjpAlgorithm
-from braintrace._etrace_vjp.misc import _route_grads_by_path, _update_dict
+from .vjp_base import ETraceVjpAlgorithm
+from .misc import _route_grads_by_path, _update_dict
 from ._common import PresynapticTrace, _resolve_leak
 
 

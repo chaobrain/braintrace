@@ -32,7 +32,7 @@ from braintrace._etrace_model_test import (
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
 )
-from braintrace._etrace_vjp.pp_prop import (
+from braintrace._etrace_algorithms.pp_prop import (
     _format_decay_and_rank,
     _expon_smooth,
     _low_pass_filter,

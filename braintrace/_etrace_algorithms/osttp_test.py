@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._snn_algorithms.osttp import OSTTP
+from braintrace._etrace_algorithms.osttp import OSTTP
 
 
 def _osttp_net():
@@ -98,7 +98,7 @@ class TestOSTTPTargetProjection(unittest.TestCase):
         )(x)
         g_osttp = grads[next(iter(grads))]
 
-        from braintrace._etrace_vjp.d_rtrl import ParamDimVjpAlgorithm
+        from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
         net2 = _osttp_net()
         algo2 = ParamDimVjpAlgorithm(net2)
         algo2.compile_graph(x)

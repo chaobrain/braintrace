@@ -13,21 +13,40 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Online learning algorithms for spiking neural networks.
+"""Eligibility-trace online-learning algorithms.
 
-Paper-faithful ``ETraceVjpAlgorithm`` subclasses: EProp, OSTL, OTPE, OTTT, OSTTP.
-See ``docs/superpowers/specs/2026-04-19-snn-online-etrace-algorithms-design.md``.
+Groups the core ETrace infrastructure (``ETraceAlgorithm``, ``EligibilityTrace``,
+``ETraceGraphExecutor``), VJP-based algorithms (D-RTRL, pp_prop / ES-D-RTRL),
+and paper-faithful SNN algorithms (EProp, OSTL, OTPE, OTTT, OSTTP).
 """
 
 from ._common import FixedRandomFeedback, KappaFilter, PresynapticTrace
+from .base import ETraceAlgorithm, EligibilityTrace
+from .d_rtrl import D_RTRL, ParamDimVjpAlgorithm
 from .e_prop import EProp
-from .osttp import OSTTP
+from .graph_executor import ETraceGraphExecutor
 from .ostl import OSTL
+from .osttp import OSTTP
 from .otpe import OTPE
 from .ottt import OTTT
-
+from .pp_prop import ES_D_RTRL, IODimVjpAlgorithm, pp_prop
+from .vjp_base import ETraceVjpAlgorithm
+from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 __all__ = [
+    # core
+    'ETraceAlgorithm',
+    'EligibilityTrace',
+    'ETraceGraphExecutor',
+    # VJP
+    'ETraceVjpAlgorithm',
+    'ETraceVjpGraphExecutor',
+    'ParamDimVjpAlgorithm',
+    'D_RTRL',
+    'IODimVjpAlgorithm',
+    'ES_D_RTRL',
+    'pp_prop',
+    # SNN
     'EProp',
     'OSTL',
     'OTPE',

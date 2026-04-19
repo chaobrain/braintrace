@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._snn_algorithms.ostl import OSTL
+from braintrace._etrace_algorithms.ostl import OSTL
 
 
 def _tiny_rec_net():

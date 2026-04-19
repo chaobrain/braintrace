@@ -40,8 +40,8 @@ from typing import Dict, Any
 import brainstate
 
 from braintrace._etrace_compiler import ETraceGraph, compile_etrace_graph
-from ._input_data import get_single_step_data
-from ._typing import Path
+from .._input_data import get_single_step_data
+from .._typing import Path
 
 __all__ = [
     'ETraceGraphExecutor',

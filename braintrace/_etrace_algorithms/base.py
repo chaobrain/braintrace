@@ -24,8 +24,8 @@ from typing import Dict, Any, Optional
 import brainstate
 
 from braintrace._etrace_compiler import ETraceGraph
-from ._etrace_graph_executor import ETraceGraphExecutor
-from ._typing import Path
+from .graph_executor import ETraceGraphExecutor
+from .._typing import Path
 
 __all__ = [
     'ETraceAlgorithm',

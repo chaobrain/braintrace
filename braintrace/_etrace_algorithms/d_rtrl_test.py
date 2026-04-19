@@ -33,7 +33,7 @@ from braintrace._etrace_model_test import (
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
 )
-from braintrace._etrace_vjp.d_rtrl import (
+from braintrace._etrace_algorithms.d_rtrl import (
     ParamDimVjpAlgorithm,
     D_RTRL,
     _normalize_vector,
@@ -826,7 +826,7 @@ class TestDRtrlDictTraceStorage:
         import brainstate
         import jax.numpy as jnp
         import braintrace
-        from braintrace._etrace_vjp.d_rtrl import _init_param_dim_state
+        from braintrace._etrace_algorithms.d_rtrl import _init_param_dim_state
 
         class Cell(brainstate.nn.Module):
             def __init__(self):

@@ -21,7 +21,7 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from braintrace._etrace_algorithms import ETraceAlgorithm
+from .base import ETraceAlgorithm
 from braintrace._input_data import has_multistep_data
 from braintrace._state_managment import assign_state_values_v2
 from braintrace._typing import (
@@ -38,7 +38,7 @@ from braintrace._typing import (
     dG_Hidden,
     dG_State,
 )
-from .graph_executor import ETraceVjpGraphExecutor
+from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 __all__ = [
     'ETraceVjpAlgorithm',  # the base class for the eligibility trace algorithm with the VJP gradient computation

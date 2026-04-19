@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._snn_algorithms import EProp, OSTL, OSTTP, OTPE, OTTT
+from braintrace._etrace_algorithms import EProp, OSTL, OSTTP, OTPE, OTTT
 
 
 class FakeLIF(brainstate.HiddenState):
