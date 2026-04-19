@@ -69,3 +69,43 @@ class TestOSTLConstruction(unittest.TestCase):
         algo.init_etrace_state()
         out = algo.update(x)
         assert out.shape == (1, 3)
+
+
+class TestOSTLResetAndKnob(unittest.TestCase):
+    def test_reset_zeros_traces(self):
+        net = _tiny_rec_net()
+        algo = OSTL(net, regime='with-H')
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        # Drive a few steps so traces become non-zero.
+        for _ in range(3):
+            algo.update(x)
+        algo.reset_state(batch_size=1)
+        for k, st in algo.etrace_bwg.items():
+            for arr in jax.tree.leaves(st.value):
+                assert jnp.allclose(arr, jnp.zeros_like(arr))
+        assert algo.running_index.value == 0
+
+    def test_without_h_regime_differs_from_with_h(self):
+        """Drive several recurrent steps; the two regimes must disagree on a non-trivial loss."""
+        def final_grad(regime):
+            net = _tiny_rec_net()
+            algo = OSTL(net, regime=regime)
+            x = jnp.ones((1, 3))
+            algo.compile_graph(x)
+            algo.init_etrace_state()
+            for _ in range(3):
+                algo.update(x)
+
+            def loss(x_):
+                return (algo.update(x_) ** 2).sum()
+
+            grads, _ = brainstate.augment.grad(
+                loss, algo.param_states, return_value=True
+            )(x)
+            return grads[next(iter(grads))]
+
+        g_with = final_grad('with-H')
+        g_without = final_grad('without-H')
+        assert not jnp.allclose(g_with, g_without, atol=1e-4)
