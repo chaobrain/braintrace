@@ -416,7 +416,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 new_etrace_vals
             ),
             weight_vals,
-            running_index
+            running_index,
+            args,  # threaded to _update_fn_bwd for the learning-signal hook
         )
         return fwd_out, fwd_res
 
@@ -444,7 +445,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             residuals,  # the residuals of the VJP computation, for computing the gradients of input arguments
             etrace_vals_at_t_or_t_minus_1,  # the eligibility trace data at the current or last time step
             weight_vals,  # the weight id to its value mapping
-            running_index  # the running index
+            running_index,  # the running index
+            args,  # original update(*args) tuple, used by _compute_learning_signal
         ) = fwd_res
 
         (
@@ -536,6 +538,14 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 )
                 for group in self.graph.hidden_groups
             ]
+
+        #
+        # Hook: subclasses may replace the reverse-AD learning signal with an
+        # alternative (e.g. target projection in OSTTP, κ-filtered signal in EProp).
+        #
+        dl2h_at_t_or_t_minus_1 = self._compute_learning_signal(
+            dl2h_at_t_or_t_minus_1, args
+        )
 
         #
         # [4] Compute the gradients of the weights

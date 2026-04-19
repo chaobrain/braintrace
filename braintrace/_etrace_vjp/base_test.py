@@ -572,3 +572,45 @@ class TestComputeLearningSignalHook:
         assert len(out) == 2
         assert jnp.allclose(out[0], dl2h[0])
         assert jnp.allclose(out[1], dl2h[1])
+
+    def test_override_hook_replaces_learning_signal(self):
+        """Subclass override is used instead of reverse-AD dl/dh."""
+        from braintrace._etrace_vjp.d_rtrl import ParamDimVjpAlgorithm
+
+        class Mini(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 3)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+            def update(self, x):
+                self.h.value = jax.nn.tanh(
+                    braintrace.matmul(self.h.value + x, self.w.value)
+                )
+                return self.h.value
+
+        captured = {}
+
+        class ConstantSignalAlgo(ParamDimVjpAlgorithm):
+            def _compute_learning_signal(self, dl_autodiff, args):
+                captured['autodiff'] = dl_autodiff
+                captured['args'] = args
+                return [jnp.ones_like(a) for a in dl_autodiff]
+
+        net = Mini()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        algo = ConstantSignalAlgo(net)
+        x0 = jnp.ones((1, 3))
+        algo.compile_graph(x0)
+        algo.init_etrace_state()
+
+        def loss(x):
+            out = algo.update(x)
+            return (out ** 2).sum()
+
+        grads, _ = brainstate.augment.grad(
+            loss, algo.param_states, return_value=True
+        )(x0)
+        assert 'autodiff' in captured  # hook was invoked
+        w_grad = grads[next(iter(grads))]
+        assert jnp.any(w_grad != 0.0)
