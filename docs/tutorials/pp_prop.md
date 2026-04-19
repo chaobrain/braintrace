@@ -168,7 +168,7 @@ where the diagonal approximation loses signal it will lag.
 
 - The `ES-D-RTRL` manuscript:
   [https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2](https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2)
-- `braintrace/_etrace_vjp/pp_prop.py` — full docstrings and mathematical
+- `braintrace/_etrace_algorithms/pp_prop.py` — full docstrings and mathematical
   derivation of the update rules.
 - `docs/tutorials/drtrl.md` — the parameter-dimensional dual algorithm
   (D_RTRL / `ParamDimVjpAlgorithm`).

@@ -209,4 +209,4 @@ cython_debug/
 /.claudegitignore
 /.codex
 /AGENTS.md
-/research/
+/dev/research/
