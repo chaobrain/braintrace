@@ -63,6 +63,16 @@ from ._etrace_vjp import (
     pp_prop,
 )
 from ._grad_exponential import GradExpon
+from ._snn_algorithms import (
+    EProp,
+    OSTL,
+    OTPE,
+    OTTT,
+    OSTTP,
+    FixedRandomFeedback,
+    KappaFilter,
+    PresynapticTrace,
+)
 from ._legacy import (
     ConvOp,
     ElemWiseOp,
@@ -138,6 +148,16 @@ __all__ = [
 
     # gradient utilities
     'GradExpon',
+
+    # SNN online-learning algorithms
+    'EProp',
+    'OSTL',
+    'OTPE',
+    'OTTT',
+    'OSTTP',
+    'FixedRandomFeedback',
+    'KappaFilter',
+    'PresynapticTrace',
 
     # errors
     'NotSupportedError',

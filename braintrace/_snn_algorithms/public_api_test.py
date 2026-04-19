@@ -13,27 +13,20 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Online learning algorithms for spiking neural networks.
-
-Paper-faithful ``ETraceVjpAlgorithm`` subclasses: EProp, OSTL, OTPE, OTTT, OSTTP.
-See ``docs/superpowers/specs/2026-04-19-snn-online-etrace-algorithms-design.md``.
-"""
-
-from ._common import FixedRandomFeedback, KappaFilter, PresynapticTrace
-from .e_prop import EProp
-from .osttp import OSTTP
-from .ostl import OSTL
-from .otpe import OTPE
-from .ottt import OTTT
+import unittest
 
 
-__all__ = [
-    'EProp',
-    'OSTL',
-    'OTPE',
-    'OTTT',
-    'OSTTP',
-    'FixedRandomFeedback',
-    'KappaFilter',
-    'PresynapticTrace',
-]
+class TestPublicAPI(unittest.TestCase):
+    def test_subpackage_exports(self):
+        import braintrace._snn_algorithms as pkg
+        for name in (
+            'EProp', 'OSTL', 'OTPE', 'OTTT', 'OSTTP',
+            'FixedRandomFeedback', 'KappaFilter', 'PresynapticTrace',
+        ):
+            assert hasattr(pkg, name), f'missing export: {name}'
+
+    def test_top_level_exports(self):
+        import braintrace
+        for name in ('EProp', 'OSTL', 'OTPE', 'OTTT', 'OSTTP'):
+            assert hasattr(braintrace, name), f'missing top-level export: {name}'
+            assert name in braintrace.__all__
