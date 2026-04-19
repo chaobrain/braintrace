@@ -40,7 +40,7 @@ from ._etrace_compiler import (
     DiagnosticLevel,
 )
 from ._etrace_graph_executor import ETraceGraphExecutor
-from ._etrace_input_data import SingleStepData, MultiStepData
+from ._input_data import SingleStepData, MultiStepData
 from ._etrace_op import (
     ETPPrimitive,
     ETPPrimitiveSpec,
