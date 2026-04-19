@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from .base import ETraceAlgorithm
 from braintrace._input_data import has_multistep_data
 from braintrace._state_managment import assign_state_values_v2
 from braintrace._typing import (
@@ -38,6 +37,7 @@ from braintrace._typing import (
     dG_Hidden,
     dG_State,
 )
+from .base import ETraceAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 __all__ = [

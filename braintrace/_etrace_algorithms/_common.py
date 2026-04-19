@@ -21,7 +21,6 @@ import brainstate
 import jax
 import jax.numpy as jnp
 
-
 __all__ = [
     'PresynapticTrace',
     'KappaFilter',

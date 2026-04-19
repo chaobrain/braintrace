@@ -28,9 +28,8 @@ import brainstate
 import jax
 import jax.numpy as jnp
 
-from .d_rtrl import ParamDimVjpAlgorithm
 from ._common import FixedRandomFeedback, KappaFilter
-
+from .d_rtrl import ParamDimVjpAlgorithm
 
 __all__ = ['EProp']
 

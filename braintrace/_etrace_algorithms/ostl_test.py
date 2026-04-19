@@ -89,6 +89,7 @@ class TestOSTLResetAndKnob(unittest.TestCase):
 
     def test_without_h_regime_differs_from_with_h(self):
         """Drive several recurrent steps; the two regimes must disagree on a non-trivial loss."""
+
         def final_grad(regime):
             net = _tiny_rec_net()
             algo = OSTL(net, regime=regime)

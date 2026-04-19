@@ -21,7 +21,6 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from .base import EligibilityTrace
 from braintrace._etrace_compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._etrace_op import (
     etp_elemwise_p,
@@ -44,7 +43,7 @@ from braintrace._typing import (
     HiddenGroupJacobian,
     dG_Weight,
 )
-from .vjp_base import ETraceVjpAlgorithm
+from .base import EligibilityTrace
 from .misc import (
     _extract_leaf,
     _reset_state_in_a_dict,
@@ -52,6 +51,7 @@ from .misc import (
     _sum_dim,
     _update_dict,
 )
+from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [
     'ParamDimVjpAlgorithm',

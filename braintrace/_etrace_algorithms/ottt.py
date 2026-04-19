@@ -23,14 +23,12 @@ presynaptic eligibility trace ``â ← λ·â + x_t`` and computes weight gradie
 from typing import Dict, Optional
 
 import brainstate
-import jax
 import jax.numpy as jnp
 
 from braintrace._etrace_op import is_batched_primitive
-from .vjp_base import ETraceVjpAlgorithm
-from .misc import _route_grads_by_path, _update_dict
 from ._common import PresynapticTrace, _resolve_leak
-
+from .misc import _route_grads_by_path, _update_dict
+from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = ['OTTT']
 

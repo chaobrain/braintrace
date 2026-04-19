@@ -20,8 +20,8 @@ class TestPublicAPI(unittest.TestCase):
     def test_subpackage_exports(self):
         import braintrace._etrace_algorithms as pkg
         for name in (
-            'EProp', 'OSTL', 'OTPE', 'OTTT', 'OSTTP',
-            'FixedRandomFeedback', 'KappaFilter', 'PresynapticTrace',
+                'EProp', 'OSTL', 'OTPE', 'OTTT', 'OSTTP',
+                'FixedRandomFeedback', 'KappaFilter', 'PresynapticTrace',
         ):
             assert hasattr(pkg, name), f'missing export: {name}'
 

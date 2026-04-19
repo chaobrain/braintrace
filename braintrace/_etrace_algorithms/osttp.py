@@ -28,7 +28,6 @@ import jax.numpy as jnp
 
 from .d_rtrl import ParamDimVjpAlgorithm
 
-
 __all__ = ['OSTTP']
 
 

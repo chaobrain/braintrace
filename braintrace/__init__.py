@@ -55,7 +55,6 @@ from ._etrace_compiler import (
     DiagnosticKind,
     DiagnosticLevel,
 )
-from ._input_data import SingleStepData, MultiStepData
 from ._etrace_op import (
     ETPPrimitive,
     ETPPrimitiveSpec,
@@ -69,6 +68,10 @@ from ._etrace_op import (
     get_primitive_spec,
 )
 from ._grad_exponential import GradExpon
+from ._input_data import (
+    SingleStepData,
+    MultiStepData,
+)
 from ._legacy import (
     ConvOp,
     ElemWiseOp,

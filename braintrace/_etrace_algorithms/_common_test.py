@@ -15,7 +15,6 @@
 
 import unittest
 
-import brainstate
 import jax
 import jax.numpy as jnp
 

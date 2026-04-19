@@ -26,8 +26,8 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
 from braintrace._etrace_algorithms import EProp
+from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
 
 
 def _net():

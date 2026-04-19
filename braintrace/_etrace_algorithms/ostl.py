@@ -26,7 +26,6 @@ import brainstate
 from .d_rtrl import ParamDimVjpAlgorithm
 from .pp_prop import IODimVjpAlgorithm
 
-
 __all__ = ['OSTL']
 
 

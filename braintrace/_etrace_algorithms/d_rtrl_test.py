@@ -21,6 +21,13 @@ import pytest
 import saiunit as u
 
 import braintrace
+from braintrace._etrace_algorithms.d_rtrl import (
+    ParamDimVjpAlgorithm,
+    D_RTRL,
+    _normalize_vector,
+    _normalize_matrix_spectrum,
+    _remove_units,
+)
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,
@@ -32,13 +39,6 @@ from braintrace._etrace_model_test import (
     ALIF_Delta_Dense_Layer,
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
-)
-from braintrace._etrace_algorithms.d_rtrl import (
-    ParamDimVjpAlgorithm,
-    D_RTRL,
-    _normalize_vector,
-    _normalize_matrix_spectrum,
-    _remove_units,
 )
 
 
