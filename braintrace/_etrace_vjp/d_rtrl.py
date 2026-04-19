@@ -32,13 +32,6 @@ from braintrace._etrace_op import (
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
 )
-
-# Primitives with an elementwise ``yw_to_w`` rule, i.e. rules of the form
-# ``trace * hidden_dim_broadcast``. For these we can replace the nested
-# ``vmap(yw_to_w, -1, -1) + sum`` pattern with a single ``einsum`` contraction
-# over the hidden-state axis of ``diag`` and ``trace``. Conv / sparse / LoRA
-# primitives have non-elementwise rules and stay on the legacy path.
-_ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 from braintrace._misc import etrace_df_key
 from braintrace._typing import (
     PyTree,
@@ -64,6 +57,13 @@ __all__ = [
     'ParamDimVjpAlgorithm',
     'D_RTRL',
 ]
+
+# Primitives with an elementwise ``yw_to_w`` rule, i.e. rules of the form
+# ``trace * hidden_dim_broadcast``. For these we can replace the nested
+# ``vmap(yw_to_w, -1, -1) + sum`` pattern with a single ``einsum`` contraction
+# over the hidden-state axis of ``diag`` and ``trace``. Conv / sparse / LoRA
+# primitives have non-elementwise rules and stay on the legacy path.
+_ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 
 
 def _init_param_dim_state(
