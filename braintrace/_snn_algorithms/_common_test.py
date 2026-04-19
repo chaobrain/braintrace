@@ -19,7 +19,13 @@ import brainstate
 import jax
 import jax.numpy as jnp
 
-from braintrace._snn_algorithms._common import PresynapticTrace
+from braintrace._snn_algorithms._common import (
+    FixedRandomFeedback,
+    KappaFilter,
+    PresynapticTrace,
+    _resolve_leak,
+    extract_y_target,
+)
 
 
 class TestPresynapticTrace(unittest.TestCase):
@@ -34,3 +40,68 @@ class TestPresynapticTrace(unittest.TestCase):
         trace = PresynapticTrace(jnp.ones((4,)), leak=0.5)
         trace.reset_state()
         assert jnp.allclose(trace.value, jnp.zeros((4,)))
+
+
+class TestKappaFilter(unittest.TestCase):
+    def test_low_pass(self):
+        flt = KappaFilter(jnp.zeros((3,)), kappa=0.8)
+        y1 = flt.update(jnp.ones((3,)))
+        # (1 - 0.8)*1 + 0.8*0 == 0.2
+        assert jnp.allclose(y1, jnp.full((3,), 0.2))
+        y2 = flt.update(jnp.ones((3,)))
+        # (1 - 0.8)*1 + 0.8*0.2 == 0.36
+        assert jnp.allclose(y2, jnp.full((3,), 0.36))
+
+    def test_kappa_zero_disables(self):
+        flt = KappaFilter(jnp.zeros((3,)), kappa=0.0)
+        y = flt.update(jnp.full((3,), 5.0))
+        assert jnp.allclose(y, jnp.full((3,), 5.0))  # pass-through
+
+
+class TestFixedRandomFeedback(unittest.TestCase):
+    def test_shape_and_frozen(self):
+        key = jax.random.PRNGKey(0)
+        fb = FixedRandomFeedback(n_target=10, n_layer=200, key=key, init_scale=0.1)
+        assert fb.B.shape == (10, 200)
+        grad_fn = jax.grad(lambda y_target: (fb.project(y_target) ** 2).sum())
+        y = jnp.ones((5, 10))
+        g = grad_fn(y)
+        assert g.shape == y.shape
+
+    def test_project_shapes(self):
+        fb = FixedRandomFeedback(n_target=4, n_layer=7, key=jax.random.PRNGKey(1))
+        y_target = jnp.ones((3, 4))  # batched
+        proj = fb.project(y_target)
+        assert proj.shape == (3, 7)
+
+
+class TestExtractYTarget(unittest.TestCase):
+    def test_absent_returns_none(self):
+        assert extract_y_target(()) is None
+
+    def test_present_returns_value(self):
+        y = jnp.ones((5,))
+        assert extract_y_target((jnp.zeros(3), y), index=1) is y
+
+
+class TestResolveLeak(unittest.TestCase):
+    def test_explicit_float_wins(self):
+        assert _resolve_leak(model=None, explicit=0.7) == 0.7
+
+    def test_discover_from_model(self):
+        class FakeState:
+            leak = 0.4
+
+        class FakeModel:
+            def states(self):
+                return [FakeState()]
+
+        assert _resolve_leak(model=FakeModel(), explicit=None) == 0.4
+
+    def test_missing_raises(self):
+        class EmptyModel:
+            def states(self):
+                return []
+
+        with self.assertRaises(ValueError):
+            _resolve_leak(model=EmptyModel(), explicit=None)
