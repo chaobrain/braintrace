@@ -210,3 +210,8 @@ cython_debug/
 /.codex
 /AGENTS.md
 /dev/research/
+
+# brainx-sphinx-header build artifacts
+docs/_brand/
+docs/_static/css/brainx-header.css
+docs/_static/js/brainx-header.js
