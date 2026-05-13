@@ -15,4 +15,4 @@ jupyter-sphinx>=0.3.2
 sphinx-design
 sphinx-math-dollar
 
-brainx-sphinx-header>=0.1.0
+brainx-sphinx-header>=0.4.0
