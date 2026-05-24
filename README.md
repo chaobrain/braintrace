@@ -8,13 +8,13 @@
 <p align="center">
 	<a href="https://pypi.org/project/braintrace/"><img alt="Supported Python Version" src="https://img.shields.io/pypi/pyversions/braintrace"></a>
 	<a href="https://github.com/chaobrain/braintrace/blob/main/LICENSE"><img alt="LICENSE" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
-  	<a href="https://braintrace.readthedocs.io/?badge=latest"><img alt="Documentation" src="https://readthedocs.org/projects/braintrace/badge/?version=latest"></a>
+  	<a href="https://brainx.chaobrain.com/braintrace/"><img alt="Documentation" src="https://readthedocs.org/projects/braintrace/badge/?version=latest"></a>
   	<a href="https://badge.fury.io/py/braintrace"><img alt="PyPI version" src="https://badge.fury.io/py/braintrace.svg"></a>
     <a href="https://github.com/chaobrain/braintrace/actions/workflows/CI.yml"><img alt="Continuous Integration" src="https://github.com/chaobrain/braintrace/actions/workflows/CI.yml/badge.svg"></a>
 </p>
 
 [``braintrace``](https://github.com/chaobrain/braintrace) provides online learning algorithms for biological neural networks.
-It has been integrated into our establishing [brain modeling ecosystem](https://brainmodeling.readthedocs.io/).
+It has been integrated into our establishing [brain modeling ecosystem](https://brainx.chaobrain.com/).
 
 ## Installation
 
@@ -32,7 +32,7 @@ pip install BrainX -U
 
 ## Documentation
 
-The official documentation is hosted on Read the Docs: [https://braintrace.readthedocs.io](https://braintrace.readthedocs.io)
+The official documentation is hosted on Read the Docs: [https://brainx.chaobrain.com/braintrace](https://brainx.chaobrain.com/braintrace)
 
 ## Citation
 
@@ -65,4 +65,4 @@ If you use this package in your research, please cite:
 
 ## See also the ecosystem
 
-``braintrace`` is one part of our brain simulation ecosystem: https://brainmodeling.readthedocs.io/
+``braintrace`` is one part of our brain simulation ecosystem: https://brainx.chaobrain.com/

@@ -69,7 +69,7 @@ Installation
 See also the ecosystem
 ^^^^^^^^^^^^^^^^^^^^^^
 
-``braintrace`` is part of the `brain simulation ecosystem <https://brainmodeling.readthedocs.io/>`_.
+``braintrace`` is part of the `brain simulation ecosystem <https://brainx.chaobrain.com/>`_.
 
 
 ----
