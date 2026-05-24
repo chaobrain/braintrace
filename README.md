@@ -2,7 +2,7 @@
 <h2 align="center">Eligibility Trace-based Online Learning for Brain Dynamics</h2>
 
 <p align="center">
-  	<img alt="Header image of braintrace." src="https://raw.githubusercontent.com/chaobrain/braintrace/main/docs/_static/braintrace.png" width=40%>
+  	<img alt="Header image of braintrace." src="https://brainx.chaobrain.com/images/braintrace.webp" width=40%>
 </p>
 
 <p align="center">
