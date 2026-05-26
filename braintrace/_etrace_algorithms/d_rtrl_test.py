@@ -297,10 +297,21 @@ class TestRemoveUnits:
 # ---------------------------------------------------------------------------
 
 class TestParamDimVjpAlgorithmAlias:
-    """Check that D_RTRL is indeed an alias for ParamDimVjpAlgorithm."""
+    """Check that D_RTRL is a subclass of ParamDimVjpAlgorithm."""
 
     def test_d_rtrl_is_param_dim_vjp_algorithm(self):
-        assert D_RTRL is ParamDimVjpAlgorithm
+        assert issubclass(D_RTRL, ParamDimVjpAlgorithm)
+
+    def test_d_rtrl_instance_is_param_dim_vjp_algorithm(self):
+        model = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(model)
+        algo = D_RTRL(model)
+        assert isinstance(algo, D_RTRL)
+        assert isinstance(algo, ParamDimVjpAlgorithm)
+        # Constructor defaults preserved through inheritance.
+        assert algo.vjp_method == 'single-step'
+        assert algo.fast_solve is True
+        assert algo.normalize_matrix_spectrum is False
 
 
 class TestParamDimVjpAlgorithmInit:

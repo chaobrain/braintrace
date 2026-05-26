@@ -793,4 +793,24 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         return dG_weights
 
 
-D_RTRL = ParamDimVjpAlgorithm
+class D_RTRL(ParamDimVjpAlgorithm):
+    r"""
+    The Diagonal RTRL (D-RTRL) online gradient computation algorithm.
+
+    ``D_RTRL`` is the canonical name for the parameter-dimension eligibility
+    trace algorithm implemented by :py:class:`ParamDimVjpAlgorithm`. It computes
+    the gradients of the weights with the diagonal approximation and the
+    parameter dimension complexity, following the learning rule:
+
+    $$
+    \begin{aligned}
+    &\boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}+\operatorname{diag}\left(\mathbf{D}_f^t\right) \otimes \mathbf{x}^t \\
+    & \nabla_{\boldsymbol{\theta}} \mathcal{L}=\sum_{t^{\prime} \in \mathcal{T}} \frac{\partial \mathcal{L}^{t^{\prime}}}{\partial \mathbf{h}^{t^{\prime}}} \circ \boldsymbol{\epsilon}^{t^{\prime}}
+    \end{aligned}
+    $$
+
+    For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
+
+    This subclass inherits all behavior from :py:class:`ParamDimVjpAlgorithm`
+    without modification; it exists to provide the canonical ``D_RTRL`` name.
+    """
