@@ -331,7 +331,7 @@ def online_train_epoch(
     """Run one online-training epoch using pp_prop. Returns traced mean step loss (wrap in jit)."""
     import braintrace
     weights = model.states(brainstate.ParamState)
-    online_model = braintrace.IODimVjpAlgorithm(
+    online_model = braintrace.pp_prop(
         model, decay_or_rank=decay_or_rank, vjp_method=vjp_method
     )
 
@@ -371,7 +371,7 @@ def online_train_epoch_fixed_target(
     """Classification variant: fixed label per batch, softmax-xent loss applied each step."""
     import braintrace
     weights = model.states(brainstate.ParamState)
-    online_model = braintrace.IODimVjpAlgorithm(
+    online_model = braintrace.pp_prop(
         model, decay_or_rank=decay_or_rank, vjp_method=vjp_method
     )
 

@@ -404,7 +404,7 @@ class OnlineTrainer(Trainer):
         weights = self.target.states().subset(brainstate.ParamState)
 
         # initialize the online learning model
-        model = braintrace.IODimVjpAlgorithm(self.target, self.decay_or_rank)
+        model = braintrace.pp_prop(self.target, self.decay_or_rank)
 
         # initialize the states
         @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])

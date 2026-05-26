@@ -29,7 +29,7 @@ from .ostl import OSTL, OSTLFeedforward, OSTLRecurrent
 from .osttp import OSTTP
 from .otpe import OTPE
 from .ottt import OTTT
-from .pp_prop import ES_D_RTRL, IODimVjpAlgorithm, pp_prop
+from .pp_prop import ES_D_RTRL, IODimVjpAlgorithm, pp_prop  # IODimVjpAlgorithm/ES_D_RTRL: back-compat aliases
 from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
@@ -43,9 +43,9 @@ __all__ = [
     'ETraceVjpGraphExecutor',
     'ParamDimVjpAlgorithm',
     'D_RTRL',
-    'IODimVjpAlgorithm',
-    'ES_D_RTRL',
     'pp_prop',
+    'ES_D_RTRL',
+    'IODimVjpAlgorithm',
     # SNN
     'EProp',
     'OSTL',

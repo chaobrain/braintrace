@@ -84,9 +84,9 @@ input and output dimensions.
    :nosignatures:
    :template: classtemplate.rst
 
-   IODimVjpAlgorithm
+   pp_prop
 
-``ES_D_RTRL`` and ``pp_prop`` are aliases for :class:`IODimVjpAlgorithm`.
+``ES_D_RTRL`` and ``IODimVjpAlgorithm`` are aliases for :class:`pp_prop`.
 
 
 VJP Algorithm Base

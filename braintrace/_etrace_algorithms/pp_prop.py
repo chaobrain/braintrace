@@ -65,9 +65,9 @@ from .misc import (
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [
-    'IODimVjpAlgorithm',  # the diagonally approximated algorithm with the input-output dimension complexity
+    'pp_prop',  # the diagonally approximated algorithm with the input-output dimension complexity
     'ES_D_RTRL',
-    'pp_prop',
+    'IODimVjpAlgorithm',
 ]
 
 
@@ -491,7 +491,7 @@ def _solve_IO_dim_weight_gradients(
             _route_grads_by_path(relation, dg_dict, weight_vals, dG_weights)
 
 
-class IODimVjpAlgorithm(ETraceVjpAlgorithm):
+class pp_prop(ETraceVjpAlgorithm):
     r"""
     The online gradient computation algorithm with the diagonal approximation
     and the input-output dimensional complexity.
@@ -856,5 +856,5 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         return dG_weights
 
 
-ES_D_RTRL = IODimVjpAlgorithm
-pp_prop = IODimVjpAlgorithm
+ES_D_RTRL = pp_prop
+IODimVjpAlgorithm = pp_prop

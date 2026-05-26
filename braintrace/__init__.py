@@ -25,9 +25,9 @@ from ._etrace_algorithms import (
     ETraceVjpGraphExecutor,
     ParamDimVjpAlgorithm,
     D_RTRL,
-    IODimVjpAlgorithm,
-    ES_D_RTRL,
     pp_prop,
+    ES_D_RTRL,
+    IODimVjpAlgorithm,
     EProp,
     OSTL,
     OSTLRecurrent,
@@ -99,9 +99,9 @@ __all__ = [
     'ETraceVjpGraphExecutor',
     'ParamDimVjpAlgorithm',
     'D_RTRL',
-    'IODimVjpAlgorithm',
-    'ES_D_RTRL',
     'pp_prop',
+    'ES_D_RTRL',
+    'IODimVjpAlgorithm',
 
     # ETP primitives (user API)
     'matmul',
