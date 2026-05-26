@@ -155,3 +155,66 @@ def assert_param_gradients_close(actual, expected, *, atol=1e-4, rtol=0.0, keys=
             "param gradients differ beyond tolerance "
             f"(atol={atol}, rtol={rtol}):\n" + "\n".join(failures)
         )
+
+
+def cosine_similarity(a, b) -> float:
+    """Cosine of the angle between two gradient arrays (flattened). Returns NaN if
+    either is all-zero. The robust direction signal for approximate algorithms:
+    it ignores magnitude, which carries the F-SINGLESTEP / approximation bias."""
+    a = np.asarray(a).ravel()
+    b = np.asarray(b).ravel()
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    if denom == 0:
+        return float('nan')
+    return float(a @ b / denom)
+
+
+def sign_agreement(a, b) -> float:
+    """Fraction of elements where ``a`` and ``b`` share the same sign, over the
+    elements where both are non-negligible (|.| > 1e-8)."""
+    a = np.asarray(a).ravel()
+    b = np.asarray(b).ravel()
+    mask = (np.abs(a) > 1e-8) & (np.abs(b) > 1e-8)
+    if mask.sum() == 0:
+        return float('nan')
+    return float((np.sign(a[mask]) == np.sign(b[mask])).mean())
+
+
+def relative_magnitude(a, b) -> float:
+    """``||a|| / ||b||`` (flattened). >1 means ``a`` is larger than the reference
+    ``b``; used to quantify magnitude bias of approximate gradients."""
+    a = np.asarray(a).ravel()
+    b = np.asarray(b).ravel()
+    nb = np.linalg.norm(b)
+    if nb == 0:
+        return float('nan')
+    return float(np.linalg.norm(a) / nb)
+
+
+def assert_direction_aligned(
+    approx, reference, *, min_cosine, min_sign_agreement=0.0, keys=None, mag_bounds=None
+):
+    """Assert an approximate gradient tree is *directionally* aligned with a
+    reference (typically BPTT).
+
+    For each compared key: cosine similarity must be >= ``min_cosine`` and sign
+    agreement >= ``min_sign_agreement``; if ``mag_bounds=(lo, hi)`` is given, the
+    relative magnitude must lie in ``[lo, hi]``. This is the C-level criterion for
+    approximate algorithms, which are not expected to match BPTT element-wise.
+    """
+    compare = list(reference.keys()) if keys is None else list(keys)
+    failures = []
+    for key in compare:
+        c = cosine_similarity(approx[key], reference[key])
+        s = sign_agreement(approx[key], reference[key])
+        if not (c >= min_cosine):
+            failures.append(f"  {key}: cosine {c:.4f} < {min_cosine}")
+        if not (s >= min_sign_agreement):
+            failures.append(f"  {key}: sign_agreement {s:.4f} < {min_sign_agreement}")
+        if mag_bounds is not None:
+            r = relative_magnitude(approx[key], reference[key])
+            lo, hi = mag_bounds
+            if not (lo <= r <= hi):
+                failures.append(f"  {key}: relmag {r:.4f} not in [{lo}, {hi}]")
+    if failures:
+        raise AssertionError("gradient direction not aligned:\n" + "\n".join(failures))
