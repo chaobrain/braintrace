@@ -132,3 +132,33 @@ def stacked_tanh_rnn(n_in: int = 3, n_rec: int = 4, seed: int = 0) -> ModelSpec:
         etp_param_keys=(('w1',), ('w2',)),
         plain_param_keys=(('win',), ('wmid',)),
     )
+
+
+def two_state_rnn(n_in: int = 3, n_rec: int = 3, seed: int = 0) -> ModelSpec:
+    """Two coupled hidden states (v, a) that the compiler groups into ONE
+    HiddenGroup with ``num_state == 2`` (an LIF+adaptation-like topology).
+
+    ``v_t = 0.9 v + matmul(x, w) - 0.1 a``; ``a_t = 0.95 a + v``. ``w`` is the
+    single trainable ETP input weight. D_RTRL handles this exactly; OTTT/OTPE
+    reject it (their per-step rule assumes a single-state group).
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(jax.random.PRNGKey(seed), (n_in, n_rec))
+                )
+                self.v = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+                self.a = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                v, a = self.v.value, self.a.value
+                self.v.value = 0.9 * v + braintrace.matmul(x.reshape(1, -1), self.w.value) - 0.1 * a
+                self.a.value = 0.95 * a + v
+                return self.v.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
