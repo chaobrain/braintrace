@@ -29,7 +29,6 @@ from braintrace._etrace_algorithms._common import (
     _batched_zeros_like,
     _extract_leaf,
     _reset_state_in_a_dict,
-    _resolve_leak,
     _sum_dim,
     _update_dict,
     _wrap_leaves_as_pytree,
@@ -92,29 +91,6 @@ class TestExtractYTarget(unittest.TestCase):
     def test_present_returns_value(self):
         y = jnp.ones((5,))
         assert extract_y_target((jnp.zeros(3), y), index=1) is y
-
-
-class TestResolveLeak(unittest.TestCase):
-    def test_explicit_float_wins(self):
-        assert _resolve_leak(model=None, explicit=0.7) == 0.7
-
-    def test_discover_from_model(self):
-        class FakeState:
-            leak = 0.4
-
-        class FakeModel:
-            def states(self):
-                return [FakeState()]
-
-        assert _resolve_leak(model=FakeModel(), explicit=None) == 0.4
-
-    def test_missing_raises(self):
-        class EmptyModel:
-            def states(self):
-                return []
-
-        with self.assertRaises(ValueError):
-            _resolve_leak(model=EmptyModel(), explicit=None)
 
 
 # ---------------------------------------------------------------------------

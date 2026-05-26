@@ -26,9 +26,6 @@ branching:
 - :class:`OSTLFeedforward` ('without-H') drops ``H``; the temporal term vanishes
   and the update reduces to pp_prop with negligible decay (feedforward SNN).
 
-:func:`OSTL` is a thin factory selecting between the two by ``regime`` keyword,
-preserving the historical ``OSTL(model, regime=...)`` call site.
-
 Reference
 ---------
 Bohnstingl, T., Woźniak, S., Pantazi, A., & Eleftheriou, E. (2023). "Online
@@ -44,7 +41,7 @@ import brainstate
 from .param_dim_vjp import ParamDimVjpAlgorithm
 from .pp_prop import pp_prop
 
-__all__ = ['OSTL', 'OSTLRecurrent', 'OSTLFeedforward']
+__all__ = ['OSTLRecurrent', 'OSTLFeedforward']
 
 
 class OSTLRecurrent(ParamDimVjpAlgorithm):
@@ -94,7 +91,7 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
         >>>
         >>> model = Net()
         >>> brainstate.nn.init_all_states(model)
-        >>> learner = braintrace.OSTLRecurrent(model)   # or braintrace.OSTL(model, regime='with-H')
+        >>> learner = braintrace.OSTLRecurrent(model)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)
         >>> y = learner(x0)
@@ -162,7 +159,7 @@ class OSTLFeedforward(pp_prop):
         >>>
         >>> model = Net()
         >>> brainstate.nn.init_all_states(model)
-        >>> learner = braintrace.OSTLFeedforward(model)  # or braintrace.OSTL(model, regime='without-H')
+        >>> learner = braintrace.OSTLFeedforward(model)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)
         >>> y = learner(x0)
@@ -188,35 +185,3 @@ class OSTLFeedforward(pp_prop):
         **kwargs,
     ):
         super().__init__(model, decay_or_rank=decay_or_rank, name=name, **kwargs)
-
-
-def OSTL(
-    model: brainstate.nn.Module,
-    regime: str = 'with-H',
-    name: Optional[str] = None,
-    **kwargs,
-):
-    """Construct the OSTL algorithm for the selected regime.
-
-    A convenience dispatcher over :class:`OSTLRecurrent` ('with-H') and
-    :class:`OSTLFeedforward` ('without-H'). Prefer constructing those classes
-    directly when the regime is known at the call site.
-
-    Parameters
-    ----------
-    model : brainstate.nn.Module
-    regime : {'with-H', 'without-H'}, default 'with-H'
-        'with-H' keeps the recurrent Jacobian (RTRL-exact, per-parameter trace).
-        'without-H' drops it (feedforward SNN, IO-dim trace with tiny decay).
-    name : optional name forwarded to the chosen class.
-    **kwargs : forwarded to the chosen class constructor.
-
-    Returns
-    -------
-    OSTLRecurrent or OSTLFeedforward
-    """
-    if regime == 'with-H':
-        return OSTLRecurrent(model, name=name, **kwargs)
-    if regime == 'without-H':
-        return OSTLFeedforward(model, name=name, **kwargs)
-    raise ValueError(f"regime must be 'with-H' or 'without-H'; got {regime!r}")

@@ -17,7 +17,8 @@
 
 Groups the core ETrace infrastructure (``ETraceAlgorithm``, ``EligibilityTrace``,
 ``ETraceGraphExecutor``), VJP-based algorithms (D-RTRL, pp_prop / ES-D-RTRL),
-and paper-faithful SNN algorithms (EProp, OSTL, OTPE, OTTT, OSTTP).
+and paper-faithful SNN algorithms (EProp, OSTLRecurrent, OSTLFeedforward, OTPE,
+OTTT, OSTTP).
 """
 
 from ._common import FixedRandomFeedback, KappaFilter, PresynapticTrace
@@ -25,7 +26,7 @@ from .base import ETraceAlgorithm, EligibilityTrace
 from .d_rtrl import D_RTRL
 from .e_prop import EProp
 from .graph_executor import ETraceGraphExecutor
-from .ostl import OSTL, OSTLFeedforward, OSTLRecurrent
+from .ostl import OSTLFeedforward, OSTLRecurrent
 from .osttp import OSTTP
 from .otpe import OTPE
 from .ottt import OTTT
@@ -49,7 +50,6 @@ __all__ = [
     'IODimVjpAlgorithm',
     # SNN
     'EProp',
-    'OSTL',
     'OSTLRecurrent',
     'OSTLFeedforward',
     'OTPE',

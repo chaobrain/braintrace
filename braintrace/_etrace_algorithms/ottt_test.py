@@ -23,14 +23,6 @@ import braintrace
 from braintrace._etrace_algorithms.ottt import OTTT
 
 
-class FakeLIF(brainstate.HiddenState):
-    """HiddenState with a `leak` attribute for _resolve_leak discovery."""
-
-    def __init__(self, init_value, leak):
-        super().__init__(init_value)
-        self.leak = leak
-
-
 def _ottt_net():
     class Net(brainstate.nn.Module):
         def __init__(self):
@@ -38,10 +30,33 @@ def _ottt_net():
             self.w = brainstate.ParamState(
                 0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
             )
-            self.v = FakeLIF(jnp.zeros((1, 3)), leak=0.9)
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
         def update(self, x):
             self.v.value = 0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _two_state_net():
+    """Net whose two coupled hidden states form one group with num_state == 2."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+            self.a = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            v, a = self.v.value, self.a.value
+            self.v.value = 0.9 * v + braintrace.matmul(x, self.w.value) - 0.1 * a
+            self.a.value = 0.95 * a + v
             return self.v.value
 
     net = Net()
@@ -58,26 +73,20 @@ class TestOTTTConstruction(unittest.TestCase):
         with self.assertRaises(ValueError):
             OTTT(_ottt_net(), mode='bogus', leak=0.9)
 
-    def test_leak_discovered_from_model(self):
-        """_resolve_leak picks up FakeLIF.leak when not explicitly provided."""
-        algo = OTTT(_ottt_net())
-        assert algo.leak == 0.9
+    def test_leak_is_required(self):
+        """leak is never inferred from the model; omitting it is a TypeError."""
+        with self.assertRaises(TypeError):
+            OTTT(_ottt_net())
 
-    def test_missing_leak_raises(self):
-        class BareNet(brainstate.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.w = brainstate.ParamState(jnp.eye(3))
-                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
-
-            def update(self, x):
-                self.h.value = braintrace.matmul(x, self.w.value)
-                return self.h.value
-
-        net = BareNet()
-        brainstate.nn.init_all_states(net, batch_size=1)
+    def test_leak_out_of_range_raises(self):
         with self.assertRaises(ValueError):
-            OTTT(net)
+            OTTT(_ottt_net(), leak=1.5)
+
+    def test_num_state_gt_one_raises(self):
+        """Multi-state hidden groups have no theoretical basis for OTTT."""
+        algo = OTTT(_two_state_net(), leak=0.9)
+        with self.assertRaises(ValueError):
+            algo.compile_graph(jnp.ones((1, 3)))
 
     def test_compile_allocates_presynaptic_traces(self):
         algo = OTTT(_ottt_net(), leak=0.9)
@@ -134,7 +143,7 @@ def _toy_net():
             self.w = brainstate.ParamState(
                 0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
             )
-            self.v = FakeLIF(jnp.zeros((1, 3)), leak=0.9)
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
         def update(self, x):
             self.v.value = jax.nn.tanh(
@@ -170,5 +179,5 @@ def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
 
 class TestSmokeLossDecreases(unittest.TestCase):
     def test_ottt(self):
-        losses = _run(OTTT(_toy_net()))
+        losses = _run(OTTT(_toy_net(), leak=0.9))
         assert losses[-1] < losses[0]

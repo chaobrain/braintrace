@@ -22,7 +22,6 @@ import jax.numpy as jnp
 import braintrace
 from braintrace._etrace_algorithms.param_dim_vjp import ParamDimVjpAlgorithm
 from braintrace._etrace_algorithms.ostl import (
-    OSTL,
     OSTLFeedforward,
     OSTLRecurrent,
 )
@@ -164,41 +163,11 @@ class TestOSTLFeedforward(unittest.TestCase):
         assert losses[-1] < losses[0]
 
 
-class TestOSTLFactory(unittest.TestCase):
-    def test_default_regime_returns_recurrent(self):
-        algo = OSTL(_tiny_rec_net())
-        assert isinstance(algo, OSTLRecurrent)
-        assert algo.regime == 'with-H'
-
-    def test_without_h_returns_feedforward(self):
-        algo = OSTL(_tiny_rec_net(), regime='without-H')
-        assert isinstance(algo, OSTLFeedforward)
-        assert algo.regime == 'without-H'
-
-    def test_invalid_regime_raises(self):
-        with self.assertRaises(ValueError):
-            OSTL(_tiny_rec_net(), regime='bogus')
-
-    def test_factory_forwards_decay_to_feedforward(self):
-        algo = OSTL(_tiny_rec_net(), regime='without-H', decay_or_rank=0.5)
-        assert algo.decay == 0.5
-
-    def test_factory_forwards_name(self):
-        algo = OSTL(_tiny_rec_net(), name='my_ostl')
-        assert algo.name == 'my_ostl'
-
-    def test_with_h_compiles_and_updates(self):
-        algo, out = _drive(OSTL(_tiny_rec_net(), regime='with-H'), n=1)
-        assert out.shape == (1, 3)
-
-    def test_without_h_compiles_and_updates(self):
-        algo, out = _drive(OSTL(_tiny_rec_net(), regime='without-H'), n=1)
-        assert out.shape == (1, 3)
-
+class TestOSTLExports(unittest.TestCase):
     def test_exported_from_package(self):
         assert braintrace.OSTLRecurrent is OSTLRecurrent
         assert braintrace.OSTLFeedforward is OSTLFeedforward
-        for name in ('OSTL', 'OSTLRecurrent', 'OSTLFeedforward'):
+        for name in ('OSTLRecurrent', 'OSTLFeedforward'):
             assert name in braintrace.__all__
 
 
@@ -275,5 +244,5 @@ def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
 
 class TestSmokeLossDecreases(unittest.TestCase):
     def test_ostl(self):
-        losses = _run(OSTL(_toy_net()))
+        losses = _run(OSTLRecurrent(_toy_net()))
         assert losses[-1] < losses[0]
