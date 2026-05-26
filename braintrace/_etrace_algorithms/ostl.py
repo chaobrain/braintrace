@@ -35,7 +35,7 @@ from typing import Optional
 import brainstate
 
 from .d_rtrl import ParamDimVjpAlgorithm
-from .pp_prop import IODimVjpAlgorithm
+from .pp_prop import pp_prop
 
 __all__ = ['OSTL', 'OSTLRecurrent', 'OSTLFeedforward']
 
@@ -62,13 +62,13 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     regime = 'with-H'
 
 
-class OSTLFeedforward(IODimVjpAlgorithm):
+class OSTLFeedforward(pp_prop):
     """OSTL 'without-H' regime — feedforward / no recurrent Jacobian.
 
     Drops the hidden-to-hidden Jacobian. With a negligible decay the input-
     output factorized trace stops accumulating across time, so the update is the
     purely-spatial (feedforward SNN) approximation. Delegates to
-    :class:`IODimVjpAlgorithm` (pp_prop).
+    :class:`pp_prop`.
 
     Parameters
     ----------
@@ -79,7 +79,7 @@ class OSTLFeedforward(IODimVjpAlgorithm):
         the temporal contribution negligible, matching the 'without-H' regime. A
         float must lie in (0, 1); an int is read as an approximation rank.
     name, vjp_method, fast_solve : optional
-        Forwarded verbatim to :class:`IODimVjpAlgorithm`.
+        Forwarded verbatim to :class:`pp_prop`.
     """
 
     __module__ = 'braintrace'

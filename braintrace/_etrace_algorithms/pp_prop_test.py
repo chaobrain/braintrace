@@ -47,10 +47,10 @@ from braintrace._etrace_model_test import (
 # ---------------------------------------------------------------------------
 
 def _make_compiled_algo(n_in=3, n_rec=4, decay_or_rank=0.9, vjp_method='single-step'):
-    """Create a GRUCell model with an IODimVjpAlgorithm, compile it, and return both."""
+    """Create a GRUCell model with a pp_prop algorithm, compile it, and return both."""
     gru = braintrace.nn.GRUCell(n_in, n_rec)
     brainstate.nn.init_all_states(gru)
-    algo = braintrace.IODimVjpAlgorithm(gru, decay_or_rank=decay_or_rank, vjp_method=vjp_method)
+    algo = braintrace.pp_prop(gru, decay_or_rank=decay_or_rank, vjp_method=vjp_method)
     sample_input = brainstate.random.rand(n_in)
     algo.compile_graph(sample_input)
     return gru, algo
@@ -351,70 +351,70 @@ class TestLowPassFilter:
 
 
 # ===========================================================================
-#  Tests for IODimVjpAlgorithm
+#  Tests for pp_prop
 # ===========================================================================
 
-class TestIODimVjpAlgorithmInit:
-    """Tests for IODimVjpAlgorithm.__init__."""
+class TestPpPropInit:
+    """Tests for pp_prop.__init__."""
 
     def test_init_with_float_decay(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        algo = pp_prop(gru, decay_or_rank=0.9)
         assert algo.decay == 0.9
 
     def test_init_with_int_rank(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=5)
+        algo = pp_prop(gru, decay_or_rank=5)
         expected_decay = 4 / 6  # (5-1)/(5+1)
         assert algo.decay == pytest.approx(expected_decay)
 
     def test_init_default_vjp_method(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        algo = pp_prop(gru, decay_or_rank=0.9)
         assert algo.vjp_method == 'single-step'
 
     def test_init_multi_step_vjp(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9, vjp_method='multi-step')
+        algo = pp_prop(gru, decay_or_rank=0.9, vjp_method='multi-step')
         assert algo.vjp_method == 'multi-step'
 
     def test_invalid_vjp_method_raises(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
         with pytest.raises(AssertionError, match="single-step.*multi-step"):
-            IODimVjpAlgorithm(gru, decay_or_rank=0.9, vjp_method='invalid')
+            pp_prop(gru, decay_or_rank=0.9, vjp_method='invalid')
 
     def test_init_with_name(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9, name='test_algo')
+        algo = pp_prop(gru, decay_or_rank=0.9, name='test_algo')
         assert algo.name == 'test_algo'
 
     def test_not_compiled_initially(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        algo = pp_prop(gru, decay_or_rank=0.9)
         assert algo.is_compiled is False
 
 
-class TestIODimVjpAlgorithmModule:
+class TestPpPropModule:
     """Tests for __module__ attribute."""
 
     def test_module_is_braintrace(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        algo = pp_prop(gru, decay_or_rank=0.9)
         assert algo.__module__ == 'braintrace'
 
     def test_class_module_is_braintrace(self):
-        assert IODimVjpAlgorithm.__module__ == 'braintrace'
+        assert pp_prop.__module__ == 'braintrace'
 
 
-class TestIODimVjpAlgorithmCompileAndState:
+class TestPpPropCompileAndState:
     """Tests for compile_graph, init_etrace_state, and state management."""
 
     def test_compile_graph_sets_compiled_flag(self):
@@ -461,7 +461,7 @@ class TestIODimVjpAlgorithmCompileAndState:
     def test_double_compile_is_idempotent(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        algo = pp_prop(gru, decay_or_rank=0.9)
         sample = brainstate.random.rand(3)
         algo.compile_graph(sample)
         n_xs = len(algo.etrace_xs)
@@ -472,7 +472,7 @@ class TestIODimVjpAlgorithmCompileAndState:
         assert len(algo.etrace_dfs) == n_dfs
 
 
-class TestIODimVjpAlgorithmResetState:
+class TestPpPropResetState:
     """Tests for reset_state."""
 
     def test_reset_state_zeros_etrace_xs(self):
@@ -555,7 +555,7 @@ class TestGetEtraceOf:
     def test_get_etrace_of_before_compile_raises(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        algo = pp_prop(gru, decay_or_rank=0.9)
         with pytest.raises(ValueError, match="not been compiled"):
             algo.get_etrace_of(list(gru.states(brainstate.ParamState).values())[0])
 
@@ -589,49 +589,49 @@ class TestGetEtraceOf:
 # ===========================================================================
 
 class TestAliases:
-    """Verify that ES_D_RTRL and pp_prop are aliases for IODimVjpAlgorithm."""
+    """Verify that ES_D_RTRL and IODimVjpAlgorithm are back-compat aliases for pp_prop."""
 
-    def test_es_d_rtrl_is_iodimvjpalgorithm(self):
-        assert ES_D_RTRL is IODimVjpAlgorithm
+    def test_es_d_rtrl_is_pp_prop(self):
+        assert ES_D_RTRL is pp_prop
 
-    def test_pp_prop_is_iodimvjpalgorithm(self):
-        assert pp_prop is IODimVjpAlgorithm
+    def test_iodimvjpalgorithm_is_pp_prop(self):
+        assert IODimVjpAlgorithm is pp_prop
 
     def test_braintrace_es_d_rtrl(self):
-        assert braintrace.ES_D_RTRL is IODimVjpAlgorithm
+        assert braintrace.ES_D_RTRL is pp_prop
 
-    def test_braintrace_pp_prop(self):
-        assert braintrace.pp_prop is IODimVjpAlgorithm
+    def test_braintrace_iodimvjpalgorithm(self):
+        assert braintrace.IODimVjpAlgorithm is pp_prop
 
     def test_alias_instance_is_same_class(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
         algo = ES_D_RTRL(gru, decay_or_rank=0.9)
-        assert isinstance(algo, IODimVjpAlgorithm)
+        assert isinstance(algo, pp_prop)
 
-        algo2 = pp_prop(gru, decay_or_rank=0.9)
-        assert isinstance(algo2, IODimVjpAlgorithm)
+        algo2 = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
+        assert isinstance(algo2, pp_prop)
 
 
 # ===========================================================================
 #  Tests for different decay_or_rank values with the full algorithm
 # ===========================================================================
 
-class TestIODimVjpAlgorithmDecayVariations:
+class TestPpPropDecayVariations:
     """Test that different decay/rank values produce valid algorithms."""
 
     @pytest.mark.parametrize("decay", [0.1, 0.5, 0.9, 0.99])
     def test_float_decay_values(self, decay):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=decay)
+        algo = pp_prop(gru, decay_or_rank=decay)
         assert algo.decay == decay
 
     @pytest.mark.parametrize("rank", [1, 2, 5, 10, 50])
     def test_int_rank_values(self, rank):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        algo = IODimVjpAlgorithm(gru, decay_or_rank=rank)
+        algo = pp_prop(gru, decay_or_rank=rank)
         expected_decay = (rank - 1) / (rank + 1)
         assert algo.decay == pytest.approx(expected_decay)
 
@@ -640,7 +640,7 @@ class TestIODimVjpAlgorithmDecayVariations:
 #  Tests for forward pass execution
 # ===========================================================================
 
-class TestIODimVjpAlgorithmForwardPass:
+class TestPpPropForwardPass:
     """Tests that the compiled algorithm can execute a forward pass."""
 
     def test_single_step_forward(self):
@@ -707,7 +707,7 @@ class TestIODimVjpAlgorithmForwardPass:
 #  Tests for gradient computation
 # ===========================================================================
 
-class TestIODimVjpAlgorithmGradients:
+class TestPpPropGradients:
     """Tests that gradients can be computed through the algorithm."""
 
     def test_grad_single_step(self):
@@ -778,7 +778,7 @@ class TestDiagOn:
         model = brainstate.nn.init_all_states(model)
 
         inputs = brainstate.random.randn(n_seq, n_in)
-        algorithm = braintrace.IODimVjpAlgorithm(model, decay_or_rank=0.9)
+        algorithm = braintrace.pp_prop(model, decay_or_rank=0.9)
         algorithm.compile_graph(inputs[0])
 
         outs = brainstate.transform.for_loop(algorithm, inputs)
@@ -813,7 +813,7 @@ class TestDiagOn:
         model = brainstate.nn.init_all_states(model)
 
         inputs = brainstate.random.randn(n_seq, n_in)
-        algorithm = braintrace.IODimVjpAlgorithm(model, decay_or_rank=0.9, vjp_method='multi-step')
+        algorithm = braintrace.pp_prop(model, decay_or_rank=0.9, vjp_method='multi-step')
         algorithm.compile_graph(inputs[0])
 
         outs = algorithm(braintrace.MultiStepData(inputs))
@@ -856,7 +856,7 @@ class TestDiagOn:
             model = brainstate.nn.init_all_states(model)
 
             inputs = brainstate.random.randn(n_seq, n_in)
-            algorithm = braintrace.IODimVjpAlgorithm(model, decay_or_rank=0.9)
+            algorithm = braintrace.pp_prop(model, decay_or_rank=0.9)
             algorithm.compile_graph(inputs[0])
 
             outs = brainstate.transform.for_loop(algorithm, inputs)
@@ -899,7 +899,7 @@ class TestDiagOn:
             model = brainstate.nn.init_all_states(model)
 
             inputs = brainstate.random.randn(n_seq, n_in)
-            algorithm = braintrace.IODimVjpAlgorithm(model, decay_or_rank=0.9, vjp_method='multi-step')
+            algorithm = braintrace.pp_prop(model, decay_or_rank=0.9, vjp_method='multi-step')
             algorithm.compile_graph(inputs[0])
 
             outs = algorithm(braintrace.MultiStepData(inputs))

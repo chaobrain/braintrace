@@ -1,7 +1,7 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
 """13 · Sweep decay_or_rank on LIF integrator.
 
-IODimVjpAlgorithm accepts decay_or_rank as either a float (exponential-smoothing
+pp_prop accepts decay_or_rank as either a float (exponential-smoothing
 decay, 0 < alpha < 1) or an int (approximation rank). The two parameterisations
 are duals: num_rank = 2/(1-decay) - 1. This file trains multiple models, one
 per value, and plots their final-epoch losses side-by-side.

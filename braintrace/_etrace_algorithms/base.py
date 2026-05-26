@@ -40,7 +40,7 @@ class EligibilityTrace(brainstate.ShortTermState):
 
     Examples
     --------
-    When you are using :class:`braintrace.IODimVjpAlgorithm`, you can get
+    When you are using :class:`braintrace.pp_prop`, you can get
     the eligibility trace of the weight by calling:
 
     .. code-block:: python

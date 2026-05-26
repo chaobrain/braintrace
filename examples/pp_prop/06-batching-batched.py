@@ -3,7 +3,7 @@
 
 Inputs carry a batch dimension directly. braintrace.matmul dispatches to the
 batched primitive etp_mm_p when x.ndim >= 2, so the network runs natively
-batched and IODimVjpAlgorithm does not need to wrap the model in Vmap.
+batched and pp_prop does not need to wrap the model in Vmap.
 """
 
 import pathlib
@@ -40,7 +40,7 @@ def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 50, plot: bool
         opt = braintools.optim.Adam(lr=1e-3)
         opt.register_trainable_weights(weights)
 
-        online_model = braintrace.IODimVjpAlgorithm(
+        online_model = braintrace.pp_prop(
             model, decay_or_rank=0.95, vjp_method="single-step"
         )
         online_model.compile_graph(jnp.zeros((batch_size, 1)))

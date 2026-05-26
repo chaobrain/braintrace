@@ -2,7 +2,7 @@
 """01 · Minimal pp_prop on the LIF integrator task.
 
 Trains a single-layer LIF RSNN on a Poisson-to-cumulative-rate regression task
-using braintrace.pp_prop (aka IODimVjpAlgorithm). Smallest possible entry
+using braintrace.pp_prop (back-compat alias: IODimVjpAlgorithm). Smallest possible entry
 point to the pp_prop API.
 """
 

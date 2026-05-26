@@ -133,7 +133,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     This class is used for executing the eligibility trace graph for the VJP-based online learning algorithms,
     including:
 
-    - :class:`IODimVjpAlgorithm` (alias :class:`ES_D_RTRL` / :func:`pp_prop`) for the
+    - :class:`pp_prop` (aliases :class:`ES_D_RTRL` / :class:`IODimVjpAlgorithm`) for the
       algorithm with input-output dimensional complexity.
     - :class:`ParamDimVjpAlgorithm` (alias :class:`D_RTRL`) for the algorithm with
       parameter dimensional complexity.
