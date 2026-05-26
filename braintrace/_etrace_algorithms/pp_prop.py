@@ -54,14 +54,14 @@ from braintrace._typing import (
     HiddenGroupJacobian,
     dG_Weight,
 )
-from .base import EligibilityTrace
-from .misc import (
+from ._common import (
     _extract_leaf,
     _reset_state_in_a_dict,
     _route_grads_by_path,
     _sum_dim,
     _update_dict,
 )
+from .base import EligibilityTrace
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [

@@ -21,9 +21,9 @@ import pytest
 import saiunit as u
 
 import braintrace
-from braintrace._etrace_algorithms.d_rtrl import (
+from braintrace._etrace_algorithms.d_rtrl import D_RTRL
+from braintrace._etrace_algorithms.param_dim_vjp import (
     ParamDimVjpAlgorithm,
-    D_RTRL,
     _normalize_vector,
     _normalize_matrix_spectrum,
     _remove_units,
@@ -837,7 +837,7 @@ class TestDRtrlDictTraceStorage:
         import brainstate
         import jax.numpy as jnp
         import braintrace
-        from braintrace._etrace_algorithms.d_rtrl import _init_param_dim_state
+        from braintrace._etrace_algorithms.param_dim_vjp import _init_param_dim_state
 
         class Cell(brainstate.nn.Module):
             def __init__(self):

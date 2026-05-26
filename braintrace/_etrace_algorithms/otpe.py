@@ -34,8 +34,7 @@ import jax.numpy as jnp
 
 from braintrace._etrace_op import is_batched_primitive
 from braintrace._misc import etrace_df_key
-from ._common import _resolve_leak
-from .misc import _route_grads_by_path, _update_dict
+from ._common import _resolve_leak, _route_grads_by_path, _update_dict
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = ['OTPE']

@@ -22,13 +22,14 @@ and paper-faithful SNN algorithms (EProp, OSTL, OTPE, OTTT, OSTTP).
 
 from ._common import FixedRandomFeedback, KappaFilter, PresynapticTrace
 from .base import ETraceAlgorithm, EligibilityTrace
-from .d_rtrl import D_RTRL, ParamDimVjpAlgorithm
+from .d_rtrl import D_RTRL
 from .e_prop import EProp
 from .graph_executor import ETraceGraphExecutor
 from .ostl import OSTL, OSTLFeedforward, OSTLRecurrent
 from .osttp import OSTTP
 from .otpe import OTPE
 from .ottt import OTTT
+from .param_dim_vjp import ParamDimVjpAlgorithm
 from .pp_prop import ES_D_RTRL, IODimVjpAlgorithm, pp_prop  # IODimVjpAlgorithm/ES_D_RTRL: back-compat aliases
 from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
