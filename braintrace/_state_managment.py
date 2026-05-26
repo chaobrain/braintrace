@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Sequence, Tuple, List, Hashable, Dict
+from typing import Sequence, Tuple, List, Hashable, Dict, Mapping, Any
 
 import brainstate
 
@@ -61,8 +61,8 @@ def assign_dict_state_values(
 
 
 def assign_state_values_v2(
-    states: Dict[Hashable, brainstate.State],
-    state_values: Dict[Hashable, brainstate.typing.PyTree],
+    states: Mapping[Any, brainstate.State],
+    state_values: Mapping[Any, brainstate.typing.PyTree],
     write: bool = True
 ):
     """
@@ -206,7 +206,7 @@ def split_dict_states_v2(
     """
     etrace_param_states = dict()
     hidden_states = dict()
-    param_states = dict()
+    param_states: dict = dict()  # stays empty; value type cannot be inferred
     other_states = dict()
     for key, st in states.items():
         if isinstance(st, brainstate.HiddenState):

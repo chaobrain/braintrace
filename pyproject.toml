@@ -75,3 +75,39 @@ cuda12 = ["jax[cuda12]"]
 cuda13 = ["jax[cuda13]"]
 tpu = ["jax[tpu]"]
 testing = ["pytest", "jax[cpu]"]
+dev = ["pytest", "jax[cpu]", "mypy>=1.8", "build"]
+
+
+[tool.setuptools.package-data]
+braintrace = ["py.typed"]
+
+
+[tool.mypy]
+python_version = "3.11"
+files = ["braintrace"]
+# Test files, test-only helpers, and non-shipped sources are not part of the
+# typed public surface and are excluded from release type checking.
+exclude = '''(?x)(
+    _test\.py$
+    | model4test\.py$
+    | scenario_catalog\.py$
+)'''
+# These None-defaulted parameters are genuinely optional throughout the
+# codebase; treat them as Optional rather than rewriting 39 signatures.
+implicit_optional = true
+# Keep `# type: ignore` honest, but only require error codes (not blanket).
+warn_redundant_casts = true
+no_implicit_reexport = false
+
+# Third-party scientific deps that ship without inline types or a py.typed
+# marker. Scoped per-module so missing stubs here never mask errors in our
+# own code. brainunit/saiunit DO ship types, so they are intentionally absent.
+[[tool.mypy.overrides]]
+module = [
+    "brainstate.*",
+    "braintools.*",
+    "brainpy.*",
+    "brainevent.*",
+    "numba.*",
+]
+ignore_missing_imports = true

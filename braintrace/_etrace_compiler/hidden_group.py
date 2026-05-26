@@ -98,7 +98,7 @@ class HiddenGroup(NamedTuple):
         ...     print(group.hidden_paths)
     """
 
-    index: int  # the index of the hidden group
+    index: int  # type: ignore[assignment]  # intentional NamedTuple field; shadows tuple.index
 
     # hidden states and their paths
     hidden_paths: List[Path]  # the hidden state paths
@@ -248,7 +248,7 @@ HiddenGroup.__module__ = 'braintrace'
 
 
 def jacrev_last_dim(
-    fn: Callable[[...], jax.Array],
+    fn: Callable[..., jax.Array],
     hid_vals: jax.Array,
 ) -> jax.Array:
     """
@@ -392,7 +392,7 @@ def _simplify_hid2hid_tracer(
     hidden_invar_to_path: Dict[HiddenInVar, Path],
     hidden_outvar_to_path: Dict[HiddenOutVar, Path],
     path_to_state: Dict[Path, brainstate.HiddenState],
-) -> Hidden2GroupTransition:
+) -> Optional[Hidden2GroupTransition]:
     """
     Simplifying the hidden-to-hidden state tracer.
 
@@ -517,7 +517,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         self.path_to_state = path_to_state
 
         # the data structures for the tracing hidden-hidden relationships
-        self.active_tracers = dict()
+        self.active_tracers: Dict[Var, HiddenToHiddenGroupTracer] = dict()
 
         super().__init__(
             weight_invars=weight_invars,
@@ -536,7 +536,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         """
 
         # the data structures for the tracing hidden-hidden relationships
-        self.active_tracers: Dict[Var, HiddenToHiddenGroupTracer] = dict()
+        self.active_tracers = dict()
 
         # evaluating the jaxpr
         self._eval_jaxpr(self.jaxpr)
@@ -597,7 +597,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
 
         # check whether this equation is used in other tracers
         for tracer in tuple(self.active_tracers.values()):
-            tracer: HiddenToHiddenGroupTracer
             matched = find_matched_vars(eqn.invars, tracer.invar_needed_in_oth_eqns)
 
             # if matched, add the eqn to the trace
@@ -648,7 +647,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         #
         # Find out the hidden group,
         # i.e., the hidden states that are connected to each other, the union of all hidden-to-group
-        outvar_groups = [
+        outvar_groups: list = [
             set(
                 [self.hidden_invar_to_outvar[transition.hidden_invar]] +
                 list(transition.connected_hidden_outvars)
@@ -686,7 +685,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         #
         # compile HiddenGroup
         #
-        hidden_groups = []
+        hidden_groups: list = []
         for hidden_invars, hidden_outvars, jaxpr in zip(invar_groups, outvar_groups, jaxpr_groups):
             group = HiddenGroup(
                 index=len(hidden_groups),
@@ -760,8 +759,7 @@ def write_jaxpr_of_hidden_group_transition(
                     eqns.append(eq.replace())
                     all_invars.update([invar for invar in eq.invars if not isinstance(invar, Literal)])
                     all_outvars.update(eq.outvars)
-    other_invars = all_invars.difference(all_outvars).difference(hidden_invars)
-    other_invars = list(other_invars)
+    other_invars = list(all_invars.difference(all_outvars).difference(hidden_invars))
 
     #
     # step 2:
@@ -864,26 +862,26 @@ def group_merging(groups, version: int = 1) -> List[frozenset[HiddenOutVar]]:
 
     elif version == 1:
         # This code has been upgraded for better readability and efficiency.
-        previous = [frozenset(g) for g in set(map(frozenset, groups))]
+        prev = [frozenset(g) for g in set(map(frozenset, groups))]
         while True:
             new_groups = []
             merged_indices = set()
-            for i, j in combinations(range(len(previous)), 2):
+            for i, j in combinations(range(len(prev)), 2):
                 if i in merged_indices or j in merged_indices:
                     continue
-                if previous[i].intersection(previous[j]):
-                    new_groups.append(previous[i].union(previous[j]))
+                if prev[i].intersection(prev[j]):
+                    new_groups.append(prev[i].union(prev[j]))
                     merged_indices.update([i, j])
             new_groups.extend(
-                previous[k]
-                for k in range(len(previous))
+                prev[k]
+                for k in range(len(prev))
                 if k not in merged_indices
             )
-            new = frozenset(new_groups)
-            if new == frozenset(previous):
+            cur = frozenset(new_groups)
+            if cur == frozenset(prev):
                 break
-            previous = list(new)
-        return list(new)
+            prev = list(cur)
+        return list(cur)
 
     else:
         raise ValueError(f'Error: the version {version} is not supported.')

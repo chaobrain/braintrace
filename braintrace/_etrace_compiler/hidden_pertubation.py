@@ -212,7 +212,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         self.hidden_jaxvars_to_remove = set(self.hidden_outvars)
 
         # final revised equations
-        self.revised_eqns = []
+        self.revised_eqns: list = []
 
         # revising equations
         self._eval_jaxpr(self.closed_jaxpr.jaxpr)

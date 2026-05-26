@@ -24,6 +24,7 @@ import saiunit as u
 from braintrace._input_data import has_multistep_data
 from braintrace._state_managment import assign_state_values_v2
 from braintrace._typing import (
+    Path,
     PyTree,
     Outputs,
     WeightID,
@@ -515,6 +516,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             #       should be checked.
             #
             assert len(dg_etrace_params) == 0  # gradients all etrace weights are updated by the RTRL algorithm
+            assert self.graph.hidden_perturb is not None
             assert len(self.graph.hidden_perturb.perturb_vars) == len(dg_hid_perturb_or_dl2h)
             dl2h_at_t_or_t_minus_1 = self.graph.hidden_perturb.perturb_data_to_hidden_group_data(
                 dg_hid_perturb_or_dl2h, self.graph.hidden_groups,
@@ -602,12 +604,15 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
     def _solve_weight_gradients(
         self,
-        running_index: Optional[int],
+        running_index: int,
+        # The eligibility-trace container and the weight-value mapping are keyed
+        # differently per algorithm (e.g. Path- vs WeightID-keyed), so this
+        # abstract hook leaves their concrete types implementation-defined.
         etrace_h2w_at_t: Any,
         dl_to_hidden_groups: Sequence[jax.Array],
-        weight_vals: Dict[WeightID, PyTree],
-        dl_to_nonetws_at_t: List[PyTree],
-        dl_to_etws_at_t: Optional[List[PyTree]],
+        weight_vals: Any,
+        dl_to_nonetws_at_t: Dict[Path, PyTree],
+        dl_to_etws_at_t: Optional[Dict[Path, PyTree]],
     ):
         r"""
         The method to solve the weight gradients, i.e., :math:`\partial L / \partial W`.
@@ -649,12 +654,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     def _update_etrace_data(
         self,
         running_index: Optional[int],
-        etrace_vals_util_t_1: ETraceVals,
+        # The eligibility-trace container type is implementation-defined.
+        etrace_vals_util_t_1: Any,
         hid2weight_jac_single_or_multi_times: Hid2WeightJacobian,
         hid2hid_jac_single_or_multi_times: Sequence[jax.Array],
         weight_vals: WeightVals,
         input_is_multi_step: bool,
-    ) -> ETraceVals:
+    ) -> Any:
         """
         The method to update the eligibility trace data.
 
@@ -674,7 +680,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         """
         raise NotImplementedError
 
-    def _get_etrace_data(self) -> ETraceVals:
+    def _get_etrace_data(self) -> Any:
         """
         Get the eligibility trace data at the last time-step.
 
@@ -687,7 +693,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         """
         raise NotImplementedError
 
-    def _assign_etrace_data(self, etrace_vals: ETraceVals) -> None:
+    def _assign_etrace_data(self, etrace_vals: Any) -> None:
         """
         Assign the eligibility trace data to the states at the current time-step.
 

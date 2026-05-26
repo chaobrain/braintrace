@@ -144,6 +144,7 @@ class ETraceGraph(NamedTuple):
             old_state_vals = [st.value for st in self.module_info.compiled_model_states]
 
         # calling the function
+        assert self.hidden_perturb is not None
         jaxpr_outs = self.hidden_perturb.eval_jaxpr(
             jax.tree.leaves((args, old_state_vals)),
             perturb_data,
@@ -276,7 +277,7 @@ def compile_etrace_graph(
         ))
 
         # all y-to-hidden vars (deduplicate while preserving insertion order)
-        out_wy2hid_jaxvars_dict = dict()
+        out_wy2hid_jaxvars_dict: dict = dict()
         for relation in hidden_param_op_relations:
             for hpo_jaxpr in relation.y_to_hidden_group_jaxprs:
                 for v in hpo_jaxpr.invars + hpo_jaxpr.constvars:
@@ -284,7 +285,7 @@ def compile_etrace_graph(
         out_wy2hid_jaxvars = list(out_wy2hid_jaxvars_dict)
 
         # hidden-hidden transition vars (deduplicate while preserving insertion order)
-        hid2hid_jaxvars_dict = dict()
+        hid2hid_jaxvars_dict: dict = dict()
         for group in hidden_groups:
             for v in group.hidden_invars:
                 hid2hid_jaxvars_dict[v] = None

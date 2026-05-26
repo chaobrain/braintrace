@@ -35,7 +35,7 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import brainstate
 
@@ -80,8 +80,8 @@ class ETraceGraphExecutor:
         self.model = model
 
         # the compiled graph
-        self._compiled_graph = None
-        self._state_id_to_path = None
+        self._compiled_graph: Optional[ETraceGraph] = None
+        self._state_id_to_path: Optional[Dict[int, Path]] = None
 
     @property
     def graph(self) -> ETraceGraph:
@@ -221,11 +221,11 @@ class ETraceGraphExecutor:
             msg += 'The weight parameters which are associated with the hidden states are:\n\n'
             for i, hp_relation in enumerate(self.graph.hidden_param_op_relations):
                 etratce_weight_paths.add(hp_relation.path)
-                group = [group_mapping[id(group)] for group in hp_relation.hidden_groups]
-                if len(group) == 1:
-                    msg += f'   Weight {i}: {hp_relation.path}  is associated with hidden group {group[0]}\n'
+                group_indices = [group_mapping[id(group)] for group in hp_relation.hidden_groups]
+                if len(group_indices) == 1:
+                    msg += f'   Weight {i}: {hp_relation.path}  is associated with hidden group {group_indices[0]}\n'
                 else:
-                    msg += f'   Weight {i}: {hp_relation.path}  is associated with hidden groups {group}\n'
+                    msg += f'   Weight {i}: {hp_relation.path}  is associated with hidden groups {group_indices}\n'
             msg += '\n\n'
 
         # non etrace weights
@@ -241,6 +241,7 @@ class ETraceGraphExecutor:
             print(msg)
         if return_msg:
             return msg
+        return None
 
     def solve_h2w_h2h_jacobian(
         self,
