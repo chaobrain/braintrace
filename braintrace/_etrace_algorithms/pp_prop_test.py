@@ -20,11 +20,13 @@ import pytest
 import saiunit as u
 
 import braintrace
-from braintrace._etrace_algorithms.pp_prop import (
+from braintrace._etrace_algorithms.io_dim_vjp import (
     _format_decay_and_rank,
     _expon_smooth,
     _low_pass_filter,
     IODimVjpAlgorithm,
+)
+from braintrace._etrace_algorithms.pp_prop import (
     ES_D_RTRL,
     pp_prop,
 )
@@ -589,19 +591,19 @@ class TestGetEtraceOf:
 # ===========================================================================
 
 class TestAliases:
-    """Verify that ES_D_RTRL and IODimVjpAlgorithm are back-compat aliases for pp_prop."""
+    """Verify that ES_D_RTRL aliases pp_prop and pp_prop subclasses IODimVjpAlgorithm."""
 
     def test_es_d_rtrl_is_pp_prop(self):
         assert ES_D_RTRL is pp_prop
 
-    def test_iodimvjpalgorithm_is_pp_prop(self):
-        assert IODimVjpAlgorithm is pp_prop
+    def test_pp_prop_subclasses_iodimvjpalgorithm(self):
+        assert issubclass(pp_prop, IODimVjpAlgorithm)
 
     def test_braintrace_es_d_rtrl(self):
         assert braintrace.ES_D_RTRL is pp_prop
 
     def test_braintrace_iodimvjpalgorithm(self):
-        assert braintrace.IODimVjpAlgorithm is pp_prop
+        assert braintrace.IODimVjpAlgorithm is IODimVjpAlgorithm
 
     def test_alias_instance_is_same_class(self):
         gru = braintrace.nn.GRUCell(3, 4)
@@ -610,7 +612,8 @@ class TestAliases:
         assert isinstance(algo, pp_prop)
 
         algo2 = IODimVjpAlgorithm(gru, decay_or_rank=0.9)
-        assert isinstance(algo2, pp_prop)
+        assert isinstance(algo2, IODimVjpAlgorithm)
+        assert not isinstance(algo2, pp_prop)
 
 
 # ===========================================================================

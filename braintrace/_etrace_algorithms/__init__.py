@@ -30,8 +30,9 @@ from .ostl import OSTLFeedforward, OSTLRecurrent
 from .osttp import OSTTP
 from .otpe import OTPE
 from .ottt import OTTT
+from .io_dim_vjp import IODimVjpAlgorithm
 from .param_dim_vjp import ParamDimVjpAlgorithm
-from .pp_prop import ES_D_RTRL, IODimVjpAlgorithm, pp_prop  # IODimVjpAlgorithm/ES_D_RTRL: back-compat aliases
+from .pp_prop import ES_D_RTRL, pp_prop  # ES_D_RTRL: back-compat alias
 from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
