@@ -14,7 +14,7 @@
 # ==============================================================================
 
 from functools import partial
-from typing import Dict, Tuple, Optional, Sequence, Any
+from typing import Callable, Dict, Tuple, Optional, Sequence, Any
 
 import brainstate
 import jax
@@ -827,6 +827,23 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         for x, val in etrace_vals.items():
             self.etrace_bwg[x].value = val
 
+    def _make_etrace_stepper(self, weight_vals: Dict[Path, PyTree]) -> Callable:
+        """Build the per-step D-RTRL eligibility-trace stepper.
+
+        Returns the ``partial`` of :func:`_update_param_dim_etrace_scan_fn` that
+        serves as the body of the trace scan. Exposing it lets the graph executor
+        fuse the roll into its over-time scan for multi-step input (see the
+        base-class :meth:`_make_etrace_stepper`).
+        """
+        return partial(
+            _update_param_dim_etrace_scan_fn,
+            weight_path_to_vals=weight_vals,
+            hidden_param_op_relations=self.graph.hidden_param_op_relations,
+            normalize_matrix_spectrum=self.normalize_matrix_spectrum,
+            fast_solve=self.fast_solve,
+            trace_dtype=self.trace_dtype,
+        )
+
     def _update_etrace_data(
         self,
         running_index: Optional[int],
@@ -865,14 +882,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
                 same structure as hist_etrace_vals but containing new values for the current timestep.
         """
 
-        scan_fn = partial(
-            _update_param_dim_etrace_scan_fn,
-            weight_path_to_vals=weight_vals,
-            hidden_param_op_relations=self.graph.hidden_param_op_relations,
-            normalize_matrix_spectrum=self.normalize_matrix_spectrum,
-            fast_solve=self.fast_solve,
-            trace_dtype=self.trace_dtype,
-        )
+        scan_fn = self._make_etrace_stepper(weight_vals)
 
         if input_is_multi_step:
             new_etrace = jax.lax.scan(

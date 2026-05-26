@@ -37,7 +37,7 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Dict, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import brainstate
 import jax.core
@@ -313,12 +313,15 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     def solve_h2w_h2h_jacobian(
         self,
         *args,
+        etrace_stepper: Optional[Callable] = None,
+        init_etrace: Any = None,
     ) -> Tuple[
         Outputs,
         ETraceVals,
         StateVals,
         Hid2WeightJacobian,
         HiddenGroupJacobian,
+        Any,
     ]:
         r"""
         Solving the hidden-to-weight and hidden-to-hidden Jacobian according to the given inputs and parameters.
@@ -329,11 +332,24 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         ----------
         *args
             The positional arguments for the model.
+        etrace_stepper : Callable, optional
+            A per-step eligibility-trace update callback with signature
+            ``(etrace_carry, (x_dict, df_dict, diag_list)) -> (new_carry, None)``.
+            When provided together with multi-step input, the trace roll is fused
+            into the model-forward scan (single loop, no stacked Jacobians) and the
+            final trace is returned in the last slot. When ``None`` (default), the
+            per-step Jacobians are stacked and returned as before.
+        init_etrace : Any, optional
+            The initial eligibility-trace carry, threaded through the scan when
+            ``etrace_stepper`` is given. Ignored otherwise.
 
         Returns
         -------
         tuple
-            The outputs, hidden states, other states, and the spatial gradients of the weights.
+            The outputs, hidden states, other states, the spatial gradients of the
+            weights, the hidden-to-hidden Jacobian, and the final eligibility trace.
+            When ``etrace_stepper`` is given the two Jacobian slots are ``None`` and
+            the last slot holds the fused trace; otherwise the last slot is ``None``.
             Return the single-step results if inputs do not contain multiple-step data,
             otherwise return the multi-step data.
 
@@ -375,7 +391,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         def scan_fn(carray, single_step_of_multistep_arg):
             args_ = merge_data(tree_def, single_step_of_multistep_arg, args_single_step)
 
-            _etrace_state_vals, _oth_state_vals = carray
+            _etrace_state_vals, _oth_state_vals, _etrace_carry = carray
             # use "restore_value" to recover the hidden states
             # this keeps the reading/writing operations as
             # the same as the original model
@@ -401,7 +417,18 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             # compute the hidden-to-hidden Jacobian
             hid2hid_jac = self._compute_hid2hid_jacobian(temps)
 
-            return (_etrace_state_vals, _oth_state_vals), (out, hid2weight_jac, hid2hid_jac)
+            if etrace_stepper is None:
+                # legacy path: stack the per-step Jacobians for a downstream scan.
+                return (_etrace_state_vals, _oth_state_vals, _etrace_carry), (out, hid2weight_jac, hid2hid_jac)
+
+            # fused path: roll the eligibility trace in-loop and drop the Jacobians
+            # from the scan outputs. ``stop_gradient`` keeps the trace detached from
+            # reverse-AD (the Jacobians are already stop_gradient'd; this also guards
+            # the weight values the stepper closes over on the conv/sparse/LoRA path).
+            _etrace_carry = jax.lax.stop_gradient(
+                etrace_stepper(_etrace_carry, (hid2weight_jac[0], hid2weight_jac[1], hid2hid_jac))[0]
+            )
+            return (_etrace_state_vals, _oth_state_vals, _etrace_carry), out
 
         # check the batch size
         if len(args_multi_steps):
@@ -409,31 +436,26 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             if len(set(args_dim)) != 1:
                 raise ValueError(f'The sequence size should be the same for all inputs. But we got {args_dim}.')
 
+        init_carry = (etrace_state_vals, other_state_vals, init_etrace)
         if input_is_multi_step:
-            (
-                (
-                    etrace_state_vals,
-                    other_state_vals
-                ),
-                (
-                    outs_single_or_multi_steps,
-                    hid2weight_jac_single_or_multi_steps,
-                    hid2hid_jac_single_or_multi_steps
-                )
-            ) = jax.lax.scan(scan_fn, (etrace_state_vals, other_state_vals), args_multi_steps)
-
+            (etrace_state_vals, other_state_vals, etrace_carry), ys = jax.lax.scan(
+                scan_fn, init_carry, args_multi_steps
+            )
         else:
+            (etrace_state_vals, other_state_vals, etrace_carry), ys = scan_fn(init_carry, {})
+
+        if etrace_stepper is None:
             (
-                (
-                    etrace_state_vals,
-                    other_state_vals
-                ),
-                (
-                    outs_single_or_multi_steps,
-                    hid2weight_jac_single_or_multi_steps,
-                    hid2hid_jac_single_or_multi_steps
-                )
-            ) = scan_fn((etrace_state_vals, other_state_vals), {})
+                outs_single_or_multi_steps,
+                hid2weight_jac_single_or_multi_steps,
+                hid2hid_jac_single_or_multi_steps,
+            ) = ys
+            final_etrace = None
+        else:
+            outs_single_or_multi_steps = ys
+            hid2weight_jac_single_or_multi_steps = None
+            hid2hid_jac_single_or_multi_steps = None
+            final_etrace = etrace_carry
 
         # recovering the other non-etrace weights, although the weights are not changed
         assign_dict_state_values(non_etrace_params, non_etrace_param_vals, write=False)
@@ -445,12 +467,15 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             etrace_state_vals,
             other_state_vals,
             hid2weight_jac_single_or_multi_steps,
-            hid2hid_jac_single_or_multi_steps
+            hid2hid_jac_single_or_multi_steps,
+            final_etrace,
         )
 
     def solve_h2w_h2h_l2h_jacobian(
         self,
         *args,
+        etrace_stepper: Optional[Callable] = None,
+        init_etrace: Any = None,
     ) -> Tuple[
         Outputs,
         ETraceVals,
@@ -458,6 +483,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         Hid2WeightJacobian,
         HiddenGroupJacobian,
         VjpResiduals,
+        Any,
     ]:
         r"""
         Solving the hidden-to-weight and hidden-to-hidden Jacobian and the VJP transformed loss-to-hidden
@@ -470,11 +496,26 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         ----------
         *args
             The positional arguments for the model.
+        etrace_stepper : Callable, optional
+            A per-step eligibility-trace update callback with signature
+            ``(etrace_carry, (x_dict, df_dict, diag_list)) -> (new_carry, None)``.
+            When provided together with multi-step input, the trace roll is fused
+            into the over-time scan (so the per-step Jacobians are never stacked)
+            and the final trace is returned in the last slot instead. The callback
+            and ``init_etrace`` are captured by closure, not passed to ``jax.vjp``,
+            so they never participate in reverse-mode differentiation.
+        init_etrace : Any, optional
+            The initial eligibility-trace carry, threaded through the scan when
+            ``etrace_stepper`` is given. Ignored otherwise.
 
         Returns
         -------
         tuple
-            The outputs, hidden states, other states, the spatial gradients of the weights, and the residuals.
+            The outputs, hidden states, other states, the spatial gradients of the
+            weights, the hidden-to-hidden Jacobian, the residuals, and the final
+            eligibility trace. When ``etrace_stepper`` is given the two Jacobian
+            slots are ``None`` and the last slot holds the fused trace; otherwise
+            the last slot is ``None``.
 
         Notes
         -----
@@ -611,7 +652,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             def scan_fn(carray, x_ss: Dict):
                 args_ss = merge_data(tree_def, x_ss, args_single_step)
 
-                hidden_vals_iter, other_vals_iter = carray
+                hidden_vals_iter, other_vals_iter, etrace_carry_iter = carray
                 (
                     out,
                     hidden_vals_iter,
@@ -627,23 +668,32 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     hidden_perturbs_ss,
                 )
 
-                return (
-                    (hidden_vals_iter, other_vals_iter),
-                    (out, hid2weight_jac, hid2hid_jac)
+                if etrace_stepper is None:
+                    return (
+                        (hidden_vals_iter, other_vals_iter, etrace_carry_iter),
+                        (out, hid2weight_jac, hid2hid_jac)
+                    )
+
+                # fused path: roll the eligibility trace in-loop (detached) and drop
+                # the per-step Jacobians from the scan outputs.
+                etrace_carry_iter = jax.lax.stop_gradient(
+                    etrace_stepper(etrace_carry_iter, (hid2weight_jac[0], hid2weight_jac[1], hid2hid_jac))[0]
                 )
+                return (hidden_vals_iter, other_vals_iter, etrace_carry_iter), out
 
             # scan over multiple time steps
             (
-                (
-                    hidden_vals_ss,
-                    other_vals_ss
-                ),
-                (
-                    _outs_multi_steps,
-                    _hid2weight_jac_multi_steps,
-                    _hid2hid_jac_multi_steps
-                )
-            ) = jax.lax.scan(scan_fn, (hidden_vals_ss, other_vals_ss), args_multi_steps)
+                (hidden_vals_ss, other_vals_ss, etrace_carry_ss),
+                ys
+            ) = jax.lax.scan(scan_fn, (hidden_vals_ss, other_vals_ss, init_etrace), args_multi_steps)
+
+            aux: Tuple[Any, ...]
+            if etrace_stepper is None:
+                _outs_multi_steps, _hid2weight_jac_multi_steps, _hid2hid_jac_multi_steps = ys
+                aux = (_hid2weight_jac_multi_steps, _hid2hid_jac_multi_steps)
+            else:
+                _outs_multi_steps = ys
+                aux = (etrace_carry_ss,)
 
             return (
                 (
@@ -651,10 +701,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     hidden_vals_ss,
                     other_vals_ss
                 ),
-                (
-                    _hid2weight_jac_multi_steps,
-                    _hid2hid_jac_multi_steps
-                )
+                aux
             )
 
         # ---------------------- [Part 2.2] ----------------------
@@ -702,10 +749,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                 other_state_vals
             ),
             f_vjp,
-            (
-                hid2weight_jac_single_or_multi_steps,
-                hid2hid_jac_single_or_multi_steps
-            )
+            aux,
         ) = jax.vjp(
             (scan_over_multiple_steps if input_is_multi_step else call_over_single_step),  # the function
             args,  # the inputs (multiple/single time)
@@ -716,6 +760,21 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             hidden_perturbs,  # the inputs (single time)
             has_aux=True
         )
+
+        # The aux structure depends on whether the trace roll was fused into the
+        # over-time scan. Fused (multi-step + stepper): aux = (final_etrace,).
+        # Otherwise: aux = (stacked hid2weight_jac, stacked hid2hid_jac).
+        fused = etrace_stepper is not None and input_is_multi_step
+        hid2weight_jac_single_or_multi_steps: Any
+        hid2hid_jac_single_or_multi_steps: Any
+        if fused:
+            (final_etrace,) = aux
+            hid2weight_jac_single_or_multi_steps = None
+            hid2hid_jac_single_or_multi_steps = None
+        else:
+            hid2weight_jac_single_or_multi_steps, hid2hid_jac_single_or_multi_steps = aux
+            final_etrace = None
+
         out_flat, out_tree = jax.tree.flatten(((out_single_or_multi_steps, etrace_state_vals, other_state_vals),))
         rule, in_tree = jax.api_util.flatten_fun_nokwargs(lu.wrap_init(f_vjp), out_tree)
         out_avals = [get_aval(x).at_least_vspace() for x in out_flat]
@@ -737,4 +796,5 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             hid2weight_jac_single_or_multi_steps,
             hid2hid_jac_single_or_multi_steps,
             residual,
+            final_etrace,
         )

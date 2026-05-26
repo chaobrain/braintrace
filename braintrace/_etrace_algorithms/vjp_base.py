@@ -14,7 +14,7 @@
 # ==============================================================================
 
 
-from typing import Dict, Tuple, Any, List, Optional, Sequence
+from typing import Callable, Dict, Tuple, Any, List, Optional, Sequence
 
 import brainstate
 import jax
@@ -323,28 +323,43 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         assign_state_values_v2(self.hidden_states, hidden_vals, write=False)
         assign_state_values_v2(self.other_states, oth_state_vals, write=False)
 
+        # When the trace roll can be fused into the executor's over-time scan
+        # (multi-step input + a fusable subclass), hand the per-step stepper down
+        # so the executor updates the trace in-loop and returns the final trace,
+        # avoiding a second scan over stacked Jacobians.
+        etrace_stepper = self._make_etrace_stepper(weight_vals) if input_is_multi_step else None
+
         # necessary jacobian information of the weights
         (
             out,
             hidden_vals,
             oth_state_vals,
             hid2weight_jac_single_or_multi_steps,
-            hid2hid_jac_single_or_multi_steps
-        ) = self.graph_executor.solve_h2w_h2h_jacobian(*args)
-
-        # eligibility trace update
-        #
-        # "self._update_etrace_data()" is a protocol method that should be implemented in the subclass.
-        # It's logic may be different for different etrace algorithms.
-        #
-        etrace_vals = self._update_etrace_data(
-            running_index,
-            etrace_vals,
-            hid2weight_jac_single_or_multi_steps,
             hid2hid_jac_single_or_multi_steps,
-            weight_vals,
-            input_is_multi_step,
+            final_etrace,
+        ) = self.graph_executor.solve_h2w_h2h_jacobian(
+            *args,
+            etrace_stepper=etrace_stepper,
+            init_etrace=etrace_vals if etrace_stepper is not None else None,
         )
+
+        if final_etrace is not None:
+            # fused path: the executor already rolled the eligibility trace in-loop.
+            etrace_vals = final_etrace
+        else:
+            # eligibility trace update
+            #
+            # "self._update_etrace_data()" is a protocol method that should be implemented in the subclass.
+            # It's logic may be different for different etrace algorithms.
+            #
+            etrace_vals = self._update_etrace_data(
+                running_index,
+                etrace_vals,
+                hid2weight_jac_single_or_multi_steps,
+                hid2hid_jac_single_or_multi_steps,
+                weight_vals,
+                input_is_multi_step,
+            )
 
         # returns
         return out, hidden_vals, oth_state_vals, etrace_vals
@@ -393,6 +408,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         assign_state_values_v2(self.hidden_states, hidden_vals, write=False)
         assign_state_values_v2(self.other_states, othstate_vals, write=False)
 
+        # As in ``_update_fn``: when fusable + multi-step, push the stepper down so
+        # the executor rolls the trace inside the same scan that builds the VJP
+        # residual. The trace carry is detached (stop_gradient), so it never enters
+        # the residual jaxpr.
+        etrace_stepper = self._make_etrace_stepper(weight_vals) if input_is_multi_step else None
+
         # necessary gradients of the weights
         (
             out,
@@ -400,22 +421,31 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             oth_states,
             hid2weight_jac_single_or_multi_steps,
             hid2hid_jac_single_or_multi_steps,
-            residuals
-        ) = self.graph_executor.solve_h2w_h2h_l2h_jacobian(*args)
-
-        # eligibility trace update
-        #
-        # "self._update_etrace_data()" is a protocol method that should be implemented in the subclass.
-        # It's logic may be different for different etrace algorithms.
-        #
-        new_etrace_vals = self._update_etrace_data(
-            running_index,
-            etrace_vals,
-            hid2weight_jac_single_or_multi_steps,
-            hid2hid_jac_single_or_multi_steps,
-            weight_vals,
-            input_is_multi_step
+            residuals,
+            final_etrace,
+        ) = self.graph_executor.solve_h2w_h2h_l2h_jacobian(
+            *args,
+            etrace_stepper=etrace_stepper,
+            init_etrace=etrace_vals if etrace_stepper is not None else None,
         )
+
+        if final_etrace is not None:
+            # fused path: the executor already rolled the eligibility trace in-loop.
+            new_etrace_vals = final_etrace
+        else:
+            # eligibility trace update
+            #
+            # "self._update_etrace_data()" is a protocol method that should be implemented in the subclass.
+            # It's logic may be different for different etrace algorithms.
+            #
+            new_etrace_vals = self._update_etrace_data(
+                running_index,
+                etrace_vals,
+                hid2weight_jac_single_or_multi_steps,
+                hid2hid_jac_single_or_multi_steps,
+                weight_vals,
+                input_is_multi_step
+            )
 
         # returns
         old_etrace_vals = etrace_vals
@@ -661,6 +691,33 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
               at the time ``t``, i.e., :math:``\partial L^t / \partial W^t``.
         """
         raise NotImplementedError
+
+    def _make_etrace_stepper(self, weight_vals: WeightVals) -> Optional[Callable]:
+        """Return a per-step eligibility-trace update callback, or ``None``.
+
+        When a subclass can express its trace roll as a pure step function with
+        signature ``(etrace_carry, (x_dict, df_dict, diag_list)) -> (new_carry, None)``,
+        it should override this to return that callback (typically the same
+        ``partial`` it builds inside :meth:`_update_etrace_data`). For multi-step
+        input the graph executor then fuses the roll into its over-time scan,
+        eliminating the separate trace scan and the stacked per-step Jacobians.
+
+        Returning ``None`` (the default) keeps the legacy two-pass behavior: the
+        executor stacks the Jacobians and :meth:`_update_etrace_data` rolls the
+        trace in a second scan. Subclasses whose update cannot be written as such a
+        step function (or that do not support multi-step input) leave this ``None``.
+
+        Parameters
+        ----------
+        weight_vals : WeightVals
+            The current parameter values, captured by the returned callback.
+
+        Returns
+        -------
+        Callable or None
+            The per-step stepper, or ``None`` to disable scan fusion.
+        """
+        return None
 
     def _update_etrace_data(
         self,

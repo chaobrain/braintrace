@@ -67,13 +67,17 @@ class TestETraceVjpGraphExecutor(unittest.TestCase):
         x = jnp.ones((self.in_size,))
         executor.compile_graph(x)
 
-        outputs, etrace_vals, state_vals, h2w_jacobian, h2h_jacobian = executor.solve_h2w_h2h_jacobian(x)
+        outputs, etrace_vals, state_vals, h2w_jacobian, h2h_jacobian, final_etrace = (
+            executor.solve_h2w_h2h_jacobian(x)
+        )
 
         self.assertIsInstance(outputs, jax.Array)
         self.assertIsInstance(etrace_vals, dict)
         self.assertIsInstance(state_vals, dict)
         self.assertIsInstance(h2w_jacobian, tuple)
         self.assertIsInstance(h2h_jacobian, list)
+        # No stepper passed -> legacy return, the fused-trace slot is None.
+        self.assertIsNone(final_etrace)
 
     def test_single_step_vs_multi_step(self):
         single_step_executor = braintrace.ETraceVjpGraphExecutor(self.model, vjp_method='single-step')
