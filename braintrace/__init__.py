@@ -30,6 +30,8 @@ from ._etrace_algorithms import (
     pp_prop,
     EProp,
     OSTL,
+    OSTLRecurrent,
+    OSTLFeedforward,
     OTPE,
     OTTT,
     OSTTP,
@@ -145,6 +147,8 @@ __all__ = [
     # SNN online-learning algorithms
     'EProp',
     'OSTL',
+    'OSTLRecurrent',
+    'OSTLFeedforward',
     'OTPE',
     'OTTT',
     'OSTTP',

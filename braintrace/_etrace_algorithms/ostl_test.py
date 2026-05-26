@@ -20,7 +20,13 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._etrace_algorithms.ostl import OSTL
+from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
+from braintrace._etrace_algorithms.ostl import (
+    OSTL,
+    OSTLFeedforward,
+    OSTLRecurrent,
+)
+from braintrace._etrace_algorithms.pp_prop import IODimVjpAlgorithm
 
 
 def _tiny_rec_net():
@@ -43,56 +49,164 @@ def _tiny_rec_net():
     return net
 
 
-class TestOSTLConstruction(unittest.TestCase):
-    def test_default_regime_is_with_h(self):
-        algo = OSTL(_tiny_rec_net())
+def _drive(algo, n=3, x=None):
+    """Compile, init, and run ``n`` update steps; return the algo and last out."""
+    x = jnp.ones((1, 3)) if x is None else x
+    algo.compile_graph(x)
+    algo.init_etrace_state()
+    out = None
+    for _ in range(n):
+        out = algo.update(x)
+    return algo, out
+
+
+def _train_loss(algo, n_steps=10, lr=0.05):
+    """Online SGD on a fit-to-ones task; return the per-step loss list."""
+    x = jnp.ones((1, 3))
+    algo.compile_graph(x)
+    algo.init_etrace_state()
+    losses = []
+    for _ in range(n_steps):
+        def loss_fn(x_):
+            out = algo.update(x_)
+            return ((out - jnp.ones_like(out)) ** 2).mean()
+
+        grads, loss_val = brainstate.augment.grad(
+            loss_fn, algo.param_states, return_value=True
+        )(x)
+        for path, st in algo.param_states.items():
+            st.value = st.value - lr * grads[path]
+        losses.append(float(loss_val))
+    return losses
+
+
+class TestOSTLRecurrent(unittest.TestCase):
+    def test_is_param_dim_subclass(self):
+        algo = OSTLRecurrent(_tiny_rec_net())
+        assert isinstance(algo, ParamDimVjpAlgorithm)
         assert algo.regime == 'with-H'
+
+    def test_compiles_and_updates(self):
+        algo, out = _drive(OSTLRecurrent(_tiny_rec_net()), n=1)
+        assert out.shape == (1, 3)
+
+    def test_reset_zeros_traces(self):
+        algo, _ = _drive(OSTLRecurrent(_tiny_rec_net()), n=3)
+        algo.reset_state(batch_size=1)
+        for st in algo.etrace_bwg.values():
+            for arr in jax.tree.leaves(st.value):
+                assert jnp.allclose(arr, jnp.zeros_like(arr))
+        assert algo.running_index.value == 0
+
+    def test_forwards_kwargs_to_base(self):
+        algo = OSTLRecurrent(
+            _tiny_rec_net(),
+            fast_solve=False,
+            normalize_matrix_spectrum=True,
+            vjp_method='single-step',
+        )
+        assert algo.fast_solve is False
+        assert algo.normalize_matrix_spectrum is True
+
+    def test_get_etrace_of_named_weight(self):
+        net = _tiny_rec_net()
+        algo, _ = _drive(OSTLRecurrent(net), n=2)
+        traces = algo.get_etrace_of(net.w_rec)
+        assert len(traces) >= 1
+
+    def test_training_decreases_loss(self):
+        losses = _train_loss(OSTLRecurrent(_tiny_rec_net()))
+        assert losses[-1] < losses[0]
+
+
+class TestOSTLFeedforward(unittest.TestCase):
+    def test_is_io_dim_subclass(self):
+        algo = OSTLFeedforward(_tiny_rec_net())
+        assert isinstance(algo, IODimVjpAlgorithm)
+        assert algo.regime == 'without-H'
+
+    def test_default_decay_is_tiny(self):
+        algo = OSTLFeedforward(_tiny_rec_net())
+        assert algo.decay == 1e-6
+
+    def test_compiles_and_updates(self):
+        algo, out = _drive(OSTLFeedforward(_tiny_rec_net()), n=1)
+        assert out.shape == (1, 3)
+
+    def test_reset_zeros_traces(self):
+        algo, _ = _drive(OSTLFeedforward(_tiny_rec_net()), n=3)
+        algo.reset_state(batch_size=1)
+        for st in algo.etrace_xs.values():
+            assert jnp.allclose(st.value, jnp.zeros_like(st.value))
+        for st in algo.etrace_dfs.values():
+            assert jnp.allclose(st.value, jnp.zeros_like(st.value))
+        assert algo.running_index.value == 0
+
+    def test_custom_float_decay_honored(self):
+        algo = OSTLFeedforward(_tiny_rec_net(), decay_or_rank=0.5)
+        assert algo.decay == 0.5
+
+    def test_int_rank_sets_decay(self):
+        # rank r -> decay = (r-1)/(r+1); rank 3 -> 0.5
+        algo = OSTLFeedforward(_tiny_rec_net(), decay_or_rank=3)
+        assert abs(algo.decay - 0.5) < 1e-9
+
+    def test_out_of_range_float_decay_rejected(self):
+        with self.assertRaises(AssertionError):
+            OSTLFeedforward(_tiny_rec_net(), decay_or_rank=1.5)
+
+    def test_bad_decay_type_rejected(self):
+        with self.assertRaises(ValueError):
+            OSTLFeedforward(_tiny_rec_net(), decay_or_rank='nope')
+
+    def test_training_decreases_loss(self):
+        losses = _train_loss(OSTLFeedforward(_tiny_rec_net()))
+        assert losses[-1] < losses[0]
+
+
+class TestOSTLFactory(unittest.TestCase):
+    def test_default_regime_returns_recurrent(self):
+        algo = OSTL(_tiny_rec_net())
+        assert isinstance(algo, OSTLRecurrent)
+        assert algo.regime == 'with-H'
+
+    def test_without_h_returns_feedforward(self):
+        algo = OSTL(_tiny_rec_net(), regime='without-H')
+        assert isinstance(algo, OSTLFeedforward)
+        assert algo.regime == 'without-H'
 
     def test_invalid_regime_raises(self):
         with self.assertRaises(ValueError):
             OSTL(_tiny_rec_net(), regime='bogus')
 
+    def test_factory_forwards_decay_to_feedforward(self):
+        algo = OSTL(_tiny_rec_net(), regime='without-H', decay_or_rank=0.5)
+        assert algo.decay == 0.5
+
+    def test_factory_forwards_name(self):
+        algo = OSTL(_tiny_rec_net(), name='my_ostl')
+        assert algo.name == 'my_ostl'
+
     def test_with_h_compiles_and_updates(self):
-        net = _tiny_rec_net()
-        algo = OSTL(net, regime='with-H')
-        x = jnp.ones((1, 3))
-        algo.compile_graph(x)
-        algo.init_etrace_state()
-        out = algo.update(x)
+        algo, out = _drive(OSTL(_tiny_rec_net(), regime='with-H'), n=1)
         assert out.shape == (1, 3)
 
     def test_without_h_compiles_and_updates(self):
-        net = _tiny_rec_net()
-        algo = OSTL(net, regime='without-H')
-        x = jnp.ones((1, 3))
-        algo.compile_graph(x)
-        algo.init_etrace_state()
-        out = algo.update(x)
+        algo, out = _drive(OSTL(_tiny_rec_net(), regime='without-H'), n=1)
         assert out.shape == (1, 3)
 
+    def test_exported_from_package(self):
+        assert braintrace.OSTLRecurrent is OSTLRecurrent
+        assert braintrace.OSTLFeedforward is OSTLFeedforward
+        for name in ('OSTL', 'OSTLRecurrent', 'OSTLFeedforward'):
+            assert name in braintrace.__all__
 
-class TestOSTLResetAndKnob(unittest.TestCase):
-    def test_reset_zeros_traces(self):
-        net = _tiny_rec_net()
-        algo = OSTL(net, regime='with-H')
-        x = jnp.ones((1, 3))
-        algo.compile_graph(x)
-        algo.init_etrace_state()
-        # Drive a few steps so traces become non-zero.
-        for _ in range(3):
-            algo.update(x)
-        algo.reset_state(batch_size=1)
-        for k, st in algo.etrace_bwg.items():
-            for arr in jax.tree.leaves(st.value):
-                assert jnp.allclose(arr, jnp.zeros_like(arr))
-        assert algo.running_index.value == 0
 
-    def test_without_h_regime_differs_from_with_h(self):
-        """Drive several recurrent steps; the two regimes must disagree on a non-trivial loss."""
+class TestRegimesDiffer(unittest.TestCase):
+    def test_recurrent_and_feedforward_disagree_on_gradient(self):
+        """With recurrent dynamics, keeping vs dropping H must change the grad."""
 
-        def final_grad(regime):
-            net = _tiny_rec_net()
-            algo = OSTL(net, regime=regime)
+        def final_grad(algo):
             x = jnp.ones((1, 3))
             algo.compile_graph(x)
             algo.init_etrace_state()
@@ -107,6 +221,6 @@ class TestOSTLResetAndKnob(unittest.TestCase):
             )(x)
             return grads[next(iter(grads))]
 
-        g_with = final_grad('with-H')
-        g_without = final_grad('without-H')
+        g_with = final_grad(OSTLRecurrent(_tiny_rec_net()))
+        g_without = final_grad(OSTLFeedforward(_tiny_rec_net()))
         assert not jnp.allclose(g_with, g_without, atol=1e-4)
