@@ -5,3 +5,5 @@ matplotlib
 
 pytest
 numba  # for brainevent cpu operator
+mypy>=1.8  # static type checking
+build  # PEP 517 wheel/sdist builds for packaging checks

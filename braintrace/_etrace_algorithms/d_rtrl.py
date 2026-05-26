@@ -14,7 +14,7 @@
 # ==============================================================================
 
 from functools import partial
-from typing import Dict, Tuple, Optional, Sequence
+from typing import Dict, Tuple, Optional, Sequence, Any
 
 import brainstate
 import jax
@@ -76,8 +76,8 @@ def _init_param_dim_state(
     Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
     trainable-input names (dict-based rule API).
     """
+    group: HiddenGroup
     for group in relation.hidden_groups:
-        group: HiddenGroup
         bwg_key = (id(relation.y_var), group.index)
         if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
@@ -213,8 +213,8 @@ def _update_param_dim_etrace_scan_fn(
     #
     new_etrace_bwg = dict()
 
+    relation: HiddenParamOpRelation
     for relation in hidden_param_op_relations:
-        relation: HiddenParamOpRelation
 
         # Build the weights dict the rules consume.
         weights_dict = {
@@ -276,8 +276,8 @@ def _update_param_dim_etrace_scan_fn(
                 return jax.tree.map(lambda a: u.math.expand_dims(a, axis=-1), res)
             return jax.vmap(fn_bwg_pre, in_axes=-2, out_axes=-1)(diag_)
 
+        group: HiddenGroup
         for group in relation.hidden_groups:
-            group: HiddenGroup
 
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
 
@@ -404,8 +404,8 @@ def _solve_param_dim_weight_gradients(
             else _call_yw_to_w_dict
         )
 
+        group: HiddenGroup
         for group in relation.hidden_groups:
-            group: HiddenGroup
 
             w_key = (id(relation.y_var), group.index)
             etrace_data = hist_etrace_data[w_key]  # Dict[str, Array]
@@ -481,7 +481,8 @@ def _remove_units(xs_maybe_quantity: brainstate.typing.PyTree):
 
     def restore_units(xs_unitless: brainstate.typing.PyTree):
         leaves, treedef2 = jax.tree.flatten(xs_unitless)
-        assert treedef == treedef2, 'The tree structure should be the same. '
+        # jax's PyTreeDef stubs omit __eq__; the comparison is valid at runtime.
+        assert treedef == treedef2, 'The tree structure should be the same. '  # type: ignore[operator]
         new_leaves = [
             leaf if unit.dim.is_dimensionless else leaf * unit
             for leaf, unit in zip(leaves, units)
@@ -597,16 +598,16 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
 
         find_this_weight = False
         etraces = dict()
+        relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
-            relation: HiddenParamOpRelation
             primary_state = next(iter(relation.trainable_param_states.values()), None)
             if primary_state is None or id(primary_state) != weight_id:
                 continue
             find_this_weight = True
 
             # retrieve the etrace data
+            group: HiddenGroup
             for group in relation.hidden_groups:
-                group: HiddenGroup
                 key = (id(relation.y_var), group.index)
                 etraces[key] = self.etrace_bwg[key].value
 
@@ -735,7 +736,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         running_index: int,
         etrace_h2w_at_t: Dict[ETraceWG_Key, PyTree],
         dl_to_hidden_groups: Sequence[jax.Array],
-        weight_vals: Dict[WeightID, PyTree],
+        weight_vals: Dict[Path, PyTree],
         dl_to_nonetws_at_t: Dict[Path, PyTree],
         dl_to_etws_at_t: Optional[Dict[Path, PyTree]],
     ):
@@ -769,7 +770,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         Returns:
             Dict[Path, PyTree]: Dictionary mapping parameter paths to their gradient values.
         """
-        dG_weights = {path: None for path in self.param_states}
+        dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
 
         # update the etrace weight gradients
         _solve_param_dim_weight_gradients(

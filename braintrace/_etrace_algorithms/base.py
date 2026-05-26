@@ -257,7 +257,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         Show the etrace graph.
         """
-        return self.graph_executor.show_graph()
+        self.graph_executor.show_graph()
 
     def __call__(self, *args) -> Any:
         """

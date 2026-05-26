@@ -25,7 +25,7 @@
 # -*- coding: utf-8 -*-
 
 from functools import partial
-from typing import Dict, Tuple, Optional, Sequence
+from typing import Dict, Tuple, Optional, Sequence, Any
 
 import brainstate
 import jax
@@ -198,6 +198,7 @@ def _init_IO_dim_state(
 
     # "relation.x_var" may be repeatedly used in the graph
     if not (relation.primitive is etp_elemwise_p):
+        assert relation.x_var is not None  # non-elemwise primitives always have an x_var
         x_key = id(relation.x_var)
         if x_key not in etrace_xs:
             shape = relation.x_var.aval.shape
@@ -206,8 +207,8 @@ def _init_IO_dim_state(
 
     y_shape = relation.y_var.aval.shape
     y_dtype = relation.y_var.aval.dtype
+    group: HiddenGroup
     for group in relation.hidden_groups:
-        group: HiddenGroup
         # Exact match required, or (elemwise only) allow trailing-dim match
         # where a batched hidden group wraps an unbatched elemwise weight.
         shape_ok = (
@@ -337,11 +338,11 @@ def _update_IO_dim_etrace_scan_fn(
     for xkey in hist_xs.keys():
         new_etrace_xs[xkey] = _low_pass_filter(hist_xs[xkey], xs[xkey], decay)
 
+    relation: HiddenParamOpRelation
     for relation in hid_weight_op_relations:
-        relation: HiddenParamOpRelation
 
+        group: HiddenGroup
         for group in relation.hidden_groups:
-            group: HiddenGroup
 
             #
             # Step 2:
@@ -430,8 +431,8 @@ def _solve_IO_dim_weight_gradients(
 
     xs, dfs = hist_etrace_data
 
+    relation: HiddenParamOpRelation
     for relation in weight_hidden_relations:
-        relation: HiddenParamOpRelation
 
         if not (relation.primitive is etp_elemwise_p):
             x = xs[id(relation.x_var)]
@@ -454,8 +455,8 @@ def _solve_IO_dim_weight_gradients(
         def _call(df_, w_, _rule=xy_to_dw_rule, _params=eqn_params, _x=x):
             return _rule(_x, df_, w_, **_params)
 
+        group: HiddenGroup
         for group in relation.hidden_groups:
-            group: HiddenGroup
             df_key = etrace_df_key(relation.y_var, group.index)
             df = dfs[df_key] / correction_factor
             df_hid = df * dG_hidden_groups[group.index]
@@ -605,8 +606,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         etrace_xs = dict()
         etrace_dfs = dict()
         find_this_weight = False
+        relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
-            relation: HiddenParamOpRelation
             primary_state = next(iter(relation.trainable_param_states.values()), None)
             if primary_state is None or id(primary_state) != weight_id:
                 continue
@@ -619,8 +620,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
             # get the weight_op df
             wy_var = relation.y_var
+            group: HiddenGroup
             for group in relation.hidden_groups:
-                group: HiddenGroup
                 df_key = etrace_df_key(wy_var, group.index)
                 etrace_dfs[df_key] = self.etrace_dfs[df_key].value
         if not find_this_weight:
@@ -830,7 +831,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         #         at the time "t", i.e., ∂L^t / ∂W^t.
         #         It has the shape of [n_param, ...].
         #
-        dG_weights = {path: None for path in self.param_states.keys()}
+        dG_weights: Dict[Path, Any] = {path: None for path in self.param_states.keys()}
 
         # update the etrace parameters
         _solve_IO_dim_weight_gradients(

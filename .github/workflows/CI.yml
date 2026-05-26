@@ -81,3 +81,48 @@ jobs:
         run: |
           pytest braintrace/ -p no:faulthandler
 
+
+  typecheck_and_build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: [ "3.13" ]
+
+    steps:
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.13.1
+        with:
+          access_token: ${{ github.token }}
+      - uses: actions/checkout@v6
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip cache purge
+          python -m pip install --upgrade pip setuptools --no-cache-dir
+          python -m pip install -r requirements-dev.txt --no-cache-dir
+          pip install .
+      - name: Type check with mypy
+        run: |
+          python -m mypy braintrace
+      - name: Build wheel and sdist
+        run: |
+          python -m build
+      - name: Verify py.typed is shipped in wheel and sdist (PEP 561)
+        run: |
+          python - <<'EOF'
+          import glob, sys, zipfile, tarfile
+
+          wheel = glob.glob('dist/*.whl')[0]
+          sdist = glob.glob('dist/*.tar.gz')[0]
+          wheel_ok = any(n.endswith('braintrace/py.typed') for n in zipfile.ZipFile(wheel).namelist())
+          sdist_ok = any(n.endswith('braintrace/py.typed') for n in tarfile.open(sdist).getnames())
+          print(f'wheel={wheel} py.typed={wheel_ok}')
+          print(f'sdist={sdist} py.typed={sdist_ok}')
+          if not (wheel_ok and sdist_ok):
+              sys.exit('ERROR: braintrace/py.typed missing from build artifacts')
+          EOF
+

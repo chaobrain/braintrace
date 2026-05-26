@@ -16,7 +16,7 @@
 
 import warnings
 from enum import Enum
-from typing import Sequence
+from typing import Sequence, Callable, Any
 
 import brainstate
 import jax.tree
@@ -292,7 +292,7 @@ def set_module_as(module: str = 'braintrace'):
         decorated function to the specified module name.
     """
 
-    def wrapper(fun: callable):
+    def wrapper(fun: Callable[..., Any]) -> Callable[..., Any]:
         fun.__module__ = module
         return fun
 

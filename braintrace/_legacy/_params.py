@@ -157,7 +157,7 @@ class NonTempParam(brainstate.ParamState):
     ):
         super().__init__(value, name=name)
         if isinstance(op, ETraceOp):
-            self._etrace_op = op
+            self._etrace_op: Optional[ETraceOp] = op
             self.op = op.raw_xw_to_y
         else:
             if not callable(op):
@@ -233,7 +233,7 @@ class FakeElemWiseParam(object):
                 raise TypeError(
                     f'op must be ElemWiseOp when an ETraceOp is supplied, got {type(op)}'
                 )
-            self._etrace_op = op
+            self._etrace_op: Optional[ElemWiseOp] = op
             self.op = op.raw_xw_to_y
             self._is_etrace_op = True
         else:

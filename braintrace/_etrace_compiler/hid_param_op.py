@@ -419,6 +419,7 @@ def _bfs_forward(
         if v in hidden_outvar_set:
             if outvar_to_group_index is not None:
                 g = outvar_to_group_index.get(v)
+                assert g is not None  # hidden outvars always carry a group index
                 if not home_group_indices:
                     home_group_indices.add(g)
                 if g in home_group_indices:
@@ -708,6 +709,7 @@ def find_hidden_param_op_relations_from_jaxpr(
 
         # --- Resolve every trainable invar declared by the primitive ---
         spec = get_primitive_spec(primitive)
+        assert spec is not None, f'No registered ETP spec for primitive {primitive.name}.'
         key_to_idx = spec.resolve_trainable_invars(eqn.params)
         trainable_invars_map = {k: eqn.invars[i] for k, i in key_to_idx.items()}
         trainable_vars: Dict[str, Var] = {}
@@ -728,7 +730,7 @@ def find_hidden_param_op_relations_from_jaxpr(
             )
 
         if weight_path is None:
-            first_invar_repr = trainable_invars_map[first_key]
+            first_invar_repr = trainable_invars_map[first_key] if first_key is not None else None
             emit(
                 kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
                 level=DiagnosticLevel.WARNING,

@@ -44,7 +44,7 @@ class GradExpon(brainstate.nn.Module):
     def __init__(
         self,
         grad_shape: brainstate.typing.PyTree,
-        tau_or_decay: u.Quantity[u.second] | float,
+        tau_or_decay: u.Quantity | float,
     ):
         super().__init__()
 

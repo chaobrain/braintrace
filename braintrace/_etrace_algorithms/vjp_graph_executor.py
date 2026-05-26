@@ -288,8 +288,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         """
 
         hid2hid_jacobian = []
+        group: HiddenGroup
         for group in self.graph.hidden_groups:
-            group: HiddenGroup
 
             # data for jacobian computation
             hidden_vals = [intermediate_values[v] for v in group.hidden_invars]
@@ -498,6 +498,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
         if self.is_single_step_vjp:
             etrace_param_vals = dict()
+            assert self.graph.hidden_perturb is not None
             hidden_perturbs = self.graph.hidden_perturb.init_perturb_data()
             etrace_weight_vals_restore = {path: st.value for path, st in etrace_param_states.items()}
 
