@@ -162,3 +162,34 @@ def two_state_rnn(n_in: int = 3, n_rec: int = 3, seed: int = 0) -> ModelSpec:
         return Net()
 
     return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
+
+
+def batched_tanh_rnn(n_in: int = 3, n_rec: int = 4, batch: int = 4, seed: int = 0) -> ModelSpec:
+    """A tanh RNN whose hidden state carries an explicit leading batch axis of
+    size ``batch``. The existing models hardcode a size-1 batch, so this one is
+    used to exercise batch-axis invariance (batched gradient == sum of
+    per-sequence gradients). ``w`` is the recurrent ETP weight; ``win`` is a
+    plain input projection.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(
+                    0.5 * jax.random.normal(jax.random.PRNGKey(seed), (n_rec, n_rec))
+                )
+                self.win = brainstate.ParamState(
+                    0.5 * jax.random.normal(jax.random.PRNGKey(seed + 1), (n_in, n_rec))
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((batch, n_rec)))
+
+            def update(self, x):
+                self.h.value = jax.nn.tanh(
+                    x @ self.win.value + braintrace.matmul(self.h.value, self.w.value)
+                )
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
