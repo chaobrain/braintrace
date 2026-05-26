@@ -32,6 +32,7 @@ Coverage:
 
 from collections import namedtuple
 
+import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -319,6 +320,204 @@ class TestConvEtpRules:
         weight_vars = {'weight': _fake_var((4, 3, 3))}
         out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (1, 4, 8, 2)
+
+
+# ---------------------------------------------------------------------------
+# Bias-gradient correctness (D-RTRL vs BPTT)
+# ---------------------------------------------------------------------------
+
+class TestConvBiasGradient:
+    """D-RTRL gradient correctness for etp_conv_p with a bias vector."""
+
+    def test_drtrl_conv_grad_matches_bptt(self):
+        """D-RTRL dkernel and dbias must match BPTT for one recurrent step."""
+        kernel_init = jnp.ones((3, 4, 4)) * 0.05  # (H, in, out) for 1D conv NHC-HIO
+        bias_init = jnp.ones((4,)) * 0.1
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.p = brainstate.ParamState(
+                    {'weight': kernel_init, 'bias': bias_init}
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, 6, 4)))
+
+            def update(self, x):
+                k = self.p.value['weight']
+                b = self.p.value['bias']
+                y = braintrace.conv(
+                    self.h.value, k, b,
+                    strides=(1,), padding='SAME',
+                    dimension_numbers=('NHC', 'HIO', 'NHC'),
+                )
+                self.h.value = jnp.tanh(x + y)
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        alg = braintrace.D_RTRL(cell)
+        alg.compile_graph(jnp.zeros((1, 6, 4)))
+
+        x = jnp.ones((1, 6, 4)) * 0.3
+
+        # --- ETP gradient via D-RTRL ---
+        @brainstate.transform.jit
+        def etrace_grad_step(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState),
+            )(inp)
+
+        grads_etrace = etrace_grad_step(x)
+
+        # grads_etrace is keyed by path; cell.p is a dict-valued ParamState
+        grad_p = list(grads_etrace.values())[0]
+        assert isinstance(grad_p, dict), (
+            f'Expected dict gradient for merged ParamState, got {type(grad_p)}'
+        )
+
+        # --- BPTT reference ---
+        def bptt_loss(params):
+            h = jnp.zeros((1, 6, 4))
+            y = jax.lax.conv_general_dilated(
+                lhs=h, rhs=params['weight'],
+                window_strides=(1,), padding='SAME',
+                dimension_numbers=('NHC', 'HIO', 'NHC'),
+            ) + params['bias']
+            h = jnp.tanh(x + y)
+            return h.sum()
+
+        bptt = jax.grad(bptt_loss)({
+            'weight': cell.p.value['weight'],
+            'bias': cell.p.value['bias'],
+        })
+
+        # Non-zero sanity check for bias gradient
+        assert jnp.abs(bptt['bias']).max() > 1e-3, (
+            f'BPTT bias gradient is unexpectedly near-zero: {bptt["bias"]}'
+        )
+
+        np.testing.assert_allclose(grad_p['weight'], bptt['weight'], atol=1e-5,
+                                   err_msg='D-RTRL dkernel does not match BPTT')
+        np.testing.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
+                                   err_msg='D-RTRL dbias does not match BPTT (was it zero?)')
+
+
+class TestConv2dBiasGradient:
+    """Bias gradient matches BPTT oracle for 2D conv (default NHWC / HWIO layout)."""
+
+    def _run_test(self, spatial_h, spatial_w, kernel_h, kernel_w, in_ch, out_ch,
+                  strides, padding, x_val=0.3):
+        """Shared helper: build a tiny 2D recurrent cell and compare D-RTRL vs BPTT."""
+        # Kernel shape: (Hk, Wk, in_ch, out_ch)  — HWIO layout
+        kernel_init = jnp.ones((kernel_h, kernel_w, in_ch, out_ch)) * 0.05
+        bias_init = jnp.ones((out_ch,)) * 0.1
+
+        # Compute output spatial size for SAME padding (input size unchanged).
+        # For VALID: floor((H - Hk) / stride + 1).
+        if padding == 'SAME':
+            out_h = -(-spatial_h // strides[0])  # ceil division
+            out_w = -(-spatial_w // strides[1])
+        else:  # VALID
+            out_h = (spatial_h - kernel_h) // strides[0] + 1
+            out_w = (spatial_w - kernel_w) // strides[1] + 1
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.p = brainstate.ParamState(
+                    {'weight': kernel_init, 'bias': bias_init}
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, out_h, out_w, out_ch)))
+
+            def update(self, x):
+                k = self.p.value['weight']
+                b = self.p.value['bias']
+                y = braintrace.conv(
+                    self.h.value, k, b,
+                    strides=strides, padding=padding,
+                    dimension_numbers=('NHWC', 'HWIO', 'NHWC'),
+                )
+                self.h.value = jnp.tanh(x + y)
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        alg = braintrace.D_RTRL(cell)
+        alg.compile_graph(jnp.zeros((1, out_h, out_w, out_ch)))
+
+        x = jnp.ones((1, out_h, out_w, out_ch)) * x_val
+
+        @brainstate.transform.jit
+        def etrace_grad_step(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState),
+            )(inp)
+
+        grads_etrace = etrace_grad_step(x)
+        grad_p = list(grads_etrace.values())[0]
+        assert isinstance(grad_p, dict), (
+            f'Expected dict gradient for merged ParamState, got {type(grad_p)}'
+        )
+
+        # --- BPTT reference ---
+        def bptt_loss(params):
+            h = jnp.zeros((1, out_h, out_w, out_ch))
+            y = jax.lax.conv_general_dilated(
+                lhs=h, rhs=params['weight'],
+                window_strides=strides, padding=padding,
+                dimension_numbers=('NHWC', 'HWIO', 'NHWC'),
+            ) + params['bias']
+            h = jnp.tanh(x + y)
+            return h.sum()
+
+        bptt = jax.grad(bptt_loss)({
+            'weight': cell.p.value['weight'],
+            'bias': cell.p.value['bias'],
+        })
+
+        assert jnp.abs(bptt['bias']).max() > 1e-3, (
+            f'BPTT bias gradient is unexpectedly near-zero: {bptt["bias"]}'
+        )
+
+        np.testing.assert_allclose(grad_p['weight'], bptt['weight'], atol=1e-5,
+                                   err_msg='D-RTRL dkernel does not match BPTT')
+        np.testing.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
+                                   err_msg='D-RTRL dbias does not match BPTT (was it zero?)')
+
+    def test_conv2d_default_layout(self):
+        """2D conv, default NHWC/HWIO layout, 3x3 kernel, stride 1, SAME padding."""
+        self._run_test(
+            spatial_h=6, spatial_w=6,
+            kernel_h=3, kernel_w=3,
+            in_ch=4, out_ch=4,
+            strides=(1, 1), padding='SAME',
+        )
+
+    def test_conv2d_with_valid_padding(self):
+        """2D conv, VALID padding, 1x1 kernel — preserves spatial dims without growth.
+
+        A 1x1 kernel with VALID padding is a valid non-trivial test: every output
+        position directly maps to one input position (no spatial reduction), so the
+        hidden state remains stable in a recurrent cell.  This exercises the VALID
+        padding code path and the 2D kernel handling simultaneously.
+        """
+        self._run_test(
+            spatial_h=4, spatial_w=4,
+            kernel_h=1, kernel_w=1,
+            in_ch=4, out_ch=4,
+            strides=(1, 1), padding='VALID',
+        )
+
+    def test_conv2d_rectangular_kernel(self):
+        """2D conv with a non-square 3x1 kernel (horizontal strip)."""
+        self._run_test(
+            spatial_h=6, spatial_w=6,
+            kernel_h=3, kernel_w=1,
+            in_ch=4, out_ch=4,
+            strides=(1, 1), padding='SAME',
+        )
 
 
 class TestPublicAPIRoundTrip:
