@@ -58,40 +58,65 @@ class ETPPrimitive(Primitive):
     convenience methods for installing ETP-specific rules into the global
     registries.
 
-    Example::
+    See Also
+    --------
+    register_primitive : Factory that creates and returns an instance.
 
-        my_p = register_primitive('etp_my_op', _my_impl, batched=True)
-        my_p.register_yw_to_w(my_yw_to_w_fn)
-        my_p.register_xy_to_dw(my_xy_to_dw_fn)
-        my_p.register_init_drtrl(my_init_drtrl_fn)
-        my_p.register_init_pp(my_init_pp_fn)
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import jax.numpy as jnp
+        >>> import braintrace
+        >>>
+        >>> # Register a primitive whose forward delegates to a standard op.
+        >>> def my_impl(x, w):
+        ...     return x @ w
+        >>> my_p = braintrace.register_primitive('etp_demo_mm', my_impl, batched=True)
+        >>> y = my_p.bind(jnp.ones((2, 3)), jnp.ones((3, 4)))
+        >>> print(y.shape)
+        (2, 4)
     """
 
     def register_yw_to_w(self, fn: Callable):
         """Install a D-RTRL trace propagation rule.
 
-        Signature: ``(hidden_dim, trace, **params) -> trace``.
+        Parameters
+        ----------
+        fn : Callable
+            Rule with signature ``(hidden_dim, trace, **params) -> trace``.
         """
         ETP_RULES_YW_TO_W[self] = fn
 
     def register_xy_to_dw(self, fn: Callable):
         """Install a weight-gradient rule.
 
-        Signature: ``(x, hidden_dim, w, **params) -> dw``.
+        Parameters
+        ----------
+        fn : Callable
+            Rule with signature ``(x, hidden_dim, w, **params) -> dw``.
         """
         ETP_RULES_XY_TO_DW[self] = fn
 
     def register_init_drtrl(self, fn: Callable):
         """Install a D-RTRL trace initialiser.
 
-        Signature: ``(x_var, y_var, weight_var, num_hidden_state) -> zeros``.
+        Parameters
+        ----------
+        fn : Callable
+            Rule with signature
+            ``(x_var, y_var, weight_var, num_hidden_state) -> zeros``.
         """
         ETP_RULES_INIT_DRTRL[self] = fn
 
     def register_init_pp(self, fn: Callable):
         """Install a pp_prop (IO-dim) df trace initialiser.
 
-        Signature: ``(x_var, y_var, weight_var, num_hidden_state) -> zeros``.
+        Parameters
+        ----------
+        fn : Callable
+            Rule with signature
+            ``(x_var, y_var, weight_var, num_hidden_state) -> zeros``.
         """
         ETP_RULES_INIT_PP[self] = fn
 
@@ -103,7 +128,21 @@ class ETPPrimitive(Primitive):
         init_drtrl: Callable = None,
         init_pp: Callable = None,
     ):
-        """Install multiple ETP rules in one call. Skips any ``None`` argument."""
+        """Install multiple ETP rules in one call.
+
+        Any argument left as ``None`` is skipped.
+
+        Parameters
+        ----------
+        yw_to_w : Callable, optional
+            D-RTRL trace propagation rule. Default ``None``.
+        xy_to_dw : Callable, optional
+            Weight-gradient rule. Default ``None``.
+        init_drtrl : Callable, optional
+            D-RTRL trace initialiser. Default ``None``.
+        init_pp : Callable, optional
+            pp_prop (IO-dim) df trace initialiser. Default ``None``.
+        """
         if yw_to_w is not None:
             ETP_RULES_YW_TO_W[self] = yw_to_w
         if xy_to_dw is not None:
@@ -126,38 +165,50 @@ def register_primitive(
 ):
     """Create an :class:`ETPPrimitive` with all JAX rules auto-derived.
 
-    The following rules are installed automatically:
-
-    - **impl** — eager execution
-    - **abstract_eval** — via ``jax.eval_shape(impl)``
-    - **lowering** — via ``mlir.lower_fun(impl)``
-    - **JVP** — via ``jax.jvp(impl)``
-    - **transpose** — derived by JAX from the JVP
-    - **batching** — via ``jax.vmap(impl)``
-
     Only the four ETP-specific rules need hand-writing — call the returned
     primitive's ``register_*`` methods.
 
-    Args:
-        name: Primitive name (e.g. ``'etp_mm'``).
-        impl_fn: Implementation function.
-        batched: Whether this primitive operates on batched inputs.
-        gradient_enabled: If True, the compiler will *evaluate* this primitive
-            when walking ``y -> h`` (identity-like ops such as
-            ``etp_elemwise_p``).
-        trainable_invars_fn: Function ``eqn.params -> {key: invar_index}``
-            declaring the primitive's full trainable-input layout. Used by the
-            compiler and executors to support N-trainable-input primitives
-            (e.g. ``{weight, bias}`` for Linear, ``{B, A, bias}`` for LoRA). If
-            ``None``, the compiler falls back to the single-weight
-            ``{'weight': 1}`` layout.
-        x_invar_index: Position of the input ``x`` in ``eqn.invars``, or
-            ``None`` for primitives with no external input (currently only
-            ``etp_elemwise_p``).
-        y_outvar_index: Position of the output ``y`` in ``eqn.outvars``.
+    Parameters
+    ----------
+    name : str
+        Primitive name (e.g. ``'etp_mm'``).
+    impl_fn : Callable
+        Implementation function.
+    batched : bool, optional
+        Whether this primitive operates on batched inputs. Default ``False``.
+    gradient_enabled : bool, optional
+        If ``True``, the compiler will *evaluate* this primitive when walking
+        ``y -> h`` (identity-like ops such as ``etp_elemwise_p``). Default
+        ``False``.
+    trainable_invars_fn : Callable or None, optional
+        Function ``eqn.params -> {key: invar_index}`` declaring the
+        primitive's full trainable-input layout. Used by the compiler and
+        executors to support N-trainable-input primitives (e.g.
+        ``{weight, bias}`` for Linear, ``{B, A, bias}`` for LoRA). If
+        ``None``, the compiler falls back to the single-weight
+        ``{'weight': 1}`` layout. Default ``None``.
+    x_invar_index : int or None, optional
+        Position of the input ``x`` in ``eqn.invars``, or ``None`` for
+        primitives with no external input (currently only ``etp_elemwise_p``).
+        Default ``0``.
+    y_outvar_index : int, optional
+        Position of the output ``y`` in ``eqn.outvars``. Default ``0``.
 
-    Returns:
-        :class:`ETPPrimitive`: the registered primitive.
+    Returns
+    -------
+    ETPPrimitive
+        The registered primitive.
+
+    Notes
+    -----
+    The following standard JAX rules are installed automatically:
+
+    - **impl** — eager execution.
+    - **abstract_eval** — via ``jax.eval_shape(impl)``.
+    - **lowering** — via ``mlir.lower_fun(impl)``.
+    - **JVP** — via ``jax.jvp(impl)``.
+    - **transpose** — derived by JAX from the JVP.
+    - **batching** — via ``jax.vmap(impl)``.
     """
     p = ETPPrimitive(name)
     ETP_PRIMITIVES.add(p)

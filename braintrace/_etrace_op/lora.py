@@ -338,19 +338,43 @@ etp_lora_mv_p.register_etp_rules(
 def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
     r"""ETP-aware LoRA (Low-Rank Adaptation) matrix multiplication.
 
-    Computes :math:`y = \alpha \cdot x \mathbin{@} B \mathbin{@} A \; (+ b)`.
-
+    Computes :math:`y = \alpha \cdot x \mathbin{@} B \mathbin{@} A \; (+ b)`,
+    routing both low-rank factors (and the optional bias) through an ETP
+    primitive so they participate in eligibility-trace computation.
     Auto-dispatches batched/unbatched based on ``x.ndim``.
 
-    Args:
-        x: Input array.
-        B: Low-rank matrix B, shape ``(in_features, rank)``.
-        A: Low-rank matrix A, shape ``(rank, out_features)``.
-        alpha: Scaling factor.
-        bias: Optional bias.
+    Parameters
+    ----------
+    x : ArrayLike
+        Input array, shape ``(..., in_features)`` or ``(in_features,)``.
+    B : ArrayLike
+        Low-rank matrix :math:`B`, shape ``(in_features, rank)``.
+    A : ArrayLike
+        Low-rank matrix :math:`A`, shape ``(rank, out_features)``.
+    alpha : float, optional
+        Scalar scaling factor :math:`\alpha`. Default ``1.0``.
+    bias : ArrayLike or None, optional
+        Bias vector, shape ``(out_features,)``. Default ``None``.
 
-    Returns:
-        Output array.
+    Returns
+    -------
+    ArrayLike
+        Output array, shape ``(..., out_features)`` or ``(out_features,)``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> brainstate.environ.set(precision=64)
+        >>> x = brainstate.random.randn(16, 8)
+        >>> B = brainstate.random.randn(8, 2)
+        >>> A = brainstate.random.randn(2, 4)
+        >>> y = braintrace.lora_matmul(x, B, A, alpha=0.5)
+        >>> print(y.shape)
+        (16, 4)
     """
     p = etp_lora_mm_p if x.ndim >= 2 else etp_lora_mv_p
     x_v, x_u = u.split_mantissa_unit(x)

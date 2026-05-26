@@ -134,7 +134,7 @@ class EProp(ParamDimVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = RSNN()
-        >>> brainstate.nn.init_all_states(model)
+        >>> _ = brainstate.nn.init_all_states(model)
         >>> learner = braintrace.EProp(model, kappa_filter_decay=0.9)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)   # trace the graph once

@@ -91,7 +91,7 @@ def online_param_gradients(
     model_factory: Callable[[], brainstate.nn.Module],
     inputs,
     *,
-    algo_factory: Callable[[brainstate.nn.Module], object],
+    algo_factory: Callable[[brainstate.nn.Module], braintrace.ETraceAlgorithm],
 ):
     """Total sequence gradient from an online algorithm via the multi-step VJP path.
 
@@ -115,7 +115,7 @@ def online_param_gradients_singlestep_naive(
     model_factory: Callable[[], brainstate.nn.Module],
     inputs,
     *,
-    algo_factory: Callable[[brainstate.nn.Module], object],
+    algo_factory: Callable[[brainstate.nn.Module], braintrace.ETraceAlgorithm],
 ):
     """Naive 'single-step' total gradient: sum of per-step grad((algo(x_t)**2).sum()).
 

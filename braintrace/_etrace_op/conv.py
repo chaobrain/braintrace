@@ -458,23 +458,55 @@ def conv(
 ):
     r"""ETP-aware convolution.
 
-    Computes :math:`y = \mathrm{conv}(x, kernel) \; (+ b)`.
-    Always expects a batch dimension on ``x``.
+    Computes :math:`y = \mathrm{conv}(x, kernel) \; (+ b)` by routing the
+    kernel (and optional bias) through an ETP primitive so they participate
+    in eligibility-trace computation. The full keyword surface of
+    :func:`jax.lax.conv_general_dilated` is preserved. Always expects a
+    batch dimension on ``x``.
 
-    Args:
-        x: Input tensor with batch dimension.
-        kernel: Convolution kernel.
-        bias: Optional bias.
-        strides: Window strides.
-        padding: Padding mode.
-        lhs_dilation: Left-hand-side dilation.
-        rhs_dilation: Right-hand-side dilation.
-        feature_group_count: Feature group count.
-        batch_group_count: Batch group count.
-        dimension_numbers: Convolution dimension numbers.
+    Parameters
+    ----------
+    x : ArrayLike
+        Input tensor with a leading batch dimension.
+    kernel : ArrayLike
+        Convolution kernel, with layout governed by ``dimension_numbers``.
+    bias : ArrayLike or None, optional
+        Per-output-channel bias. Default ``None``.
+    strides : Sequence[int], optional
+        Window strides. Default ``(1,)``.
+    padding : str, optional
+        Padding mode (e.g. ``'SAME'`` or ``'VALID'``). Default ``'SAME'``.
+    lhs_dilation : Sequence[int] or None, optional
+        Left-hand-side (input) dilation factors. Default ``None``.
+    rhs_dilation : Sequence[int] or None, optional
+        Right-hand-side (kernel) dilation factors. Default ``None``.
+    feature_group_count : int, optional
+        Number of feature groups. Default ``1``.
+    batch_group_count : int, optional
+        Number of batch groups. Default ``1``.
+    dimension_numbers : Any, optional
+        Convolution dimension numbers (e.g. ``('NHWC', 'HWIO', 'NHWC')``).
+        Default ``None``, which uses the JAX default layout.
 
-    Returns:
-        Convolution output.
+    Returns
+    -------
+    ArrayLike
+        Convolution output tensor.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> brainstate.environ.set(precision=64)
+        >>> # 1-D conv, NCH input and OIH kernel (JAX defaults)
+        >>> x = brainstate.random.randn(8, 3, 16)
+        >>> kernel = brainstate.random.randn(4, 3, 5)
+        >>> y = braintrace.conv(x, kernel, strides=(1,), padding='SAME')
+        >>> print(y.shape)
+        (8, 4, 16)
     """
     conv_kwargs = dict(
         strides=tuple(strides),

@@ -83,6 +83,7 @@ class LeakyRateReadout(brainstate.nn.Module):
         >>> import brainstate
         >>> import saiunit as u
         >>>
+        >>> brainstate.environ.set(dt=0.1 * u.ms)
         >>> # Create a leaky rate readout layer
         >>> readout = braintrace.nn.LeakyRateReadout(
         ...     in_size=256,

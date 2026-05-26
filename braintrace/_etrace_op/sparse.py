@@ -318,19 +318,28 @@ etp_sp_mv_p.register_etp_rules(
 def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
     r"""ETP-aware sparse matrix multiplication.
 
-    Computes :math:`y = x \mathbin{@} \mathrm{sparse}(w) \; (+ b)`.
-
+    Computes :math:`y = x \mathbin{@} \mathrm{sparse}(w) \; (+ b)`, where
+    only the non-zero entries (``weight_data``) of the fixed sparse pattern
+    are trainable and participate in eligibility-trace computation.
     Auto-dispatches batched/unbatched based on ``x.ndim``.
 
-    Args:
-        x: Input array.
-        weight_data: Sparse-matrix data (non-zero values).
-        sparse_mat: The sparse-matrix structure (e.g. a
-            ``saiunit.sparse`` matrix object) — must expose ``with_data``
-            and ``yw_to_w_transposed``.
-        bias: Optional bias.
+    Parameters
+    ----------
+    x : ArrayLike
+        Input array.
+    weight_data : ArrayLike
+        Sparse-matrix data, i.e. the non-zero values, shape ``(nnz,)``.
+    sparse_mat : object
+        Sparse-matrix structure (e.g. a ``saiunit.sparse`` matrix object).
+        Must expose ``with_data`` (substitute new data into the structure)
+        and ``yw_to_w_transposed`` (apply the transposed sparse pattern to
+        a trace).
+    bias : ArrayLike or None, optional
+        Bias vector. Default ``None``.
 
-    Returns:
+    Returns
+    -------
+    ArrayLike
         Output array.
     """
     p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p
