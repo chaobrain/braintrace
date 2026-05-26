@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._etrace_algorithms import EProp, OSTL, OSTTP, OTPE, OTTT
+from braintrace._etrace_algorithms import EProp, OSTLRecurrent, OSTTP, OTPE, OTTT
 
 
 class FakeLIF(brainstate.HiddenState):
@@ -78,15 +78,15 @@ class TestSmokeLossDecreases(unittest.TestCase):
         assert losses[-1] < losses[0]
 
     def test_ostl(self):
-        losses = _run(OSTL(_toy_net()))
+        losses = _run(OSTLRecurrent(_toy_net()))
         assert losses[-1] < losses[0]
 
     def test_otpe(self):
-        losses = _run(OTPE(_toy_net()))
+        losses = _run(OTPE(_toy_net(), leak=0.9))
         assert losses[-1] < losses[0]
 
     def test_ottt(self):
-        losses = _run(OTTT(_toy_net()))
+        losses = _run(OTTT(_toy_net(), leak=0.9))
         assert losses[-1] < losses[0]
 
     def test_osttp(self):

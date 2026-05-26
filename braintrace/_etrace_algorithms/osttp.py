@@ -59,7 +59,7 @@ class OSTTP(ParamDimVjpAlgorithm):
     Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
 
     **How it works.** The eligibility trace carries the temporal credit exactly
-    as in :class:`~braintrace.OSTL` ('with-H'), but the spatial credit normally
+    as in :class:`~braintrace.OSTLRecurrent` ('with-H'), but the spatial credit normally
     obtained by back-propagating :math:`\partial \mathcal{L}/\partial h` is
     replaced by a frozen random projection of the target. Because the projection
     matrices :math:`B_l` are fixed, there is no weight transport and no backward

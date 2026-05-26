@@ -26,7 +26,6 @@ __all__ = [
     'KappaFilter',
     'FixedRandomFeedback',
     'extract_y_target',
-    '_resolve_leak',
 ]
 
 
@@ -132,27 +131,3 @@ def extract_y_target(args: tuple, *, index: int = -1) -> Optional[jax.Array]:
     if not args:
         return None
     return args[index]
-
-
-def _resolve_leak(model, explicit: Optional[float]) -> float:
-    """Pick the leak factor λ for OTTT/OTPE.
-
-    Priority:
-    1. ``explicit`` argument (constructor-supplied) wins if not None.
-    2. Walk ``model.states()``; first state whose object has a ``leak`` attribute wins.
-    3. Raise ``ValueError`` if neither resolves.
-    """
-    if explicit is not None:
-        return float(explicit)
-    if model is not None:
-        states = model.states()
-        # model.states() may return a dict-like (FlattedDict) or an iterable;
-        # unwrap via .values() when available.
-        state_iter = states.values() if hasattr(states, 'values') else iter(states)
-        for st in state_iter:
-            if hasattr(st, 'leak'):
-                return float(st.leak)
-    raise ValueError(
-        'Could not resolve the membrane leak factor. Provide `leak=<float>` at '
-        'construction, or ensure the model has a state with a `leak` attribute.'
-    )

@@ -34,7 +34,6 @@ import jax.numpy as jnp
 
 from braintrace._etrace_op import is_batched_primitive
 from braintrace._misc import etrace_df_key
-from ._common import _resolve_leak
 from .misc import _route_grads_by_path, _update_dict
 from .vjp_base import ETraceVjpAlgorithm
 
@@ -96,9 +95,13 @@ class OTPE(ETraceVjpAlgorithm):
         :math:`O(I+O)` memory; emits a :class:`UserWarning` when the network has
         more than one HiddenGroup, because the factorization bias compounds with
         depth.
-    leak : float, optional
-        Decay factor :math:`\lambda`. If ``None``, it is resolved from the
-        model's neuron states (the first state exposing a ``leak`` attribute).
+    leak : float
+        Decay factor :math:`\lambda \in (0, 1)`. **Required** — it must be
+        supplied explicitly and is never inferred from the model. :math:`\lambda`
+        is the membrane leak of the *postsynaptic* neuron whose influence is
+        being accumulated; auto-inferring it from ``model.states()`` silently
+        picks an arbitrary (often wrong) value on heterogeneous or
+        multi-population models, so the framework will not guess it.
     trace_clip_abs : float, optional
         Elementwise clip applied to :math:`\hat R` each step (full mode only).
         ``None`` disables clipping.
@@ -108,12 +111,51 @@ class OTPE(ETraceVjpAlgorithm):
         Forwarded to the base algorithm. Only ``'single-step'`` is supported by
         OTPE v1; multi-step inputs raise :class:`NotImplementedError`.
 
+    Limitations
+    -----------
+    OTPE's published derivation is **narrower than OTTT's**, and this
+    implementation is a *general operator* that will happily run far outside
+    that proven regime. The estimate :math:`\hat R` is built on the assumption
+    that the only temporal coupling of the postsynaptic state is the scalar
+    membrane leak, :math:`\partial U^t / \partial U^{t-1} = \lambda` — exactly
+    the leaky integrate-and-fire (LIF) recurrence. On top of that scalar-leak
+    assumption (inherited from OTTT), OTPE adds three further restrictions:
+
+    1. **A single global time constant.** One scalar :math:`\lambda` is shared by
+       every traced connection. Heterogeneous leaks across neurons or layers
+       break the estimate; ``leak`` is therefore a user-supplied global constant
+       and is never inferred from the model (see the ``leak`` parameter).
+    2. **Feed-forward only.** The trace omits the hidden-to-hidden Jacobian, so
+       it is the *postsynaptic estimate* for feed-forward SNNs. Applying it to a
+       recurrent network silently drops the recurrent temporal credit.
+    3. **Single-hidden-layer exactness.** The estimate is gradient-exact for one
+       hidden layer; with depth the per-layer factorization accumulates bias.
+
+    The low-rank ``'approx'`` mode (**F-OTPE**) layers an additional
+    outer-product approximation on top, which is itself justified only under the
+    same linear-leak assumption; its bias compounds with network depth (hence
+    the :class:`UserWarning` for multi-group networks).
+
+    Concretely, ``braintrace`` exposes OTPE as a generic ETP operator: it accepts
+    arbitrary ETP weights and hidden states, multi-layer stacks, recurrent
+    connectivity, and even non-spiking cells (e.g. a ``tanh`` RNN). All of these
+    *run* mechanically, but **the moment the model deviates from a feed-forward
+    LIF network with a single global scalar leak, the computed gradient leaves
+    the regime in which OTPE is proven correct** and should be treated as a
+    heuristic approximation rather than a faithful gradient estimate. The one
+    structural case that is rejected outright is a multi-state hidden group
+    (``num_state > 1``, e.g. ALIF with an adaptation variable): the leaky scalar
+    estimate cannot assign per-state credit, so :meth:`compile_graph` raises
+    rather than silently summing across states.
+
     Raises
     ------
     ValueError
-        If ``mode`` is not ``'full'`` or ``'approx'``, if ``leak`` cannot be
-        resolved, or if a weight-to-hidden relation reaches more than one
-        HiddenGroup (OTPE v1 requires one-hop per-layer relations).
+        If ``mode`` is not ``'full'`` or ``'approx'``, if ``leak`` is not in
+        :math:`(0, 1)`, if a weight-to-hidden relation reaches more than one
+        HiddenGroup (OTPE v1 requires one-hop per-layer relations), or (at
+        :meth:`compile_graph`) if a trained connection projects into a hidden
+        group with ``num_state > 1``.
 
     Examples
     --------
@@ -132,8 +174,8 @@ class OTPE(ETraceVjpAlgorithm):
         >>>
         >>> model = Net()
         >>> brainstate.nn.init_all_states(model)
-        >>> # In a real SNN the hidden layer is a spiking neuron exposing a
-        >>> # ``leak`` attribute, in which case ``leak`` can be omitted.
+        >>> # ``leak`` is the postsynaptic membrane leak and must be passed
+        >>> # explicitly; it is never inferred from the model.
         >>> learner = braintrace.OTPE(model, mode='full', leak=0.9)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)
@@ -152,7 +194,8 @@ class OTPE(ETraceVjpAlgorithm):
         self,
         model: brainstate.nn.Module,
         mode: str = 'full',
-        leak: Optional[float] = None,
+        *,
+        leak: float,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         trace_clip_abs: Optional[float] = None,
@@ -160,9 +203,11 @@ class OTPE(ETraceVjpAlgorithm):
     ):
         if mode not in ('full', 'approx'):
             raise ValueError(f"mode must be 'full' or 'approx'; got {mode!r}")
+        if not (0.0 < float(leak) < 1.0):
+            raise ValueError(f'leak must be in (0, 1); got {leak}')
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.mode = mode
-        self.leak = _resolve_leak(model, leak)
+        self.leak = float(leak)
         self.trace_clip_abs = trace_clip_abs
         self._R_hat: Dict[int, brainstate.ShortTermState] = {}
         self._R_hat_x: Dict[int, brainstate.ShortTermState] = {}
@@ -184,6 +229,21 @@ class OTPE(ETraceVjpAlgorithm):
                 raise ValueError(
                     f'OTPE requires per-layer one-hop weight-to-hidden relations; '
                     f'found relation reaching {len(rel.hidden_groups)} groups.'
+                )
+            # OTPE's derivation assumes a single scalar membrane state per neuron
+            # (the LIF case). A hidden group bundling several states (e.g. ALIF's
+            # membrane potential plus adaptation variable) cannot be handled: the
+            # leaky scalar estimate cannot assign per-state credit, and collapsing
+            # the num_state axis with a sum has no theoretical basis (see the
+            # *Limitations* section of the class docstring).
+            group = rel.hidden_groups[0]
+            if group.num_state > 1:
+                raise ValueError(
+                    f'OTPE only supports hidden groups with num_state == 1 '
+                    f'(single-state LIF-like neurons), but a trained connection '
+                    f'projects into a group with num_state == {group.num_state}. '
+                    f'Multi-state neurons (e.g. ALIF with an adaptation variable) '
+                    f'are outside the regime where OTPE is derived.'
                 )
 
     def init_etrace_state(self, *args, **kwargs):

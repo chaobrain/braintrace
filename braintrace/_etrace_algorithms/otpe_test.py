@@ -23,12 +23,6 @@ import braintrace
 from braintrace._etrace_algorithms.otpe import OTPE
 
 
-class FakeLIF(brainstate.HiddenState):
-    def __init__(self, init_value, leak):
-        super().__init__(init_value)
-        self.leak = leak
-
-
 def _otpe_net_single_layer():
     class Net(brainstate.nn.Module):
         def __init__(self):
@@ -36,10 +30,33 @@ def _otpe_net_single_layer():
             self.w = brainstate.ParamState(
                 0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
             )
-            self.v = FakeLIF(jnp.zeros((1, 3)), leak=0.9)
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
         def update(self, x):
             self.v.value = 0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _two_state_net():
+    """Net whose two coupled hidden states form one group with num_state == 2."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+            self.a = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            v, a = self.v.value, self.a.value
+            self.v.value = 0.9 * v + braintrace.matmul(x, self.w.value) - 0.1 * a
+            self.a.value = 0.95 * a + v
             return self.v.value
 
     net = Net()
@@ -56,9 +73,20 @@ class TestOTPEConstruction(unittest.TestCase):
         with self.assertRaises(ValueError):
             OTPE(_otpe_net_single_layer(), mode='bogus', leak=0.9)
 
-    def test_leak_resolved_from_model(self):
-        algo = OTPE(_otpe_net_single_layer())
-        assert algo.leak == 0.9
+    def test_leak_is_required(self):
+        """leak is never inferred from the model; omitting it is a TypeError."""
+        with self.assertRaises(TypeError):
+            OTPE(_otpe_net_single_layer())
+
+    def test_leak_out_of_range_raises(self):
+        with self.assertRaises(ValueError):
+            OTPE(_otpe_net_single_layer(), leak=1.5)
+
+    def test_num_state_gt_one_raises(self):
+        """Multi-state hidden groups are outside OTPE's LIF regime."""
+        algo = OTPE(_two_state_net(), leak=0.9)
+        with self.assertRaises(ValueError):
+            algo.compile_graph(jnp.ones((1, 3)))
 
     def test_compile_allocates_R_hat(self):
         algo = OTPE(_otpe_net_single_layer(), leak=0.9)

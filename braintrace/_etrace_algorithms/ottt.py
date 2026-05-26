@@ -31,7 +31,7 @@ import brainstate
 import jax.numpy as jnp
 
 from braintrace._etrace_op import is_batched_primitive
-from ._common import PresynapticTrace, _resolve_leak
+from ._common import PresynapticTrace
 from .misc import _route_grads_by_path, _update_dict
 from .vjp_base import ETraceVjpAlgorithm
 
@@ -82,19 +82,46 @@ class OTTT(ETraceVjpAlgorithm):
         ``'A'`` accumulates the presynaptic trace over time
         (:math:`\hat a \leftarrow \lambda\,\hat a + x`). ``'O'`` uses the
         instantaneous presynaptic spike only (:math:`\hat a := x^t`).
-    leak : float, optional
-        Presynaptic leak :math:`\lambda`. If ``None``, it is discovered from the
-        model's neuron states (the first state exposing a ``leak`` attribute).
+    leak : float
+        Presynaptic leak :math:`\lambda \in (0, 1)`. **Required** — it must be
+        supplied explicitly and is never inferred from the model (see
+        *Limitations*). Mathematically :math:`\lambda` is the membrane leak of
+        the *postsynaptic* neuron whose trace is being accumulated.
     name : str, optional
         Name of the algorithm instance.
     vjp_method : str, optional
         Forwarded to the base algorithm. Only ``'single-step'`` is supported by
         OTTT v1; multi-step inputs raise :class:`NotImplementedError`.
 
+    Limitations
+    -----------
+    - **The leak must be supplied by the user.** OTTT does *not* try to read
+      :math:`\lambda` off the model's neuron states. A previous version walked
+      ``model.states()`` and took the first state exposing a ``leak`` attribute,
+      but on heterogeneous or multi-population models that silently picks an
+      arbitrary (often wrong) value — e.g. the leak of the *presynaptic* layer,
+      a readout filter, or whichever population happens to be enumerated first.
+      Since :math:`\lambda` is, by the derivation, the membrane leak of the
+      postsynaptic neuron of each trained connection, the framework cannot
+      guess it safely. A single network with different leaks per layer therefore
+      cannot be trained correctly with one global ``leak`` and is unsupported.
+    - **Single-state hidden groups only.** Each trained connection must project
+      into a :class:`HiddenGroup` with ``num_state == 1``. The weight gradient
+      contracts the learning signal ``L`` (shape ``(*varshape, num_state)``)
+      down to ``(*varshape,)``; collapsing a ``num_state > 1`` tail (e.g. an
+      ALIF neuron carrying both membrane potential and an adaptation variable)
+      has no theoretical justification — the trace is a single leaky scalar and
+      cannot disentangle per-state credit — so OTTT raises at compile time
+      instead of silently summing across states.
+    - **Single-step inputs only** (OTTT v1); multi-step inputs raise
+      :class:`NotImplementedError`.
+
     Raises
     ------
     ValueError
-        If ``mode`` is not ``'A'`` or ``'O'``, or if ``leak`` cannot be resolved.
+        If ``mode`` is not ``'A'`` or ``'O'``, if ``leak`` is not in
+        :math:`(0, 1)`, or (at :meth:`compile_graph`) if a trained connection
+        projects into a hidden group with ``num_state > 1``.
 
     Examples
     --------
@@ -113,8 +140,8 @@ class OTTT(ETraceVjpAlgorithm):
         >>>
         >>> model = Net()
         >>> brainstate.nn.init_all_states(model)
-        >>> # In a real SNN the hidden layer is a spiking neuron that exposes a
-        >>> # ``leak`` attribute, in which case ``leak`` can be omitted.
+        >>> # ``leak`` is the postsynaptic membrane leak and must be passed
+        >>> # explicitly; it is never inferred from the model.
         >>> learner = braintrace.OTTT(model, mode='A', leak=0.9)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)
@@ -134,21 +161,35 @@ class OTTT(ETraceVjpAlgorithm):
         self,
         model: brainstate.nn.Module,
         mode: str = 'A',
-        leak: Optional[float] = None,
+        *,
+        leak: float,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         **kwargs,
     ):
         if mode not in ('A', 'O'):
             raise ValueError(f"mode must be 'A' or 'O'; got {mode!r}")
+        if not (0.0 < float(leak) < 1.0):
+            raise ValueError(f'leak must be in (0, 1); got {leak}')
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.mode = mode
-        self.leak = _resolve_leak(model, leak)
+        self.leak = float(leak)
         self._pre_traces: Dict[int, PresynapticTrace] = {}
 
     def init_etrace_state(self, *args, **kwargs):
         self._pre_traces = {}
         for rel in self.graph.hidden_param_op_relations:
+            for group in rel.hidden_groups:
+                if group.num_state > 1:
+                    raise ValueError(
+                        f'OTTT only supports hidden groups with num_state == 1, '
+                        f'but a trained connection projects into a group with '
+                        f'num_state == {group.num_state}. Collapsing the learning '
+                        f'signal across multiple hidden states (e.g. an ALIF '
+                        f'neuron with membrane potential plus an adaptation '
+                        f'variable) has no theoretical basis for OTTT; the leaky '
+                        f'scalar presynaptic trace cannot assign per-state credit.'
+                    )
             rid = id(rel.x_var)
             if rid in self._pre_traces:
                 continue
@@ -201,7 +242,9 @@ class OTTT(ETraceVjpAlgorithm):
             a_hat = etrace_at_t[id(rel.x_var)]
             for group in rel.hidden_groups:
                 L = dl_to_hidden_groups[group.index]
-                # L shape = (*varshape, num_state); collapse num_state tail
+                # L shape = (*varshape, num_state); num_state == 1 is enforced at
+                # compile time (see init_etrace_state), so this drops the singleton
+                # tail rather than summing across genuinely distinct hidden states.
                 L_proj = L.sum(axis=-1)
                 if is_batched_primitive(rel.primitive):
                     # a_hat: (batch, in), L_proj: (batch, out). ΔW: (in, out)

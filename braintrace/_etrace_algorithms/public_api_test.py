@@ -20,13 +20,13 @@ class TestPublicAPI(unittest.TestCase):
     def test_subpackage_exports(self):
         import braintrace._etrace_algorithms as pkg
         for name in (
-                'EProp', 'OSTL', 'OTPE', 'OTTT', 'OSTTP',
+                'EProp', 'OSTLRecurrent', 'OSTLFeedforward', 'OTPE', 'OTTT', 'OSTTP',
                 'FixedRandomFeedback', 'KappaFilter', 'PresynapticTrace',
         ):
             assert hasattr(pkg, name), f'missing export: {name}'
 
     def test_top_level_exports(self):
         import braintrace
-        for name in ('EProp', 'OSTL', 'OTPE', 'OTTT', 'OSTTP'):
+        for name in ('EProp', 'OSTLRecurrent', 'OSTLFeedforward', 'OTPE', 'OTTT', 'OSTTP'):
             assert hasattr(braintrace, name), f'missing top-level export: {name}'
             assert name in braintrace.__all__

@@ -112,7 +112,6 @@ Paper-faithful algorithms tailored to spiking neural networks. All are
    :template: classtemplate.rst
 
    EProp
-   OSTL
    OSTLRecurrent
    OSTLFeedforward
    OTPE
@@ -154,10 +153,10 @@ Algorithm Comparison
      - :math:`O(B \cdot |\theta|)`
      - :math:`O(B \cdot I \cdot O)`
      - SNNs with κ-filtered / random-feedback learning signals
-   * - ``OSTL`` / ``OSTLRecurrent`` / ``OSTLFeedforward``
+   * - ``OSTLRecurrent`` / ``OSTLFeedforward``
      - depends on regime
      - depends on regime
-     - ``OSTLRecurrent`` ('with-H', D-RTRL) keeps the recurrent Jacobian; ``OSTLFeedforward`` ('without-H', pp_prop) drops it. ``OSTL`` dispatches between them.
+     - ``OSTLRecurrent`` ('with-H', D-RTRL) keeps the recurrent Jacobian; ``OSTLFeedforward`` ('without-H', pp_prop) drops it.
    * - ``OTPE``
      - :math:`O(B \cdot I \cdot O)` (full) / :math:`O(B(I+O))` (approx)
      - :math:`O(B \cdot I \cdot O)`
