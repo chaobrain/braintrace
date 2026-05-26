@@ -926,13 +926,26 @@ def _run_updates(algo, xs):
     return [v.value for v in algo.etrace_bwg.values()]
 
 
-def _assert_etrace_lists_equal(a_list, b_list, *, exact=True, rtol=0.0, atol=0.0):
+def _assert_etrace_lists_equal(a_list, b_list, *, exact=True, rtol=0.0, atol=0.0,
+                               canon_state_axis=False):
+    # ``canon_state_axis`` sorts the trailing num_state axis before comparing.
+    # A hidden group's member states are stored in a frozenset-derived order
+    # (compiler grouping), so the num_state column order is not stable across
+    # two independent model constructions. That order is self-consistent within
+    # one algorithm (trace and solve share the same group), so gradients are
+    # unaffected; only a positional cross-algo trace comparison sees the
+    # permutation. Sorting that axis canonicalizes it without hiding genuine
+    # value differences (a dropped cross-state coupling changes magnitudes,
+    # which survive the sort).
+    def _canon(v):
+        return jax.tree.map(lambda a: u.math.sort(a, axis=-1), v) if canon_state_axis else v
+
     assert len(a_list) == len(b_list) >= 1
     for da, db in zip(a_list, b_list):
         assert set(da.keys()) == set(db.keys())
         for k in da:
-            av = jax.tree.map(u.get_mantissa, da[k])
-            bv = jax.tree.map(u.get_mantissa, db[k])
+            av = _canon(jax.tree.map(u.get_mantissa, da[k]))
+            bv = _canon(jax.tree.map(u.get_mantissa, db[k]))
             if exact:
                 npt.assert_array_equal(av, bv)
             else:
@@ -1075,7 +1088,11 @@ class TestMultiStateUnaffected:
             _clone_state_values(m_fast, m_legacy)  # force identical weights + init
             fast = _run_updates(ParamDimVjpAlgorithm(m_fast, fast_solve=True), xs)
             legacy = _run_updates(ParamDimVjpAlgorithm(m_legacy, fast_solve=False), xs)
-            _assert_etrace_lists_equal(fast, legacy, exact=False, rtol=1e-5, atol=1e-6)
+            # canon_state_axis: the two states' num_state column order is not
+            # stable across the two independent constructions (frozenset-derived
+            # group ordering); canonicalize it before the positional compare.
+            _assert_etrace_lists_equal(fast, legacy, exact=False, rtol=1e-5, atol=1e-6,
+                                       canon_state_axis=True)
 
 
 # ---------------------------------------------------------------------------
