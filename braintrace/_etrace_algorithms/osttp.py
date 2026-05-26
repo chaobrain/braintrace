@@ -31,7 +31,7 @@ import brainstate
 import jax
 import jax.numpy as jnp
 
-from .d_rtrl import ParamDimVjpAlgorithm
+from .param_dim_vjp import ParamDimVjpAlgorithm
 
 __all__ = ['OSTTP']
 
