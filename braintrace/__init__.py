@@ -57,15 +57,12 @@ from ._etrace_compiler import (
 )
 from ._etrace_op import (
     ETPPrimitive,
-    ETPPrimitiveSpec,
     matmul,
     element_wise,
     conv,
     sparse_matmul,
     lora_matmul,
     register_primitive,
-    register_primitive_spec,
-    get_primitive_spec,
 )
 from ._grad_exponential import GradExpon
 from ._input_data import (
@@ -113,10 +110,7 @@ __all__ = [
 
     # ETP primitive class & rule registration
     'ETPPrimitive',
-    'ETPPrimitiveSpec',
     'register_primitive',
-    'register_primitive_spec',
-    'get_primitive_spec',
 
     # input data
     'SingleStepData',

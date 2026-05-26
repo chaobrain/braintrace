@@ -84,7 +84,7 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from ._spec import ETPPrimitiveSpec, register_primitive_spec
+from ._primitive import register_primitive
 
 __all__ = [
     'etp_lora_mm_p',
@@ -306,32 +306,32 @@ def _lora_mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_lora_mm_p = register_primitive_spec(
-    ETPPrimitiveSpec(
-        name='etp_lora_mm',
-        impl=_etp_lora_impl,
-        yw_to_w=_lora_mm_yw_to_w,
-        xy_to_dw=_lora_xy_to_dw,
-        init_drtrl=_lora_mm_init_drtrl,
-        init_pp=_lora_mm_init_pp,
-        trainable_invars_fn=_lora_trainable_invars,
-        x_invar_index=0,
-        batched=True,
-    )
+etp_lora_mm_p = register_primitive(
+    'etp_lora_mm',
+    _etp_lora_impl,
+    batched=True,
+    trainable_invars_fn=_lora_trainable_invars,
+    x_invar_index=0,
+)
+etp_lora_mm_p.register_etp_rules(
+    yw_to_w=_lora_mm_yw_to_w,
+    xy_to_dw=_lora_xy_to_dw,
+    init_drtrl=_lora_mm_init_drtrl,
+    init_pp=_lora_mm_init_pp,
 )
 
-etp_lora_mv_p = register_primitive_spec(
-    ETPPrimitiveSpec(
-        name='etp_lora_mv',
-        impl=_etp_lora_impl,
-        yw_to_w=_lora_mv_yw_to_w,
-        xy_to_dw=_lora_xy_to_dw,
-        init_drtrl=_lora_mv_init_drtrl,
-        init_pp=_lora_mv_init_pp,
-        trainable_invars_fn=_lora_trainable_invars,
-        x_invar_index=0,
-        batched=False,
-    )
+etp_lora_mv_p = register_primitive(
+    'etp_lora_mv',
+    _etp_lora_impl,
+    batched=False,
+    trainable_invars_fn=_lora_trainable_invars,
+    x_invar_index=0,
+)
+etp_lora_mv_p.register_etp_rules(
+    yw_to_w=_lora_mv_yw_to_w,
+    xy_to_dw=_lora_xy_to_dw,
+    init_drtrl=_lora_mv_init_drtrl,
+    init_pp=_lora_mv_init_pp,
 )
 
 

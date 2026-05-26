@@ -159,10 +159,10 @@ class TestTrainableDictsDefault:
 
 
 class TestTrainableInvarsPopulatedForDense:
-    """Even before per-primitive migration, the compiler fills the
-    trainable_* dicts from spec.resolve_trainable_invars(). For un-migrated
-    primitives (e.g. etp_mm_p without a trainable_invars_fn), this yields
-    the single-key {'weight': ...} form."""
+    """The compiler fills the trainable_* dicts from the primitive's
+    registered trainable-invars layout (``get_trainable_invars``). For a
+    single-weight primitive such as ``etp_mm_p`` this yields the single-key
+    {'weight': ...} form."""
 
     def test_single_weight_populated_for_mm(self):
         import brainstate
