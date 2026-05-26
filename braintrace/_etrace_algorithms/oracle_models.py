@@ -64,3 +64,71 @@ def tanh_rnn(n_in: int = 3, n_rec: int = 4, seed: int = 0) -> ModelSpec:
         return Net()
 
     return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
+
+
+def leaky_linear(n_in: int = 3, n_rec: int = 4, leak: float = 0.9, seed: int = 0) -> ModelSpec:
+    """Pure leaky integrator with a trainable ETP *input* weight.
+
+    The recurrence ``h_t = leak * h_{t-1} + matmul(x_t, w)`` has hidden-to-hidden
+    Jacobian ``leak * I`` exactly (no off-diagonal recurrent term). This is the
+    regime in which OTTT (which discards ``hid2hid_jac`` and assumes ``leak * I``)
+    is exact. ``w`` reaches every future hidden state through the leaky carry, so
+    it is a genuine ETP relation despite being an input projection.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(jax.random.PRNGKey(seed), (n_in, n_rec))
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                drive = braintrace.matmul(x.reshape(1, -1), self.w.value)
+                self.h.value = leak * self.h.value + drive
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
+
+
+def stacked_tanh_rnn(n_in: int = 3, n_rec: int = 4, seed: int = 0) -> ModelSpec:
+    """Two-layer tanh RNN with two trainable ETP recurrent weights.
+
+    Layer 1: ``h1 = tanh(x @ win + matmul(h1, w1))``; layer 2:
+    ``h2 = tanh(h1 @ wmid + matmul(h2, w2))``. ``w1``/``w2`` are ETP recurrent
+    weights (two HiddenParamOp relations); ``win``/``wmid`` are plain projections
+    (excluded from ETP). Exercises multi-relation D_RTRL == BPTT.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                k = jax.random.PRNGKey
+                self.w1 = brainstate.ParamState(0.1 * jax.random.normal(k(seed), (n_rec, n_rec)))
+                self.w2 = brainstate.ParamState(0.1 * jax.random.normal(k(seed + 1), (n_rec, n_rec)))
+                self.win = brainstate.ParamState(0.1 * jax.random.normal(k(seed + 2), (n_in, n_rec)))
+                self.wmid = brainstate.ParamState(0.1 * jax.random.normal(k(seed + 3), (n_rec, n_rec)))
+                self.h1 = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+                self.h2 = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                self.h1.value = jax.nn.tanh(
+                    x @ self.win.value + braintrace.matmul(self.h1.value, self.w1.value)
+                )
+                self.h2.value = jax.nn.tanh(
+                    self.h1.value @ self.wmid.value + braintrace.matmul(self.h2.value, self.w2.value)
+                )
+                return self.h2.value
+
+        return Net()
+
+    return ModelSpec(
+        factory=factory,
+        etp_param_keys=(('w1',), ('w2',)),
+        plain_param_keys=(('win',), ('wmid',)),
+    )
