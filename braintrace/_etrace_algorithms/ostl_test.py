@@ -26,7 +26,7 @@ from braintrace._etrace_algorithms.ostl import (
     OSTLFeedforward,
     OSTLRecurrent,
 )
-from braintrace._etrace_algorithms.pp_prop import IODimVjpAlgorithm
+from braintrace._etrace_algorithms.pp_prop import pp_prop
 
 
 def _tiny_rec_net():
@@ -122,7 +122,7 @@ class TestOSTLRecurrent(unittest.TestCase):
 class TestOSTLFeedforward(unittest.TestCase):
     def test_is_io_dim_subclass(self):
         algo = OSTLFeedforward(_tiny_rec_net())
-        assert isinstance(algo, IODimVjpAlgorithm)
+        assert isinstance(algo, pp_prop)
         assert algo.regime == 'without-H'
 
     def test_default_decay_is_tiny(self):
