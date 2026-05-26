@@ -25,7 +25,7 @@ from .base import ETraceAlgorithm, EligibilityTrace
 from .d_rtrl import D_RTRL, ParamDimVjpAlgorithm
 from .e_prop import EProp
 from .graph_executor import ETraceGraphExecutor
-from .ostl import OSTL
+from .ostl import OSTL, OSTLFeedforward, OSTLRecurrent
 from .osttp import OSTTP
 from .otpe import OTPE
 from .ottt import OTTT
@@ -49,6 +49,8 @@ __all__ = [
     # SNN
     'EProp',
     'OSTL',
+    'OSTLRecurrent',
+    'OSTLFeedforward',
     'OTPE',
     'OTTT',
     'OSTTP',
