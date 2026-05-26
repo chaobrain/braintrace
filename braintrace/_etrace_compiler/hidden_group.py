@@ -72,30 +72,49 @@ __all__ = [
 
 
 class HiddenGroup(NamedTuple):
-    r"""
-    The data structure for recording the hidden group relation.
+    r"""The data structure recording a hidden-group relation.
 
-    The following fields are included:
+    A hidden group bundles the hidden states that are mutually connected through
+    a recurrence transition, together with the jaxpr that computes that
+    transition
 
-    - ``hidden_paths``: the path to each hidden state
-    - ``hidden_states``: the hidden states
-    - ``hidden_invars``: the input jax Var of hidden states
-    - ``hidden_outvars``: the output jax Var of hidden states
-    - ``transition_jaxpr``: the jaxpr for computing hidden state transitions, i.e.,
-      $h_1^t, h_2^t, ... = f(h_1^{t-1}, h_2^{t-1}, ..., x_t)$
-    - ``transition_jaxpr_constvars``: the other input variables for jaxpr evaluation of ``transition_jaxpr``
+    .. math::
 
+        h_1^t, h_2^t, \ldots = f(h_1^{t-1}, h_2^{t-1}, \ldots, x^t).
 
-    Example::
+    Attributes
+    ----------
+    index : int
+        Position of this group in the compiled group sequence.
+    hidden_paths : list of Path
+        The module path to each hidden state in the group.
+    hidden_states : list of brainstate.HiddenState
+        The hidden states in the group.
+    hidden_invars : list of HiddenInVar
+        The input jaxpr ``Var`` of each hidden state (at the previous step).
+    hidden_outvars : list of HiddenOutVar
+        The output jaxpr ``Var`` of each hidden state (at the current step).
+    transition_jaxpr : Jaxpr
+        The jaxpr computing the hidden-state transition for the group.
+    transition_jaxpr_constvars : list of Var
+        The other input variables required to evaluate ``transition_jaxpr``.
 
-        >>> import braintrace
+    See Also
+    --------
+    find_hidden_groups_from_module : Build hidden groups directly from a model.
+
+    Examples
+    --------
+    .. code-block:: python
+
         >>> import brainstate
-        >>> gru = braintrace.nn.GRUCell(10, 20)
-        >>> gru.init_state()
-        >>> inputs = brainstate.random.randn(10)
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
         >>> hidden_groups, _ = braintrace.find_hidden_groups_from_module(gru, inputs)
-        >>> for group in hidden_groups:
-        ...     print(group.hidden_paths)
+        >>> len(hidden_groups)
+        1
     """
 
     index: int  # type: ignore[assignment]  # intentional NamedTuple field; shadows tuple.index
@@ -121,24 +140,33 @@ class HiddenGroup(NamedTuple):
 
     @property
     def varshape(self) -> Tuple[int, ...]:
-        """
-        The shape of each state variable.
+        """The shape of each state variable.
+
+        Returns
+        -------
+        tuple of int
+            The variable shape shared by the hidden states in the group.
         """
         return self.hidden_states[0].varshape
 
     @property
     def num_state(self) -> int:
-        """
-        The number of hidden states.
+        """The number of hidden states.
+
+        Returns
+        -------
+        int
+            The total number of hidden states across the group.
         """
         return sum([st.num_state for st in self.hidden_states])
 
     def check_consistent_varshape(self):
-        """
-        Checking whether the shapes of the hidden states are consistent.
+        """Check whether the shapes of the hidden states are consistent.
 
-        Raises:
-            NotSupportedError: If the shapes of the hidden states are not consistent.
+        Raises
+        ------
+        NotSupportedError
+            If the shapes of the hidden states are not consistent.
         """
 
         varshapes = set([tuple(st.varshape) for st in self.hidden_states])
@@ -153,15 +181,25 @@ class HiddenGroup(NamedTuple):
         hidden_vals: Sequence[jax.Array],
         input_vals: PyTree,
     ) -> List[jax.Array]:
-        r"""
-        Computing the hidden state transitions $h_1^t, h_2^t, \cdots = f(h_1^{t-1}, h_2^{t-1}, \cdots, x^t)$.
+        r"""Compute the hidden-state transitions.
 
-        Args:
-            hidden_vals: The old hidden state value.
-            input_vals: The input values.
+        Evaluates the group transition jaxpr
 
-        Returns:
-            The new hidden state values.
+        .. math::
+
+            h_1^t, h_2^t, \cdots = f(h_1^{t-1}, h_2^{t-1}, \cdots, x^t).
+
+        Parameters
+        ----------
+        hidden_vals : sequence of jax.Array
+            The old hidden-state values.
+        input_vals : PyTree
+            The input values.
+
+        Returns
+        -------
+        list of jax.Array
+            The new hidden-state values.
         """
         return jax.core.eval_jaxpr(self.transition_jaxpr, input_vals, *hidden_vals)
 
@@ -170,15 +208,19 @@ class HiddenGroup(NamedTuple):
         hidden_vals: Sequence[jax.Array],
         input_vals: PyTree,
     ):
-        """
-        Computing the diagonal Jacobian matrix along the last dimension.
+        """Compute the diagonal Jacobian matrix along the last dimension.
 
-        Args:
-            hidden_vals: The hidden state values.
-            input_vals: The input values.
+        Parameters
+        ----------
+        hidden_vals : sequence of jax.Array
+            The hidden-state values.
+        input_vals : PyTree
+            The input values.
 
-        Returns:
-            The diagonal Jacobian matrix, which has the shape of
+        Returns
+        -------
+        jax.Array
+            The diagonal Jacobian matrix, with shape
             ``(*varshape, num_states, num_states)``.
         """
         return jacrev_last_dim(
@@ -187,20 +229,23 @@ class HiddenGroup(NamedTuple):
         )
 
     def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]):
-        """
-        Concatenate split hidden state values into a single array.
+        """Concatenate split hidden-state values into a single array.
 
-        This function takes a sequence of split hidden state values and concatenates them
-        along the last axis. For non-HiddenGroupState values, it adds an extra dimension
-        before concatenation.
+        Concatenates a sequence of split hidden-state values along the last
+        axis. For non-``HiddenGroupState`` values, an extra trailing dimension
+        is added before concatenation.
 
-        Args:
-            splitted_hid_vals (Sequence[jax.Array]): A sequence of split hidden state
-                values, each corresponding to a hidden state in the group.
+        Parameters
+        ----------
+        splitted_hid_vals : sequence of jax.Array
+            A sequence of split hidden-state values, each corresponding to a
+            hidden state in the group.
 
-        Returns:
-            jax.Array: A single concatenated array containing all hidden state values.
-                The concatenation is performed along the last axis.
+        Returns
+        -------
+        jax.Array
+            A single array containing all hidden-state values concatenated
+            along the last axis.
         """
         splitted_hid_vals = [
             val
@@ -211,19 +256,22 @@ class HiddenGroup(NamedTuple):
         return u.math.concatenate(splitted_hid_vals, axis=-1)
 
     def split_hidden(self, concat_hid_vals: jax.Array):
-        """
-        Split concatenated hidden state values into individual arrays.
+        """Split a concatenated hidden-state array into individual arrays.
 
-        This function takes a concatenated array of hidden state values and splits it
-        into separate arrays for each hidden state in the group. It handles both
-        HiddenGroupState and non-HiddenGroupState values differently.
+        Splits a concatenated array of hidden-state values into separate arrays,
+        one per hidden state in the group. ``HiddenGroupState`` and
+        non-``HiddenGroupState`` values are handled differently.
 
-        Args:
-            concat_hid_vals (jax.Array): A concatenated array of hidden state values.
-                The last dimension is assumed to contain the concatenated states.
+        Parameters
+        ----------
+        concat_hid_vals : jax.Array
+            A concatenated array of hidden-state values. The last dimension is
+            assumed to contain the concatenated states.
 
-        Returns:
-            List[jax.Array]: A list of split hidden state arrays. For non-HiddenGroupState
+        Returns
+        -------
+        list of jax.Array
+            A list of split hidden-state arrays. For non-``HiddenGroupState``
             values, the last dimension is squeezed.
         """
         num_states = [st.num_state for st in self.hidden_states]
@@ -926,15 +974,23 @@ def find_hidden_groups_from_jaxpr(
 def find_hidden_groups_from_minfo(
     minfo: ModuleInfo
 ):
-    """
-    Finding the hidden groups from the model.
+    """Find the hidden groups from the model information.
 
-    Args:
-        minfo: The model information.
+    Parameters
+    ----------
+    minfo : ModuleInfo
+        The model information.
 
-    Returns:
-        The hidden groups,
-        and the mapping from the hidden state path to the hidden group.
+    Returns
+    -------
+    hidden_groups : sequence of HiddenGroup
+        The hidden groups.
+    hid_path_to_group : dict
+        Mapping from each hidden-state path to its :class:`HiddenGroup`.
+
+    See Also
+    --------
+    find_hidden_groups_from_module : Equivalent helper starting from a model.
     """
     (
         hidden_groups,
@@ -955,18 +1011,40 @@ def find_hidden_groups_from_module(
     *model_args,
     **model_kwargs,
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
-    """
-    Find hidden groups from the model.
+    """Find hidden groups from a model.
 
-    Args:
-        model: The model.
-        model_args: The model arguments.
-        model_kwargs: The model keyword arguments.
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model.
+    *model_args
+        The positional arguments of the model.
+    **model_kwargs
+        The keyword arguments of the model.
 
-    Returns:
-        A tuple containing:
-        - Sequence of HiddenGroup objects
-        - PrettyDict mapping hidden state paths to hidden groups
+    Returns
+    -------
+    hidden_groups : sequence of HiddenGroup
+        The hidden groups.
+    hid_path_to_group : brainstate.util.PrettyDict
+        Mapping from each hidden-state path to its :class:`HiddenGroup`.
+
+    See Also
+    --------
+    find_hidden_groups_from_minfo : Equivalent helper starting from ``ModuleInfo``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
+        >>> hidden_groups, hid_path_to_group = braintrace.find_hidden_groups_from_module(gru, inputs)
+        >>> len(hidden_groups)
+        1
     """
     minfo = extract_module_info(model, *model_args, **model_kwargs)
     return find_hidden_groups_from_minfo(minfo)

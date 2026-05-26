@@ -56,14 +56,37 @@ class _ZeroResetState(brainstate.ShortTermState):
 
 
 class PresynapticTrace(_ZeroResetState):
-    """Leaky accumulator ``â ← λ·â + x_t`` used by OTTT and OTPE-Approx.
+    r"""Leaky presynaptic accumulator used by OTTT and OTPE-Approx.
+
+    The trace accumulates the presynaptic input with a multiplicative decay,
+    following :math:`\hat{a} \leftarrow \lambda \cdot \hat{a} + x_t`.
 
     Parameters
     ----------
     init_value : jax.Array
-        Initial value; also dictates shape and dtype.
+        Initial value; also dictates the shape and dtype of the trace.
     leak : float
-        Decay factor λ in (0, 1). Pulled from the neuron's membrane leak in SNN usage.
+        Decay factor :math:`\lambda` in ``(0, 1)``. Pulled from the neuron's
+        membrane leak in SNN usage.
+
+    Raises
+    ------
+    ValueError
+        If ``leak`` is not strictly inside the open interval ``(0, 1)``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import jax.numpy as jnp
+        >>> import braintrace
+        >>> trace = braintrace.PresynapticTrace(jnp.zeros(3), leak=0.5)
+        >>> out = trace.update(jnp.ones(3))
+        >>> print(out)
+        [1. 1. 1.]
+        >>> out = trace.update(jnp.ones(3))
+        >>> print(out)
+        [1.5 1.5 1.5]
     """
 
     __module__ = 'braintrace'
@@ -75,19 +98,53 @@ class PresynapticTrace(_ZeroResetState):
         self.leak = float(leak)
 
     def update(self, x):
-        """Apply one accumulation step: â ← λ·â + x."""
+        r"""Apply one accumulation step :math:`\hat{a} \leftarrow \lambda \cdot \hat{a} + x`.
+
+        Parameters
+        ----------
+        x : jax.Array
+            The new presynaptic input added to the decayed trace.
+
+        Returns
+        -------
+        jax.Array
+            The updated trace value.
+        """
         self.value = self.leak * self.value + x
         return self.value
 
 
 class KappaFilter(_ZeroResetState):
-    """Low-pass output-side filter ``x_filt ← (1-κ)·x + κ·x_filt`` used by EProp.
+    r"""Low-pass output-side filter used by EProp.
+
+    The filter smooths the output-side signal following
+    :math:`x_{\mathrm{filt}} \leftarrow (1-\kappa) \cdot x + \kappa \cdot x_{\mathrm{filt}}`.
 
     Parameters
     ----------
     init_value : jax.Array
+        Initial value; also dictates the shape and dtype of the filtered state.
     kappa : float
-        Decay factor in [0, 1). 0 disables filtering.
+        Decay factor :math:`\kappa` in ``[0, 1)``. A value of ``0`` disables filtering.
+
+    Raises
+    ------
+    ValueError
+        If ``kappa`` is not inside the half-open interval ``[0, 1)``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import jax.numpy as jnp
+        >>> import braintrace
+        >>> filt = braintrace.KappaFilter(jnp.zeros(3), kappa=0.5)
+        >>> out = filt.update(jnp.ones(3))
+        >>> print(out)
+        [0.5 0.5 0.5]
+        >>> out = filt.update(jnp.ones(3))
+        >>> print(out)
+        [0.75 0.75 0.75]
     """
 
     __module__ = 'braintrace'
@@ -105,9 +162,44 @@ class KappaFilter(_ZeroResetState):
 
 
 class FixedRandomFeedback:
-    """Frozen random feedback matrix ``B ∈ ℝ^{n_target × n_layer}`` with stop_gradient guard.
+    r"""Frozen random feedback matrix with a stop-gradient guard.
 
-    Used by OSTTP (per-HiddenGroup target projection) and EProp-random-feedback.
+    The feedback matrix :math:`B \in \mathbb{R}^{n_{\mathrm{target}} \times n_{\mathrm{layer}}}`
+    is sampled once at construction and frozen via :func:`jax.lax.stop_gradient`. It is used by
+    OSTTP (per-HiddenGroup target projection) and EProp-random-feedback.
+
+    Parameters
+    ----------
+    n_target : int
+        Number of target dimensions (the row count of ``B``).
+    n_layer : int
+        Number of layer dimensions (the column count of ``B``).
+    key : jax.Array
+        A JAX PRNG key used to sample the feedback matrix.
+    init_scale : float, optional
+        Standard-deviation scaling applied to the sampled normal entries. Default is ``0.1``.
+
+    Attributes
+    ----------
+    B : jax.Array
+        The frozen feedback matrix of shape ``(n_target, n_layer)``.
+    n_target : int
+        Number of target dimensions.
+    n_layer : int
+        Number of layer dimensions.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import jax
+        >>> import braintrace
+        >>> fb = braintrace.FixedRandomFeedback(2, 3, jax.random.PRNGKey(0))
+        >>> print(fb.B.shape)
+        (2, 3)
+        >>> y = jax.numpy.ones(2)
+        >>> print(fb.project(y).shape)
+        (3,)
     """
 
     __module__ = 'braintrace'
@@ -120,7 +212,18 @@ class FixedRandomFeedback:
         self.n_layer = int(n_layer)
 
     def project(self, y_target):
-        """Return ``y_target @ B`` with B frozen. Handles batched and unbatched y_target."""
+        """Project the target onto the frozen feedback matrix.
+
+        Parameters
+        ----------
+        y_target : jax.Array
+            The target tensor to project. Both batched and unbatched layouts are handled.
+
+        Returns
+        -------
+        jax.Array
+            The projection ``y_target @ B`` with ``B`` frozen.
+        """
         return y_target @ self.B
 
 

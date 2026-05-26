@@ -173,7 +173,7 @@ class OTPE(ETraceVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = Net()
-        >>> brainstate.nn.init_all_states(model)
+        >>> _ = brainstate.nn.init_all_states(model)
         >>> # ``leak`` is the postsynaptic membrane leak and must be passed
         >>> # explicitly; it is never inferred from the model.
         >>> learner = braintrace.OTPE(model, mode='full', leak=0.9)

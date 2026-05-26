@@ -74,31 +74,45 @@ def order_hidden_group_index(
 
 
 class ETraceGraph(NamedTuple):
-    """
-    The overall compiled graph for the eligibility trace.
+    """The overall compiled graph for the eligibility trace.
 
-    The eligibility trace graph, tracking the relationship between the etrace weights
-    ParamState, the etrace variables HiddenState, and the etrace
-    operations :pyETP primitives.
+    Tracks the relationship between the eligibility-trace weights
+    (``ParamState``), the eligibility-trace variables (``HiddenState``), and
+    the eligibility-trace operations (ETP primitives). It is the object
+    returned by :func:`compile_etrace_graph` and consumed by the online-learning
+    algorithms.
 
-    The following fields are included:
+    Attributes
+    ----------
+    module_info : ModuleInfo
+        The model information.
+    hidden_groups : sequence of HiddenGroup
+        The hidden groups.
+    hid_path_to_group : dict
+        Mapping from each hidden-state path to its :class:`HiddenGroup`.
+    hidden_param_op_relations : sequence of HiddenParamOpRelation
+        The hidden parameter-operation relations.
+    hidden_perturb : HiddenPerturbation or None
+        The hidden perturbation, or ``None`` when perturbations are excluded.
+    diagnostics : tuple of CompilationRecord
+        The structured compilation records emitted while building the graph.
 
-    - ``module_info``: The model information, instance of :class:`ModuleInfo`.
-    - ``hidden_groups``: The hidden groups, sequence of :class:`HiddenGroup`.
-    - ``hid_path_to_group``: The mapping from the hidden path to the hidden group :class:`HiddenGroup`.
-    - ``hidden_param_op_relations``: The hidden parameter operation relations, sequence of :class:`HiddenParamOpRelation`.
-    - ``hidden_perturb``: The hidden perturbation, instance of :class:`HiddenPerturbation`, or None.
+    See Also
+    --------
+    compile_etrace_graph : Build an ``ETraceGraph`` from a model.
 
-    Example::
+    Examples
+    --------
+    .. code-block:: python
 
-        >>> import braintrace
         >>> import brainstate
-        >>> gru = braintrace.nn.GRUCell(10, 20)
-        >>> gru.init_state()
-        >>> inputs = brainstate.random.randn(10)
-        >>> compiled_graph = braintrace.compile_etrace_graph(gru, inputs)
-        >>> compiled_graph.dict().keys()
-
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
+        >>> graph = braintrace.compile_etrace_graph(gru, inputs)
+        >>> isinstance(graph, braintrace.ETraceGraph)
+        True
     """
 
     module_info: ModuleInfo
@@ -119,8 +133,25 @@ class ETraceGraph(NamedTuple):
 
         ``weight_path`` and ``hidden_path`` match the record's ``weight_path``
         exactly and ``hidden_paths`` membership respectively. ``kind`` matches
-        ``CompilationRecord.kind``. All are optional; with no filters the full
-        diagnostic log is returned.
+        ``CompilationRecord.kind``. All filters are optional; with no filters
+        the full diagnostic log is returned.
+
+        Parameters
+        ----------
+        weight_path : Path or None, optional
+            If given, keep only records whose ``weight_path`` equals this
+            value. Default ``None``.
+        hidden_path : Path or None, optional
+            If given, keep only records whose ``hidden_paths`` contain this
+            value. Default ``None``.
+        kind : DiagnosticKind or None, optional
+            If given, keep only records whose ``kind`` is this value. Default
+            ``None``.
+
+        Returns
+        -------
+        tuple of CompilationRecord
+            The matching records, in emission order.
         """
         result = []
         for record in self.diagnostics:
@@ -218,29 +249,52 @@ def compile_etrace_graph(
     *model_args: Tuple,
     include_hidden_perturb: bool = True,
 ) -> ETraceGraph:
-    """
-    Constructs the eligibility trace graph for a given model based on the provided inputs.
+    """Construct the eligibility-trace graph for a given model and inputs.
 
-    This is the most important method for the eligibility trace graph. It builds the
-    graph for the model, tracking the relationship between the etrace weights
-    ParamState, the etrace state HiddenState, and the etrace
-    operations ETP primitives, which will be used for computing the weight
-    spatial gradients, the hidden state Jacobian, and the hidden state-weight Jacobian.
+    This is the primary entry point of the ETrace compiler. It builds the graph
+    for the model, tracking the relationship between the eligibility-trace
+    weights (``ParamState``), the eligibility-trace states (``HiddenState``),
+    and the eligibility-trace operations (ETP primitives). These relationships
+    are later used to compute the weight spatial gradients, the hidden-state
+    Jacobian, and the hidden-state-to-weight Jacobian.
 
-    This function is crucial for building the eligibility trace graph, which tracks the
-    relationships between eligibility trace weights, states, and operations. These relationships
-    are used to compute weight spatial gradients, hidden state Jacobians, and hidden state-weight
-    Jacobians.
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model for which the eligibility-trace graph is built.
+    *model_args : tuple
+        The positional arguments required by the model.
+    include_hidden_perturb : bool, optional
+        Whether to include hidden perturbations in the graph. Default ``True``.
 
-    Args:
-        model (brainstate.nn.Module): The model for which the eligibility trace graph is to be built.
-        model_args (Tuple): The arguments required by the model.
-        include_hidden_perturb (bool): Indicates whether to include hidden perturbations in the graph.
-            Defaults to True.
+    Returns
+    -------
+    ETraceGraph
+        The compiled eligibility-trace graph containing module information,
+        hidden groups, hidden parameter-operation relations, and optional
+        hidden perturbations.
 
-    Returns:
-        ETraceGraph: The compiled eligibility trace graph containing module information, hidden groups,
-        hidden parameter operation relations, and optional hidden perturbations.
+    Raises
+    ------
+    NotImplementedError
+        If a recursive call to the compiler is detected.
+
+    See Also
+    --------
+    ETraceGraph : The returned compiled-graph data structure.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
+        >>> graph = braintrace.compile_etrace_graph(gru, inputs)
+        >>> len(graph.hidden_groups)
+        1
     """
 
     with compiler_context('compile_graph'), diagnostic_context() as reporter:

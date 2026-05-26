@@ -549,18 +549,41 @@ def _remove_units(xs_maybe_quantity: brainstate.typing.PyTree):
 
 
 class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
-    r"""
-    The online gradient computation algorithm with the diagonal approximation and the parameter dimension complexity.
+    r"""Online gradient algorithm with diagonal approximation and parameter-dimension complexity.
 
-    This algorithm computes the gradients of the weights with the diagonal approximation and the parameter dimension complexity.
-    Its algorithm is based on the RTRL algorithm, and has the following learning rule:
+    This algorithm computes the gradients of the weights with the diagonal
+    approximation and the parameter-dimension complexity. It is based on the RTRL
+    algorithm (Real-Time Recurrent Learning).
 
-    $$
-    \begin{aligned}
-    &\boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}+\operatorname{diag}\left(\mathbf{D}_f^t\right) \otimes \mathbf{x}^t \\
-    & \nabla_{\boldsymbol{\theta}} \mathcal{L}=\sum_{t^{\prime} \in \mathcal{T}} \frac{\partial \mathcal{L}^{t^{\prime}}}{\partial \mathbf{h}^{t^{\prime}}} \circ \boldsymbol{\epsilon}^{t^{\prime}}
-    \end{aligned}
-    $$
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model function, which receives the input arguments and returns the
+        model output.
+    vjp_method : str, optional
+        The method for computing the VJP. It should be either ``"single-step"``
+        or ``"multi-step"``.
+
+        - ``"single-step"``: the VJP is computed at the current time step, i.e.,
+          :math:`\partial L^t/\partial h^t`.
+        - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
+          :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
+          the data input.
+    name : str, optional
+        The name of the etrace algorithm.
+    mode : braintrace.mixin.Mode, optional
+        The computing mode, indicating the batching behavior.
+
+    Notes
+    -----
+    The learning rule is
+
+    .. math::
+
+        \begin{aligned}
+        &\boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}+\operatorname{diag}\left(\mathbf{D}_f^t\right) \otimes \mathbf{x}^t \\
+        & \nabla_{\boldsymbol{\theta}} \mathcal{L}=\sum_{t^{\prime} \in \mathcal{T}} \frac{\partial \mathcal{L}^{t^{\prime}}}{\partial \mathbf{h}^{t^{\prime}}} \circ \boldsymbol{\epsilon}^{t^{\prime}}
+        \end{aligned}
 
     where :math:`\boldsymbol{\epsilon}^t` is the per-parameter eligibility
     trace, :math:`\mathbf{D}^t` the hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t`
@@ -568,43 +591,27 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     :math:`\partial \mathcal{L}^{t'}/\partial \mathbf{h}^{t'}` the learning
     signal back-propagated from the loss at each step.
 
-    **How it works.** Real-Time Recurrent Learning (RTRL) propagates the full
-    sensitivity :math:`\partial \mathbf{h}^t/\partial \boldsymbol{\theta}`
-    forward in time, which costs :math:`O(|\theta| \cdot H)` memory. D-RTRL
-    keeps only the *diagonal* of the hidden-to-hidden Jacobian, collapsing the
-    trace to one value per parameter. The trace is then contracted with the
-    instantaneous learning signal at each step to accumulate the gradient — no
-    backward pass through time and memory linear in the parameter count.
+    Real-Time Recurrent Learning (RTRL) propagates the full sensitivity
+    :math:`\partial \mathbf{h}^t/\partial \boldsymbol{\theta}` forward in time,
+    which costs :math:`O(|\theta| \cdot H)` memory. D-RTRL keeps only the
+    *diagonal* of the hidden-to-hidden Jacobian, collapsing the trace to one
+    value per parameter. The trace is then contracted with the instantaneous
+    learning signal at each step to accumulate the gradient — no backward pass
+    through time and memory linear in the parameter count.
+
+    :class:`ParamDimVjpAlgorithm` is a subclass of :class:`brainstate.nn.Module`
+    and is sensitive to the context/mode of the computation. In particular, it is
+    sensitive to ``brainstate.mixin.Batching`` behavior.
+
+    This algorithm has :math:`O(B\theta)` memory complexity, where
+    :math:`\theta` is the number of parameters and :math:`B` the batch size.
+    For a convolutional layer, the weight gradients are computed with
+    :math:`O(B\theta)` memory complexity, where :math:`\theta` is the dimension
+    of the convolutional kernel. For a linear transformation layer, the weight
+    gradients are computed with :math:`O(BIO)` computational complexity, where
+    :math:`I` and :math:`O` are the number of input and output dimensions.
 
     For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
-
-    Note than the :py:class:`ParamDimVjpAlgorithm` is a subclass of :py:class:`brainstate.nn.Module`,
-    and it is sensitive to the context/mode of the computation. Particularly,
-    the :py:class:`ParamDimVjpAlgorithm` is sensitive to ``brainstate.mixin.Batching`` behavior.
-
-    This algorithm has the :math:`O(B\theta)` memory complexity, where :math:`\theta` is the number of parameters,
-    and :math:`B` the batch size.
-
-    For a convolutional layer, the algorithm computes the weight gradients with the :math:`O(B\theta)`
-    memory complexity, where :math:`\theta` is the dimension of the convolutional kernel.
-
-    For a Linear transformation layer, the algorithm computes the weight gradients with the :math:`O(BIO)``
-    computational complexity, where :math:`I` and :math:`O` are the number of input and output dimensions.
-
-    Parameters
-    -----------
-    model: brainstate.nn.Module
-        The model function, which receives the input arguments and returns the model output.
-    vjp_method: str, optional
-        The method for computing the VJP. It should be either "single-step" or "multi-step".
-
-        - "single-step": The VJP is computed at the current time step, i.e., $\partial L^t/\partial h^t$.
-        - "multi-step": The VJP is computed at multiple time steps, i.e., $\partial L^t/\partial h^{t-k}$,
-          where $k$ is determined by the data input.
-    name: str, optional
-        The name of the etrace algorithm.
-    mode: braintrace.mixin.Mode
-        The computing mode, indicating the batching behavior.
 
     Examples
     --------
@@ -622,7 +629,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = RNN()
-        >>> brainstate.nn.init_all_states(model)
+        >>> _ = brainstate.nn.init_all_states(model)
         >>> learner = braintrace.D_RTRL(model)  # alias of ParamDimVjpAlgorithm
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)   # trace the graph once
@@ -682,11 +689,10 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         self.trace_dtype = trace_dtype
 
     def init_etrace_state(self, *args, **kwargs):
-        """
-        Initialize the eligibility trace states of the etrace algorithm.
+        """Initialize the eligibility trace states of the etrace algorithm.
 
         This method is needed after compiling the etrace graph. See
-        `.compile_graph()` for the details.
+        :meth:`compile_graph` for the details.
         """
         # The states of batched weight gradients
         self.etrace_bwg = dict()
@@ -694,18 +700,35 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             _init_param_dim_state(self.etrace_bwg, relation, self.trace_dtype)
 
     def reset_state(self, batch_size: int = None, **kwargs):
-        """
-        Reset the eligibility trace states.
+        """Reset the eligibility trace states.
+
+        Parameters
+        ----------
+        batch_size : int, optional
+            The batch size used to reshape the reset trace states. Default ``None``.
         """
         self.running_index.value = 0
         _reset_state_in_a_dict(self.etrace_bwg, batch_size)
 
     def get_etrace_of(self, weight: brainstate.ParamState | Path) -> Dict:
-        """
-        Get the eligibility trace of the given weight.
+        """Get the eligibility trace of the given weight.
 
-        The eligibility trace contains the following structures:
+        Parameters
+        ----------
+        weight : brainstate.ParamState or Path
+            The weight whose eligibility trace is requested, given either as a
+            :class:`brainstate.ParamState` instance or as its path in the model.
 
+        Returns
+        -------
+        dict
+            A dictionary mapping ``(y_var id, hidden-group index)`` keys to the
+            eligibility-trace values associated with the given weight.
+
+        Raises
+        ------
+        ValueError
+            If no eligibility trace is found for the given weight.
         """
 
         self._assert_compiled()

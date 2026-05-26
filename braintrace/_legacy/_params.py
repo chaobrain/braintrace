@@ -70,16 +70,36 @@ class ETraceGrad(str, Enum):
 # ---------------------------------------------------------------------------
 
 class ETraceParam(brainstate.ParamState):
-    """Legacy eligibility-trace parameter.
+    r"""Legacy eligibility-trace parameter.
 
-    Wraps a pytree weight (typically ``{'weight': ..., 'bias': ...}``)
-    and an :class:`ETraceOp`. :meth:`execute` routes through the op's
-    ETP-primitive path, so the compiler will register an eligibility-
-    trace relation when this parameter flows into a hidden state.
+    Wraps a pytree weight (typically ``{'weight': ..., 'bias': ...}``) and
+    an :class:`ETraceOp`. :meth:`execute` routes through the op's
+    ETP-primitive path, so the compiler registers an eligibility-trace
+    relation when this parameter flows into a hidden state.
 
     .. deprecated:: 0.2.0
-        Use :class:`brainstate.ParamState` + the new ETP primitive
-        functions (:func:`braintrace.matmul` etc.) directly.
+        Use :class:`brainstate.ParamState` together with the new ETP
+        primitive functions (:func:`braintrace.matmul`, etc.) directly.
+
+    Parameters
+    ----------
+    weight : Any
+        The pytree weight to wrap, typically a dict such as
+        ``{'weight': ..., 'bias': ...}``.
+    op : ETraceOp
+        The eligibility-trace operator used to combine inputs with the
+        weight.
+    grad : object, optional
+        Legacy gradient type. Defaults to the adaptive mode; kept for API
+        compatibility and has no effect on the new primitive-based
+        compiler.
+    name : str, optional
+        Optional name forwarded to :class:`brainstate.ParamState`.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim. New code should
+    use :class:`brainstate.ParamState` with the ETP primitive functions.
     """
     __module__ = 'braintrace'
 
@@ -114,7 +134,31 @@ class ETraceParam(brainstate.ParamState):
 # ---------------------------------------------------------------------------
 
 class ElemWiseParam(ETraceParam):
-    """Legacy element-wise trace parameter."""
+    r"""Legacy element-wise eligibility-trace parameter.
+
+    Element-wise variant of :class:`ETraceParam`: wraps a weight together
+    with an :class:`ElemWiseOp` and routes :meth:`execute` through the
+    element-wise ETP-primitive path.
+
+    .. deprecated:: 0.2.0
+        Use :class:`brainstate.ParamState` together with
+        :func:`braintrace.element_wise` directly.
+
+    Parameters
+    ----------
+    weight : Any
+        The pytree weight to wrap.
+    op : ElemWiseOp or Callable, optional
+        Element-wise operator (or a callable wrapped into one). Defaults to
+        the identity ``lambda w: w``.
+    name : str, optional
+        Optional name forwarded to :class:`brainstate.ParamState`.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim. New code should
+    use :class:`brainstate.ParamState` with :func:`braintrace.element_wise`.
+    """
     __module__ = 'braintrace'
 
     def __init__(
@@ -136,15 +180,32 @@ class ElemWiseParam(ETraceParam):
 # ---------------------------------------------------------------------------
 
 class NonTempParam(brainstate.ParamState):
-    """Legacy parameter — spatial gradient only, no eligibility trace.
+    r"""Legacy parameter with spatial gradient only and no eligibility trace.
 
-    ``execute`` calls the op's plain-JAX path (``raw_xw_to_y``), so no
+    :meth:`execute` calls the op's plain-JAX path (``raw_xw_to_y``), so no
     ETP primitive appears in the jaxpr for this weight. The compiler
-    therefore registers zero relations for this ``ParamState``.
+    therefore registers zero eligibility-trace relations for this
+    ``ParamState``.
 
     .. deprecated:: 0.2.0
         Use :class:`brainstate.ParamState` with plain JAX ops (``x @ w``)
         directly.
+
+    Parameters
+    ----------
+    value : Any
+        The pytree weight to wrap.
+    op : ETraceOp or Callable
+        Operator used in :meth:`execute`. If an :class:`ETraceOp` is given,
+        its plain-JAX ``raw_xw_to_y`` path is used so no ETP primitive is
+        emitted; otherwise a plain callable is used directly.
+    name : str, optional
+        Optional name forwarded to :class:`brainstate.ParamState`.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim. New code should
+    use :class:`brainstate.ParamState` with plain JAX ops.
     """
     __module__ = 'braintrace'
 
@@ -178,18 +239,30 @@ class NonTempParam(brainstate.ParamState):
 # ---------------------------------------------------------------------------
 
 class FakeETraceParam(object):
-    """Legacy fake parameter — NOT a ``ParamState``.
+    r"""Legacy fake parameter that is NOT a ``ParamState``.
 
-    Stores a value + callable and exposes :meth:`execute`. Since this is
-    not a ``ParamState``, the compiler never sees it — no gradient will
-    be produced for this weight.
-
-    Routes through the op's plain-JAX path to avoid emitting any ETP
-    primitive (which would trigger
+    Stores a value and a callable and exposes :meth:`execute`. Because it
+    is not a ``ParamState``, the compiler never sees it, so no gradient is
+    produced for this weight. The op is routed through its plain-JAX path
+    to avoid emitting any ETP primitive (which would otherwise trigger
     :attr:`DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE` warnings).
 
     .. deprecated:: 0.2.0
         Use :class:`brainstate.FakeState` with plain JAX ops.
+
+    Parameters
+    ----------
+    value : Any
+        The pytree weight to store.
+    op : ETraceOp or Callable
+        Operator used in :meth:`execute`. An :class:`ETraceOp` is routed
+        through its plain-JAX ``raw_xw_to_y`` path; otherwise a plain
+        callable is used directly.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim. New code should
+    use :class:`brainstate.FakeState` with plain JAX ops.
     """
     __module__ = 'braintrace'
 
@@ -214,10 +287,30 @@ class FakeETraceParam(object):
 # ---------------------------------------------------------------------------
 
 class FakeElemWiseParam(object):
-    """Legacy fake element-wise parameter — NOT a ``ParamState``.
+    r"""Legacy fake element-wise parameter that is NOT a ``ParamState``.
+
+    Element-wise variant of :class:`FakeETraceParam`. Because it is not a
+    ``ParamState``, the compiler never sees it and produces no gradient for
+    this weight.
 
     .. deprecated:: 0.2.0
         Use :class:`brainstate.FakeState` with plain JAX ops.
+
+    Parameters
+    ----------
+    weight : Any
+        The pytree weight to store.
+    op : ElemWiseOp or Callable, optional
+        Element-wise operator. An :class:`ElemWiseOp` is routed through its
+        plain-JAX path; otherwise a plain callable is used directly.
+        Defaults to the identity ``lambda w: w``.
+    name : str, optional
+        Optional name stored on the instance.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim. New code should
+    use :class:`brainstate.FakeState` with plain JAX ops.
     """
     __module__ = 'braintrace'
 

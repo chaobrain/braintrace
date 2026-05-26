@@ -199,54 +199,68 @@ def abstractify_model(
 
 
 class ModuleInfo(NamedTuple):
-    """
-    The model information for the etrace compiler.
+    """The model information for the ETrace compiler.
 
-    The model information contains the at least five categories of information:
+    Bundles the abstract representation of a model and all the lookup tables the
+    compiler needs. It groups information into five categories: the stateful
+    model, the jaxpr, the states, the hidden states, and the parameter weights.
 
-    1. The stateful model.
+    Attributes
+    ----------
+    stateful_model : brainstate.transform.StatefulFunction
+        The stateful function that compiles the model into an abstract jaxpr
+        representation.
+    closed_jaxpr : ClosedJaxpr
+        The closed-jaxpr representation of the model.
+    retrieved_model_states : brainstate.util.FlattedDict
+        The model states retrieved from ``model.states()``, with well-defined
+        paths and structures.
+    compiled_model_states : sequence of brainstate.State
+        The model states compiled from the stateful model; accurate and
+        consistent with the model jaxpr but lacking path information.
+    state_id_to_path : dict
+        Mapping from each state id to its state path.
+    state_tree_invars : PyTree of Var
+        The input jaxpr variables of the states, as a pytree.
+    state_tree_outvars : PyTree of Var
+        The output jaxpr variables of the states, as a pytree.
+    hidden_path_to_invar : dict
+        Mapping from each hidden path to its input variable.
+    hidden_path_to_outvar : dict
+        Mapping from each hidden path to its output variable.
+    invar_to_hidden_path : dict
+        Mapping from each input variable to its hidden path.
+    outvar_to_hidden_path : dict
+        Mapping from each output variable to its hidden path.
+    hidden_outvar_to_invar : dict
+        Mapping from each output variable to its input variable.
+    weight_invars : list of Var
+        The weight input variables.
+    weight_path_to_invars : dict
+        Mapping from each weight path to its input variables.
+    invar_to_weight_path : dict
+        Mapping from each input variable to its weight path.
+    num_var_out : int
+        Number of original output variables.
+    num_var_state : int
+        Number of state-variable outputs.
 
-        - ``stateful_model``: The stateful model is the model that compiles the model
-          into abstract jaxpr representation.
+    See Also
+    --------
+    extract_module_info : Build a ``ModuleInfo`` from a model.
 
-    2. The jaxpr.
+    Examples
+    --------
+    .. code-block:: python
 
-        The jaxpr is the abstract representation of the model.
-
-        - ``closed_jaxpr``: The closed jaxpr is the closed jaxpr representation of the model.
-
-    3. The states.
-
-        - ``retrieved_model_states``: The model states that are retrieved from the ``model.states()`` function,
-          which has well-defined paths and structures.
-        - ``compiled_model_states``: The model states that are compiled from the stateful model, which is
-          accurate and consistent with the model jaxpr, but loss the path information.
-        - ``state_id_to_path``: The mapping from the state id to the state path.
-
-    4. The hidden states.
-
-        - ``hidden_path_to_invar``: The mapping from the hidden path to the input variable.
-        - ``hidden_path_to_outvar``: The mapping from the hidden path to the output variable.
-        - ``invar_to_hidden_path``: The mapping from the input variable to the hidden path.
-        - ``outvar_to_hidden_path``: The mapping from the output variable to the hidden path.
-        - ``hidden_outvar_to_invar``: The mapping from the output variable to the input variable.
-
-    5. The parameter weights.
-
-        - ``weight_invars``: The weight input variables.
-        - ``weight_path_to_invars``: The mapping from the weight path to the input variables.
-        - ``invar_to_weight_path``: The mapping from the input variable to the weight path.
-
-
-    Example::
-
-        >>> import braintrace
         >>> import brainstate
-        >>> gru = braintrace.nn.GRUCell(10, 20)
-        >>> gru.init_state()
-        >>> inputs = brainstate.random.randn(10)
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
         >>> module_info = braintrace.extract_module_info(gru, inputs)
-
+        >>> isinstance(module_info, braintrace.ModuleInfo)
+        True
     """
     # stateful model
     stateful_model: brainstate.transform.StatefulFunction
@@ -279,8 +293,12 @@ class ModuleInfo(NamedTuple):
 
     @property
     def jaxpr(self) -> Jaxpr:
-        """
-        The jaxpr of the model.
+        """The jaxpr of the model.
+
+        Returns
+        -------
+        Jaxpr
+            The jaxpr extracted from ``closed_jaxpr``.
         """
         return self.closed_jaxpr.jaxpr
 
@@ -288,9 +306,20 @@ class ModuleInfo(NamedTuple):
         self,
         jax_vars: Sequence[Var],
     ) -> 'ModuleInfo':
-        """
-        Adding the jaxpr outputs to the model jaxpr, so that it can return the additional variables which
-        needed for the etrace compiler.
+        """Add extra jaxpr outputs to the model jaxpr.
+
+        Returns a new ``ModuleInfo`` whose jaxpr additionally outputs the given
+        variables, so the compiler can recover the intermediate values it needs.
+
+        Parameters
+        ----------
+        jax_vars : sequence of Var
+            The extra jaxpr variables to append to the jaxpr outputs.
+
+        Returns
+        -------
+        ModuleInfo
+            A new ``ModuleInfo`` with the extended jaxpr.
         """
         assert all(isinstance(v, Var) for v in jax_vars), 'The jax_vars should be the instance of Var.'
 
@@ -316,13 +345,16 @@ class ModuleInfo(NamedTuple):
         return ModuleInfo(**items)
 
     def split_state_outvars(self):
-        """
-        Splitting the state outvars into three parts: weight, hidden, and other states.
+        """Split the state outvars into weight, hidden, and other states.
 
-        Returns:
-            weight_jaxvar_tree: The weight tree of jax Var.
-            hidden_jaxvar: The hidden tree of jax Var.
-            other_state_jaxvar_tree: The other state tree of jax Var.
+        Returns
+        -------
+        weight_jaxvar_tree : PyTree of Var
+            The weight tree of jaxpr variables.
+        hidden_jaxvar : PyTree of Var
+            The hidden tree of jaxpr variables.
+        other_state_jaxvar_tree : PyTree of Var
+            The other-state tree of jaxpr variables.
         """
         (
             weight_jaxvar_tree,
@@ -341,18 +373,26 @@ class ModuleInfo(NamedTuple):
         StateVals,
         TempData,
     ]:
-        """
-        Computing the model according to the given inputs and parameters by using the compiled jaxpr.
+        """Evaluate the model on the given inputs using the compiled jaxpr.
 
-        Args:
-            args: The inputs of the model.
-            old_state_vals: The old state values.
+        Parameters
+        ----------
+        *args : Inputs
+            The inputs of the model.
+        old_state_vals : sequence of jax.Array or None, optional
+            The old state values. When ``None``, the current values of the
+            compiled model states are used. Default ``None``.
 
-        Returns:
-            out: The output of the model.
-            etrace_vals: The values for etrace states.
-            oth_state_vals: The other state values.
-            temps: The temporary intermediate values.
+        Returns
+        -------
+        out : Outputs
+            The output of the model.
+        etrace_vals : ETraceVals
+            The values for the eligibility-trace (hidden) states.
+        oth_state_vals : StateVals
+            The other state values.
+        temps : TempData
+            The temporary intermediate values.
         """
 
         # state checking
@@ -431,16 +471,38 @@ def extract_module_info(
     *model_args,
     **model_kwargs
 ) -> ModuleInfo:
-    """
-    Extracting the model information for the etrace compiler.
+    """Extract the model information for the ETrace compiler.
 
-    Args:
-        model: The model to extract the information.
-        model_args: The arguments of the model.
-        model_kwargs: The keyword arguments of the model.
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model from which to extract the information.
+    *model_args
+        The positional arguments of the model.
+    **model_kwargs
+        The keyword arguments of the model.
 
-    Returns:
-        The model information, instance of :class:`ModuleInfo`.
+    Returns
+    -------
+    ModuleInfo
+        The model information.
+
+    See Also
+    --------
+    ModuleInfo : The returned data structure.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
+        >>> module_info = braintrace.extract_module_info(gru, inputs)
+        >>> module_info.num_var_out
+        1
     """
 
     # abstract the model

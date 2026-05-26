@@ -124,36 +124,50 @@ class PathClassification:
 class HiddenParamOpRelation(NamedTuple):
     r"""Connection between an ETP primitive, its trainable parameters, and hidden states.
 
-    Records the structural relationship:
+    Records the structural relationship
 
     .. math::
-        h^t = f(y), \quad y = \text{primitive}(x, \theta)
 
-    Attributes:
-        primitive: The JAX primitive (``etp_mm_p``, ``etp_mv_p``, etc.).
-        x_var: Jaxpr ``Var`` for the input (``None`` for element-wise ops).
-        y_var: Jaxpr ``Var`` for the primitive output.
-        hidden_groups: Hidden groups that this op feeds into.
-        y_to_hidden_group_jaxprs: Transition Jaxpr from *y* to each hidden group.
-        connected_hidden_paths: Hidden-state paths connected to this op.
-        eqn_params: Static parameters of the primitive equation.
-        path_classification: ``{hidden_path: PathClassification.*}`` for each
-            connected hidden state. Populated by the path-classification pass.
-        trainable_vars: Per-key dict mapping a primitive-chosen key name
-            (e.g. ``'weight'``, ``'bias'``, ``'lora_b'``, ``'lora_a'``) to its
-            jaxpr ``Var``. Populated by the compiler with one entry per declared
-            trainable input.
-        trainable_paths: Per-key dict mapping each key to the owning
-            ``ParamState``'s module path. When the primitive has two keys
-            whose invars trace to the same ``ParamState`` (e.g. merged
-            ``{weight, bias}`` Linear), the entries share a path.
-        trainable_leaf_indices: Per-key dict mapping each key to the leaf
-            index in ``jax.tree.leaves`` of the owning ``ParamState``.
-        trainable_param_states: Per-key dict mapping each key to the actual
-            ``ParamState`` object.
-        trainable_processing_chains: Per-key dict mapping each key to the
-            backward-trace processing chain (primitives traversed from the
-            trainable invar back to the originating ``ParamState`` invar).
+        h^t = f(y), \quad y = \mathrm{primitive}(x, \theta)
+
+    discovered by the compiler for a single ETP primitive equation.
+
+    Attributes
+    ----------
+    primitive : Primitive
+        The JAX primitive (``etp_mm_p``, ``etp_mv_p``, etc.).
+    x_var : Var or None
+        Jaxpr ``Var`` for the input (``None`` for element-wise ops).
+    y_var : Var
+        Jaxpr ``Var`` for the primitive output.
+    hidden_groups : list of HiddenGroup
+        Hidden groups that this op feeds into.
+    y_to_hidden_group_jaxprs : list of Jaxpr
+        Transition jaxpr from ``y`` to each hidden group.
+    connected_hidden_paths : list of Path
+        Hidden-state paths connected to this op.
+    eqn_params : dict
+        Static parameters of the primitive equation.
+    path_classification : dict
+        Mapping ``{hidden_path: PathClassification.*}`` for each connected
+        hidden state. Populated by the path-classification pass.
+    trainable_vars : dict
+        Per-key dict mapping a primitive-chosen key name (e.g. ``'weight'``,
+        ``'bias'``, ``'lora_b'``, ``'lora_a'``) to its jaxpr ``Var``, with one
+        entry per declared trainable input.
+    trainable_paths : dict
+        Per-key dict mapping each key to the owning ``ParamState``'s module
+        path. When two keys trace to the same ``ParamState`` (e.g. a merged
+        ``{weight, bias}`` Linear), the entries share a path.
+    trainable_leaf_indices : dict
+        Per-key dict mapping each key to the leaf index in
+        ``jax.tree.leaves`` of the owning ``ParamState``.
+    trainable_param_states : dict
+        Per-key dict mapping each key to the actual ``ParamState`` object.
+    trainable_processing_chains : dict
+        Per-key dict mapping each key to the backward-trace processing chain
+        (primitives traversed from the trainable invar back to the originating
+        ``ParamState`` invar).
     """
     primitive: Primitive
     x_var: Optional[Var]
@@ -183,7 +197,25 @@ class HiddenParamOpRelation(NamedTuple):
         return next(iter(self.trainable_paths.values()), None)
 
     def y_to_hidden_groups(self, y_val, const_vals, concat_hidden_vals=True):
-        """Evaluate transition jaxprs: y -> hidden group values."""
+        """Evaluate the transition jaxprs mapping ``y`` to hidden-group values.
+
+        Parameters
+        ----------
+        y_val : jax.Array
+            The value of the primitive output ``y``.
+        const_vals : dict
+            Mapping from each transition-jaxpr constvar to its value.
+        concat_hidden_vals : bool, optional
+            If ``True``, concatenate each group's hidden values into a single
+            array via :meth:`HiddenGroup.concat_hidden`. Default ``True``.
+
+        Returns
+        -------
+        list
+            One entry per hidden group: either a list of per-state arrays
+            (when ``concat_hidden_vals`` is ``False``) or a single concatenated
+            array (when ``True``).
+        """
         vals_of_hidden_groups = []
         for jaxpr, group in zip(self.y_to_hidden_group_jaxprs, self.hidden_groups):
             consts = [const_vals[var] for var in jaxpr.constvars]
@@ -951,8 +983,24 @@ def find_hidden_param_op_relations_from_minfo(
 ) -> Sequence[HiddenParamOpRelation]:
     """Find ETP relations from a ``ModuleInfo``.
 
-    Builds a mapping from ALL ``brainstate.ParamState`` invars so that
-    plain ``ParamState`` weights used with ETP primitives are recognised.
+    Builds a mapping from all ``brainstate.ParamState`` invars so that plain
+    ``ParamState`` weights used with ETP primitives are recognised.
+
+    Parameters
+    ----------
+    minfo : ModuleInfo
+        The model information.
+    hid_path_to_group : dict
+        Mapping from each hidden-state path to its :class:`HiddenGroup`.
+
+    Returns
+    -------
+    sequence of HiddenParamOpRelation
+        The discovered ETP-primitive-to-hidden-state relations.
+
+    See Also
+    --------
+    find_hidden_param_op_relations_from_module : Equivalent helper starting from a model.
     """
     invar_to_weight_path: Dict[Var, Path] = {}
     weight_path_to_invars: Dict[Path, List[Var]] = {}
@@ -986,7 +1034,39 @@ def find_hidden_param_op_relations_from_module(
     *model_args,
     **model_kwargs,
 ) -> Sequence[HiddenParamOpRelation]:
-    """Find ETP relations from a model."""
+    """Find ETP relations from a model.
+
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model.
+    *model_args
+        The positional arguments of the model.
+    **model_kwargs
+        The keyword arguments of the model.
+
+    Returns
+    -------
+    sequence of HiddenParamOpRelation
+        The discovered ETP-primitive-to-hidden-state relations.
+
+    See Also
+    --------
+    find_hidden_param_op_relations_from_minfo : Equivalent helper starting from ``ModuleInfo``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>> gru = braintrace.nn.GRUCell(3, 4)
+        >>> _ = brainstate.nn.init_all_states(gru)
+        >>> inputs = brainstate.random.randn(3)
+        >>> relations = braintrace.find_hidden_param_op_relations_from_module(gru, inputs)
+        >>> len(relations)
+        2
+    """
     minfo = extract_module_info(model, *model_args, **model_kwargs)
     hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(minfo)
     return find_hidden_param_op_relations_from_minfo(minfo, hid_path_to_group)

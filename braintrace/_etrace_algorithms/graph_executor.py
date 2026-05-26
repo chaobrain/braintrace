@@ -92,14 +92,18 @@ class ETraceGraphExecutor:
         for the eligibility trace algorithm. It contains various attributes that describe the
         relationships between the model's variables, states, and operations.
 
-        Returns:
-            ETraceGraph: The compiled graph for the model. This graph includes detailed
-            information about the model's structure, such as output variables, state variables,
+        Returns
+        -------
+        ETraceGraph
+            The compiled graph for the model. This graph includes detailed information about
+            the model's structure, such as output variables, state variables,
             hidden-to-hidden variable relationships, and more.
 
-        Raises:
-            ValueError: If the graph has not been compiled yet. Ensure to call the
-            `compile_graph()` method before accessing this property.
+        Raises
+        ------
+        ValueError
+            If the graph has not been compiled yet. Ensure to call the
+            :meth:`compile_graph` method before accessing this property.
         """
         if self._compiled_graph is None:
             raise ValueError('The graph is not compiled yet. Please call ".compile_graph()" first.')
@@ -110,7 +114,9 @@ class ETraceGraphExecutor:
         """
         The states for the model.
 
-        Returns:
+        Returns
+        -------
+        brainstate.util.FlattedDict[Path, brainstate.State]
             The states for the model.
         """
         return self.graph.module_info.retrieved_model_states
@@ -120,7 +126,9 @@ class ETraceGraphExecutor:
         """
         The path to the states.
 
-        Returns:
+        Returns
+        -------
+        brainstate.util.FlattedDict[Path, brainstate.State]
             The path to the states.
         """
         return self.states
@@ -130,8 +138,10 @@ class ETraceGraphExecutor:
         """
         The state id to the path.
 
-        Returns:
-            The state id to the path.
+        Returns
+        -------
+        Dict[int, Path]
+            The mapping from state id to the path.
         """
         if self._state_id_to_path is None:
             self._state_id_to_path = {id(state): path for path, state in self.states.items()}
@@ -255,15 +265,6 @@ class ETraceGraphExecutor:
         part of the eligibility trace algorithm, which helps in understanding the influence of weights
         and previous hidden states on the current hidden state.
 
-        Now we mathematically define what computations are done in this function.
-
-        For the state transition function $y, h^t = f(h^{t-1}, \theta, x)$, this function aims to solve:
-
-        1. The function output: $y$
-        2. The updated hidden states: $h^t$
-        3. The Jacobian matrix of hidden-to-weight, i.e., $\partial h^t / \partial \theta^t$.
-        2. The Jacobian matrix of hidden-to-hidden, i.e., $\partial h^t / \partial h^{t-1}$.
-
         Parameters
         ----------
         *args
@@ -274,10 +275,26 @@ class ETraceGraphExecutor:
         -------
         Any
             A tuple containing the following elements:
+
             - The function output (e.g., model predictions).
             - The updated hidden states after the current computation step.
             - Other states that may be relevant to the model's operation.
             - The spatial gradients of the weights, represented by the hidden-to-weight Jacobian.
+
+        Raises
+        ------
+        NotImplementedError
+            This method must be implemented by subclasses.
+
+        Notes
+        -----
+        For the state transition function :math:`y, h^t = f(h^{t-1}, \theta, x)`, this function aims
+        to solve:
+
+        1. The function output :math:`y`.
+        2. The updated hidden states :math:`h^t`.
+        3. The Jacobian matrix of hidden-to-weight, i.e., :math:`\partial h^t / \partial \theta^t`.
+        4. The Jacobian matrix of hidden-to-hidden, i.e., :math:`\partial h^t / \partial h^{t-1}`.
         """
         raise NotImplementedError('The method "solve_h2w_h2h_jacobian" should be '
                                   'implemented in the subclass.')
@@ -294,15 +311,6 @@ class ETraceGraphExecutor:
         influence of weights and previous hidden states on the current hidden state, as well as the impact
         of the loss on the hidden states.
 
-        Particularly, this function aims to solve:
-
-        1. The Jacobian matrix of hidden-to-weight. That is,
-           :math:`\partial h / \partial w`, where :math:`h` is the hidden state and :math:`w` is the weight.
-        2. The Jacobian matrix of hidden-to-hidden. That is,
-           :math:`\partial h / \partial h`, where :math:`h` is the hidden state.
-        3. The partial gradients of the loss with respect to the hidden states.
-           That is, :math:`\partial L / \partial h`, where :math:`L` is the loss and :math:`h` is the hidden state.
-
         Parameters
         ----------
         *args
@@ -313,11 +321,28 @@ class ETraceGraphExecutor:
         -------
         Any
             A tuple containing the following elements:
+
             - The function output (e.g., model predictions).
             - The updated hidden states after the current computation step.
             - Other states that may be relevant to the model's operation.
             - The spatial gradients of the weights, represented by the hidden-to-weight Jacobian.
             - The residuals, which are the partial gradients of the loss with respect to the hidden states.
+
+        Raises
+        ------
+        NotImplementedError
+            This method must be implemented by subclasses.
+
+        Notes
+        -----
+        Particularly, this function aims to solve:
+
+        1. The Jacobian matrix of hidden-to-weight. That is,
+           :math:`\partial h / \partial w`, where :math:`h` is the hidden state and :math:`w` is the weight.
+        2. The Jacobian matrix of hidden-to-hidden. That is,
+           :math:`\partial h / \partial h`, where :math:`h` is the hidden state.
+        3. The partial gradients of the loss with respect to the hidden states.
+           That is, :math:`\partial L / \partial h`, where :math:`L` is the loss and :math:`h` is the hidden state.
         """
         raise NotImplementedError('The method "solve_h2w_h2h_jacobian_and_l2h_vjp" '
                                   'should be implemented in the subclass.')

@@ -107,11 +107,27 @@ def general_y2w(xw2y: Callable, x, y, w):
 # ---------------------------------------------------------------------------
 
 class ETraceOp:
-    """Legacy base class for eligibility-trace operators.
+    r"""Legacy base class for eligibility-trace operators.
+
+    Defines the operator interface used by the legacy parameter shims: a
+    forward map from inputs and weights to outputs (``xw_to_y``), a
+    plain-JAX variant (``raw_xw_to_y``), and gradient helpers.
 
     .. deprecated:: 0.2.0
         Prefer calling the new ETP primitive user-API functions directly
-        (:func:`braintrace.matmul`, :func:`braintrace.conv`, ...).
+        (:func:`braintrace.matmul`, :func:`braintrace.conv`, etc.).
+
+    Parameters
+    ----------
+    is_diagonal : bool, optional
+        Whether the operator is element-wise (diagonal). Default ``False``.
+    name : str, optional
+        Optional operator name.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim. New code should
+    call the ETP primitive functions directly.
     """
     __module__ = 'braintrace'
 
@@ -131,12 +147,25 @@ class ETraceOp:
         raise NotImplementedError
 
     def raw_xw_to_y(self, inputs, weights):
-        """Plain-JAX variant — does NOT emit an ETP primitive.
+        """Compute the forward map without emitting an ETP primitive.
 
-        Used by :class:`NonTempParam` / :class:`FakeETraceParam` so those
-        wrappers do not register an eligibility-trace relation.
-        Default: fall through to ``xw_to_y`` (subclasses that route to
-        an ETP primitive MUST override).
+        Plain-JAX variant of :meth:`xw_to_y`, used by
+        :class:`NonTempParam` and :class:`FakeETraceParam` so those
+        wrappers do not register an eligibility-trace relation. The base
+        implementation falls through to :meth:`xw_to_y`; subclasses that
+        route to an ETP primitive must override this.
+
+        Parameters
+        ----------
+        inputs : Any
+            The input array(s) to the operator.
+        weights : Any
+            The weight pytree.
+
+        Returns
+        -------
+        Any
+            The operator output computed with plain JAX ops.
         """
         return self.xw_to_y(inputs, weights)
 
@@ -159,9 +188,29 @@ class ETraceOp:
 # ---------------------------------------------------------------------------
 
 class MatMulOp(ETraceOp):
-    r"""Legacy dense-matmul op. Routes to :func:`braintrace.matmul`.
+    r"""Legacy dense matrix-multiplication operator.
 
-    Weight is supplied as ``{'weight': ..., 'bias': <optional>}``.
+    Routes :meth:`xw_to_y` to :func:`braintrace.matmul`. The weight is
+    supplied as a dict ``{'weight': ..., 'bias': <optional>}``.
+
+    .. deprecated:: 0.2.0
+        Use :func:`braintrace.matmul` directly.
+
+    Parameters
+    ----------
+    weight_mask : array_like, optional
+        Optional multiplicative mask applied to the weight. Default
+        ``None``.
+    weight_fn : Callable, optional
+        Function applied to the (possibly masked) weight before the
+        matmul. Default is the identity ``lambda w: w``.
+    apply_weight_fn_before_mask : bool, optional
+        If ``True``, ``weight_fn`` is applied before the mask; otherwise
+        after. Default ``False``.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim.
     """
     __module__ = 'braintrace'
 
@@ -221,7 +270,24 @@ class MatMulOp(ETraceOp):
 # ---------------------------------------------------------------------------
 
 class ElemWiseOp(ETraceOp):
-    r"""Legacy element-wise op. Routes to :func:`braintrace.element_wise`."""
+    r"""Legacy element-wise operator.
+
+    Routes :meth:`xw_to_y` to :func:`braintrace.element_wise`, applying a
+    callable element-wise to the weight.
+
+    .. deprecated:: 0.2.0
+        Use :func:`braintrace.element_wise` directly.
+
+    Parameters
+    ----------
+    fn : Callable, optional
+        The element-wise function applied to the weight. Default is the
+        identity ``lambda w: w``.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim.
+    """
     __module__ = 'braintrace'
 
     def __init__(self, fn: Callable = lambda w: w):
@@ -243,9 +309,42 @@ class ElemWiseOp(ETraceOp):
 # ---------------------------------------------------------------------------
 
 class ConvOp(ETraceOp):
-    r"""Legacy convolution op. Routes to :func:`braintrace.conv`.
+    r"""Legacy convolution operator.
 
-    Weight is supplied as ``{'weight': ..., 'bias': <optional>}``.
+    Routes :meth:`xw_to_y` to :func:`braintrace.conv`. The weight is
+    supplied as a dict ``{'weight': ..., 'bias': <optional>}``.
+
+    .. deprecated:: 0.2.0
+        Use :func:`braintrace.conv` directly.
+
+    Parameters
+    ----------
+    xinfo : jax.ShapeDtypeStruct
+        Shape/dtype information describing the convolution input.
+    window_strides : Sequence[int]
+        Strides of the convolution window.
+    padding : Any
+        Padding specification passed to the convolution.
+    lhs_dilation : Sequence[int], optional
+        Dilation factor for the input. Default ``None``.
+    rhs_dilation : Sequence[int], optional
+        Dilation factor for the kernel. Default ``None``.
+    feature_group_count : int, optional
+        Number of feature groups. Default ``1``.
+    batch_group_count : int, optional
+        Number of batch groups. Default ``1``.
+    dimension_numbers : Any, optional
+        Convolution dimension-numbers specification. Default ``None``.
+    weight_mask : array_like, optional
+        Optional multiplicative mask applied to the weight. Default
+        ``None``.
+    weight_fn : Callable, optional
+        Function applied to the (possibly masked) weight. Default is the
+        identity ``lambda w: w``.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim.
     """
     __module__ = 'braintrace'
 
@@ -336,9 +435,27 @@ class ConvOp(ETraceOp):
 # ---------------------------------------------------------------------------
 
 class SpMatMulOp(ETraceOp):
-    r"""Legacy sparse-matmul op. Routes to :func:`braintrace.sparse_matmul`.
+    r"""Legacy sparse matrix-multiplication operator.
 
-    Weight is supplied as ``{'weight': data, 'bias': <optional>}``.
+    Routes :meth:`xw_to_y` to :func:`braintrace.sparse_matmul`. The weight
+    is supplied as a dict ``{'weight': data, 'bias': <optional>}``, where
+    ``data`` holds the values of the sparse matrix.
+
+    .. deprecated:: 0.2.0
+        Use :func:`braintrace.sparse_matmul` directly.
+
+    Parameters
+    ----------
+    sparse_mat : saiunit.sparse.SparseMatrix
+        The sparse matrix whose structure is reused; its data is replaced
+        by the weight values.
+    weight_fn : Callable, optional
+        Function applied to the weight data before the matmul. Default is
+        the identity ``lambda w: w``.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim.
     """
     __module__ = 'braintrace'
 
@@ -384,9 +501,24 @@ class SpMatMulOp(ETraceOp):
 # ---------------------------------------------------------------------------
 
 class LoraOp(ETraceOp):
-    r"""Legacy LoRA op. Routes to :func:`braintrace.lora_matmul`.
+    r"""Legacy LoRA (low-rank adaptation) operator.
 
-    Weight is supplied as ``{'B': ..., 'A': ..., 'bias': <optional>}``.
+    Routes :meth:`xw_to_y` to :func:`braintrace.lora_matmul`. The weight is
+    supplied as a dict ``{'B': ..., 'A': ..., 'bias': <optional>}`` holding
+    the two low-rank factors.
+
+    .. deprecated:: 0.2.0
+        Use :func:`braintrace.lora_matmul` directly.
+
+    Parameters
+    ----------
+    alpha : array_like, optional
+        Scaling factor applied to the low-rank product. Defaults to
+        ``1.0`` when ``None``.
+
+    Notes
+    -----
+    This class is a deprecated back-compatibility shim.
     """
     __module__ = 'braintrace'
 
