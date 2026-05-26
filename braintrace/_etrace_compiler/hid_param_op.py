@@ -63,7 +63,9 @@ from braintrace._compatible_imports import (
     is_cond_primitive,
 )
 from braintrace._etrace_op import (
-    get_primitive_spec,
+    get_trainable_invars,
+    get_x_invar_index,
+    get_y_outvar_index,
     is_etp_primitive,
     is_etp_enable_gradient_primitive,
 )
@@ -229,20 +231,14 @@ def _build_consumer_map(jaxpr: Jaxpr) -> Dict[Var, List[JaxprEqn]]:
 
 
 # ---------------------------------------------------------------------------
-# Spec dispatch — locate weight / x / y vars on a primitive equation
+# Layout dispatch — locate weight / x / y vars on a primitive equation
 # ---------------------------------------------------------------------------
 
 def _resolve_eqn_trainable_invars(
     eqn: JaxprEqn,
 ) -> Dict[str, Var]:
     """Return ``{key: invar_var}`` for every trainable input of *eqn*."""
-    primitive = eqn.primitive
-    spec = get_primitive_spec(primitive)
-    if spec is None:
-        raise RuntimeError(
-            f'ETP primitive {primitive.name} has no registered spec'
-        )
-    key_to_idx = spec.resolve_trainable_invars(eqn.params)
+    key_to_idx = get_trainable_invars(eqn.primitive, eqn.params)
     return {k: eqn.invars[i] for k, i in key_to_idx.items()}
 
 
@@ -251,17 +247,14 @@ def _resolve_eqn_vars(
 ) -> Tuple[Optional[Var], Var]:
     """Return ``(x_var, y_var)`` for an ETP primitive equation."""
     primitive = eqn.primitive
-    spec = get_primitive_spec(primitive)
-    if spec is None:
-        raise RuntimeError(
-            f'ETP primitive {primitive.name} has no registered spec'
-        )
-    if spec.x_invar_index is None:
+    x_invar_index = get_x_invar_index(primitive)
+    y_outvar_index = get_y_outvar_index(primitive)
+    if x_invar_index is None:
         x_var = None
     else:
-        candidate = eqn.invars[spec.x_invar_index]
+        candidate = eqn.invars[x_invar_index]
         x_var = candidate if isinstance(candidate, Var) else None
-    y_var = eqn.outvars[spec.y_outvar_index]
+    y_var = eqn.outvars[y_outvar_index]
     if len(eqn.outvars) > 1:
         emit(
             kind=DiagnosticKind.MULTI_OUTPUT_PRIMITIVE_DETECTED,
@@ -269,11 +262,11 @@ def _resolve_eqn_vars(
             message=(
                 f'ETP primitive {primitive.name} has '
                 f'{len(eqn.outvars)} outputs; using outvar index '
-                f'{spec.y_outvar_index} as y per spec.'
+                f'{y_outvar_index} as y.'
             ),
             primitive=primitive,
             context={'num_outvars': len(eqn.outvars),
-                     'y_outvar_index': spec.y_outvar_index},
+                     'y_outvar_index': y_outvar_index},
         )
     return x_var, y_var
 
@@ -708,9 +701,7 @@ def find_hidden_param_op_relations_from_jaxpr(
         x_var, y_var = _resolve_eqn_vars(eqn)
 
         # --- Resolve every trainable invar declared by the primitive ---
-        spec = get_primitive_spec(primitive)
-        assert spec is not None, f'No registered ETP spec for primitive {primitive.name}.'
-        key_to_idx = spec.resolve_trainable_invars(eqn.params)
+        key_to_idx = get_trainable_invars(primitive, eqn.params)
         trainable_invars_map = {k: eqn.invars[i] for k, i in key_to_idx.items()}
         trainable_vars: Dict[str, Var] = {}
         trainable_paths: Dict[str, Path] = {}

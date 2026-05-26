@@ -20,7 +20,6 @@ module. The submodule layout is:
 
 * :mod:`._registries` — global registries + flag-checking helpers
 * :mod:`._primitive` — :class:`ETPPrimitive` + :func:`register_primitive`
-* :mod:`._spec` — :class:`ETPPrimitiveSpec` + spec-based registration
 * :mod:`.dense` — ``etp_mm_p``, ``etp_mv_p``, :func:`matmul`
 * :mod:`.elemwise` — ``etp_elemwise_p``, :func:`element_wise`
 * :mod:`.conv` — ``etp_conv_p``, :func:`conv`
@@ -39,16 +38,16 @@ from ._registries import (
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_YW_TO_W,
+    ETP_TRAINABLE_INVARS_FNS,
+    ETP_X_INVAR_INDICES,
+    ETP_Y_OUTVAR_INDICES,
     GRADIENT_ENABLED_PRIMITIVES,
+    get_trainable_invars,
+    get_x_invar_index,
+    get_y_outvar_index,
     is_batched_primitive,
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
-)
-from ._spec import (
-    ETP_PRIMITIVE_SPECS,
-    ETPPrimitiveSpec,
-    get_primitive_spec,
-    register_primitive_spec,
 )
 from .conv import _etp_conv_impl
 from .conv import conv, etp_conv_p
@@ -60,11 +59,7 @@ from .sparse import etp_sp_mm_p, etp_sp_mv_p, sparse_matmul
 __all__ = [
     # ETP primitive class & registration
     'ETPPrimitive',
-    'ETPPrimitiveSpec',
     'register_primitive',
-    'register_primitive_spec',
-    'get_primitive_spec',
-    'ETP_PRIMITIVE_SPECS',
 
     # registries + flag helpers
     'ETP_PRIMITIVES',
@@ -72,11 +67,17 @@ __all__ = [
     'ETP_RULES_XY_TO_DW',
     'ETP_RULES_INIT_DRTRL',
     'ETP_RULES_INIT_PP',
+    'ETP_TRAINABLE_INVARS_FNS',
+    'ETP_X_INVAR_INDICES',
+    'ETP_Y_OUTVAR_INDICES',
     'GRADIENT_ENABLED_PRIMITIVES',
     'BATCHED_PRIMITIVES',
     'is_etp_primitive',
     'is_etp_enable_gradient_primitive',
     'is_batched_primitive',
+    'get_trainable_invars',
+    'get_x_invar_index',
+    'get_y_outvar_index',
 
     # primitives
     'etp_mm_p',

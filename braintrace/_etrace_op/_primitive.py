@@ -38,6 +38,9 @@ from ._registries import (
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_YW_TO_W,
+    ETP_TRAINABLE_INVARS_FNS,
+    ETP_X_INVAR_INDICES,
+    ETP_Y_OUTVAR_INDICES,
     GRADIENT_ENABLED_PRIMITIVES,
 )
 
@@ -111,7 +114,16 @@ class ETPPrimitive(Primitive):
             ETP_RULES_INIT_PP[self] = init_pp
 
 
-def register_primitive(name, impl_fn, *, batched=False, gradient_enabled=False):
+def register_primitive(
+    name,
+    impl_fn,
+    *,
+    batched=False,
+    gradient_enabled=False,
+    trainable_invars_fn=None,
+    x_invar_index=0,
+    y_outvar_index=0,
+):
     """Create an :class:`ETPPrimitive` with all JAX rules auto-derived.
 
     The following rules are installed automatically:
@@ -133,6 +145,16 @@ def register_primitive(name, impl_fn, *, batched=False, gradient_enabled=False):
         gradient_enabled: If True, the compiler will *evaluate* this primitive
             when walking ``y -> h`` (identity-like ops such as
             ``etp_elemwise_p``).
+        trainable_invars_fn: Function ``eqn.params -> {key: invar_index}``
+            declaring the primitive's full trainable-input layout. Used by the
+            compiler and executors to support N-trainable-input primitives
+            (e.g. ``{weight, bias}`` for Linear, ``{B, A, bias}`` for LoRA). If
+            ``None``, the compiler falls back to the single-weight
+            ``{'weight': 1}`` layout.
+        x_invar_index: Position of the input ``x`` in ``eqn.invars``, or
+            ``None`` for primitives with no external input (currently only
+            ``etp_elemwise_p``).
+        y_outvar_index: Position of the output ``y`` in ``eqn.outvars``.
 
     Returns:
         :class:`ETPPrimitive`: the registered primitive.
@@ -143,6 +165,10 @@ def register_primitive(name, impl_fn, *, batched=False, gradient_enabled=False):
         BATCHED_PRIMITIVES.add(p)
     if gradient_enabled:
         GRADIENT_ENABLED_PRIMITIVES.add(p)
+    if trainable_invars_fn is not None:
+        ETP_TRAINABLE_INVARS_FNS[p] = trainable_invars_fn
+    ETP_X_INVAR_INDICES[p] = x_invar_index
+    ETP_Y_OUTVAR_INDICES[p] = y_outvar_index
 
     p.def_impl(impl_fn)
 

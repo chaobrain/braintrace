@@ -222,11 +222,9 @@ class TestPublicAPIRoundTrip:
 
 class TestElemwiseDictRules:
 
-    def test_spec_declares_trainable_invars_fn(self):
-        from braintrace._etrace_op import get_primitive_spec
-        spec = get_primitive_spec(etp_elemwise_p)
-        assert spec.trainable_invars_fn is not None
-        assert spec.resolve_trainable_invars({}) == {'weight': 0}
+    def test_declares_trainable_invars(self):
+        from braintrace._etrace_op import get_trainable_invars
+        assert get_trainable_invars(etp_elemwise_p, {}) == {'weight': 0}
 
     def test_xy_to_dw_returns_dict(self):
         hidden_dim = jnp.ones((3, 4))

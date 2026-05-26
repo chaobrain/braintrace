@@ -81,7 +81,7 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from ._spec import ETPPrimitiveSpec, register_primitive_spec
+from ._primitive import register_primitive
 
 __all__ = [
     'etp_sp_mm_p',
@@ -286,32 +286,32 @@ def _sp_mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
 # Primitive registration
 # ---------------------------------------------------------------------------
 
-etp_sp_mm_p = register_primitive_spec(
-    ETPPrimitiveSpec(
-        name='etp_sp_mm',
-        impl=_etp_sp_matmul_impl,
-        yw_to_w=_sp_mm_yw_to_w,
-        xy_to_dw=_sp_xy_to_dw,
-        init_drtrl=_sp_mm_init_drtrl,
-        init_pp=_sp_mm_init_pp,
-        trainable_invars_fn=_sp_trainable_invars,
-        x_invar_index=0,
-        batched=True,
-    )
+etp_sp_mm_p = register_primitive(
+    'etp_sp_mm',
+    _etp_sp_matmul_impl,
+    batched=True,
+    trainable_invars_fn=_sp_trainable_invars,
+    x_invar_index=0,
+)
+etp_sp_mm_p.register_etp_rules(
+    yw_to_w=_sp_mm_yw_to_w,
+    xy_to_dw=_sp_xy_to_dw,
+    init_drtrl=_sp_mm_init_drtrl,
+    init_pp=_sp_mm_init_pp,
 )
 
-etp_sp_mv_p = register_primitive_spec(
-    ETPPrimitiveSpec(
-        name='etp_sp_mv',
-        impl=_etp_sp_matmul_impl,
-        yw_to_w=_sp_mv_yw_to_w,
-        xy_to_dw=_sp_xy_to_dw,
-        init_drtrl=_sp_mv_init_drtrl,
-        init_pp=_sp_mv_init_pp,
-        trainable_invars_fn=_sp_trainable_invars,
-        x_invar_index=0,
-        batched=False,
-    )
+etp_sp_mv_p = register_primitive(
+    'etp_sp_mv',
+    _etp_sp_matmul_impl,
+    batched=False,
+    trainable_invars_fn=_sp_trainable_invars,
+    x_invar_index=0,
+)
+etp_sp_mv_p.register_etp_rules(
+    yw_to_w=_sp_mv_yw_to_w,
+    xy_to_dw=_sp_xy_to_dw,
+    init_drtrl=_sp_mv_init_drtrl,
+    init_pp=_sp_mv_init_pp,
 )
 
 

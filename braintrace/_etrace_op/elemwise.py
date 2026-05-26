@@ -65,7 +65,7 @@ primitive when composing Jacobians).
 import jax.numpy as jnp
 import saiunit as u
 
-from ._spec import ETPPrimitiveSpec, register_primitive_spec
+from ._primitive import register_primitive
 
 __all__ = [
     'etp_elemwise_p',
@@ -177,19 +177,19 @@ def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_elemwise_p = register_primitive_spec(
-    ETPPrimitiveSpec(
-        name='etp_elemwise',
-        impl=_etp_elemwise_impl,
-        yw_to_w=_elemwise_yw_to_w,
-        xy_to_dw=_elemwise_xy_to_dw,
-        init_drtrl=_elemwise_init_drtrl,
-        init_pp=_elemwise_init_pp,
-        trainable_invars_fn=_elem_trainable_invars,
-        x_invar_index=None,
-        batched=False,
-        gradient_enabled=True,
-    )
+etp_elemwise_p = register_primitive(
+    'etp_elemwise',
+    _etp_elemwise_impl,
+    batched=False,
+    gradient_enabled=True,
+    trainable_invars_fn=_elem_trainable_invars,
+    x_invar_index=None,
+)
+etp_elemwise_p.register_etp_rules(
+    yw_to_w=_elemwise_yw_to_w,
+    xy_to_dw=_elemwise_xy_to_dw,
+    init_drtrl=_elemwise_init_drtrl,
+    init_pp=_elemwise_init_pp,
 )
 
 

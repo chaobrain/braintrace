@@ -75,7 +75,7 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
-from ._spec import ETPPrimitiveSpec, register_primitive_spec
+from ._primitive import register_primitive
 
 __all__ = [
     'etp_conv_p',
@@ -428,18 +428,18 @@ def _conv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-etp_conv_p = register_primitive_spec(
-    ETPPrimitiveSpec(
-        name='etp_conv',
-        impl=_etp_conv_impl,
-        yw_to_w=_conv_yw_to_w,
-        xy_to_dw=_conv_xy_to_dw,
-        init_drtrl=_conv_init_drtrl,
-        init_pp=_conv_init_pp,
-        trainable_invars_fn=_conv_trainable_invars,
-        x_invar_index=0,
-        batched=True,
-    )
+etp_conv_p = register_primitive(
+    'etp_conv',
+    _etp_conv_impl,
+    batched=True,
+    trainable_invars_fn=_conv_trainable_invars,
+    x_invar_index=0,
+)
+etp_conv_p.register_etp_rules(
+    yw_to_w=_conv_yw_to_w,
+    xy_to_dw=_conv_xy_to_dw,
+    init_drtrl=_conv_init_drtrl,
+    init_pp=_conv_init_pp,
 )
 
 

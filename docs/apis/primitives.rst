@@ -14,25 +14,28 @@ ETP-specific rules every primitive must provide. The built-in primitives
 through this same machinery — adding a custom op uses the same surface.
 
 
-Two registration styles
------------------------
+Registration
+-----------
 
-There are two equivalent ways to register a primitive. Pick whichever
-fits your codebase:
+Register a primitive by calling :func:`register_primitive` to obtain an
+:class:`ETPPrimitive`, then attach the four ETP rules via its
+``register_*`` methods (or in one call via ``register_etp_rules``).
 
-* **Class-based** — call :func:`register_primitive` to obtain an
-  :class:`ETPPrimitive`, then attach the four rules via its
-  ``register_*`` methods. Best for incremental development where you
-  want to register rules close to where they are defined.
-* **Spec-based** — declare an :class:`ETPPrimitiveSpec` (a single
-  dataclass-like value), then pass it to
-  :func:`register_primitive_spec`. Best when you want a single object
-  that fully describes the primitive (useful for testing and for the
-  compiler's ``get_primitive_spec`` query).
+Beyond the implementation function, :func:`register_primitive` accepts a
+few keyword arguments that record the primitive's invar / outvar layout
+for the compiler:
 
-Both styles populate the same four global registries
+* ``trainable_invars_fn`` — ``eqn.params -> {key: invar_index}``,
+  declaring every trainable input (e.g. ``{'weight': 1}`` for a plain
+  matmul, ``{'weight': 1, 'bias': 2}`` when a bias is present). Defaults
+  to the single-weight ``{'weight': 1}`` layout when omitted.
+* ``x_invar_index`` — position of the input ``x`` in ``eqn.invars``
+  (``None`` for input-free primitives such as ``etp_elemwise_p``).
+* ``y_outvar_index`` — position of the output ``y`` in ``eqn.outvars``.
+
+The call populates the same four global rule registries
 (:data:`ETP_RULES_YW_TO_W`, :data:`ETP_RULES_XY_TO_DW`,
-:data:`ETP_RULES_INIT_DRTRL`, :data:`ETP_RULES_INIT_PP`) and result in a
+:data:`ETP_RULES_INIT_DRTRL`, :data:`ETP_RULES_INIT_PP`) and results in a
 fully-functional ``ETPPrimitive``.
 
 
@@ -44,12 +47,10 @@ Registration entry points
    :nosignatures:
 
    register_primitive
-   register_primitive_spec
-   get_primitive_spec
 
 
-Primitive class & spec
-----------------------
+Primitive class
+---------------
 
 .. autosummary::
    :toctree: generated/
@@ -57,7 +58,6 @@ Primitive class & spec
    :template: classtemplate.rst
 
    ETPPrimitive
-   ETPPrimitiveSpec
 
 
 The four ETP rules
@@ -93,11 +93,11 @@ time.
        shaped to hold the IO-dim trace.
 
 The four registries live in :mod:`braintrace._etrace_op` and are
-populated by both registration styles.
+populated by :func:`register_primitive`.
 
 
-Class-based example
--------------------
+Registration example
+--------------------
 
 .. code-block:: python
 
@@ -108,7 +108,13 @@ Class-based example
    def _my_impl(x, w, *, scale=1.0):
        return scale * (x @ w)
 
-   my_p = braintrace.register_primitive('etp_my_op', _my_impl, batched=True)
+   my_p = braintrace.register_primitive(
+       'etp_my_op',
+       _my_impl,
+       batched=True,
+       trainable_invars_fn=lambda params: {'weight': 1},
+       x_invar_index=0,
+   )
 
    # Rules can be registered one-by-one, or in a single call via
    # ``register_etp_rules(yw_to_w=..., xy_to_dw=..., ...)``.
@@ -136,39 +142,6 @@ After registration the primitive is ready to use:
    w = jnp.ones((3, 5))
    y = my_p.bind(x, w, scale=0.5)         # all standard JAX rules work
    gw = jax.grad(lambda w_: my_p.bind(x, w_, scale=0.5).sum())(w)
-
-
-Spec-based example
-------------------
-
-.. code-block:: python
-
-   import jax
-   import jax.numpy as jnp
-   import braintrace
-
-   def _impl(x, w, *, scale=1.0):
-       return scale * (x @ w)
-
-   spec = braintrace.ETPPrimitiveSpec(
-       name='etp_my_op',
-       impl=_impl,
-       yw_to_w=lambda hidden, trace, **p: trace * hidden[None, :],
-       xy_to_dw=lambda x, hidden, w, **p:
-           jax.vjp(lambda w_: _impl(x, w_, **p), w)[1](hidden)[0],
-       init_drtrl=lambda x_var, y_var, w, ns:
-           jnp.zeros((x_var.aval.shape[0], *jnp.shape(w.value), ns)),
-       init_pp=lambda x_var, y_var, w, ns:
-           jnp.zeros((*y_var.aval.shape, ns), dtype=y_var.aval.dtype),
-       weight_invar_index=1,
-       x_invar_index=0,
-       batched=True,
-   )
-
-   my_p = braintrace.register_primitive_spec(spec)
-
-   # Later, the compiler can query the spec it was built from:
-   assert braintrace.get_primitive_spec(my_p) is spec
 
 
 Auto-derived JAX rules
