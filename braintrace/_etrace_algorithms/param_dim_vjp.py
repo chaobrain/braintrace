@@ -385,23 +385,32 @@ def _normalize_vector(v):
     return v / jnp.maximum(max_elem, 1.0)
 
 
-def _fast_solve_contract(primitive, diag_like, etrace_data):
+def _fast_solve_contract(primitive, diag_like, etrace_data, fold_batch=False):
     """Solve-time closed-form contraction for mm/mv/elemwise.
 
     ``diag_like`` is the dl/dh group gradient with shape ``(*y_shape, num_state)``;
     ``etrace_data`` is the weight-shaped trace dict. The solver computes
     ``sum_alpha diag_like[..., alpha] * yw_to_w(etrace[..., alpha])``, which
     for elementwise ``yw_to_w`` is an einsum along the ``num_state`` axis.
+
+    When ``fold_batch`` is True the leading batch axis ``b`` is contracted inside
+    the einsum, so the result is the already batch-summed gradient. This avoids
+    materializing a ``(B, I, O)`` intermediate and a follow-up ``sum(axis=0)``.
+    It assumes exactly one leading batch axis (the same assumption the trailing
+    ``sum(axis=0)`` already makes).
     """
     if primitive is etp_elemwise_p:
+        spec = 'b...a,b...a->...' if fold_batch else '...a,...a->...'
         return {
-            'weight': jnp.einsum('...a,...a->...', diag_like, etrace_data['weight']),
+            'weight': jnp.einsum(spec, diag_like, etrace_data['weight']),
         }
+    w_spec = 'bka,bika->ik' if fold_batch else '...ka,...ika->...ik'
     out = {
-        'weight': jnp.einsum('...ka,...ika->...ik', diag_like, etrace_data['weight']),
+        'weight': jnp.einsum(w_spec, diag_like, etrace_data['weight']),
     }
     if 'bias' in etrace_data:
-        out['bias'] = jnp.einsum('...ka,...ka->...k', diag_like, etrace_data['bias'])
+        b_spec = 'bka,bka->k' if fold_batch else '...ka,...ka->...k'
+        out['bias'] = jnp.einsum(b_spec, diag_like, etrace_data['bias'])
     return out
 
 

@@ -27,6 +27,7 @@ from braintrace._etrace_algorithms.param_dim_vjp import (
     _normalize_vector,
     _normalize_matrix_spectrum,
     _remove_units,
+    _fast_solve_contract,
 )
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
@@ -40,6 +41,7 @@ from braintrace._etrace_model_test import (
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
 )
+from braintrace._etrace_op import etp_mm_p
 
 
 # ---------------------------------------------------------------------------
@@ -1074,3 +1076,31 @@ class TestMultiStateUnaffected:
             fast = _run_updates(ParamDimVjpAlgorithm(m_fast, fast_solve=True), xs)
             legacy = _run_updates(ParamDimVjpAlgorithm(m_legacy, fast_solve=False), xs)
             _assert_etrace_lists_equal(fast, legacy, exact=False, rtol=1e-5, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# T2 Part 2 — batch-fold the solve einsum
+# ---------------------------------------------------------------------------
+
+class TestSolveBatchFold:
+    """Folding the batch axis into the solve einsum must equal the old
+    'per-batch contraction then sum(axis=0)' result (reduction reassociation,
+    not bit-identical)."""
+
+    def test_fast_solve_contract_fold_equals_unfold_sum(self):
+        B, I, O, S = 3, 2, 4, 1
+        diag_like = brainstate.random.randn(B, O, S)
+        etrace = {
+            'weight': brainstate.random.randn(B, I, O, S),
+            'bias': brainstate.random.randn(B, O, S),
+        }
+        # reference: current per-batch contraction, then explicit batch sum
+        ref = _fast_solve_contract(etp_mm_p, diag_like, etrace)
+        ref_w = ref['weight'].sum(axis=0)   # (I, O)
+        ref_b = ref['bias'].sum(axis=0)     # (O,)
+        # new: fold the batch axis inside the einsum
+        folded = _fast_solve_contract(etp_mm_p, diag_like, etrace, fold_batch=True)
+        assert folded['weight'].shape == (I, O)
+        assert folded['bias'].shape == (O,)
+        npt.assert_allclose(folded['weight'], ref_w, atol=1e-6)
+        npt.assert_allclose(folded['bias'], ref_b, atol=1e-6)
