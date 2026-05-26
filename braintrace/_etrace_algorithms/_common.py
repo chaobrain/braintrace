@@ -30,7 +30,31 @@ __all__ = [
 ]
 
 
-class PresynapticTrace(brainstate.ShortTermState):
+class _ZeroResetState(brainstate.ShortTermState):
+    """``ShortTermState`` that records its init shape/dtype and resets to zeros.
+
+    Both :class:`PresynapticTrace` and :class:`KappaFilter` are leaky scalar-rate
+    accumulators that share the same reset semantics: on ``reset_state`` they are
+    re-zeroed at the original shape, optionally with the leading dimension swapped
+    for ``batch_size`` (or prepended for scalar-shaped states).
+    """
+
+    def __init__(self, init_value):
+        super().__init__(init_value)
+        self._init_shape = jnp.shape(init_value)
+        self._init_dtype = init_value.dtype
+
+    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
+        if batch_size is None:
+            shape = self._init_shape
+        elif len(self._init_shape) == 0:
+            shape = (batch_size,)
+        else:
+            shape = (batch_size, *self._init_shape[1:])
+        self.value = jnp.zeros(shape, dtype=self._init_dtype)
+
+
+class PresynapticTrace(_ZeroResetState):
     """Leaky accumulator ``â ← λ·â + x_t`` used by OTTT and OTPE-Approx.
 
     Parameters
@@ -48,25 +72,14 @@ class PresynapticTrace(brainstate.ShortTermState):
         if not (0.0 < leak < 1.0):
             raise ValueError(f'leak must be in (0, 1); got {leak}')
         self.leak = float(leak)
-        self._init_shape = jnp.shape(init_value)
-        self._init_dtype = init_value.dtype
 
     def update(self, x):
         """Apply one accumulation step: â ← λ·â + x."""
         self.value = self.leak * self.value + x
         return self.value
 
-    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
-        if batch_size is None:
-            shape = self._init_shape
-        elif len(self._init_shape) == 0:
-            shape = (batch_size,)
-        else:
-            shape = (batch_size, *self._init_shape[1:])
-        self.value = jnp.zeros(shape, dtype=self._init_dtype)
 
-
-class KappaFilter(brainstate.ShortTermState):
+class KappaFilter(_ZeroResetState):
     """Low-pass output-side filter ``x_filt ← (1-κ)·x + κ·x_filt`` used by EProp.
 
     Parameters
@@ -83,22 +96,11 @@ class KappaFilter(brainstate.ShortTermState):
         if not (0.0 <= kappa < 1.0):
             raise ValueError(f'kappa must be in [0, 1); got {kappa}')
         self.kappa = float(kappa)
-        self._init_shape = jnp.shape(init_value)
-        self._init_dtype = init_value.dtype
 
     def update(self, x):
         new = (1.0 - self.kappa) * x + self.kappa * self.value
         self.value = new
         return new
-
-    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
-        if batch_size is None:
-            shape = self._init_shape
-        elif len(self._init_shape) == 0:
-            shape = (batch_size,)
-        else:
-            shape = (batch_size, *self._init_shape[1:])
-        self.value = jnp.zeros(shape, dtype=self._init_dtype)
 
 
 class FixedRandomFeedback:

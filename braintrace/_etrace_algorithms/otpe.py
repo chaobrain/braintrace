@@ -122,18 +122,15 @@ class OTPE(ETraceVjpAlgorithm):
 
     def reset_state(self, batch_size: Optional[int] = None, **kwargs):
         self.running_index.value = 0
-        for r in self._R_hat.values():
-            shape = r.value.shape
+
+        def _rezero(state):
+            shape = state.value.shape
             new_shape = (batch_size, *shape[1:]) if batch_size is not None else shape
-            r.value = jnp.zeros(new_shape, dtype=r.value.dtype)
-        for r in self._R_hat_x.values():
-            shape = r.value.shape
-            new_shape = (batch_size, *shape[1:]) if batch_size is not None else shape
-            r.value = jnp.zeros(new_shape, dtype=r.value.dtype)
-        for r in self._R_hat_g.values():
-            shape = r.value.shape
-            new_shape = (batch_size, *shape[1:]) if batch_size is not None else shape
-            r.value = jnp.zeros(new_shape, dtype=r.value.dtype)
+            state.value = jnp.zeros(new_shape, dtype=state.value.dtype)
+
+        for store in (self._R_hat, self._R_hat_x, self._R_hat_g):
+            for r in store.values():
+                _rezero(r)
 
     def _get_etrace_data(self):
         if self.mode == 'full':
