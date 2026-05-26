@@ -36,6 +36,7 @@ from braintrace._typing import (
     PyTree,
     WeightID,
     Path,
+    DTypeLike,
     ETraceX_Key,
     ETraceDF_Key,
     ETraceWG_Key,
@@ -65,15 +66,31 @@ __all__ = [
 _ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 
 
+def _cast_to_dtype(tree, dtype):
+    """Cast every array leaf of ``tree`` to ``dtype`` (unit-safe; ``None`` -> no-op).
+
+    Used to store the eligibility trace — and the inputs to its update — at a
+    reduced precision (e.g. ``bfloat16``). The fast path operates on unitless
+    arrays, but the ``is_leaf`` guard keeps the helper correct if a leaf ever
+    carries a unit.
+    """
+    if dtype is None:
+        return tree
+    return jax.tree.map(lambda a: a.astype(dtype), tree, is_leaf=u.math.is_quantity)
+
+
 def _init_param_dim_state(
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State],
-    relation: HiddenParamOpRelation
+    relation: HiddenParamOpRelation,
+    trace_dtype: Optional[DTypeLike] = None,
 ):
     """
     Initialize the eligibility trace states for parameter dimensions.
 
     Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
-    trainable-input names (dict-based rule API).
+    trainable-input names (dict-based rule API). When ``trace_dtype`` is set and
+    the primitive uses the elementwise fast path (mm/mv/elemwise), the trace is
+    allocated at that reduced precision; conv/sparse/LoRA keep native precision.
     """
     group: HiddenGroup
     for group in relation.hidden_groups:
@@ -92,10 +109,12 @@ def _init_param_dim_state(
                 f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
                 f'got {type(init_val).__name__}.'
             )
+        if relation.primitive in _ELEMENTWISE_YW_PRIMITIVES:
+            init_val = _cast_to_dtype(init_val, trace_dtype)
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
 
-def _fast_recurrent_term(primitive, diag, old_bwg):
+def _fast_recurrent_term(primitive, diag, old_bwg, num_state):
     """Closed-form ``D^t * eps^{t-1}`` for primitives with an elementwise
     ``yw_to_w`` rule.
 
@@ -111,7 +130,22 @@ def _fast_recurrent_term(primitive, diag, old_bwg):
                                        * trace[b..., i, k, beta]
     which maps exactly to ``einsum('...kab,...ikb->...ika')``. For elemwise
     the ``i`` axis disappears and it reduces to ``einsum('...ab,...b->...a')``.
+
+    When ``num_state == 1`` (the common single-state case) both state axes have
+    size 1, so the sum over ``beta`` collapses to a single term and the whole
+    contraction becomes a broadcast multiply — bit-identical to the einsum but
+    with no degenerate ``dot_general``. ``diag[..., 0, 0]`` indexes the hidden
+    (``k``) axis.
     """
+    if num_state == 1:
+        if primitive is etp_elemwise_p:
+            # diag[..., 0, :] keeps the size-1 beta axis to align with trace.
+            return {'weight': diag[..., 0, :] * old_bwg['weight']}
+        d = diag[..., 0, 0]  # (*varshape) ending in the hidden ``k`` axis
+        out = {'weight': d[..., None, :, None] * old_bwg['weight']}
+        if 'bias' in old_bwg:
+            out['bias'] = d[..., None] * old_bwg['bias']
+        return out
     if primitive is etp_elemwise_p:
         return {
             'weight': jnp.einsum('...ab,...b->...a', diag, old_bwg['weight']),
@@ -154,6 +188,7 @@ def _update_param_dim_etrace_scan_fn(
     hidden_param_op_relations,
     normalize_matrix_spectrum: bool = False,
     fast_solve: bool = True,
+    trace_dtype: Optional[DTypeLike] = None,
 ):
     """
     Update the eligibility trace values for parameter dimensions.
@@ -281,8 +316,16 @@ def _update_param_dim_etrace_scan_fn(
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
 
             # Instantaneous term: diag(D_f^t) ⊗ x^t  (Dict[str, Array]).
+            # Cast the update inputs to ``trace_dtype`` (no-op when None) so the
+            # multiply-add runs in the trace precision and the new trace stays
+            # there; Jacobians/learning-signal remain full precision elsewhere.
             if use_fast:
-                phg_to_pw = _fast_instant_term(relation.primitive, x, df, has_bias)
+                phg_to_pw = _fast_instant_term(
+                    relation.primitive,
+                    _cast_to_dtype(x, trace_dtype),
+                    _cast_to_dtype(df, trace_dtype),
+                    has_bias,
+                )
             else:
                 phg_to_pw = _comp_instant_legacy(df)
             if normalize_matrix_spectrum:
@@ -295,7 +338,12 @@ def _update_param_dim_etrace_scan_fn(
 
             # Recurrent term: D^t · ε^{t-1}.
             if use_fast:
-                new_bwg_pre = _fast_recurrent_term(relation.primitive, diag, old_bwg)
+                new_bwg_pre = _fast_recurrent_term(
+                    relation.primitive,
+                    _cast_to_dtype(diag, trace_dtype),
+                    old_bwg,
+                    group.num_state,
+                )
             else:
                 new_bwg_pre = _comp_recurrent_legacy(diag, old_bwg, group.num_state)
 
@@ -337,23 +385,32 @@ def _normalize_vector(v):
     return v / jnp.maximum(max_elem, 1.0)
 
 
-def _fast_solve_contract(primitive, diag_like, etrace_data):
+def _fast_solve_contract(primitive, diag_like, etrace_data, fold_batch=False):
     """Solve-time closed-form contraction for mm/mv/elemwise.
 
     ``diag_like`` is the dl/dh group gradient with shape ``(*y_shape, num_state)``;
     ``etrace_data`` is the weight-shaped trace dict. The solver computes
     ``sum_alpha diag_like[..., alpha] * yw_to_w(etrace[..., alpha])``, which
     for elementwise ``yw_to_w`` is an einsum along the ``num_state`` axis.
+
+    When ``fold_batch`` is True the leading batch axis ``b`` is contracted inside
+    the einsum, so the result is the already batch-summed gradient. This avoids
+    materializing a ``(B, I, O)`` intermediate and a follow-up ``sum(axis=0)``.
+    It assumes exactly one leading batch axis (the same assumption the trailing
+    ``sum(axis=0)`` already makes).
     """
     if primitive is etp_elemwise_p:
+        spec = 'b...a,b...a->...' if fold_batch else '...a,...a->...'
         return {
-            'weight': jnp.einsum('...a,...a->...', diag_like, etrace_data['weight']),
+            'weight': jnp.einsum(spec, diag_like, etrace_data['weight']),
         }
+    w_spec = 'bka,bika->ik' if fold_batch else '...ka,...ika->...ik'
     out = {
-        'weight': jnp.einsum('...ka,...ika->...ik', diag_like, etrace_data['weight']),
+        'weight': jnp.einsum(w_spec, diag_like, etrace_data['weight']),
     }
     if 'bias' in etrace_data:
-        out['bias'] = jnp.einsum('...ka,...ka->...k', diag_like, etrace_data['bias'])
+        b_spec = 'bka,bka->k' if fold_batch else '...ka,...ka->...k'
+        out['bias'] = jnp.einsum(b_spec, diag_like, etrace_data['bias'])
     return out
 
 
@@ -388,6 +445,9 @@ def _solve_param_dim_weight_gradients(
     """
     # update the etrace weight gradients
     temp_data: Dict[Path, PyTree] = dict()
+    # Paths whose gradient was already batch-reduced inside the fast-path einsum
+    # (fold_batch). The trailing batch-sum must skip these.
+    folded_paths: set = set()
     for relation in weight_hidden_relations:
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
@@ -415,10 +475,25 @@ def _solve_param_dim_weight_gradients(
             dg_hidden_unitless, _ = _remove_units(dg_hidden)
 
             if use_fast:
-                # Closed-form einsum path for mm/mv/elemwise primitives.
-                dg_weight_dict = _fast_solve_contract(
-                    relation.primitive, dg_hidden_unitless, etrace_data_unitless
+                # Upcast a reduced-precision trace to (at least) the learning-
+                # signal dtype so the gradient reduction accumulates in full
+                # precision. ``promote_types`` never downcasts, so this is a
+                # no-op for the default fp32 trace.
+                sig_dtype = jax.tree.leaves(dg_hidden_unitless)[0].dtype
+                etrace_for_solve = jax.tree.map(
+                    lambda a: a.astype(jnp.promote_types(a.dtype, sig_dtype)),
+                    etrace_data_unitless,
                 )
+                # Closed-form einsum path for mm/mv/elemwise primitives. For a
+                # batched primitive, fold the batch reduction into the einsum so
+                # no (B, I, O) intermediate is materialized; record the routed
+                # paths so the trailing batch-sum skips them (already reduced).
+                dg_weight_dict = _fast_solve_contract(
+                    relation.primitive, dg_hidden_unitless, etrace_for_solve,
+                    fold_batch=batched,
+                )
+                if batched:
+                    folded_paths.update(relation.trainable_paths.values())
             elif group.num_state == 1:
                 # num_state==1 shortcut: skip outer vmap of size 1.
                 dg_hid_squeezed = jax.tree.map(
@@ -448,6 +523,9 @@ def _solve_param_dim_weight_gradients(
     has_batched = any(is_batched_primitive(r.primitive) for r in weight_hidden_relations)
     if has_batched:
         for key, val in temp_data.items():
+            if key in folded_paths:
+                # already batch-reduced inside the fast-path einsum (fold_batch)
+                continue
             temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
 
     # update the weight gradients
@@ -600,6 +678,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         normalize_matrix_spectrum: bool = False,
+        trace_dtype: Optional[DTypeLike] = None,
         **kwargs,
     ):
         super().__init__(model, name=name, vjp_method=vjp_method)
@@ -612,6 +691,23 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # implementation applied this unconditionally to the instantaneous
         # term only, which silently distorted gradients.
         self.normalize_matrix_spectrum = normalize_matrix_spectrum
+        # Optional reduced-precision storage for the eligibility trace (e.g.
+        # ``jnp.bfloat16`` / ``jnp.float16``); ``None`` keeps native fp32. Only
+        # the mm/mv/elemwise fast path honors it. Reduced-precision eigenvalues
+        # are unreliable, so this is incompatible with spectral normalization.
+        if (
+            trace_dtype is not None
+            and normalize_matrix_spectrum
+            and jnp.issubdtype(jnp.dtype(trace_dtype), jnp.floating)
+            and jnp.dtype(trace_dtype).itemsize < 4
+        ):
+            raise ValueError(
+                f'trace_dtype={trace_dtype!r} has reduced precision (<4 bytes), '
+                'which is incompatible with normalize_matrix_spectrum=True: '
+                'spectral normalization needs full-precision eigenvalues. Use '
+                'trace_dtype=None (or float32) with normalization, or disable it.'
+            )
+        self.trace_dtype = trace_dtype
 
     def init_etrace_state(self, *args, **kwargs):
         """Initialize the eligibility trace states of the etrace algorithm.
@@ -622,7 +718,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # The states of batched weight gradients
         self.etrace_bwg = dict()
         for relation in self.graph.hidden_param_op_relations:
-            _init_param_dim_state(self.etrace_bwg, relation)
+            _init_param_dim_state(self.etrace_bwg, relation, self.trace_dtype)
 
     def reset_state(self, batch_size: int = None, **kwargs):
         """Reset the eligibility trace states.
@@ -775,6 +871,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             hidden_param_op_relations=self.graph.hidden_param_op_relations,
             normalize_matrix_spectrum=self.normalize_matrix_spectrum,
             fast_solve=self.fast_solve,
+            trace_dtype=self.trace_dtype,
         )
 
         if input_is_multi_step:

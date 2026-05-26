@@ -27,6 +27,7 @@ from braintrace._etrace_algorithms.param_dim_vjp import (
     _normalize_vector,
     _normalize_matrix_spectrum,
     _remove_units,
+    _fast_solve_contract,
 )
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
@@ -40,6 +41,7 @@ from braintrace._etrace_model_test import (
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
 )
+from braintrace._etrace_op import etp_mm_p
 
 
 # ---------------------------------------------------------------------------
@@ -864,3 +866,303 @@ class TestDRtrlDictTraceStorage:
         assert set(entry.value.keys()) == {'weight'}
         assert entry.value['weight'].shape[0] == 1  # batch
         assert entry.value['weight'].shape[1:3] == (4, 4)  # W shape
+
+
+# ---------------------------------------------------------------------------
+# Helpers for the trace-update specialization + dtype-knob tests
+# ---------------------------------------------------------------------------
+
+def _rnn_mm(seed=0, n=4, bias=False):
+    """Batched single-recurrent-weight tanh RNN -> etp_mm_p, num_state==1."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            k1, k2 = jax.random.split(jax.random.PRNGKey(seed))
+            self.w = brainstate.ParamState(0.3 * jax.random.normal(k1, (n, n)))
+            self.b = brainstate.ParamState(0.1 * jax.random.normal(k2, (n,))) if bias else None
+            self.h = brainstate.HiddenState(jnp.zeros((1, n)))
+
+        def update(self, x):
+            b = self.b.value if self.b is not None else None
+            self.h.value = jax.nn.tanh(braintrace.matmul(self.h.value + x, self.w.value, b))
+            return self.h.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _rnn_mv(seed=0, n=4):
+    """Unbatched single-recurrent-weight tanh RNN -> etp_mv_p, num_state==1."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.3 * jax.random.normal(jax.random.PRNGKey(seed), (n, n))
+            )
+            self.h = brainstate.HiddenState(jnp.zeros((n,)))
+
+        def update(self, x):
+            self.h.value = jax.nn.tanh(braintrace.matmul(self.h.value + x, self.w.value))
+            return self.h.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net)
+    return net
+
+
+def _run_updates(algo, xs):
+    """Compile, init, run len(xs) eager updates; return etrace_bwg snapshot.
+
+    Returns the etrace values as an ordered list of per-key dicts (keys differ
+    across algo instances, but relation/group iteration order is deterministic
+    for identical models, so positional comparison is valid)."""
+    algo.compile_graph(xs[0])
+    algo.init_etrace_state()
+    for t in range(xs.shape[0]):
+        algo.update(xs[t])
+    return [v.value for v in algo.etrace_bwg.values()]
+
+
+def _assert_etrace_lists_equal(a_list, b_list, *, exact=True, rtol=0.0, atol=0.0,
+                               canon_state_axis=False):
+    # ``canon_state_axis`` sorts the trailing num_state axis before comparing.
+    # A hidden group's member states are stored in a frozenset-derived order
+    # (compiler grouping), so the num_state column order is not stable across
+    # two independent model constructions. That order is self-consistent within
+    # one algorithm (trace and solve share the same group), so gradients are
+    # unaffected; only a positional cross-algo trace comparison sees the
+    # permutation. Sorting that axis canonicalizes it without hiding genuine
+    # value differences (a dropped cross-state coupling changes magnitudes,
+    # which survive the sort).
+    def _canon(v):
+        return jax.tree.map(lambda a: u.math.sort(a, axis=-1), v) if canon_state_axis else v
+
+    assert len(a_list) == len(b_list) >= 1
+    for da, db in zip(a_list, b_list):
+        assert set(da.keys()) == set(db.keys())
+        for k in da:
+            av = _canon(jax.tree.map(u.get_mantissa, da[k]))
+            bv = _canon(jax.tree.map(u.get_mantissa, db[k]))
+            if exact:
+                npt.assert_array_equal(av, bv)
+            else:
+                npt.assert_allclose(av, bv, rtol=rtol, atol=atol)
+
+
+# ---------------------------------------------------------------------------
+# Change B — S==1 recurrent trace update is bit-identical to the legacy path
+# ---------------------------------------------------------------------------
+
+class TestS1RecurrentBroadcastEqualsLegacy:
+    """The S==1 broadcast specialization of the recurrent trace term must be
+    bit-identical to the legacy nested-vmap path (fast_solve=False).
+
+    The recurrent term is only exercised once the trace is non-zero, i.e. from
+    the 2nd update on, so we run several steps."""
+
+    def _xs_mm(self, n=4, steps=4):
+        return brainstate.random.randn(steps, 1, n)
+
+    def _xs_mv(self, n=4, steps=4):
+        return brainstate.random.randn(steps, n)
+
+    def test_mm_s1_fast_equals_legacy(self):
+        xs = self._xs_mm()
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+    def test_mm_s1_with_bias_fast_equals_legacy(self):
+        xs = self._xs_mm()
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(bias=True), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(bias=True), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+    def test_mv_s1_fast_equals_legacy(self):
+        xs = self._xs_mv()
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+
+# ---------------------------------------------------------------------------
+# Change A — trace_dtype knob (store the eligibility trace in lower precision)
+# ---------------------------------------------------------------------------
+
+class TestTraceDtypeKnob:
+    """trace_dtype stores the eligibility trace at reduced precision (default
+    None = unchanged fp32 behavior). Jacobians and the final gradient stay fp32."""
+
+    def _xs(self, n=4, steps=4):
+        return brainstate.random.randn(steps, 1, n)
+
+    def test_default_is_float32(self):
+        xs = self._xs()
+        algo = ParamDimVjpAlgorithm(_rnn_mm())
+        _run_updates(algo, xs)
+        for v in algo.etrace_bwg.values():
+            for leaf in jax.tree.leaves(v.value):
+                assert u.get_mantissa(leaf).dtype == jnp.float32
+
+    def test_bf16_state_dtype(self):
+        xs = self._xs()
+        algo = ParamDimVjpAlgorithm(_rnn_mm(), trace_dtype=jnp.bfloat16)
+        _run_updates(algo, xs)
+        for v in algo.etrace_bwg.values():
+            for leaf in jax.tree.leaves(v.value):
+                assert u.get_mantissa(leaf).dtype == jnp.bfloat16
+
+    def test_none_equals_default(self):
+        xs = self._xs()
+        a = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(), trace_dtype=None), xs)
+        b = _run_updates(ParamDimVjpAlgorithm(_rnn_mm()), xs)
+        _assert_etrace_lists_equal(a, b, exact=True)
+
+    def test_bf16_grad_close_to_fp32(self):
+        xs = self._xs()
+
+        def grad_of(algo):
+            algo.compile_graph(xs[0])
+            algo.init_etrace_state()
+            algo.update(xs[0])
+            algo.update(xs[1])
+
+            def loss(x_):
+                return (algo.update(x_) ** 2).sum()
+
+            grads, _ = brainstate.transform.grad(
+                loss, algo.param_states, return_value=True
+            )(xs[2])
+            return grads
+
+        g32 = grad_of(ParamDimVjpAlgorithm(_rnn_mm()))
+        gbf = grad_of(ParamDimVjpAlgorithm(_rnn_mm(), trace_dtype=jnp.bfloat16))
+        for k in g32:
+            a = u.get_mantissa(jax.tree.leaves(g32[k])[0])
+            b = u.get_mantissa(jax.tree.leaves(gbf[k])[0])
+            # bf16 trace -> ~2-3 significant digits; assert bounded divergence.
+            npt.assert_allclose(b, a, rtol=0.2, atol=1e-2)
+
+    def test_bf16_with_normalize_raises(self):
+        with pytest.raises((ValueError, AssertionError)):
+            ParamDimVjpAlgorithm(
+                _rnn_mm(), trace_dtype=jnp.bfloat16, normalize_matrix_spectrum=True
+            )
+
+
+# ---------------------------------------------------------------------------
+# The S==1 broadcast branch must NOT perturb the multi-state (num_state>1) path
+# ---------------------------------------------------------------------------
+
+def _alif(n_in=4, n_rec=5):
+    """Adaptive-LIF dense layer -> coupled (V, adaptation) hidden group with
+    num_state==2, exercising the S>1 einsum branch of _fast_recurrent_term."""
+    model = ALIF_Delta_Dense_Layer(n_in, n_rec)
+    brainstate.nn.init_all_states(model)
+    return model
+
+
+def _clone_state_values(src, dst):
+    """Copy every state value from ``src`` into ``dst`` (same model class -> same
+    paths), so the two models are bit-identical regardless of global RNG."""
+    ss, ds = src.states(), dst.states()
+    for k in ss.keys():
+        ds[k].value = ss[k].value
+
+
+class TestMultiStateUnaffected:
+    """For num_state>1 the recurrent term must keep using the einsum (the S==1
+    broadcast would silently drop the cross-state coupling). Pin fast==legacy
+    on an ALIF model to guarantee the new ``num_state==1`` branch is not taken.
+
+    fast and legacy reduce over the state axis in a different order (einsum vs
+    nested vmap+sum), so this is numerically equal, not bit-identical."""
+
+    def test_alif_fast_equals_legacy(self):
+        with brainstate.environ.context(dt=0.1 * u.ms):
+            xs = brainstate.random.randn(5, 4)
+            m_fast, m_legacy = _alif(), _alif()
+            _clone_state_values(m_fast, m_legacy)  # force identical weights + init
+            fast = _run_updates(ParamDimVjpAlgorithm(m_fast, fast_solve=True), xs)
+            legacy = _run_updates(ParamDimVjpAlgorithm(m_legacy, fast_solve=False), xs)
+            # canon_state_axis: the two states' num_state column order is not
+            # stable across the two independent constructions (frozenset-derived
+            # group ordering); canonicalize it before the positional compare.
+            _assert_etrace_lists_equal(fast, legacy, exact=False, rtol=1e-5, atol=1e-6,
+                                       canon_state_axis=True)
+
+
+# ---------------------------------------------------------------------------
+# T2 Part 2 — batch-fold the solve einsum
+# ---------------------------------------------------------------------------
+
+class TestSolveBatchFold:
+    """Folding the batch axis into the solve einsum must equal the old
+    'per-batch contraction then sum(axis=0)' result (reduction reassociation,
+    not bit-identical)."""
+
+    def test_fast_solve_contract_fold_equals_unfold_sum(self):
+        B, I, O, S = 3, 2, 4, 1
+        diag_like = brainstate.random.randn(B, O, S)
+        etrace = {
+            'weight': brainstate.random.randn(B, I, O, S),
+            'bias': brainstate.random.randn(B, O, S),
+        }
+        # reference: current per-batch contraction, then explicit batch sum
+        ref = _fast_solve_contract(etp_mm_p, diag_like, etrace)
+        ref_w = ref['weight'].sum(axis=0)   # (I, O)
+        ref_b = ref['bias'].sum(axis=0)     # (O,)
+        # new: fold the batch axis inside the einsum
+        folded = _fast_solve_contract(etp_mm_p, diag_like, etrace, fold_batch=True)
+        assert folded['weight'].shape == (I, O)
+        assert folded['bias'].shape == (O,)
+        npt.assert_allclose(folded['weight'], ref_w, atol=1e-6)
+        npt.assert_allclose(folded['bias'], ref_b, atol=1e-6)
+
+    @staticmethod
+    def _grad_after_warmup(algo, xs):
+        algo.compile_graph(xs[0])
+        algo.init_etrace_state()
+        algo.update(xs[0])
+        algo.update(xs[1])
+
+        def loss(x_):
+            return (algo.update(x_) ** 2).sum()
+
+        grads, _ = brainstate.transform.grad(
+            loss, algo.param_states, return_value=True
+        )(xs[2])
+        return grads
+
+    def _assert_grads_close(self, g_a, g_b, atol):
+        assert set(g_a.keys()) == set(g_b.keys())
+        for k in g_a:
+            a = u.get_mantissa(jax.tree.leaves(g_a[k])[0])
+            b = u.get_mantissa(jax.tree.leaves(g_b[k])[0])
+            npt.assert_allclose(a, b, atol=atol)
+
+    def test_batched_solve_fold_equals_legacy(self):
+        # Batched mm (etp_mm_p) -> fast path folds the batch; legacy path does
+        # per-batch contraction + trailing sum. They must agree.
+        xs = brainstate.random.randn(4, 1, 4)  # steps, batch=1, n=4
+        g_fast = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mm(bias=True), fast_solve=True), xs
+        )
+        g_legacy = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mm(bias=True), fast_solve=False), xs
+        )
+        self._assert_grads_close(g_fast, g_legacy, atol=1e-5)
+
+    def test_unbatched_solve_unaffected(self):
+        # mv (etp_mv_p) is unbatched: no fold, no trailing sum. fast == legacy.
+        xs = brainstate.random.randn(4, 4)  # steps, n=4 (unbatched)
+        g_fast = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=True), xs
+        )
+        g_legacy = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=False), xs
+        )
+        self._assert_grads_close(g_fast, g_legacy, atol=1e-5)
