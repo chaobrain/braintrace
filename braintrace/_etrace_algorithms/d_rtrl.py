@@ -506,6 +506,20 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     \end{aligned}
     $$
 
+    where :math:`\boldsymbol{\epsilon}^t` is the per-parameter eligibility
+    trace, :math:`\mathbf{D}^t` the hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t`
+    the state-to-output Jacobian, :math:`\mathbf{x}^t` the presynaptic input, and
+    :math:`\partial \mathcal{L}^{t'}/\partial \mathbf{h}^{t'}` the learning
+    signal back-propagated from the loss at each step.
+
+    **How it works.** Real-Time Recurrent Learning (RTRL) propagates the full
+    sensitivity :math:`\partial \mathbf{h}^t/\partial \boldsymbol{\theta}`
+    forward in time, which costs :math:`O(|\theta| \cdot H)` memory. D-RTRL
+    keeps only the *diagonal* of the hidden-to-hidden Jacobian, collapsing the
+    trace to one value per parameter. The trace is then contracted with the
+    instantaneous learning signal at each step to accumulate the gradient — no
+    backward pass through time and memory linear in the parameter count.
+
     For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
 
     Note than the :py:class:`ParamDimVjpAlgorithm` is a subclass of :py:class:`brainstate.nn.Module`,
@@ -535,6 +549,39 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         The name of the etrace algorithm.
     mode: braintrace.mixin.Mode
         The computing mode, indicating the batching behavior.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class RNN(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = RNN()
+        >>> brainstate.nn.init_all_states(model)
+        >>> learner = braintrace.D_RTRL(model)  # alias of ParamDimVjpAlgorithm
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)   # trace the graph once
+        >>> y = learner(x0)             # forward pass + eligibility-trace update
+
+    References
+    ----------
+    .. [1] Wang, C., Dong, X., Ji, Z., Xiao, M., Jiang, J., Liu, X., Huan, Y., &
+       Wu, S. (2026). "Model-agnostic linear-memory online learning in spiking
+       neural networks." *Nature Communications*.
+       https://doi.org/10.1038/s41467-026-68453-w
+       (preprint: bioRxiv 2024.09.24.614728)
+    .. [2] Williams, R. J., & Zipser, D. (1989). "A Learning Algorithm for
+       Continually Running Fully Recurrent Neural Networks" (RTRL). *Neural
+       Computation*, 1(2), 270-280. https://doi.org/10.1162/neco.1989.1.2.270
     """
 
     # batch of weight gradients
@@ -812,5 +859,18 @@ class D_RTRL(ParamDimVjpAlgorithm):
     For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
 
     This subclass inherits all behavior from :py:class:`ParamDimVjpAlgorithm`
-    without modification; it exists to provide the canonical ``D_RTRL`` name.
+    without modification; it exists to provide the canonical ``D_RTRL`` name. See
+    :py:class:`ParamDimVjpAlgorithm` for the full parameter list and a usage
+    example.
+
+    References
+    ----------
+    .. [1] Wang, C., Dong, X., Ji, Z., Xiao, M., Jiang, J., Liu, X., Huan, Y., &
+       Wu, S. (2026). "Model-agnostic linear-memory online learning in spiking
+       neural networks." *Nature Communications*.
+       https://doi.org/10.1038/s41467-026-68453-w
+       (preprint: bioRxiv 2024.09.24.614728)
+    .. [2] Williams, R. J., & Zipser, D. (1989). "A Learning Algorithm for
+       Continually Running Fully Recurrent Neural Networks" (RTRL). *Neural
+       Computation*, 1(2), 270-280. https://doi.org/10.1162/neco.1989.1.2.270
     """

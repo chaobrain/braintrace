@@ -13,12 +13,17 @@
 # limitations under the License.
 # ==============================================================================
 
-"""OTPE — Online Training with Postsynaptic Estimates (Summe et al. 2024).
+"""OTPE — Online Training with Postsynaptic Estimates (Summe et al., 2023).
 
-Replaces RTRL's full Jacobian with a leaky-additive per-parameter accumulator
-``R_hat ← λ·R_hat + ∂s/∂θ_local``. Cross-layer coupling is handled inside
-``_solve_weight_gradients`` without relaxing the compiler's "no W→W→h"
+OTPE replaces RTRL's full Jacobian with a leaky-additive per-parameter
+accumulator :math:`\\hat R \\leftarrow \\lambda\\,\\hat R + \\partial s/\\partial
+\\theta_\\text{local}` that estimates how a parameter's influence persists in the
+postsynaptic membrane across several time steps — temporal structure that the
+single-step approximations OTTT and OSTL drop. Cross-layer coupling is handled
+inside ``_solve_weight_gradients`` without relaxing the compiler's "no W→W→h"
 invariant.
+
+See :class:`OTPE` for the mathematical formulation, references, and an example.
 """
 
 import warnings
@@ -37,20 +42,108 @@ __all__ = ['OTPE']
 
 
 class OTPE(ETraceVjpAlgorithm):
-    """Online Training with Postsynaptic Estimates.
+    r"""Online Training with Postsynaptic Estimates for spiking networks.
+
+    OTPE maintains a leaky, additive estimate :math:`\hat R^t` of each
+    parameter's accumulated influence on the postsynaptic state, then contracts
+    it with the learning signal :math:`L^t` to obtain the weight gradient:
+
+    .. math::
+
+        \hat R^t = \lambda\,\hat R^{t-1}
+                   + \frac{\partial s^t}{\partial \theta}
+                 = \lambda\,\hat R^{t-1}
+                   + x^t \otimes \operatorname{diag}(D_f^t) ,
+        \qquad
+        \nabla_{W}\mathcal{L}^t = L^t \cdot \hat R^t ,
+
+    where :math:`x^t` is the presynaptic input, :math:`D_f^t` the
+    state-to-output Jacobian (surrogate gradient of the spike), :math:`\lambda
+    \in (0, 1)` the membrane leak, and :math:`L^t = \partial \mathcal{L}^t /
+    \partial s^t` the learning signal. The contraction runs over the output
+    dimension, leaving a gradient with the weight's shape.
+
+    In the low-rank ``'approx'`` mode (**F-OTPE**) the estimate is factorized as
+    an outer product, reducing memory from :math:`O(I\cdot O)` to :math:`O(I+O)`
+    per layer:
+
+    .. math::
+
+        \hat R^t \approx \hat z_\text{in}^t \otimes \bar g_\text{out}^t ,
+        \quad
+        \hat z_\text{in}^t = \lambda\,\hat z_\text{in}^{t-1} + x^t ,
+        \quad
+        \bar g_\text{out}^t = \lambda\,\bar g_\text{out}^{t-1}
+                              + \operatorname{diag}(D_f^t) ,
+
+    with gradient :math:`\nabla_{W}\mathcal{L}^t
+    = \hat z_\text{in}^t \otimes (L^t \cdot \bar g_\text{out}^t)`.
+
+    **How it works.** Unlike OTTT/OSTL, which assign temporal credit only within
+    the current layer's output, OTPE keeps a per-parameter trace that decays
+    with the membrane leak, approximating the *entire* temporal effect of a
+    weight on downstream activity while staying local to each layer. This
+    improves gradient alignment with BPTT in deep feed-forward SNNs at modest
+    extra cost.
 
     Parameters
     ----------
     model : brainstate.nn.Module
-    mode : {'full', 'approx'}
-        'full' keeps the ``(batch, I, O)`` ``R_hat`` per layer.
-        'approx' factors ``R_hat`` as ``outer(ḡ_out, ẑ_in)`` for O(I+O) memory
-        (F-OTPE variant); issues a UserWarning for depth > 1.
+        The SNN whose weights are trained online.
+    mode : {'full', 'approx'}, default 'full'
+        ``'full'`` keeps the full ``(batch, I, O)`` estimate :math:`\hat R` per
+        layer. ``'approx'`` (F-OTPE) factorizes it as an outer product for
+        :math:`O(I+O)` memory; emits a :class:`UserWarning` when the network has
+        more than one HiddenGroup, because the factorization bias compounds with
+        depth.
     leak : float, optional
-        λ factor. If None, resolved via ``_resolve_leak``.
-    trace_clip_abs : float or None
-        Elementwise clip on ``R_hat`` each step. None disables.
-    name, vjp_method : forwarded to base.
+        Decay factor :math:`\lambda`. If ``None``, it is resolved from the
+        model's neuron states (the first state exposing a ``leak`` attribute).
+    trace_clip_abs : float, optional
+        Elementwise clip applied to :math:`\hat R` each step (full mode only).
+        ``None`` disables clipping.
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method : str, optional
+        Forwarded to the base algorithm. Only ``'single-step'`` is supported by
+        OTPE v1; multi-step inputs raise :class:`NotImplementedError`.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not ``'full'`` or ``'approx'``, if ``leak`` cannot be
+        resolved, or if a weight-to-hidden relation reaches more than one
+        HiddenGroup (OTPE v1 requires one-hop per-layer relations).
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class Net(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = Net()
+        >>> brainstate.nn.init_all_states(model)
+        >>> # In a real SNN the hidden layer is a spiking neuron exposing a
+        >>> # ``leak`` attribute, in which case ``leak`` can be omitted.
+        >>> learner = braintrace.OTPE(model, mode='full', leak=0.9)
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)
+        >>> y = learner(x0)
+
+    References
+    ----------
+    .. [1] Summe, T. M., Schaefer, C. J. S., & Joshi, S. (2023). "Estimating
+       Post-Synaptic Effects for Online Training of Feed-Forward SNNs."
+       *arXiv preprint* arXiv:2311.16151. https://arxiv.org/abs/2311.16151
     """
 
     __module__ = 'braintrace'

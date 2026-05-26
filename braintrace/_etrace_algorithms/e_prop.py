@@ -13,13 +13,20 @@
 # limitations under the License.
 # ==============================================================================
 
-"""E-Prop — Eligibility Propagation (Bellec et al. 2020).
+"""E-Prop — Eligibility Propagation (Bellec et al., 2020).
 
-``D_RTRL``'s per-parameter trace plus:
-- An optional κ-filter on each HiddenGroup's eligibility signal (ē = F_κ(L))
-  matching the paper's readout-side low-pass.
-- An optional random-feedback variant (feedback='random') that replaces the
-  readout's symmetric gradient with a fixed random projection.
+E-prop factorizes the BPTT gradient of a recurrent SNN into a *local*
+eligibility trace and a *learning signal* broadcast from the readout. This
+module builds on ``D_RTRL``'s per-parameter trace and adds the two ingredients
+that make the rule biologically plausible:
+
+- An optional κ-filter on each HiddenGroup's learning signal
+  (:math:`\\bar L = F_\\kappa(L)`), matching the paper's readout-side low-pass.
+- An optional random-feedback variant (``feedback='random'``) that replaces the
+  readout's symmetric gradient with a fixed random projection, removing the
+  weight-transport requirement.
+
+See :class:`EProp` for the mathematical formulation, references, and an example.
 """
 
 from typing import Dict, Optional
@@ -35,20 +42,110 @@ __all__ = ['EProp']
 
 
 class EProp(ParamDimVjpAlgorithm):
-    """Eligibility Propagation.
+    r"""Eligibility Propagation (e-prop) for recurrent spiking networks.
+
+    E-prop approximates the gradient of a loss :math:`\mathcal{L}` with respect
+    to a recurrent weight :math:`W_{ji}` by the product of a *local* eligibility
+    trace and a *global* learning signal, dropping the temporally non-local
+    terms of BPTT:
+
+    .. math::
+
+        \frac{d\mathcal{L}}{dW_{ji}}
+        = \sum_t L_j^t \, \bar{e}_{ji}^t ,
+
+    where
+
+    .. math::
+
+        e_{ji}^t = \frac{\partial h_j^t}{\partial W_{ji}}
+                 \approx D_j^t \, e_{ji}^{t-1}
+                 + \big[\operatorname{diag}(D_{f,j}^t)\big]\, x_i^t ,
+        \qquad
+        \bar{e}_{ji}^t = \kappa\,\bar{e}_{ji}^{t-1} + e_{ji}^t .
+
+    Here :math:`h_j^t` is the hidden state of neuron :math:`j` at time
+    :math:`t`, :math:`x_i^t` the presynaptic input, :math:`D_j^t` the
+    hidden-to-hidden (recurrent) Jacobian diagonal, :math:`D_{f,j}^t` the
+    state-to-output Jacobian, and :math:`\kappa \in [0, 1)` the readout-side
+    low-pass factor. The learning signal is
+
+    .. math::
+
+        L_j^t =
+        \begin{cases}
+          \dfrac{\partial \mathcal{L}}{\partial h_j^t}
+            & \text{(symmetric feedback, standard backprop through readout)} \\[2ex]
+          \big(B\,e^t\big)_j
+            & \text{(random feedback: a fixed random projection } B\text{)} .
+        \end{cases}
+
+    **How it works.** The eligibility trace :math:`e_{ji}^t` is exactly the
+    per-parameter trace maintained by :class:`~braintrace.D_RTRL`; it depends
+    only on quantities local to the synapse and is updated forward in time. The
+    learning signal :math:`L_j^t` is broadcast from the readout. E-prop is
+    therefore *online* (no backward pass through time) and uses memory linear in
+    the number of parameters. With ``kappa_filter_decay > 0`` the learning
+    signal is additionally low-pass filtered; with ``feedback='random'`` the
+    symmetric readout gradient is replaced by a frozen random matrix, removing
+    the biologically implausible weight-transport requirement.
 
     Parameters
     ----------
     model : brainstate.nn.Module
-    feedback : {'symmetric', 'random'}
-        'symmetric' uses reverse-AD's ∂L/∂h (standard backprop through readout).
-        'random' replaces the readout gradient with a frozen random projection.
-    kappa_filter_decay : float in [0, 1)
-        If > 0, apply an output-side low-pass to each HiddenGroup's learning
-        signal each step. 0 disables (paper default for hard tasks).
+        The recurrent SNN whose weights are trained online.
+    feedback : {'symmetric', 'random'}, default 'symmetric'
+        ``'symmetric'`` uses reverse-AD's :math:`\partial \mathcal{L}/\partial h`
+        (standard backprop through the readout). ``'random'`` replaces the
+        readout gradient with a frozen random projection (requires
+        ``random_feedback_key``).
+    kappa_filter_decay : float in [0, 1), default 0.0
+        Readout-side low-pass factor :math:`\kappa`. If ``> 0``, each
+        HiddenGroup's learning signal is filtered each step
+        (:math:`\bar L^t = (1-\kappa)L^t + \kappa\bar L^{t-1}`). ``0`` disables
+        filtering.
     random_feedback_key : jax.random.PRNGKey, optional
-        Seed for the random-feedback matrices when feedback='random'.
-    name, vjp_method, fast_solve, normalize_matrix_spectrum : forwarded to D_RTRL.
+        Seed for the random-feedback matrices. Required when
+        ``feedback='random'``; ignored otherwise.
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method, fast_solve, normalize_matrix_spectrum
+        Forwarded verbatim to :class:`~braintrace.D_RTRL`.
+
+    Raises
+    ------
+    ValueError
+        If ``feedback`` is not one of ``{'symmetric', 'random'}``, or if
+        ``feedback='random'`` is given without ``random_feedback_key``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class RSNN(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = RSNN()
+        >>> brainstate.nn.init_all_states(model)
+        >>> learner = braintrace.EProp(model, kappa_filter_decay=0.9)
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)   # trace the graph once
+        >>> y = learner(x0)             # forward pass + eligibility-trace update
+
+    References
+    ----------
+    .. [1] Bellec, G., Scherr, F., Subramoney, A., Hajek, E., Salaj, D.,
+       Legenstein, R., & Maass, W. (2020). "A solution to the learning dilemma
+       for recurrent networks of spiking neurons." *Nature Communications*,
+       11, 3625. https://doi.org/10.1038/s41467-020-17236-y
     """
 
     __module__ = 'braintrace'
