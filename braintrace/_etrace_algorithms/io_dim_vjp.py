@@ -25,7 +25,7 @@
 # -*- coding: utf-8 -*-
 
 from functools import partial
-from typing import Dict, Tuple, Optional, Sequence, Any
+from typing import Callable, Dict, Tuple, Optional, Sequence, Any
 
 import brainstate
 import jax
@@ -749,6 +749,22 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         for df, val in etrace_dfs.items():
             self.etrace_dfs[df].value = val
 
+    def _make_etrace_stepper(self, weight_vals: WeightVals) -> Callable:
+        """Build the per-step ES-D-RTRL eligibility-trace stepper.
+
+        Returns the ``partial`` of :func:`_update_IO_dim_etrace_scan_fn` that serves
+        as the body of the trace scan. ``weight_vals`` is accepted for a uniform
+        hook signature but unused (this algorithm's trace roll does not read the
+        weights). Exposing the stepper lets the graph executor fuse the roll into
+        its over-time scan for multi-step input (see the base-class
+        :meth:`_make_etrace_stepper`).
+        """
+        return partial(
+            _update_IO_dim_etrace_scan_fn,
+            hid_weight_op_relations=self.graph.hidden_param_op_relations,
+            decay=self.decay,
+        )
+
     def _update_etrace_data(
         self,
         running_index: Optional[int],
@@ -810,11 +826,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         #           the weight values.
         #
 
-        scan_fn = partial(
-            _update_IO_dim_etrace_scan_fn,
-            hid_weight_op_relations=self.graph.hidden_param_op_relations,
-            decay=self.decay,
-        )
+        scan_fn = self._make_etrace_stepper(weight_vals)
 
         if input_is_multi_step:
             hist_etrace_vals = jax.lax.scan(
