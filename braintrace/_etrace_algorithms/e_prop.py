@@ -36,7 +36,7 @@ import jax
 import jax.numpy as jnp
 
 from ._common import FixedRandomFeedback, KappaFilter
-from .d_rtrl import ParamDimVjpAlgorithm
+from .param_dim_vjp import ParamDimVjpAlgorithm
 
 __all__ = ['EProp']
 

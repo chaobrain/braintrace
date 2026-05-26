@@ -98,7 +98,7 @@ class TestOSTTPTargetProjection(unittest.TestCase):
         )(x)
         g_osttp = grads[next(iter(grads))]
 
-        from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
+        from braintrace._etrace_algorithms.param_dim_vjp import ParamDimVjpAlgorithm
         net2 = _osttp_net()
         algo2 = ParamDimVjpAlgorithm(net2)
         algo2.compile_graph(x)
@@ -113,3 +113,60 @@ class TestOSTTPTargetProjection(unittest.TestCase):
         )(x)
         g_drtrl = grads2[next(iter(grads2))]
         assert not jnp.allclose(g_osttp, g_drtrl, atol=1e-4)
+
+
+class FakeLIF(brainstate.HiddenState):
+    def __init__(self, iv, leak):
+        super().__init__(iv)
+        self.leak = leak
+
+
+def _toy_net():
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = FakeLIF(jnp.zeros((1, 3)), leak=0.9)
+
+        def update(self, x):
+            self.v.value = jax.nn.tanh(
+                0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
+    x = jnp.ones((1, 3))
+    algo.compile_graph(x)
+    algo.init_etrace_state()
+
+    losses = []
+    for _ in range(n_steps):
+        def loss_fn(x_):
+            out = algo.update(x_, y_target=y_target) if pass_y else algo.update(x_)
+            target = jnp.ones_like(out)
+            return ((out - target) ** 2).mean()
+
+        grads, loss_val = brainstate.augment.grad(
+            loss_fn, algo.param_states, return_value=True
+        )(x)
+        for path, st in algo.param_states.items():
+            st.value = st.value - lr * grads[path]
+        losses.append(float(loss_val))
+    return losses
+
+
+class TestSmokeLossDecreases(unittest.TestCase):
+    def test_osttp(self):
+        net = _toy_net()
+        B = [0.1 * jax.random.normal(jax.random.PRNGKey(9), (3, 3))]
+        algo = OSTTP(net, B_list=B)
+        y = jnp.ones((1, 3))
+        losses = _run(algo, y_target=y, pass_y=True)
+        assert losses[-1] < losses[0]

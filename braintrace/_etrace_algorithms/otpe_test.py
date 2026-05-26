@@ -140,3 +140,50 @@ class TestOTPEApproxMode(unittest.TestCase):
         )(x)
         g = grads[next(iter(grads))]
         assert g.shape == (3, 3)
+
+
+def _toy_net():
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = jax.nn.tanh(
+                0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
+    x = jnp.ones((1, 3))
+    algo.compile_graph(x)
+    algo.init_etrace_state()
+
+    losses = []
+    for _ in range(n_steps):
+        def loss_fn(x_):
+            out = algo.update(x_, y_target=y_target) if pass_y else algo.update(x_)
+            target = jnp.ones_like(out)
+            return ((out - target) ** 2).mean()
+
+        grads, loss_val = brainstate.augment.grad(
+            loss_fn, algo.param_states, return_value=True
+        )(x)
+        for path, st in algo.param_states.items():
+            st.value = st.value - lr * grads[path]
+        losses.append(float(loss_val))
+    return losses
+
+
+class TestSmokeLossDecreases(unittest.TestCase):
+    def test_otpe(self):
+        losses = _run(OTPE(_toy_net(), leak=0.9))
+        assert losses[-1] < losses[0]

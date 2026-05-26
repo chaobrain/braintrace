@@ -31,8 +31,7 @@ import brainstate
 import jax.numpy as jnp
 
 from braintrace._etrace_op import is_batched_primitive
-from ._common import PresynapticTrace
-from .misc import _route_grads_by_path, _update_dict
+from ._common import PresynapticTrace, _route_grads_by_path, _update_dict
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = ['OTTT']

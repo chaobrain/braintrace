@@ -575,7 +575,7 @@ class TestComputeLearningSignalHook:
 
     def test_override_hook_replaces_learning_signal(self):
         """Subclass override is used instead of reverse-AD dl/dh."""
-        from braintrace._etrace_algorithms.d_rtrl import ParamDimVjpAlgorithm
+        from braintrace._etrace_algorithms.param_dim_vjp import ParamDimVjpAlgorithm
 
         class Mini(brainstate.nn.Module):
             def __init__(self):

@@ -38,7 +38,7 @@ from typing import Optional
 
 import brainstate
 
-from .d_rtrl import ParamDimVjpAlgorithm
+from .param_dim_vjp import ParamDimVjpAlgorithm
 from .pp_prop import pp_prop
 
 __all__ = ['OSTLRecurrent', 'OSTLFeedforward']
