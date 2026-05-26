@@ -31,6 +31,7 @@ Coverage:
 
 from collections import namedtuple
 
+import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -366,6 +367,127 @@ class TestMvEtpRules:
         weight_vars = {'weight': _fake_var((3, 5))}
         out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
         assert out.shape == (5, 2)
+
+
+# ---------------------------------------------------------------------------
+# Bias-gradient correctness (D-RTRL vs BPTT)
+# ---------------------------------------------------------------------------
+
+class TestMMBiasGradient:
+    """D-RTRL gradient correctness for etp_mm_p with a bias vector.
+
+    Train a tiny recurrent net one step and verify ETP gradients (dW, db)
+    match BPTT ground-truth. The merged-ParamState variant uses a single
+    ParamState holding {'weight': W, 'bias': b} and proves that bias
+    gradients are no longer silently zero: D-RTRL produces a db matching BPTT.
+    """
+
+    def _build_cell_merged(self):
+        """One-step RNN with weight+bias stored in a merged ParamState."""
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.p = brainstate.ParamState(
+                    {'weight': jnp.ones((4, 4)) * 0.1,
+                     'bias': jnp.ones((4,)) * 0.2}
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                w = self.p.value['weight']
+                b = self.p.value['bias']
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, w, b)
+                )
+                return self.h.value
+
+        cell = Cell()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        return cell
+
+    def test_drtrl_grad_matches_bptt_merged_paramstate(self):
+        """D-RTRL dW and db must match BPTT for one recurrent step."""
+        cell = self._build_cell_merged()
+        alg = braintrace.D_RTRL(cell)
+        alg.compile_graph(jnp.zeros((1, 4)))
+
+        x = jnp.ones((1, 4)) * 0.3
+        target = jnp.zeros((1, 4))
+
+        # --- ETP gradient via D-RTRL ---
+        @brainstate.transform.jit
+        def etrace_grad_step(inp):
+            return brainstate.transform.grad(
+                lambda inp: alg(inp).sum(),
+                cell.states(brainstate.ParamState),
+            )(inp)
+
+        grads_etrace = etrace_grad_step(x)
+
+        # Extract the dict-valued gradient for cell.p
+        # grads_etrace is keyed by path; cell.p is at path ('p',)
+        # Its value is a dict {'weight': ..., 'bias': ...}
+        grad_p = list(grads_etrace.values())[0]
+        assert isinstance(grad_p, dict), (
+            f'Expected dict gradient for merged ParamState, got {type(grad_p)}'
+        )
+
+        # --- BPTT reference ---
+        def bptt_loss(params):
+            h = jnp.zeros((1, 4))
+            h = jnp.tanh(x + h @ params['weight'] + params['bias'])
+            return h.sum()
+
+        bptt = jax.grad(bptt_loss)({'weight': cell.p.value['weight'],
+                                    'bias': cell.p.value['bias']})
+
+        np.testing.assert_allclose(grad_p['weight'], bptt['weight'], atol=1e-5,
+                                   err_msg='D-RTRL dW does not match BPTT')
+        np.testing.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
+                                   err_msg='D-RTRL db does not match BPTT (was it zero?)')
+
+
+class TestMMNonSquareWeight:
+    """_mm_yw_to_w must broadcast hidden_dim correctly when in != out.
+
+    The latent bug was ``jnp.expand_dims(hidden_dim, axis=1)`` in the
+    gradient-solve context where the batch axis is stripped: for
+    ``hidden_dim: (out,)`` and ``trace: (in, out)`` with ``in != out``,
+    axis=1 produced shape ``(out, 1)`` and broadcasting failed. Fixed by
+    using ``axis=-2`` which inserts the singleton at the correct axis
+    in both the batched (trace-update) and unbatched (solve) contexts.
+    """
+
+    def test_yw_to_w_non_square_solve_context(self):
+        from braintrace._etrace_op.dense import _mm_yw_to_w
+        # Gradient-solve shapes (batch axis stripped by outer vmap).
+        in_dim, out_dim = 5, 3
+        trace_weight = jnp.arange(in_dim * out_dim, dtype=jnp.float32).reshape(
+            in_dim, out_dim
+        )
+        hidden_dim = jnp.array([1.0, 2.0, 3.0])  # (out,)
+
+        out = _mm_yw_to_w(hidden_dim, {'weight': trace_weight}, has_bias=False)
+
+        # Expected: trace[i, o] * hidden_dim[o] — broadcast across in axis.
+        expected = trace_weight * hidden_dim[None, :]
+        np.testing.assert_array_equal(out['weight'], expected)
+        assert out['weight'].shape == (in_dim, out_dim)
+
+    def test_yw_to_w_non_square_trace_update_context(self):
+        from braintrace._etrace_op.dense import _mm_yw_to_w
+        # Trace-update shapes (batch retained).
+        batch, in_dim, out_dim = 2, 5, 3
+        trace_weight = jnp.ones((batch, in_dim, out_dim)) * 0.5
+        hidden_dim = jnp.ones((batch, out_dim)) * 2.0
+
+        out = _mm_yw_to_w(hidden_dim, {'weight': trace_weight}, has_bias=False)
+
+        # Expected: trace[b,i,o] * hidden_dim[b,o].
+        expected = trace_weight * hidden_dim[:, None, :]
+        np.testing.assert_array_equal(out['weight'], expected)
+        assert out['weight'].shape == (batch, in_dim, out_dim)
 
 
 class TestPublicAPIRoundTrip:
