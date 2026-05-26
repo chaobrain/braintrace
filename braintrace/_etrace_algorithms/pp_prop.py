@@ -509,6 +509,21 @@ class pp_prop(ETraceVjpAlgorithm):
     \end{aligned}
     $$
 
+    where :math:`\boldsymbol{\epsilon}_{\mathbf{x}}^t` is the input-side trace,
+    :math:`\boldsymbol{\epsilon}_{\mathbf{f}}^t` the output-side trace,
+    :math:`\alpha` the exponential-smoothing factor, :math:`\mathbf{D}^t` the
+    hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t` the state-to-output
+    Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
+
+    **How it works.** The full per-parameter D-RTRL trace
+    :math:`\boldsymbol{\epsilon}^t \in \mathbb{R}^{I\times O}` is approximated by
+    the outer product of two exponentially-smoothed *vectors* — one over the
+    input dimension and one over the output dimension. Storing the two factors
+    instead of the full matrix drops the memory from :math:`O(I\cdot O)` to
+    :math:`O(I+O)` per layer. The decay :math:`\alpha` (equivalently an
+    approximation rank) controls how much temporal history the factored trace
+    retains; the bias of the exponential estimator is corrected at solve time.
+
     For more details, please see `the ES-D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
 
     This algorithm has the :math:`O(BI+BO)` memory complexity and :math:`O(BIO)` computational
@@ -538,6 +553,39 @@ class pp_prop(ETraceVjpAlgorithm):
         The name of the etrace algorithm.
     mode: braintrace.mixin.Mode
         The computing mode, indicating the batching information.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class RNN(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = RNN()
+        >>> brainstate.nn.init_all_states(model)
+        >>> learner = braintrace.pp_prop(model, decay_or_rank=0.9)  # or rank: decay_or_rank=19
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)   # trace the graph once
+        >>> y = learner(x0)             # forward pass + eligibility-trace update
+
+    References
+    ----------
+    .. [1] Wang, C., Dong, X., Ji, Z., Xiao, M., Jiang, J., Liu, X., Huan, Y., &
+       Wu, S. (2026). "Model-agnostic linear-memory online learning in spiking
+       neural networks." *Nature Communications*.
+       https://doi.org/10.1038/s41467-026-68453-w
+       (preprint: bioRxiv 2024.09.24.614728)
+    .. [2] Williams, R. J., & Zipser, D. (1989). "A Learning Algorithm for
+       Continually Running Fully Recurrent Neural Networks" (RTRL). *Neural
+       Computation*, 1(2), 270-280. https://doi.org/10.1162/neco.1989.1.2.270
     """
 
     __module__ = 'braintrace'

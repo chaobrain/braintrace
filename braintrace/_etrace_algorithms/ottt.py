@@ -13,11 +13,16 @@
 # limitations under the License.
 # ==============================================================================
 
-"""OTTT — Online Training Through Time (Xiao et al. 2022).
+"""OTTT — Online Training Through Time (Xiao et al., 2022).
 
-Drops both the hidden-to-hidden and hidden-to-weight Jacobians; maintains only a
-presynaptic eligibility trace ``â ← λ·â + x_t`` and computes weight gradients as
-``ΔW = outer(â, L · σ'(u))`` per step.
+OTTT is derived from BPTT but discards the hidden-to-hidden recurrent Jacobian,
+so it keeps only a leaky presynaptic eligibility trace
+:math:`\\hat a^t \\leftarrow \\lambda\\,\\hat a^{t-1} + x^t` and forms the weight
+gradient at each step as the outer product of that trace with the (instantaneous)
+learning signal, :math:`\\Delta W = \\hat a^t \\otimes (L \\cdot \\sigma'(u))`.
+This yields constant training memory, independent of the number of time steps.
+
+See :class:`OTTT` for the mathematical formulation, references, and an example.
 """
 
 from typing import Dict, Optional
@@ -34,18 +39,93 @@ __all__ = ['OTTT']
 
 
 class OTTT(ETraceVjpAlgorithm):
-    """Online Training Through Time.
+    r"""Online Training Through Time for spiking neural networks.
+
+    OTTT tracks only a leaky **presynaptic trace** and forms the weight gradient
+    each step as an outer product with the local learning signal:
+
+    .. math::
+
+        \hat{a}^t =
+        \begin{cases}
+          \lambda\,\hat{a}^{t-1} + x^t & \text{(mode='A', accumulated)} \\
+          x^t                           & \text{(mode='O', instantaneous)}
+        \end{cases}
+
+    .. math::
+
+        \nabla_{W}\mathcal{L}^t
+        = \hat{a}^t \otimes
+          \Big( \frac{\partial \mathcal{L}^t}{\partial s^t}\,\sigma'(u^t) \Big)
+        \;=\; \hat{a}^t \otimes L^t ,
+
+    where :math:`x^t` is the presynaptic input, :math:`u^t` the membrane
+    potential, :math:`s^t = \sigma(u^t)` the (surrogate) spike, :math:`\sigma'`
+    the surrogate-gradient function, :math:`\lambda \in (0, 1)` the membrane
+    leak, and :math:`L^t` the learning signal already propagated through the
+    spike nonlinearity.
+
+    **How it works.** Starting from BPTT, OTTT keeps the spatial credit
+    assignment but **drops the hidden-to-hidden recurrent Jacobian**. The only
+    state it carries forward in time is the rank-1 presynaptic trace
+    :math:`\hat{a}^t`, so the per-step gradient is the outer product of that
+    trace with the instantaneous learning signal. Training memory is therefore
+    :math:`O(B \cdot I)` per layer and **independent of the sequence length** —
+    the cheapest of the algorithms here, at the cost of ignoring longer-range
+    temporal credit.
 
     Parameters
     ----------
     model : brainstate.nn.Module
-    mode : {'A', 'O'}
-        'A' (default) accumulates â over time (â ← λ·â + x). 'O' uses the
-        instantaneous presynaptic spike only (â := x_t).
+        The SNN whose weights are trained online.
+    mode : {'A', 'O'}, default 'A'
+        ``'A'`` accumulates the presynaptic trace over time
+        (:math:`\hat a \leftarrow \lambda\,\hat a + x`). ``'O'`` uses the
+        instantaneous presynaptic spike only (:math:`\hat a := x^t`).
     leak : float, optional
-        Presynaptic leak λ. If None, discovered from the model via
-        ``_resolve_leak``.
-    name, vjp_method : forwarded to base.
+        Presynaptic leak :math:`\lambda`. If ``None``, it is discovered from the
+        model's neuron states (the first state exposing a ``leak`` attribute).
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method : str, optional
+        Forwarded to the base algorithm. Only ``'single-step'`` is supported by
+        OTTT v1; multi-step inputs raise :class:`NotImplementedError`.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not ``'A'`` or ``'O'``, or if ``leak`` cannot be resolved.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class Net(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = Net()
+        >>> brainstate.nn.init_all_states(model)
+        >>> # In a real SNN the hidden layer is a spiking neuron that exposes a
+        >>> # ``leak`` attribute, in which case ``leak`` can be omitted.
+        >>> learner = braintrace.OTTT(model, mode='A', leak=0.9)
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)
+        >>> y = learner(x0)
+
+    References
+    ----------
+    .. [1] Xiao, M., Meng, Q., Zhang, Z., He, D., & Lin, Z. (2022). "Online
+       Training Through Time for Spiking Neural Networks." *Advances in Neural
+       Information Processing Systems (NeurIPS)* 35.
+       https://arxiv.org/abs/2210.04195
     """
 
     __module__ = 'braintrace'

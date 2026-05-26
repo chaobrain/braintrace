@@ -13,11 +13,16 @@
 # limitations under the License.
 # ==============================================================================
 
-"""OSTTP — Online Spatio-Temporal Target Projection (Ortner et al. 2023).
+"""OSTTP — Online Spatio-Temporal Learning with Target Projection
+(Ortner et al., 2023).
 
-D_RTRL trace machinery + DRTP-style target projection replacing reverse-AD's
-``∂L/∂h``. Each HiddenGroup receives a signal ``B_l @ y_target`` instead of the
-autodiff gradient.
+OSTTP combines the OSTL / D-RTRL eligibility trace with a DRTP-style *target
+projection*: instead of back-propagating :math:`\\partial \\mathcal{L}/\\partial
+h` from the readout, each HiddenGroup receives a learning signal formed by a
+fixed random projection of the task target, :math:`y^{*}\\,B_l`. This removes the
+weight-transport requirement and the backward pass, so learning is forward-only.
+
+See :class:`OSTTP` for the mathematical formulation, references, and an example.
 """
 
 from typing import Optional, Sequence
@@ -32,19 +37,96 @@ __all__ = ['OSTTP']
 
 
 class OSTTP(ParamDimVjpAlgorithm):
-    """Online Spatio-Temporal Target Projection.
+    r"""Online Spatio-Temporal Learning with Target Projection.
+
+    OSTTP reuses the OSTL / D-RTRL per-parameter eligibility trace but replaces
+    the back-propagated learning signal with a **direct random target
+    projection** (DRTP):
+
+    .. math::
+
+        \boldsymbol{\epsilon}^t \approx \mathbf{D}^t\,\boldsymbol{\epsilon}^{t-1}
+        + \operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t ,
+        \qquad
+        L_l^t = y^{*\,t}\, B_l ,
+        \qquad
+        \nabla_{W}\mathcal{L} = \sum_t L^t \circ \boldsymbol{\epsilon}^t ,
+
+    where :math:`y^{*\,t}` is the task target at time :math:`t`, :math:`B_l \in
+    \mathbb{R}^{n_\text{target}\times n_l}` is a fixed random feedback matrix for
+    HiddenGroup :math:`l` (frozen via ``stop_gradient``), :math:`\mathbf{D}^t` is
+    the hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t` the state-to-output
+    Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
+
+    **How it works.** The eligibility trace carries the temporal credit exactly
+    as in :class:`~braintrace.OSTL` ('with-H'), but the spatial credit normally
+    obtained by back-propagating :math:`\partial \mathcal{L}/\partial h` is
+    replaced by a frozen random projection of the target. Because the projection
+    matrices :math:`B_l` are fixed, there is no weight transport and no backward
+    pass — the rule is fully forward and update-unlocked in both space and time.
 
     Parameters
     ----------
     model : brainstate.nn.Module
+        The SNN whose weights are trained online.
     B_list : Sequence[jax.Array]
-        One feedback matrix per HiddenGroup, each of shape ``(n_target, n_l)``.
-        Frozen via ``stop_gradient`` at construction.
-    target_timing : {'per-step', 'sequence-end'}
-        'per-step' requires ``y_target`` at every ``update()`` call.
-        'sequence-end' zeros the signal on intermediate steps and only applies
-        the projection when ``y_target`` is supplied.
-    name, vjp_method, fast_solve : forwarded to ``ParamDimVjpAlgorithm``.
+        One feedback matrix per HiddenGroup, each of shape
+        ``(n_target, n_l)``. Frozen via ``stop_gradient`` at construction; the
+        count and trailing dimension are validated against the compiled graph.
+    target_timing : {'per-step', 'sequence-end'}, default 'per-step'
+        ``'per-step'`` requires ``y_target`` at every :meth:`update` call.
+        ``'sequence-end'`` zeros the learning signal on intermediate steps (the
+        trace still accumulates) and applies the projection only when
+        ``y_target`` is supplied.
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method, fast_solve
+        Forwarded verbatim to :class:`~braintrace.ParamDimVjpAlgorithm`.
+
+    Raises
+    ------
+    ValueError
+        If ``target_timing`` is invalid; if ``len(B_list)`` differs from the
+        number of HiddenGroups; if a matrix's trailing dimension does not match
+        its HiddenGroup width; or if ``target_timing='per-step'`` and
+        ``y_target`` is omitted from an :meth:`update` call.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import jax
+        >>> import braintrace
+        >>>
+        >>> class Net(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = Net()
+        >>> brainstate.nn.init_all_states(model)
+        >>> # one (n_target, n_l) feedback matrix per HiddenGroup (here n_l = 20)
+        >>> B = jax.random.normal(jax.random.PRNGKey(0), (1, 20))
+        >>> learner = braintrace.OSTTP(model, B_list=[B])
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)
+        >>> y = learner(x0, y_target=brainstate.random.randn(1))
+
+    References
+    ----------
+    .. [1] Ortner, T., Pes, L., Gentinetta, J., Frenkel, C., & Pantazi, A.
+       (2023). "Online Spatio-Temporal Learning with Target Projection."
+       *2023 IEEE 5th International Conference on Artificial Intelligence
+       Circuits and Systems (AICAS)*, 1-5.
+       https://doi.org/10.1109/AICAS57966.2023.10168623 (arXiv:2304.05124)
+    .. [2] Frenkel, C., Lefebvre, M., & Bol, D. (2021). "Learning Without
+       Feedback: Fixed Random Learning Signals Allow for Feedforward Training of
+       Deep Neural Networks" (DRTP). *Frontiers in Neuroscience*, 15, 629892.
+       https://doi.org/10.3389/fnins.2021.629892
     """
 
     __module__ = 'braintrace'

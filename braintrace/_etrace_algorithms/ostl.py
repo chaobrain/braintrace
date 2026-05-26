@@ -28,6 +28,13 @@ branching:
 
 :func:`OSTL` is a thin factory selecting between the two by ``regime`` keyword,
 preserving the historical ``OSTL(model, regime=...)`` call site.
+
+Reference
+---------
+Bohnstingl, T., Woźniak, S., Pantazi, A., & Eleftheriou, E. (2023). "Online
+Spatio-Temporal Learning in Deep Neural Networks." *IEEE Transactions on Neural
+Networks and Learning Systems*, 34(11), 8894-8908.
+https://doi.org/10.1109/TNNLS.2022.3153985 (arXiv:2007.12723)
 """
 
 from typing import Optional
@@ -41,19 +48,63 @@ __all__ = ['OSTL', 'OSTLRecurrent', 'OSTLFeedforward']
 
 
 class OSTLRecurrent(ParamDimVjpAlgorithm):
-    """OSTL 'with-H' regime — RTRL-exact single-layer factorization.
+    r"""OSTL 'with-H' regime — RTRL-exact single-layer factorization.
 
-    Retains the hidden-to-hidden Jacobian, so the eligibility trace carries the
-    full temporal term ``ε^t = D^t·ε^{t-1} + diag(D_f^t)⊗x^t``. Exact for a
-    single recurrent layer; per-parameter trace with O(P·H) memory. Delegates
-    entirely to :class:`ParamDimVjpAlgorithm` (D-RTRL).
+    OSTL derives an online rule by cleanly separating the gradient into a
+    *temporal* eligibility trace and a *spatial* learning signal. The 'with-H'
+    regime retains the hidden-to-hidden Jacobian, so the trace carries the full
+    temporal term and the rule is gradient-equivalent to BPTT for a single
+    recurrent layer:
+
+    .. math::
+
+        \boldsymbol{\epsilon}^t = \mathbf{D}^t\,\boldsymbol{\epsilon}^{t-1}
+        + \operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t ,
+        \qquad
+        \nabla_{\boldsymbol{\theta}}\mathcal{L}
+        = \sum_t \frac{\partial \mathcal{L}^t}{\partial \mathbf{h}^t}
+          \circ \boldsymbol{\epsilon}^t ,
+
+    where :math:`\mathbf{D}^t` is the hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t`
+    the state-to-output Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
+    This is exactly the per-parameter D-RTRL trace (memory :math:`O(P\cdot H)`),
+    so the class delegates entirely to :class:`~braintrace.ParamDimVjpAlgorithm`.
 
     Parameters
     ----------
     model : brainstate.nn.Module
         The recurrent SNN whose weights are trained online.
     name, vjp_method, fast_solve, normalize_matrix_spectrum : optional
-        Forwarded verbatim to :class:`ParamDimVjpAlgorithm`.
+        Forwarded verbatim to :class:`~braintrace.ParamDimVjpAlgorithm`.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class Net(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = Net()
+        >>> brainstate.nn.init_all_states(model)
+        >>> learner = braintrace.OSTLRecurrent(model)   # or braintrace.OSTL(model, regime='with-H')
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)
+        >>> y = learner(x0)
+
+    References
+    ----------
+    .. [1] Bohnstingl, T., Woźniak, S., Pantazi, A., & Eleftheriou, E. (2023).
+       "Online Spatio-Temporal Learning in Deep Neural Networks." *IEEE
+       Transactions on Neural Networks and Learning Systems*, 34(11), 8894-8908.
+       https://doi.org/10.1109/TNNLS.2022.3153985 (arXiv:2007.12723)
     """
 
     __module__ = 'braintrace'
@@ -63,12 +114,25 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
 
 
 class OSTLFeedforward(pp_prop):
-    """OSTL 'without-H' regime — feedforward / no recurrent Jacobian.
+    r"""OSTL 'without-H' regime — feedforward / no recurrent Jacobian.
 
-    Drops the hidden-to-hidden Jacobian. With a negligible decay the input-
-    output factorized trace stops accumulating across time, so the update is the
-    purely-spatial (feedforward SNN) approximation. Delegates to
-    :class:`pp_prop`.
+    The 'without-H' regime drops the hidden-to-hidden Jacobian
+    :math:`\mathbf{D}^t`, so the temporal term of the eligibility trace
+    vanishes and only the instantaneous (spatial) contribution survives:
+
+    .. math::
+
+        \boldsymbol{\epsilon}^t \approx \operatorname{diag}(\mathbf{D}_f^t)
+        \otimes \mathbf{x}^t ,
+        \qquad
+        \nabla_{\boldsymbol{\theta}}\mathcal{L}
+        = \sum_t \frac{\partial \mathcal{L}^t}{\partial \mathbf{h}^t}
+          \circ \boldsymbol{\epsilon}^t .
+
+    This is the appropriate (and exact) approximation for feed-forward SNNs. It
+    is realized by delegating to :class:`~braintrace.pp_prop` (the input-output
+    factorized trace) with a *negligible* decay, so the trace does not
+    accumulate across time.
 
     Parameters
     ----------
@@ -79,7 +143,36 @@ class OSTLFeedforward(pp_prop):
         the temporal contribution negligible, matching the 'without-H' regime. A
         float must lie in (0, 1); an int is read as an approximation rank.
     name, vjp_method, fast_solve : optional
-        Forwarded verbatim to :class:`pp_prop`.
+        Forwarded verbatim to :class:`~braintrace.pp_prop`.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class Net(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(20, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = Net()
+        >>> brainstate.nn.init_all_states(model)
+        >>> learner = braintrace.OSTLFeedforward(model)  # or braintrace.OSTL(model, regime='without-H')
+        >>> x0 = brainstate.random.randn(1)
+        >>> learner.compile_graph(x0)
+        >>> y = learner(x0)
+
+    References
+    ----------
+    .. [1] Bohnstingl, T., Woźniak, S., Pantazi, A., & Eleftheriou, E. (2023).
+       "Online Spatio-Temporal Learning in Deep Neural Networks." *IEEE
+       Transactions on Neural Networks and Learning Systems*, 34(11), 8894-8908.
+       https://doi.org/10.1109/TNNLS.2022.3153985 (arXiv:2007.12723)
     """
 
     __module__ = 'braintrace'
