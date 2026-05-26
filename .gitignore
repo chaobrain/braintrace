@@ -216,3 +216,4 @@ docs/_brand/
 docs/_static/css/brainx-header.css
 docs/_static/js/brainx-header.js
 /.agents/
+/.worktrees/
