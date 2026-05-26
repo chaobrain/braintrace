@@ -1104,3 +1104,48 @@ class TestSolveBatchFold:
         assert folded['bias'].shape == (O,)
         npt.assert_allclose(folded['weight'], ref_w, atol=1e-6)
         npt.assert_allclose(folded['bias'], ref_b, atol=1e-6)
+
+    @staticmethod
+    def _grad_after_warmup(algo, xs):
+        algo.compile_graph(xs[0])
+        algo.init_etrace_state()
+        algo.update(xs[0])
+        algo.update(xs[1])
+
+        def loss(x_):
+            return (algo.update(x_) ** 2).sum()
+
+        grads, _ = brainstate.transform.grad(
+            loss, algo.param_states, return_value=True
+        )(xs[2])
+        return grads
+
+    def _assert_grads_close(self, g_a, g_b, atol):
+        assert set(g_a.keys()) == set(g_b.keys())
+        for k in g_a:
+            a = u.get_mantissa(jax.tree.leaves(g_a[k])[0])
+            b = u.get_mantissa(jax.tree.leaves(g_b[k])[0])
+            npt.assert_allclose(a, b, atol=atol)
+
+    def test_batched_solve_fold_equals_legacy(self):
+        # Batched mm (etp_mm_p) -> fast path folds the batch; legacy path does
+        # per-batch contraction + trailing sum. They must agree.
+        xs = brainstate.random.randn(4, 1, 4)  # steps, batch=1, n=4
+        g_fast = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mm(bias=True), fast_solve=True), xs
+        )
+        g_legacy = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mm(bias=True), fast_solve=False), xs
+        )
+        self._assert_grads_close(g_fast, g_legacy, atol=1e-5)
+
+    def test_unbatched_solve_unaffected(self):
+        # mv (etp_mv_p) is unbatched: no fold, no trailing sum. fast == legacy.
+        xs = brainstate.random.randn(4, 4)  # steps, n=4 (unbatched)
+        g_fast = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=True), xs
+        )
+        g_legacy = self._grad_after_warmup(
+            ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=False), xs
+        )
+        self._assert_grads_close(g_fast, g_legacy, atol=1e-5)

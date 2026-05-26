@@ -445,6 +445,9 @@ def _solve_param_dim_weight_gradients(
     """
     # update the etrace weight gradients
     temp_data: Dict[Path, PyTree] = dict()
+    # Paths whose gradient was already batch-reduced inside the fast-path einsum
+    # (fold_batch). The trailing batch-sum must skip these.
+    folded_paths: set = set()
     for relation in weight_hidden_relations:
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
@@ -481,10 +484,16 @@ def _solve_param_dim_weight_gradients(
                     lambda a: a.astype(jnp.promote_types(a.dtype, sig_dtype)),
                     etrace_data_unitless,
                 )
-                # Closed-form einsum path for mm/mv/elemwise primitives.
+                # Closed-form einsum path for mm/mv/elemwise primitives. For a
+                # batched primitive, fold the batch reduction into the einsum so
+                # no (B, I, O) intermediate is materialized; record the routed
+                # paths so the trailing batch-sum skips them (already reduced).
                 dg_weight_dict = _fast_solve_contract(
-                    relation.primitive, dg_hidden_unitless, etrace_for_solve
+                    relation.primitive, dg_hidden_unitless, etrace_for_solve,
+                    fold_batch=batched,
                 )
+                if batched:
+                    folded_paths.update(relation.trainable_paths.values())
             elif group.num_state == 1:
                 # num_state==1 shortcut: skip outer vmap of size 1.
                 dg_hid_squeezed = jax.tree.map(
@@ -514,6 +523,9 @@ def _solve_param_dim_weight_gradients(
     has_batched = any(is_batched_primitive(r.primitive) for r in weight_hidden_relations)
     if has_batched:
         for key, val in temp_data.items():
+            if key in folded_paths:
+                # already batch-reduced inside the fast-path einsum (fold_batch)
+                continue
             temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
 
     # update the weight gradients
