@@ -90,7 +90,7 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = Net()
-        >>> brainstate.nn.init_all_states(model)
+        >>> _ = brainstate.nn.init_all_states(model)
         >>> learner = braintrace.OSTLRecurrent(model)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)
@@ -158,7 +158,7 @@ class OSTLFeedforward(pp_prop):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = Net()
-        >>> brainstate.nn.init_all_states(model)
+        >>> _ = brainstate.nn.init_all_states(model)
         >>> learner = braintrace.OSTLFeedforward(model)
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)

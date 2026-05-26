@@ -140,14 +140,17 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
     Parameters
     ----------
-    model: brainstate.nn.Module
+    model : brainstate.nn.Module
         The model to build the eligibility trace graph. The models should only define the one-step behavior.
-    vjp_method: str
-        The method for computing the VJP. It should be either "single-step" or "multi-step".
+    vjp_method : str, optional
+        The method for computing the VJP. It should be either ``"single-step"`` or
+        ``"multi-step"``. Default is ``"single-step"``.
 
-        - "single-step": The VJP is computed at the current time step, i.e., $\partial L^t/\partial h^t$.
-        - "multi-step": The VJP is computed at multiple time steps, i.e., $\partial L^t/\partial h^{t-k}$,
-          where $k$ is determined by the data input.
+        - ``"single-step"``: The VJP is computed at the current time step, i.e.,
+          :math:`\partial L^t/\partial h^t`.
+        - ``"multi-step"``: The VJP is computed at multiple time steps, i.e.,
+          :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by the
+          data input.
     """
     __module__ = 'braintrace'
 
@@ -170,8 +173,10 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         """
         Whether the VJP method is ``single-step``.
 
-        Returns:
-            bool: Whether the VJP method is ``single-step``.
+        Returns
+        -------
+        bool
+            Whether the VJP method is ``single-step``.
         """
         return self.vjp_method == 'single-step'
 
@@ -180,8 +185,10 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         """
         Whether the VJP method is ``multi-step``.
 
-        Returns:
-            bool: Whether the VJP method is ``multi-step``.
+        Returns
+        -------
+        bool
+            Whether the VJP method is ``multi-step``.
         """
         return self.vjp_method == 'multi-step'
 
@@ -193,8 +200,10 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         graph for the model, which is used for computing the weight spatial gradients and
         the hidden state Jacobian.
 
-        Args:
-            *args: The positional arguments for the model.
+        Parameters
+        ----------
+        *args
+            The positional arguments for the model.
         """
 
         # process the inputs
@@ -316,22 +325,27 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
         This function is typically used for computing the forward propagation of hidden-to-weight Jacobian.
 
-        Now we mathematically define what computations are done in this function.
+        Parameters
+        ----------
+        *args
+            The positional arguments for the model.
 
-        For the state transition function $y, h^t = f(h^{t-1}, \theta, x)$, this function aims to solve:
-
-        1. The function output: $y$
-        2. The updated hidden states: $h^t$
-        3. The Jacobian matrix of hidden-to-weight, i.e., $\partial h^t / \partial \theta^t$.
-        2. The Jacobian matrix of hidden-to-hidden, i.e., $\partial h^t / \partial h^{t-1}$.
-
-        Args:
-            *args: The positional arguments for the model.
-
-        Returns:
+        Returns
+        -------
+        tuple
             The outputs, hidden states, other states, and the spatial gradients of the weights.
             Return the single-step results if inputs do not contain multiple-step data,
             otherwise return the multi-step data.
+
+        Notes
+        -----
+        For the state transition function :math:`y, h^t = f(h^{t-1}, \theta, x)`, this function aims
+        to solve:
+
+        1. The function output :math:`y`.
+        2. The updated hidden states :math:`h^t`.
+        3. The Jacobian matrix of hidden-to-weight, i.e., :math:`\partial h^t / \partial \theta^t`.
+        4. The Jacobian matrix of hidden-to-hidden, i.e., :math:`\partial h^t / \partial h^{t-1}`.
         """
 
         input_is_multi_step = has_multistep_data(*args)
@@ -452,6 +466,18 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         This function is typically used for computing both the forward propagation of hidden-to-weight Jacobian
         and the loss-to-hidden gradients at the current time-step.
 
+        Parameters
+        ----------
+        *args
+            The positional arguments for the model.
+
+        Returns
+        -------
+        tuple
+            The outputs, hidden states, other states, the spatial gradients of the weights, and the residuals.
+
+        Notes
+        -----
         Particularly, this function aims to solve:
 
         1. The Jacobian matrix of hidden-to-weight. That is,
@@ -460,12 +486,6 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
            :math:`\partial h / \partial h`, where :math:`h` is the hidden state.
         3. The partial gradients of the loss with respect to the hidden states.
            That is, :math:`\partial L / \partial h`, where :math:`L` is the loss and :math:`h` is the hidden state.
-
-        Args:
-          *args: The positional arguments for the model.
-
-        Returns:
-          The outputs, hidden states, other states, the spatial gradients of the weights, and the residuals.
         """
         input_is_multi_step = has_multistep_data(*args)
 

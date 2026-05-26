@@ -48,54 +48,54 @@ __all__ = [
 
 class ETraceVjpAlgorithm(ETraceAlgorithm):
     r"""
-    The base class for the eligibility trace algorithm which supporting the VJP gradient
+    The base class for the eligibility trace algorithm supporting the VJP gradient
     computation (reverse-mode differentiation).
 
-    The term ``VJP`` comes from the following two aspects:
+    The term ``VJP`` comes from two aspects. First, this module is designed to be
+    compatible with JAX's VJP mechanism, so the gradient is computed according to the
+    reverse-mode differentiation interface, like :func:`jax.grad`, :func:`jax.vjp`, or
+    :func:`jax.jacrev`. The true update function is defined as a custom VJP function
+    ``._true_update_fun()``, which receives the inputs, the hidden states, other states,
+    and etrace variables at the last time step, and returns the outputs, the hidden
+    states, other states, and etrace variables at the current time step. Second, the
+    algorithm computes the spatial gradient :math:`\partial L^t / \partial H^t` using the
+    standard back-propagation algorithm, which enhances the accuracy and the stability of
+    the gradient computation.
 
-    **First**, this module is designed to be compatible with the JAX's VJP mechanism.
-    This means that the gradient is computed according to the reverse-mode differentiation
-    interface, like the ``jax.grad()`` function, the ``jax.vjp()`` function,
-    or the ``jax.jacrev()`` function. The true update function is defined as a custom
-    VJP function ``._true_update_fun()``, which receives the inputs, the hidden states,
-    other states, and etrace variables at the last time step, and returns the outputs,
-    the hidden states, other states, and etrace variables at the current time step.
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model function, which receives the input arguments and returns the model output.
+    name : str, optional
+        The name of the etrace algorithm.
+    vjp_method : str, optional
+        The method for computing the VJP. It should be either ``"single-step"`` or
+        ``"multi-step"``. Default is ``"single-step"``.
 
-    For each subclass (or the instance of an etrace algorithm), we should define the
-    following methods:
+        - ``"single-step"``: The VJP is computed at the current time step, i.e.,
+          :math:`\partial L^t/\partial h^t`.
+        - ``"multi-step"``: The VJP is computed at multiple time steps, i.e.,
+          :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by the
+          data input.
 
-    - ``._update()``: update the eligibility trace states and return the outputs, hidden states, other states, and etrace data.
+    Notes
+    -----
+    For each subclass (or the instance of an etrace algorithm), the following methods
+    define the custom VJP rule:
+
+    - ``._update()``: update the eligibility trace states and return the outputs, hidden
+      states, other states, and etrace data.
     - ``._update_fwd()``: the forward pass of the custom VJP rule.
     - ``._update_bwd()``: the backward pass of the custom VJP rule.
 
-    However, this class has provided a default implementation for the ``._update()``,
-    ``._update_fwd()``, and ``._update_bwd()`` methods.
-
-    To implement a new etrace algorithm, users just need to override the following methods:
+    This class provides a default implementation for the ``._update()``,
+    ``._update_fwd()``, and ``._update_bwd()`` methods. To implement a new etrace
+    algorithm, users just need to override the following methods:
 
     - ``._solve_weight_gradients()``: solve the gradients of the learnable weights / parameters.
     - ``._update_etrace_data()``: update the eligibility trace data.
     - ``._assign_etrace_data()``: assign the eligibility trace data to the states.
     - ``._get_etrace_data()``: get the eligibility trace data.
-
-    **Second**, the algorithm computes the spatial gradient $\partial L^t / \partial H^t$ using the standard
-    back-propagation algorithm. This design can enhance the accuracy and the stability of the algorithm for
-    computing gradients.
-
-
-    Parameters
-    ----------
-    model: brainstate.nn.Module
-        The model function, which receives the input arguments and returns the model output.
-    name: str, optional
-        The name of the etrace algorithm.
-    vjp_method: str
-        The method for computing the VJP. It should be either "single-step" or "multi-step".
-
-        - "single-step": The VJP is computed at the current time step, i.e., $\partial L^t/\partial h^t$.
-        - "multi-step": The VJP is computed at multiple time steps, i.e., $\partial L^t/\partial h^{t-k}$,
-          where $k$ is determined by the data input.
-
     """
 
     __module__ = 'braintrace'
@@ -133,15 +133,29 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             raise ValueError('The etrace algorithm has not been compiled. Please call `compile_graph()` first. ')
 
     def update(self, *args) -> Any:
-        """
+        r"""
         Update the model states and the eligibility trace.
 
-        The input arguments ``args`` here supports very complex data structures, including
+        The input arguments ``args`` here support very complex data structures, including
         the combination of :py:class:`SingleStepData` and :py:class:`MultiStepData`.
 
-        - :py:class:`SingleStepData`: indicating the data at the single time step, $x_t$.
-        - :py:class:`MultiStepData`: indicating the data at multiple time steps, $[x_{t-k}, ..., x_t]$.
+        - :py:class:`SingleStepData`: indicating the data at the single time step,
+          :math:`x_t`.
+        - :py:class:`MultiStepData`: indicating the data at multiple time steps,
+          :math:`[x_{t-k}, ..., x_t]`.
 
+        Parameters
+        ----------
+        *args
+            The input arguments.
+
+        Returns
+        -------
+        Any
+            The model output.
+
+        Notes
+        -----
         Suppose all inputs have the shape of ``(10,)``.
 
         If the input arguments are given by:
@@ -178,9 +192,6 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         Then, the first input argument is considered as the :py:class:`MultiStepData`, and its data will
         be fed into the model within five consecutive steps, and the second input argument will be fed
         into the model at each time of this five consecutive steps.
-
-        Args:
-            *args: the input arguments.
         """
 
         # ----------------------------------------------------------------------------------------------

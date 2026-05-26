@@ -40,12 +40,17 @@ class EligibilityTrace(brainstate.ShortTermState):
 
     Examples
     --------
-    When you are using :class:`braintrace.pp_prop`, you can get
-    the eligibility trace of the weight by calling:
+    An eligibility trace wraps an array-valued state, just like any other
+    :class:`brainstate.ShortTermState`:
 
     .. code-block:: python
 
-        >>> etrace = etrace_algorithm.etrace_of(weight)
+        >>> import jax.numpy as jnp
+        >>> import braintrace
+        >>>
+        >>> trace = braintrace.EligibilityTrace(jnp.zeros((3, 4)))
+        >>> trace.value.shape
+        (3, 4)
 
     """
     __module__ = 'braintrace'

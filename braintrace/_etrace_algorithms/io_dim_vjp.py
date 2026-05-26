@@ -490,22 +490,48 @@ def _solve_IO_dim_weight_gradients(
 
 
 class IODimVjpAlgorithm(ETraceVjpAlgorithm):
-    r"""
-    The online gradient computation algorithm with the diagonal approximation
-    and the input-output dimensional complexity.
+    r"""Online gradient algorithm with diagonal approximation and input-output-dimension complexity.
 
-    This algrithm computes the gradients of the weights with the diagonal approximation
-    and the input-output dimensional complexity. Its aglritm is based on the RTRL algorithm,
-    and has the following learning rule:
+    This algorithm computes the gradients of the weights with the diagonal
+    approximation and the input-output dimensional complexity. It is based on the
+    RTRL algorithm (Real-Time Recurrent Learning).
 
-    $$
-    \begin{aligned}
-    & \boldsymbol{\epsilon}^t \approx \boldsymbol{\epsilon}_{\mathbf{f}}^t \otimes \boldsymbol{\epsilon}_{\mathbf{x}}^t \\
-    & \boldsymbol{\epsilon}_{\mathbf{x}}^t=\alpha \boldsymbol{\epsilon}_{\mathbf{x}}^{t-1}+\mathbf{x}^t \\
-    & \boldsymbol{\epsilon}_{\mathbf{f}}^t=\alpha \operatorname{diag}\left(\mathbf{D}^t\right) \circ \boldsymbol{\epsilon}_{\mathbf{f}}^{t-1}+(1-\alpha) \operatorname{diag}\left(\mathbf{D}_f^t\right) \\
-    & \nabla_{\boldsymbol{\theta}} \mathcal{L}=\sum_{t^{\prime} \in \mathcal{T}} \frac{\partial \mathcal{L}^{t^{\prime}}}{\partial \mathbf{h}^{t^{\prime}}} \circ \boldsymbol{\epsilon}^{t^{\prime}}
-    \end{aligned}
-    $$
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model function, which receives the input arguments and returns the
+        model output.
+    decay_or_rank : float or int
+        The exponential smoothing factor for the eligibility trace. If a float,
+        it is the decay factor and should be in the range :math:`(0, 1)`. If an
+        integer, it is the number of approximation ranks for the algorithm and
+        should be greater than 0.
+    vjp_method : str, optional
+        The method for computing the VJP. It should be either ``"single-step"``
+        or ``"multi-step"``.
+
+        - ``"single-step"``: the VJP is computed at the current time step, i.e.,
+          :math:`\partial L^t/\partial h^t`.
+        - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
+          :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
+          the data input.
+    name : str, optional
+        The name of the etrace algorithm.
+    mode : braintrace.mixin.Mode, optional
+        The computing mode, indicating the batching information.
+
+    Notes
+    -----
+    The learning rule is
+
+    .. math::
+
+        \begin{aligned}
+        & \boldsymbol{\epsilon}^t \approx \boldsymbol{\epsilon}_{\mathbf{f}}^t \otimes \boldsymbol{\epsilon}_{\mathbf{x}}^t \\
+        & \boldsymbol{\epsilon}_{\mathbf{x}}^t=\alpha \boldsymbol{\epsilon}_{\mathbf{x}}^{t-1}+\mathbf{x}^t \\
+        & \boldsymbol{\epsilon}_{\mathbf{f}}^t=\alpha \operatorname{diag}\left(\mathbf{D}^t\right) \circ \boldsymbol{\epsilon}_{\mathbf{f}}^{t-1}+(1-\alpha) \operatorname{diag}\left(\mathbf{D}_f^t\right) \\
+        & \nabla_{\boldsymbol{\theta}} \mathcal{L}=\sum_{t^{\prime} \in \mathcal{T}} \frac{\partial \mathcal{L}^{t^{\prime}}}{\partial \mathbf{h}^{t^{\prime}}} \circ \boldsymbol{\epsilon}^{t^{\prime}}
+        \end{aligned}
 
     where :math:`\boldsymbol{\epsilon}_{\mathbf{x}}^t` is the input-side trace,
     :math:`\boldsymbol{\epsilon}_{\mathbf{f}}^t` the output-side trace,
@@ -513,7 +539,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t` the state-to-output
     Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
 
-    **How it works.** The full per-parameter D-RTRL trace
+    The full per-parameter D-RTRL trace
     :math:`\boldsymbol{\epsilon}^t \in \mathbb{R}^{I\times O}` is approximated by
     the outer product of two exponentially-smoothed *vectors* — one over the
     input dimension and one over the output dimension. Storing the two factors
@@ -522,35 +548,14 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     approximation rank) controls how much temporal history the factored trace
     retains; the bias of the exponential estimator is corrected at solve time.
 
+    This algorithm has :math:`O(BI+BO)` memory complexity and :math:`O(BIO)`
+    computational complexity, where :math:`I` and :math:`O` are the number of
+    input and output dimensions, and :math:`B` the batch size. In particular, for
+    a linear transformation layer, the weight gradients are computed with
+    :math:`O(Bn)` memory complexity and :math:`O(Bn^2)` computational complexity,
+    where :math:`n` is the number of hidden dimensions.
+
     For more details, please see `the ES-D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
-
-    This algorithm has the :math:`O(BI+BO)` memory complexity and :math:`O(BIO)` computational
-    complexity, where :math:`I` and :math:`O` are the number of input and output dimensions, and
-    :math:`B` the batch size.
-
-    Particularly, for a Linear transformation layer, the algorithm computes the weight gradients
-    with the :math:`O(Bn)` memory complexity and :math:`O(Bn^2)` computational complexity, where
-    :math:`n` is the number of hidden dimensions.
-
-    Parameters
-    -----------
-    model: brainstate.nn.Module
-        The model function, which receives the input arguments and returns the model output.
-    vjp_method: str, optional
-        The method for computing the VJP. It should be either "single-step" or "multi-step".
-
-        - "single-step": The VJP is computed at the current time step, i.e., $\partial L^t/\partial h^t$.
-        - "multi-step": The VJP is computed at multiple time steps, i.e., $\partial L^t/\partial h^{t-k}$,
-          where $k$ is determined by the data input.
-
-    decay_or_rank: float, int
-        The exponential smoothing factor for the eligibility trace.
-        If it is a float, it is the decay factor, should be in the range of (0, 1).
-        If it is an integer, it is the number of approximation rank for the algorithm, should be greater than 0.
-    name: str, optional
-        The name of the etrace algorithm.
-    mode: braintrace.mixin.Mode
-        The computing mode, indicating the batching information.
 
     Examples
     --------
@@ -568,7 +573,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = RNN()
-        >>> brainstate.nn.init_all_states(model)
+        >>> _ = brainstate.nn.init_all_states(model)
         >>> learner = braintrace.pp_prop(model, decay_or_rank=0.9)  # or rank: decay_or_rank=19
         >>> x0 = brainstate.random.randn(1)
         >>> learner.compile_graph(x0)   # trace the graph once
@@ -609,10 +614,10 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         self.fast_solve = fast_solve
 
     def init_etrace_state(self, *args, **kwargs):
-        """
-        Initialize the eligibility trace states of the etrace algorithm.
+        """Initialize the eligibility trace states of the etrace algorithm.
 
-        This method is needed after compiling the etrace graph. See :meth:`.compile_graph()` for the details.
+        This method is needed after compiling the etrace graph. See
+        :meth:`compile_graph` for the details.
         """
         # The states of weight spatial gradients:
         #   1. x
@@ -624,19 +629,38 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             _init_IO_dim_state(self.etrace_xs, self.etrace_dfs, relation)
 
     def reset_state(self, batch_size: int = None, **kwargs):
-        """
-        Reset the eligibility trace states.
+        """Reset the eligibility trace states.
+
+        Parameters
+        ----------
+        batch_size : int, optional
+            The batch size used to reshape the reset trace states. Default ``None``.
         """
         self.running_index.value = 0
         _reset_state_in_a_dict(self.etrace_xs, batch_size)
         _reset_state_in_a_dict(self.etrace_dfs, batch_size)
 
     def get_etrace_of(self, weight: brainstate.ParamState | Path) -> Tuple[Dict, Dict]:
-        """
-        Get the eligibility trace of the given weight.
+        """Get the eligibility trace of the given weight.
 
-        The eligibility trace contains the following structures:
+        Parameters
+        ----------
+        weight : brainstate.ParamState or Path
+            The weight whose eligibility trace is requested, given either as a
+            :class:`brainstate.ParamState` instance or as its path in the model.
 
+        Returns
+        -------
+        etrace_xs : dict
+            The input-side eligibility traces keyed by the weight-input variable.
+        etrace_dfs : dict
+            The output-side eligibility traces keyed by
+            ``(y_var, hidden-group index)``.
+
+        Raises
+        ------
+        ValueError
+            If no eligibility trace is found for the given weight.
         """
         self._assert_compiled()
 

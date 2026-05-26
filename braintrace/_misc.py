@@ -221,22 +221,21 @@ def deprecation_getattr(module, deprecations):
 
 
 class NotSupportedError(Exception):
-    """
-    Exception raised for operations that are not supported.
+    """Exception raised for operations that are not supported.
 
-    This exception is used to indicate that a particular operation or
-    functionality is not supported within the context of the application.
-
+    Signals that a particular operation or functionality is not supported
+    within the eligibility-trace compilation and execution machinery, for
+    example an ETP primitive used in an unsupported configuration.
     """
     __module__ = 'braintrace'
 
 
 class CompilationError(Exception):
-    """
-    Exception raised for errors that occur during the compilation process.
+    """Exception raised for errors that occur during compilation.
 
-    This exception is used to indicate that a compilation error has occurred
-    within the context of the application.
+    Signals that the jaxpr-analysis / graph-building stage of the
+    eligibility-trace compiler failed, for example when parameters cannot
+    be connected to the hidden states they influence.
     """
     __module__ = 'braintrace'
 

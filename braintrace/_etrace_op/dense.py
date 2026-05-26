@@ -393,18 +393,45 @@ etp_mv_p.register_etp_rules(
 def matmul(x, weight, bias=None):
     r"""ETP-aware matrix multiplication.
 
-    Computes :math:`y = x \mathbin{@} w \; (+ b)`.
+    Computes :math:`y = x \mathbin{@} w \; (+ b)`. The operation is routed
+    through an ETP primitive so the weight (and optional bias) participates
+    in eligibility-trace computation. Auto-dispatches to ``etp_mm_p``
+    (batched) or ``etp_mv_p`` (unbatched) based on ``x.ndim``.
 
-    Auto-dispatches to ``etp_mm_p`` (batched) or ``etp_mv_p`` (unbatched)
-    based on ``x.ndim``.
+    Parameters
+    ----------
+    x : ArrayLike
+        Input array, shape ``(..., in_features)`` or ``(in_features,)``.
+    weight : ArrayLike
+        Weight matrix, shape ``(in_features, out_features)``.
+    bias : ArrayLike or None, optional
+        Bias vector, shape ``(out_features,)``. Default ``None``.
 
-    Args:
-        x: Input array, shape ``(..., in_features)`` or ``(in_features,)``.
-        weight: Weight matrix, shape ``(in_features, out_features)``.
-        bias: Optional bias vector, shape ``(out_features,)``.
+    Returns
+    -------
+    ArrayLike
+        Output array, shape ``(..., out_features)`` or ``(out_features,)``.
 
-    Returns:
-        Output array.
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> brainstate.environ.set(precision=64)
+        >>> x = brainstate.random.randn(16, 3)
+        >>> w = brainstate.random.randn(3, 4)
+        >>> y = braintrace.matmul(x, w)
+        >>> print(y.shape)
+        (16, 4)
+        >>>
+        >>> # Unbatched input with a bias term
+        >>> x1 = brainstate.random.randn(3)
+        >>> b = brainstate.random.randn(4)
+        >>> y1 = braintrace.matmul(x1, w, bias=b)
+        >>> print(y1.shape)
+        (4,)
     """
     p = etp_mm_p if x.ndim >= 2 else etp_mv_p
     x_v, x_u = u.split_mantissa_unit(x)

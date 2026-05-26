@@ -46,7 +46,20 @@ __all__ = [
 
 
 class DiagnosticLevel(str, Enum):
-    """Severity of a :class:`CompilationRecord`."""
+    """Severity of a :class:`CompilationRecord`.
+
+    A string-valued enumeration ordering compiler diagnostics by severity.
+
+    Attributes
+    ----------
+    INFO
+        Informational record; not surfaced through :func:`warnings.warn`.
+    WARNING
+        A potential problem (e.g. an excluded relation) that is also emitted
+        as a Python warning.
+    ERROR
+        A serious problem that is also emitted as a Python warning.
+    """
 
     INFO = 'info'
     WARNING = 'warning'
@@ -56,8 +69,17 @@ class DiagnosticLevel(str, Enum):
 class DiagnosticKind(str, Enum):
     """Machine-readable reason for a :class:`CompilationRecord`.
 
-    Every decision the ETrace compiler makes maps to exactly one ``DiagnosticKind``
-    so tests can assert on ``.kind`` rather than parsing message strings.
+    A string-valued enumeration naming the exact decision the ETrace compiler
+    made. Every decision maps to exactly one ``DiagnosticKind`` so tests can
+    assert on ``CompilationRecord.kind`` rather than parsing message strings.
+
+    Notes
+    -----
+    The members fall into a few families: an inclusion marker
+    (``RELATION_INCLUDED``), exclusion reasons (the ``RELATION_EXCLUDED_*``
+    members), a path-classification marker (``RELATION_PARTIAL_PATH``), and a
+    set of structural observations about the jaxpr (nested ``jit``, control
+    flow, multi-output primitives, state mismatches, and so on).
     """
 
     # Inclusion
@@ -90,8 +112,30 @@ class DiagnosticKind(str, Enum):
 class CompilationRecord:
     """A single compiler decision, captured with structured context.
 
-    ``context`` is an open dict keyed by the emitting site; see the
-    :class:`DiagnosticKind` documentation for the schema of each kind.
+    A frozen dataclass recording one decision made by the ETrace compiler,
+    together with enough structured context to query *why* the decision was
+    made without parsing the human-readable ``message``.
+
+    Parameters
+    ----------
+    kind : DiagnosticKind
+        Machine-readable reason for the record.
+    level : DiagnosticLevel
+        Severity of the record.
+    message : str
+        Human-readable description of the decision.
+    primitive : object or None, optional
+        The JAX primitive the decision concerns, if any. Default ``None``.
+    weight_path : tuple of object or None, optional
+        Module path of the weight ``ParamState`` the decision concerns, if
+        any. Default ``None``.
+    hidden_paths : tuple of tuple of object, optional
+        Module paths of the hidden states the decision concerns. Default
+        ``()``.
+    context : dict or None, optional
+        Open dict of extra context keyed by the emitting site; see the
+        :class:`DiagnosticKind` documentation for the schema of each kind.
+        Default ``None``.
     """
 
     kind: DiagnosticKind

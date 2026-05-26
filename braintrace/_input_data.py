@@ -63,40 +63,64 @@ class ETraceInputData:
 
 @register_pytree_node_class
 class SingleStepData(ETraceInputData):
-    """
-    The data at a single time step.
+    """A container marking input data as belonging to a single time step.
 
-    Examples::
+    Wraps an arbitrary pytree of arrays so the online-learning machinery
+    can distinguish per-step inputs (which are reused at every step) from
+    time-major inputs. Registered as a JAX pytree node, so instances can
+    cross ``jit``/``grad`` boundaries transparently.
 
-        >>> import brainstate as brainstate
-        >>> data = SingleStepData(brainstate.random.randn(2, 3))
+    Parameters
+    ----------
+    data : Any
+        The pytree of arrays to store for a single time step.
 
+    See Also
+    --------
+    MultiStepData : Container for inputs spanning multiple time steps.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>> data = braintrace.SingleStepData(brainstate.random.randn(2, 3))
+        >>> print(data.data.shape)
+        (2, 3)
     """
     __module__ = 'braintrace'
 
 
 @register_pytree_node_class
 class MultiStepData(ETraceInputData):
-    """
-    The data at multiple time steps.
+    """A container marking input data as spanning multiple time steps.
 
-    The first dimension of the data represents the time steps.
+    Wraps an arbitrary pytree of arrays whose leading axis is the time
+    dimension, so the online-learning machinery can iterate over time
+    steps. Registered as a JAX pytree node, so instances can cross
+    ``jit``/``grad`` boundaries transparently.
 
-    Examples::
+    Parameters
+    ----------
+    data : Any
+        The pytree of arrays to store. The first dimension of each array
+        represents the time steps.
 
-        >>> import brainstate as brainstate
-        # data at 10 time steps, each time step has 2 samples, each sample has 3 features
-        >>> data = MultiStepData(brainstate.random.randn(10, 2, 3))
+    See Also
+    --------
+    SingleStepData : Container for an input at a single time step.
 
+    Examples
+    --------
+    .. code-block:: python
 
-    Another example::
-
-        >>> import brainstate as brainstate
-        >>> data = MultiStepData(
-        ...     brainstate.random.randn(10, 2, 3),
-        ...     brainstate.random.randn(10, 5),
-        ... )
-
+        >>> import brainstate
+        >>> import braintrace
+        >>> # data at 10 time steps, 2 samples each, 3 features per sample
+        >>> data = braintrace.MultiStepData(brainstate.random.randn(10, 2, 3))
+        >>> print(data.data.shape)
+        (10, 2, 3)
     """
     __module__ = 'braintrace'
 
