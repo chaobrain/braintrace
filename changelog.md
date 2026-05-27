@@ -1,6 +1,219 @@
 # Release Notes
 
 
+## Version 0.2.0
+
+This release is a major step for BrainTrace. It adds a family of spiking neural
+network (SNN) online-learning algorithms, rewrites the eligibility-trace
+compiler around primitive-type dispatch, generalizes every ETP primitive to
+support multiple trainable inputs (fixing a silent bias-gradient drop),
+delivers substantial performance gains for D-RTRL and multi-step rollouts, and
+hardens the package with PEP 561 typing and a BPTT-oracle-backed test suite.
+
+### Major Changes
+
+#### New: SNN Online-Learning Algorithms
+
+- **Added five SNN online-learning algorithms** as flat `ETraceVjpAlgorithm`
+  subclasses: `EProp`, `OSTL` (`OSTLRecurrent` / `OSTLFeedforward`), `OTPE`,
+  `OTTT`, and `OSTTP`. All are exported at the top level.
+- **Added a `_compute_learning_signal` hook** to `ETraceVjpAlgorithm` to support
+  target-projection algorithms (`OSTTP`) without disrupting the existing D-RTRL
+  and pp-prop paths.
+- **Added supporting trace helpers**: `PresynapticTrace`, `KappaFilter`,
+  `FixedRandomFeedback`, and target-signal extraction utilities.
+- Algorithms are cross-checked for regime equivalence and verified to decrease
+  loss in integration smoke tests.
+
+#### ETP Compiler Rewrite
+
+- **Rewrote the eligibility-trace compiler to dispatch on primitive-type
+  identity** rather than string-matching op or trace names, with structured,
+  leveled diagnostics (`DiagnosticKind`, `DiagnosticLevel`,
+  `CompilationRecord`) replacing ad-hoc warnings.
+- **Added compile-time diagnostics** that surface previously silent issues —
+  e.g. `TRAINABLE_INVAR_NOT_PARAMSTATE` flags a trainable input (such as a
+  constant bias) that does not trace to a `ParamState`, so users can wrap it
+  intentionally instead of silently losing its gradient.
+
+#### Multi-Trainable-Input ETP Primitives (Bias Gradients)
+
+- **Generalized every ETP primitive from a single-"weight" assumption to an
+  arbitrary named dict of trainable inputs.** This fixes a silent bias-gradient
+  drop and a LoRA executor signature mismatch in one coherent refactor.
+- Migrated all built-in primitives (`elemwise`, dense `mm`/`mv`, `conv`,
+  `sparse` `mm`/`mv`, and `lora`) to the dict-based rule API with first-class
+  **bias gradient support**, each verified element-wise against a BPTT oracle.
+- **Fixed layout-aware axis handling in conv** primitives (1D/2D, NHWC/NCHW,
+  OIHW/HWIO kernel layouts) that previously corrupted gradients on non-default
+  layouts, and **fixed non-square dense weight broadcasting** in `_mm_yw_to_w`.
+- Eligibility traces are now stored as per-key dicts; the transitional
+  legacy-array adapter has been fully removed.
+
+#### Performance
+
+- **D-RTRL einsum fast path** (`fast_solve=True`, default on): replaces nested
+  `vmap`-of-`vjp` and per-step `lax.cond` overhead with direct einsum kernels
+  for `mm`/`mv`/`elemwise`; conv/sparse/LoRA fall back to the legacy path.
+- **Reduced-precision trace storage** (`trace_dtype`, e.g. bf16/fp16) halves the
+  dominant `B*N^2` trace bandwidth on GPU/TPU while keeping Jacobians, learning
+  signals, and final gradients in fp32. Default `None` preserves exact behavior.
+- **Multi-step trace fusion**: the per-step eligibility-trace roll for exact
+  algorithms (D-RTRL, pp-prop) is now threaded into the graph executor's forward
+  scan, eliminating an `O(T × Jacobian)` HBM round-trip (traced scan count drops
+  3 → 2). Opt-in and multi-step-only; single-step/SNN paths are unchanged.
+- Branch-free spectrum/vector normalization to restore XLA fusion across steps.
+
+#### Primitive Registration Simplification
+
+- **Removed `ETPPrimitiveSpec`** and the spec-based registration layer; invar/
+  outvar layout metadata (`trainable_invars_fn`, `x_invar_index`,
+  `y_outvar_index`) now lives in internal registries populated directly through
+  `register_primitive` keyword arguments.
+
+#### Package Restructuring
+
+- **Consolidated the eligibility-trace code into a single flat
+  `_etrace_algorithms` package**, merging the former `_etrace_vjp/`,
+  `_etrace_algorithms.py`, `_etrace_graph_executor.py`, and `_snn_algorithms/`
+  modules. The top-level public API is unchanged.
+- **Split the algorithm base hierarchy into dedicated modules**:
+  `ParamDimVjpAlgorithm` (D-RTRL) and `IODimVjpAlgorithm` (pp-prop) now live in
+  their own files, with `D_RTRL`/`pp_prop` as thin subclasses.
+- Removed the experimental hybrid online-learning method.
+
+#### Typing & Packaging
+
+- **The package is now PEP 561 compliant**: ships a `py.typed` marker so
+  downstream users receive inline type hints.
+- Added a pragmatic `mypy` configuration and wired type checking plus packaging
+  verification (`python -m build`, `py.typed` presence) into CI.
+
+#### Testing
+
+- **Added a BPTT gradient oracle and a layered correctness test suite** (P2–P8):
+  per-operator rule oracles, public-API contract tests, exact-class
+  element-wise equivalence with BPTT, approximate-class direction-alignment
+  checks, transform/integration invariance, and per-cell compiler relation
+  guardrails tied to the cell registry.
+
+#### Documentation
+
+- **Converted all public-API docstrings to NumPy-doc style** with math,
+  references, and runnable examples.
+- Documentation is now self-hosted at `brainx.chaobrain.com/braintrace/`, with
+  refreshed RTD links and a WebP logo.
+
+#### Dependencies & Tooling
+
+- **Replaced `brainunit` with `saiunit`** throughout for unit handling.
+- Numerous CI/CD upgrades (checkout, setup-python, artifact actions, sphinx and
+  theme requirements); docs deploy on release publication.
+
+### Deprecations
+
+The entire v0.1.x **class-based** operator/parameter API is deprecated in favor
+of the new **primitive-based** ETP user-API. The legacy classes still work —
+they are thin back-compatibility shims that route through the new primitives —
+but each emits a `DeprecationWarning` (once per class, per process) on first
+use, and they will be removed in a future release. Migrate at your convenience.
+
+**Deprecated operator classes** → new primitive functions:
+
+| Deprecated (v0.1.x) | Use instead (v0.2.0) |
+| --- | --- |
+| `MatMulOp` | `braintrace.matmul` |
+| `ElemWiseOp` | `braintrace.element_wise` |
+| `ConvOp` | `braintrace.conv` |
+| `SpMatMulOp` | `braintrace.sparse_matmul` |
+| `LoraOp` | `braintrace.lora_matmul` |
+| `ETraceOp` (base) | the ETP primitive functions above |
+
+**Deprecated parameter classes** → `brainstate.ParamState` + a primitive:
+
+| Deprecated (v0.1.x) | Use instead (v0.2.0) |
+| --- | --- |
+| `ETraceParam` | `brainstate.ParamState` + an ETP primitive function (e.g. `braintrace.matmul`) |
+| `ElemWiseParam` | `brainstate.ParamState` + `braintrace.element_wise` |
+| `NonTempParam` | `brainstate.ParamState` + plain JAX ops (`x @ w`) — keeps the weight out of the ETP graph |
+| `FakeETraceParam`, `FakeElemWiseParam` | plain objects with plain JAX ops |
+
+The `stop_param_gradients` context manager and the `general_y2w` helper are kept
+as no-op compatibility shims and have no effect on the new primitive path.
+
+### Breaking Changes
+
+1. **OSTL factory removed** — use `OSTLRecurrent` or `OSTLFeedforward` directly
+   instead of the former `OSTL` factory function.
+
+2. **`OTTT` and `OTPE` require an explicit `leak`** — the membrane leak is no
+   longer inferred from `model.states()` (it silently picked a wrong value on
+   heterogeneous/multi-population models). Both now also reject hidden groups
+   with `num_state > 1` at compile time, as collapsing the `num_state` axis has
+   no theoretical basis for these LIF-derived rules. `OTPE` additionally
+   documents a narrower feed-forward / single-layer / global-scalar-leak regime.
+
+3. **Unit dependency change** — code relying on `brainunit` internals should
+   migrate to `saiunit`.
+
+4. **`ETPPrimitiveSpec` removed** — custom primitives must register layout
+   metadata via `register_primitive` keyword arguments
+   (`trainable_invars_fn`, `x_invar_index`, `y_outvar_index`).
+
+### Migration Guide
+
+#### OSTL
+```python
+# Old
+algo = OSTL(model, ...)         # factory
+
+# New — choose the regime explicitly
+algo = OSTLRecurrent(model, ...)
+# or
+algo = OSTLFeedforward(model, ...)
+```
+
+#### OTTT / OTPE
+```python
+# Old
+algo = OTTT(model, ...)               # leak inferred from model.states()
+
+# New — pass the postsynaptic membrane leak explicitly
+algo = OTTT(model, leak=0.9, ...)
+```
+
+#### Custom ETP primitives
+```python
+# Old: register_primitive_spec(ETPPrimitiveSpec(...))
+# New: pass layout metadata directly
+register_primitive(
+    prim,
+    trainable_invars_fn=...,
+    x_invar_index=...,
+    y_outvar_index=...,
+)
+```
+
+#### Deprecated class-based API → primitive-based API
+```python
+# Old (v0.1.x): wrap the weight in an ETraceParam bound to an op
+self.w = braintrace.ETraceParam({'weight': w}, braintrace.MatMulOp())
+y = self.w.execute(x)
+
+# New (v0.2.0): a plain ParamState + the ETP primitive function
+self.w = brainstate.ParamState({'weight': w})
+y = braintrace.matmul(x, self.w.value)
+```
+
+The element-wise case is analogous (`ElemWiseParam`/`ElemWiseOp` →
+`brainstate.ParamState` + `braintrace.element_wise`); to keep a weight out of
+the eligibility-trace graph, use a plain `brainstate.ParamState` with ordinary
+JAX ops instead of `NonTempParam` / `FakeETraceParam`.
+
+### Version
+- Bumped version from `0.1.3` to `0.2.0`
+
+
 ## Version 0.1.2
 
 ### Major Changes

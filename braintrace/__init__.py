@@ -15,6 +15,56 @@
 
 # -*- coding: utf-8 -*-
 
+"""braintrace: online learning for recurrent networks via Eligibility Trace Propagation (ETP).
+
+``braintrace`` trains recurrent and spiking neural networks **online** — forward
+in time, without backpropagation through time (BPTT). Models mark their
+trainable operations with ETP user-API ops (for example :func:`matmul`,
+:func:`conv`, :func:`sparse_matmul`, :func:`lora_matmul`, :func:`element_wise`)
+instead of wrapping parameters in a special class. A compiler then walks the
+JAX ``jaxpr``, identifies those ETP primitives, and connects each parameter to
+the hidden states it influences so that eligibility traces can be propagated.
+
+The public API is organised in four layers, with dependencies pointing strictly
+downward:
+
+1. **ETP operators** — the user-facing ops (:func:`matmul`, :func:`conv`, ...),
+   the :class:`ETPPrimitive` class, and :func:`register_primitive` for adding
+   new ones.
+2. **Compiler** — :func:`compile_etrace_graph` and the analysis containers
+   (:class:`ETraceGraph`, :class:`ModuleInfo`, :class:`HiddenGroup`,
+   :class:`HiddenParamOpRelation`, :class:`HiddenPerturbation`) plus the
+   diagnostics types (:class:`CompilationRecord`, :class:`DiagnosticKind`,
+   :class:`DiagnosticLevel`).
+3. **Graph executor** — :class:`ETraceGraphExecutor` /
+   :class:`ETraceVjpGraphExecutor`, which run the forward pass and the
+   hidden->weight / hidden->hidden Jacobian computations.
+4. **Algorithms** — online-learning orchestrators: the exact algorithms
+   :class:`D_RTRL` / :func:`pp_prop` / :class:`ES_D_RTRL`, and the SNN family
+   :class:`EProp`, :class:`OSTLRecurrent`, :class:`OSTLFeedforward`,
+   :class:`OTPE`, :class:`OTTT`, :class:`OSTTP`.
+
+The :mod:`braintrace.nn` subpackage provides ready-made ETP-wired layers
+(linear maps, convolutions, recurrent cells, read-outs).
+
+Notes
+-----
+The convenience entry point :func:`compile` wraps a model together with an
+algorithm into a single trainable object and is the recommended starting point.
+The ``braintrace.MatMulOp`` / ``ETraceParam`` style names from the v0.1.x API
+are deprecated shims served lazily with a :class:`DeprecationWarning`; new code
+should mark parameters by routing them through ETP ops instead.
+
+Examples
+--------
+.. code-block:: python
+
+    >>> import braintrace
+    >>> # the public API surface is enumerated by __all__
+    >>> 'matmul' in braintrace.__all__
+    True
+"""
+
 
 from typing import TYPE_CHECKING
 

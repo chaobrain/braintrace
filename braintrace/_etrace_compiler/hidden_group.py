@@ -286,6 +286,14 @@ class HiddenGroup(NamedTuple):
         return splitted_hid_vals
 
     def dict(self) -> Dict[str, Any]:
+        """Return this group's named fields as a plain dictionary.
+
+        Returns
+        -------
+        dict
+            An ordered mapping from field name to value, as produced by the
+            underlying :class:`typing.NamedTuple`.
+        """
         return self._asdict()
 
     def __repr__(self) -> str:
@@ -349,6 +357,14 @@ class HiddenToHiddenGroupTracer(NamedTuple):
     trace: List[JaxprEqn]
 
     def dict(self) -> Dict[str, Any]:
+        """Return this tracer's named fields as a plain dictionary.
+
+        Returns
+        -------
+        dict
+            An ordered mapping from field name to value, as produced by the
+            underlying :class:`typing.NamedTuple`.
+        """
         return self._asdict()
 
     def __repr__(self) -> str:
@@ -413,6 +429,14 @@ class Hidden2GroupTransition(NamedTuple):
         return new_hidden_vals
 
     def dict(self) -> Dict[str, Any]:
+        """Return this transition's named fields as a plain dictionary.
+
+        Returns
+        -------
+        dict
+            An ordered mapping from field name to value, as produced by the
+            underlying :class:`typing.NamedTuple`.
+        """
         return self._asdict()
 
     def __repr__(self) -> str:

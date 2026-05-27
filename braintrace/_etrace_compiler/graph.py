@@ -170,6 +170,31 @@ class ETraceGraph(NamedTuple):
         perturb_data: Sequence[jax.Array],
         old_state_vals: Optional[Sequence[jax.Array]] = None,
     ):
+        r"""Run the forward pass with additive perturbations injected at the hidden states.
+
+        Evaluates the perturbed-forward jaxpr built during compilation, which is
+        the forward computation augmented so that each tracked hidden state has a
+        perturbation term added to it. This is the primitive used to probe
+        hidden->hidden and hidden->output sensitivities.
+
+        Parameters
+        ----------
+        args : Inputs
+            The model inputs for this step, matching the signature captured at
+            compile time.
+        perturb_data : Sequence[jax.Array]
+            One perturbation array per tracked hidden state, added at the
+            corresponding perturbation site.
+        old_state_vals : Sequence[jax.Array] or None, optional
+            The state values to run from. When ``None`` (default) the current
+            values of the compiled model states are used.
+
+        Returns
+        -------
+        object
+            The processed model outputs, in the same structure produced by a
+            normal forward call.
+        """
         # state checking
         if old_state_vals is None:
             old_state_vals = [st.value for st in self.module_info.compiled_model_states]
@@ -184,6 +209,14 @@ class ETraceGraph(NamedTuple):
         return self.module_info._process(*args, jaxpr_outs=jaxpr_outs)
 
     def dict(self) -> Dict:
+        """Return the graph's fields as a plain dictionary.
+
+        Returns
+        -------
+        dict
+            A mapping from field name to value for every attribute of this
+            :class:`ETraceGraph`.
+        """
         return self._asdict()
 
     def __repr__(self) -> str:

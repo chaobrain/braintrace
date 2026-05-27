@@ -34,6 +34,22 @@ class Linear(brainstate.nn.Linear):
     __doc__ = brainstate.nn.Linear.__doc__.replace('brainstate', 'braintrace')
 
     def update(self, x):
+        """Apply the linear transform through the ETP ``matmul`` primitive.
+
+        Routing the matrix multiplication through :func:`braintrace.matmul`
+        (instead of a plain JAX dot) is what makes ``weight`` eligible for
+        online-learning trace computation.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input array, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The transformed output, of shape ``(..., out_size)``.
+        """
         w = self.weight.value['weight']
         if self.w_mask is not None:
             w = w * self.w_mask
@@ -46,6 +62,22 @@ class SignedWLinear(brainstate.nn.SignedWLinear):
     __doc__ = brainstate.nn.SignedWLinear.__doc__.replace('brainstate', 'braintrace')
 
     def update(self, x):
+        """Apply the sign-constrained linear transform through ETP ``matmul``.
+
+        The stored weight magnitudes are made non-negative and then given a
+        fixed sign before being routed through :func:`braintrace.matmul`, so
+        the weight participates in online-learning trace computation.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input array, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The transformed output, of shape ``(..., out_size)``.
+        """
         w = u.math.abs(self.weight.value)
         if self.w_sign is not None:
             w = w * self.w_sign
@@ -57,6 +89,22 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
     __doc__ = brainstate.nn.ScaledWSLinear.__doc__.replace('brainstate', 'braintrace')
 
     def update(self, x):
+        """Apply the weight-standardized linear transform through ETP ``matmul``.
+
+        The weight is standardized (zero-mean, unit-variance per output unit)
+        before being routed through :func:`braintrace.matmul`, so it
+        participates in online-learning trace computation.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input array, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The transformed output, of shape ``(..., out_size)``.
+        """
         params = self.weight.value
         w = brainstate.nn.weight_standardization(params['weight'], self.eps, params.get('gain', None))
         if self.w_mask is not None:
@@ -70,6 +118,22 @@ class SparseLinear(brainstate.nn.SparseLinear):
     __doc__ = brainstate.nn.SparseLinear.__doc__.replace('brainstate', 'braintrace')
 
     def update(self, x):
+        """Apply the sparse linear transform through the ETP ``sparse_matmul``.
+
+        The dense data of the sparse weight is routed through
+        :func:`braintrace.sparse_matmul`, so it participates in
+        online-learning trace computation.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input array, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The transformed output, of shape ``(..., out_size)``.
+        """
         weight = self.weight.value['weight']
         bias = self.weight.value.get('bias', None)
         return sparse_matmul(x, weight, sparse_mat=self.spar_mat, bias=bias)
@@ -156,6 +220,22 @@ class LoRA(brainstate.nn.LoRA):
     __module__ = 'braintrace.nn'
 
     def update(self, x: ArrayLike):
+        r"""Apply the low-rank adaptation through the ETP ``lora_matmul``.
+
+        Computes :math:`\frac{1}{r} B A\, x` via :func:`braintrace.lora_matmul`
+        (so the LoRA factors participate in online-learning trace
+        computation) and adds the optional base-module output.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input array, of shape ``(..., in_features)``.
+
+        Returns
+        -------
+        ArrayLike
+            The adapted output, of shape ``(..., out_features)``.
+        """
         param = self.weight.value
         lora_rank = param['lora_b'].shape[0]
         out = lora_matmul(x, param['lora_b'], param['lora_a'], alpha=1.0 / lora_rank)
