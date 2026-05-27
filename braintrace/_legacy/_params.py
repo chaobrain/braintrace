@@ -27,7 +27,6 @@
 
 
 
-import warnings
 from enum import Enum
 from typing import Optional
 
@@ -42,20 +41,6 @@ __all__ = [
     'FakeETraceParam',
     'FakeElemWiseParam',
 ]
-
-_warned: set = set()
-
-
-def _deprecate(cls_name: str, replacement: str) -> None:
-    if cls_name in _warned:
-        return
-    _warned.add(cls_name)
-    warnings.warn(
-        f'braintrace._legacy.{cls_name} is deprecated; use {replacement} instead.',
-        DeprecationWarning,
-        stacklevel=3,
-    )
-
 
 class ETraceGrad(str, Enum):
     """Legacy gradient-type enum. Kept for API compatibility; no effect
@@ -120,10 +105,6 @@ class ETraceParam(brainstate.ParamState):
             grad = ETraceGrad(grad)
         self.gradient = grad
         self.is_etrace = True
-        _deprecate(
-            'ETraceParam',
-            'brainstate.ParamState + braintrace.matmul/conv/...',
-        )
 
     def execute(self, x):
         return self.op(x, self.value)
@@ -225,10 +206,6 @@ class NonTempParam(brainstate.ParamState):
                 raise TypeError(f'op must be callable, got {type(op)}')
             self._etrace_op = None
             self.op = op
-        _deprecate(
-            'NonTempParam',
-            'brainstate.ParamState with plain JAX ops',
-        )
 
     def execute(self, x):
         return self.op(x, self.value)
@@ -276,7 +253,6 @@ class FakeETraceParam(object):
                 raise TypeError(f'op must be callable, got {type(op)}')
             self._etrace_op = None
             self.op = op
-        _deprecate('FakeETraceParam', 'brainstate.FakeState')
 
     def execute(self, x):
         return self.op(x, self.value)
@@ -336,7 +312,6 @@ class FakeElemWiseParam(object):
             self.op = op
         self.value = weight
         self.name = name
-        _deprecate('FakeElemWiseParam', 'brainstate.FakeState')
 
     def execute(self):
         if self._is_etrace_op:

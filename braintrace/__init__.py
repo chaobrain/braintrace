@@ -16,7 +16,10 @@
 # -*- coding: utf-8 -*-
 
 
+from typing import TYPE_CHECKING
+
 from . import nn
+from ._compile import compile
 from ._etrace_algorithms import (
     ETraceAlgorithm,
     EligibilityTrace,
@@ -70,21 +73,26 @@ from ._input_data import (
     SingleStepData,
     MultiStepData,
 )
-from ._legacy import (
-    ConvOp,
-    ElemWiseOp,
-    ElemWiseParam,
-    ETraceOp,
-    ETraceParam,
-    FakeElemWiseParam,
-    FakeETraceParam,
-    LoraOp,
-    MatMulOp,
-    NonTempParam,
-    SpMatMulOp,
-)
 from ._misc import NotSupportedError, CompilationError
 from ._version import __version__, __version_info__
+
+if TYPE_CHECKING:
+    # The v0.1.x legacy shims are deprecated and served lazily via ``__getattr__``
+    # below. Re-import them here so static type checkers / IDEs can still resolve
+    # ``braintrace.MatMulOp`` etc.
+    from ._legacy import (
+        ConvOp,
+        ElemWiseOp,
+        ElemWiseParam,
+        ETraceOp,
+        ETraceParam,
+        FakeElemWiseParam,
+        FakeETraceParam,
+        LoraOp,
+        MatMulOp,
+        NonTempParam,
+        SpMatMulOp,
+    )
 
 __all__ = [
     # version
@@ -101,6 +109,9 @@ __all__ = [
     'pp_prop',
     'ES_D_RTRL',
     'IODimVjpAlgorithm',
+
+    # one-call entry point
+    'compile',
 
     # ETP primitives (user API)
     'matmul',
@@ -158,19 +169,42 @@ __all__ = [
     'NotSupportedError',
     'CompilationError',
 
-    # legacy v0.1.x shims (deprecated)
-    'ETraceParam',
-    'ElemWiseParam',
-    'NonTempParam',
-    'FakeETraceParam',
-    'FakeElemWiseParam',
-    'ETraceOp',
-    'MatMulOp',
-    'ElemWiseOp',
-    'ConvOp',
-    'SpMatMulOp',
-    'LoraOp',
-
     # submodules
     'nn',
 ]
+
+
+# --- v0.1.x legacy shims: deprecated, served lazily with an access-time warning.
+# Each maps the public name -> migration replacement text. The shim classes still
+# work; new code should use the primitive-based ETP user-API instead.
+_DEPRECATED_LEGACY = {
+    'MatMulOp': 'braintrace.matmul (with a brainstate.ParamState)',
+    'ElemWiseOp': 'braintrace.element_wise',
+    'ConvOp': 'braintrace.conv',
+    'SpMatMulOp': 'braintrace.sparse_matmul',
+    'LoraOp': 'braintrace.lora_matmul',
+    'ETraceOp': 'the braintrace ETP primitive functions (matmul, conv, ...)',
+    'ETraceParam': 'brainstate.ParamState together with an ETP primitive function',
+    'ElemWiseParam': 'brainstate.ParamState together with braintrace.element_wise',
+    'NonTempParam': 'brainstate.ParamState with plain JAX ops (keeps the weight out of the ETP graph)',
+    'FakeETraceParam': 'a plain object with plain JAX ops',
+    'FakeElemWiseParam': 'a plain object with plain JAX ops',
+}
+
+
+def __getattr__(name):
+    if name in _DEPRECATED_LEGACY:
+        import warnings
+        warnings.warn(
+            f'braintrace.{name} is deprecated since 0.2.0 and will be removed in a '
+            f'future release; use {_DEPRECATED_LEGACY[name]} instead.',
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from . import _legacy
+        return getattr(_legacy, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+
+
+def __dir__():
+    return sorted(list(__all__) + list(_DEPRECATED_LEGACY))
