@@ -246,47 +246,38 @@ class TestCompilerIntegration:
 # ---------------------------------------------------------------------------
 
 class TestDeprecationWarnings:
+    # As of 0.2.0 the deprecation warning fires at package-root attribute access
+    # (``braintrace.MatMulOp``) via ``braintrace.__getattr__``, not at construction
+    # and not when importing from the private ``braintrace._legacy`` submodule.
 
-    def _reset(self):
-        from braintrace._legacy import _ops, _params
-        _ops._warned.clear()
-        _params._warned.clear()
-
-    def test_matmul_op_warns(self):
-        self._reset()
+    def test_matmul_op_access_warns(self):
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter('always')
-            MatMulOp()
+            _ = braintrace.MatMulOp
         assert any(
             issubclass(w.category, DeprecationWarning)
             and 'MatMulOp' in str(w.message)
             for w in captured
         )
 
-    def test_etrace_param_warns(self):
-        self._reset()
+    def test_etrace_param_access_warns(self):
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter('always')
-            ETraceParam({'weight': jnp.ones((4, 4))}, op=MatMulOp())
+            _ = braintrace.ETraceParam
         assert any(
             issubclass(w.category, DeprecationWarning)
             and 'ETraceParam' in str(w.message)
             for w in captured
         )
 
-    def test_warning_once_per_class(self):
-        self._reset()
+    def test_construction_does_not_warn(self):
+        # The shim classes themselves no longer warn; construction is silent.
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter('always')
             MatMulOp()
-            MatMulOp()
-            MatMulOp()
-        matmul_warnings = [
-            w for w in captured
-            if issubclass(w.category, DeprecationWarning)
-               and 'MatMulOp' in str(w.message)
-        ]
-        assert len(matmul_warnings) == 1
+        assert not any(
+            issubclass(w.category, DeprecationWarning) for w in captured
+        )
 
 
 # ---------------------------------------------------------------------------

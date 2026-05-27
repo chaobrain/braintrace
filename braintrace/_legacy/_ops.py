@@ -26,7 +26,6 @@ the weight *out* of the ETP graph.
 
 import contextlib
 import threading
-import warnings
 from typing import Any, Callable, Optional, Sequence
 
 import jax
@@ -51,20 +50,6 @@ __all__ = [
     'general_y2w',
     'stop_param_gradients',
 ]
-
-_warned: set = set()
-
-
-def _deprecate(cls_name: str, replacement: str) -> None:
-    if cls_name in _warned:
-        return
-    _warned.add(cls_name)
-    warnings.warn(
-        f'braintrace._legacy.{cls_name} is deprecated; use {replacement} instead.',
-        DeprecationWarning,
-        stacklevel=3,
-    )
-
 
 # ---------------------------------------------------------------------------
 # stop_param_gradients context (kept for API compat; no effect on shim path)
@@ -138,7 +123,6 @@ class ETraceOp:
     ):
         self.is_diagonal = is_diagonal
         self.name = name
-        _deprecate(type(self).__name__, 'braintrace ETP primitive functions')
 
     def __call__(self, inputs, weights):
         return self.xw_to_y(inputs, weights)

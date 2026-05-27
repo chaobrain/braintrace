@@ -166,24 +166,16 @@ def test_weight_used_inside_scan_raises_not_implemented():
 
 # --- Task 6: legacy + nn deprecations emit DeprecationWarning ----------------
 
-def _reset_legacy_warned():
-    # Legacy ops/params warn once per class (cached in a module-level set); reset
-    # so the warning fires regardless of earlier construction this session.
-    from braintrace._legacy import _ops, _params
-    _ops._warned.clear()
-    _params._warned.clear()
-
-
-def test_legacy_op_construction_warns():
-    _reset_legacy_warned()
+def test_legacy_op_access_warns():
+    # Legacy shims are served lazily via the package-root __getattr__, which warns
+    # at attribute-access time (not at construction).
     with pytest.warns(DeprecationWarning):
-        braintrace.MatMulOp()
+        _ = braintrace.MatMulOp
 
 
-def test_legacy_param_construction_warns():
-    _reset_legacy_warned()
+def test_legacy_param_access_warns():
     with pytest.warns(DeprecationWarning):
-        braintrace.ETraceParam({'weight': jnp.ones((4, 4))}, op=braintrace.MatMulOp())
+        _ = braintrace.ETraceParam
 
 
 def test_nn_forwarded_name_warns():
