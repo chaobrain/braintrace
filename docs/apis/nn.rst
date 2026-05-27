@@ -1,17 +1,24 @@
-Neural Network Modules
-======================
+Neural-Network Layers
+=====================
 
 .. currentmodule:: braintrace.nn
-.. automodule:: braintrace.nn
 
-``braintrace.nn`` provides neural network layers that use ETP primitives
-internally. These layers are drop-in replacements for standard layers
-but automatically participate in online learning.
+``braintrace.nn`` mirrors a subset of ``brainstate.nn``, but routes each
+layer's trainable forward pass through ETP primitives. As a result, the layers
+are drop-in replacements whose parameters **automatically participate in online
+learning** — no manual wiring required.
 
-For example, ``braintrace.nn.Linear`` uses ``braintrace.matmul`` internally,
-so its weight is automatically included in eligibility trace computation.
-Similarly, ``braintrace.nn.GRUCell`` uses ``braintrace.matmul`` for its
-recurrent weight and ``braintrace.element_wise`` for gate operations.
+For example, :class:`Linear` uses :func:`braintrace.matmul` internally, so its
+weight is included in eligibility-trace computation; :class:`GRUCell` uses
+:func:`braintrace.matmul` for its recurrent maps and :func:`braintrace.element_wise`
+for gate operations.
+
+.. note::
+
+   Activation, normalization, and pooling layers are intentionally **not**
+   re-implemented here. Accessing them through ``braintrace.nn`` (e.g.
+   ``braintrace.nn.LayerNorm``) emits a :class:`DeprecationWarning` and forwards
+   to ``brainstate.nn`` / ``brainstate.state``; use those packages directly.
 
 
 Linear Layers
@@ -44,6 +51,9 @@ Convolutional Layers
 Recurrent Layers
 ----------------
 
+Single-step recurrent cells. Each updates its hidden state in place and returns
+the new hidden state (or, for :class:`LRUCell`, the projected output).
+
 .. autosummary::
    :toctree: generated/
    :nosignatures:
@@ -58,23 +68,6 @@ Recurrent Layers
    MiniGRU
    MiniLSTM
    LRUCell
-
-
-Normalization Layers
---------------------
-
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-   BatchNorm0d
-   BatchNorm1d
-   BatchNorm2d
-   BatchNorm3d
-   LayerNorm
-   RMSNorm
-   GroupNorm
 
 
 Readout Layers

@@ -1,5 +1,5 @@
-Core Concepts
-=============
+ETP Operators & Core Types
+==========================
 
 .. currentmodule:: braintrace
 
@@ -7,14 +7,28 @@ Core Concepts
    :local:
    :depth: 1
 
+This page documents the **user-facing ETP operators** — the ops you call inside
+a model's ``update`` to make a weight participate in online learning — together
+with the small set of core types every algorithm consumes: input wrappers, the
+eligibility-trace state, gradient utilities, and the error hierarchy.
 
-ETP Primitives (User API)
--------------------------
+To add your *own* ETP primitive (with custom trace-propagation rules), see
+:doc:`primitives`.
 
-These functions mark weight operations for inclusion in online learning.
-Use ``braintrace.matmul(x, w)`` instead of ``x @ w`` to include a weight
-in eligibility trace computation. Parameters used with regular JAX ops
-are automatically excluded — no special parameter classes needed.
+
+ETP Primitive Operators
+-----------------------
+
+These functions mark weight operations for inclusion in online learning. Use
+``braintrace.matmul(x, w)`` instead of ``x @ w`` to include a weight in
+eligibility-trace computation; a parameter used through a regular JAX op is
+automatically excluded. There is **no special parameter class** — every
+``brainstate.ParamState`` is eligible, and participation is decided purely by
+whether an ETP operator consumed it.
+
+All operators accept physical-unit quantities (mantissa/unit are split,
+computed, and recombined) and come in batched and unbatched forms selected by
+input rank.
 
 .. autosummary::
    :toctree: generated/
@@ -33,6 +47,7 @@ Controlling Parameter Participation
 
 .. code-block:: python
 
+   import jax
    import braintrace
    import brainstate
 
@@ -56,21 +71,21 @@ Controlling Parameter Participation
 
    * - Goal
      - How
-   * - Include parameter in online learning
-     - Use a ``braintrace.*`` ETP primitive (e.g. ``braintrace.matmul(x, w)``)
-   * - Exclude parameter from online learning
-     - Use a regular JAX op (e.g. ``x @ w``)
+   * - Include a parameter in online learning
+     - Use a ``braintrace.*`` ETP operator (e.g. ``braintrace.matmul(x, w)``).
+   * - Exclude a parameter from online learning
+     - Use a regular JAX op (e.g. ``x @ w``).
    * - Selection mechanism
-     - Operation primitive type — *not* parameter class type. Every
-       ``brainstate.ParamState`` is eligible; participation depends solely
-       on whether an ETP primitive consumed it.
+     - The *operation's* primitive type — not the parameter's class. Every
+       ``brainstate.ParamState`` is eligible; participation depends solely on
+       whether an ETP primitive consumed it.
 
 
 Input Data
 ----------
 
-Wrappers that tell the online learning algorithm whether the input
-is a single time step or a sequence of time steps.
+Wrappers that tell an online-learning algorithm whether a step receives a
+single time step or a whole sequence of time steps.
 
 .. autosummary::
    :toctree: generated/
@@ -84,6 +99,9 @@ is a single time step or a sequence of time steps.
 Eligibility Trace State
 -----------------------
 
+The state object that stores the eligibility trace carried forward across time
+steps during online learning.
+
 .. autosummary::
    :toctree: generated/
    :nosignatures:
@@ -95,6 +113,9 @@ Eligibility Trace State
 Gradient Utilities
 ------------------
 
+Helpers used when combining per-step gradients into the running online
+gradient.
+
 .. autosummary::
    :toctree: generated/
    :nosignatures:
@@ -105,6 +126,8 @@ Gradient Utilities
 
 Errors
 ------
+
+Exceptions raised by the compilation and execution machinery.
 
 .. autosummary::
    :toctree: generated/

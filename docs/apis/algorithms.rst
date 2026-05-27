@@ -1,4 +1,4 @@
-Online Learning Algorithms
+Online-Learning Algorithms
 ==========================
 
 .. currentmodule:: braintrace
@@ -7,14 +7,39 @@ Online Learning Algorithms
    :local:
    :depth: 1
 
-``braintrace`` provides online learning algorithms based on
-eligibility trace propagation. All algorithms share the same interface:
-wrap a model, compile the graph, then call the algorithm as a drop-in
-replacement for the model's forward pass.
+``braintrace`` provides online-learning algorithms based on eligibility-trace
+propagation. They all share one interface: wrap a model, compile its graph,
+then call the learner as a drop-in replacement for the model's forward pass —
+gradients are accumulated forward in time instead of by BPTT.
+
+Two correctness classes appear below. **Exact** algorithms compute the same
+total gradient as BPTT (just forward); they match a BPTT oracle element-wise.
+**Approximate** algorithms deliberately drop or factor part of the computation
+and match BPTT only in the regime their math guarantees.
+
+
+One-Call Entry Point
+--------------------
+
+:func:`compile` is the recommended starting point. It constructs an algorithm
+for a model and eagerly builds its eligibility-trace graph, returning a
+ready-to-``update`` learner in a single call.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   compile
 
 
 Base Classes
 ------------
+
+The abstract bases shared by every algorithm. :class:`ETraceAlgorithm` is the
+root; :class:`ETraceVjpAlgorithm` adds the VJP-based machinery that the
+concrete D-RTRL / ES-D-RTRL / SNN algorithms build on. :class:`EligibilityTrace`
+is the state these algorithms carry across time.
 
 .. autosummary::
    :toctree: generated/
@@ -22,15 +47,16 @@ Base Classes
    :template: classtemplate.rst
 
    ETraceAlgorithm
+   ETraceVjpAlgorithm
    EligibilityTrace
 
 
-D-RTRL (Parameter Dimension)
------------------------------
+D-RTRL — Parameter Dimension (exact)
+------------------------------------
 
-The Decoupled Real-Time Recurrent Learning algorithm with diagonal
-approximation. Memory complexity: :math:`O(B \cdot |\theta|)`, where
-:math:`B` is the batch size and :math:`|\theta|` is the number of parameters.
+Decoupled Real-Time Recurrent Learning with a diagonal approximation of the
+hidden-to-hidden Jacobian. Memory complexity :math:`O(B \cdot |\theta|)`, where
+:math:`B` is the batch size and :math:`|\theta|` the number of parameters.
 
 .. math::
 
@@ -43,24 +69,25 @@ approximation. Memory complexity: :math:`O(B \cdot |\theta|)`, where
    = \sum_{t' \in \mathcal{T}} \frac{\partial \mathcal{L}^{t'}}{\partial \mathbf{h}^{t'}}
    \circ \boldsymbol{\epsilon}^{t'}
 
-
 .. autosummary::
    :toctree: generated/
    :nosignatures:
    :template: classtemplate.rst
 
    ParamDimVjpAlgorithm
+   D_RTRL
 
-``D_RTRL`` is an alias for :class:`ParamDimVjpAlgorithm`.
+:class:`D_RTRL` is the concrete, ready-to-use subclass of
+:class:`ParamDimVjpAlgorithm`.
 
 
-ES-D-RTRL (Input-Output Dimension)
-------------------------------------
+ES-D-RTRL — Input/Output Dimension (exact)
+------------------------------------------
 
-The Event-Synchronized D-RTRL algorithm. Factorizes the eligibility trace
-into input and output components with exponential smoothing. Memory
-complexity: :math:`O(B(I + O))`, where :math:`I` and :math:`O` are the
-input and output dimensions.
+The Event-Synchronized D-RTRL algorithm factorizes the eligibility trace into
+input and output components with exponential smoothing, reducing memory to
+:math:`O(B(I + O))`, where :math:`I` and :math:`O` are the input and output
+dimensions.
 
 .. math::
 
@@ -78,33 +105,24 @@ input and output dimensions.
    = \alpha \operatorname{diag}(\mathbf{D}^t) \circ \boldsymbol{\epsilon}_{\mathbf{f}}^{t-1}
    + (1 - \alpha) \operatorname{diag}(\mathbf{D}_f^t)
 
-
 .. autosummary::
    :toctree: generated/
    :nosignatures:
    :template: classtemplate.rst
 
+   IODimVjpAlgorithm
    pp_prop
 
-``ES_D_RTRL`` and ``IODimVjpAlgorithm`` are aliases for :class:`pp_prop`.
-
-
-VJP Algorithm Base
-------------------
-
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-   ETraceVjpAlgorithm
+:class:`pp_prop` is the concrete subclass of :class:`IODimVjpAlgorithm`;
+``ES_D_RTRL`` is an alias for :class:`pp_prop`.
 
 
 SNN Online-Learning Algorithms
 ------------------------------
 
-Paper-faithful algorithms tailored to spiking neural networks. All are
-``ETraceVjpAlgorithm`` subclasses (or factories over the VJP algorithms).
+Paper-faithful algorithms tailored to spiking neural networks, all
+``ETraceVjpAlgorithm`` subclasses. These are **approximate** (except where a
+regime makes them exact); know the regime before relying on their gradients.
 
 .. autosummary::
    :toctree: generated/
@@ -118,7 +136,9 @@ Paper-faithful algorithms tailored to spiking neural networks. All are
    OTTT
    OSTTP
 
-SNN helpers reusable across the above algorithms:
+Trace helpers reused across the SNN algorithms — a frozen random-feedback
+projection, an output-side low-pass filter, and a leaky presynaptic
+accumulator:
 
 .. autosummary::
    :toctree: generated/
