@@ -1,5 +1,5 @@
-Compiler
-========
+Compiler, Executor & Diagnostics
+================================
 
 .. currentmodule:: braintrace
 
@@ -7,16 +7,22 @@ Compiler
    :local:
    :depth: 1
 
-The compiler analyzes the model's JAX intermediate representation (Jaxpr)
-to discover relationships between ETP primitives, weight parameters,
-and hidden states. This page documents the compiler pipeline and its
-data structures.
+The compiler analyzes a model's JAX intermediate representation (``jaxpr``) to
+discover the relationships between ETP primitives, weight parameters, and
+hidden states. It recognizes ETP primitives by **primitive-type identity**
+(never by string-matching names), and the result is an :class:`ETraceGraph`
+that the executor and the online-learning algorithms consume.
+
+Most users never call this layer directly — :func:`compile` and the algorithm
+classes drive it for you. It is documented here for building custom algorithms,
+inspecting what the compiler discovered, and acting on diagnostics.
 
 
 Graph Compilation
 -----------------
 
-The main entry point for compiling a model into an eligibility trace graph.
+The entry point that compiles a model into an eligibility-trace graph, and the
+graph object it returns.
 
 .. autosummary::
    :toctree: generated/
@@ -30,7 +36,8 @@ The main entry point for compiling a model into an eligibility trace graph.
 Module Info
 -----------
 
-Extracts the Jaxpr and state information from a ``brainstate.nn.Module``.
+Extracts the ``jaxpr`` and state information from a ``brainstate.nn.Module``.
+``ModuleInfo`` is the compiler's structured view of a model.
 
 .. autosummary::
    :toctree: generated/
@@ -44,7 +51,9 @@ Extracts the Jaxpr and state information from a ``brainstate.nn.Module``.
 Hidden Groups
 -------------
 
-Groups of hidden states that are updated together in the recurrent computation.
+Sets of hidden states that are updated together in the recurrent computation.
+The finder functions discover them either from an extracted ``ModuleInfo`` or
+directly from a module.
 
 .. autosummary::
    :toctree: generated/
@@ -56,12 +65,14 @@ Groups of hidden states that are updated together in the recurrent computation.
    find_hidden_groups_from_module
 
 
-Hidden-Parameter-Operation Relations
+Hidden–Parameter–Operation Relations
 -------------------------------------
 
-Connections between ETP primitives, weight parameters, and hidden states.
-Each relation describes: *"weight W is used through ETP primitive P,
-and the output feeds into hidden group H."*
+The core data structure connecting ETP primitives, weight parameters, and
+hidden states. Each relation encodes *"weight W is used through ETP primitive
+P, and P's output feeds hidden group H."* Per the non-parametric-tail
+invariant, a weight that reaches a hidden state only through another trainable
+ETP primitive is deliberately excluded.
 
 .. autosummary::
    :toctree: generated/
@@ -76,8 +87,8 @@ and the output feeds into hidden group H."*
 Hidden Perturbation
 -------------------
 
-Perturbation structures for computing hidden-to-hidden Jacobians
-(the diagonal approximation of :math:`\partial h^t / \partial h^{t-1}`).
+Perturbation structures used to compute hidden-to-hidden Jacobians
+(the diagonal approximation of :math:`\partial \mathbf{h}^t / \partial \mathbf{h}^{t-1}`).
 
 .. autosummary::
    :toctree: generated/
@@ -92,8 +103,10 @@ Perturbation structures for computing hidden-to-hidden Jacobians
 Graph Executor
 --------------
 
-Executes the compiled graph: runs the forward pass and computes
-the hidden-to-weight and hidden-to-hidden Jacobians.
+Executes the compiled graph: runs the forward pass and computes the
+hidden-to-weight and hidden-to-hidden Jacobians the algorithms consume.
+:class:`ETraceVjpGraphExecutor` is the VJP-based executor used by the
+``ETraceVjpAlgorithm`` family.
 
 .. autosummary::
    :toctree: generated/
@@ -102,3 +115,23 @@ the hidden-to-weight and hidden-to-hidden Jacobians.
 
    ETraceGraphExecutor
    ETraceVjpGraphExecutor
+
+
+Diagnostics
+-----------
+
+Structured, leveled records emitted while the compiler analyzes a model. They
+surface issues that would otherwise be silent — for example a trainable input
+that does not trace back to a ``ParamState``, or an ETP weight excluded because
+it only reaches a hidden state through another trainable primitive.
+:class:`DiagnosticLevel` orders records by severity (``INFO`` < ``WARNING`` <
+``ERROR``) and :class:`DiagnosticKind` names the specific condition.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   CompilationRecord
+   DiagnosticKind
+   DiagnosticLevel

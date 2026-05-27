@@ -119,9 +119,5 @@ See also the ecosystem
    :maxdepth: 2
    :caption: API Reference
 
+   apis/index.rst
    changelog.md
-   apis/concepts.rst
-   apis/primitives.rst
-   apis/compiler.rst
-   apis/algorithms.rst
-   apis/nn.rst
