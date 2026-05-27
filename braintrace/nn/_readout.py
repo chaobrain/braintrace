@@ -132,6 +132,21 @@ class LeakyRateReadout(brainstate.nn.Module):
         self.r.value = braintools.init.param(self.r_init, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the readout by one time step of leaky integration.
+
+        Applies :math:`r_t = \mathrm{decay} \cdot r_{t-1} + W^\top x_t` and
+        stores the result in the readout state.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated readout state, of shape ``(..., out_size)``.
+        """
         r = self.decay * self.r.value + matmul(x, self.W.value)
         self.r.value = r
         return r

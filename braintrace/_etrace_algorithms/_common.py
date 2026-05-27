@@ -46,6 +46,18 @@ class _ZeroResetState(brainstate.ShortTermState):
         self._init_dtype = init_value.dtype
 
     def reset_state(self, batch_size: Optional[int] = None, **kwargs):
+        """Re-zero the state at its original shape.
+
+        Parameters
+        ----------
+        batch_size : int or None, optional
+            If given, the state is re-zeroed with ``batch_size`` as the leading
+            dimension (prepended when the original state was scalar-shaped).
+            When ``None`` (default) the original unbatched shape is restored.
+        **kwargs
+            Ignored; accepted for compatibility with the brainstate state-reset
+            protocol.
+        """
         if batch_size is None:
             shape = self._init_shape
         elif len(self._init_shape) == 0:
@@ -156,6 +168,18 @@ class KappaFilter(_ZeroResetState):
         self.kappa = float(kappa)
 
     def update(self, x):
+        r"""Apply one low-pass step :math:`x_{\mathrm{filt}} \leftarrow (1-\kappa) x + \kappa\, x_{\mathrm{filt}}`.
+
+        Parameters
+        ----------
+        x : jax.Array
+            The new input mixed into the filtered state.
+
+        Returns
+        -------
+        jax.Array
+            The updated, filtered value.
+        """
         new = (1.0 - self.kappa) * x + self.kappa * self.value
         self.value = new
         return new

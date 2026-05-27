@@ -193,6 +193,14 @@ class HiddenPerturbation(NamedTuple):
         ]
 
     def dict(self) -> Dict[str, Any]:
+        """Return this perturbation's named fields as a plain dictionary.
+
+        Returns
+        -------
+        dict
+            An ordered mapping from field name to value, as produced by the
+            underlying :class:`typing.NamedTuple`.
+        """
         return self._asdict()
 
     def __repr__(self) -> str:

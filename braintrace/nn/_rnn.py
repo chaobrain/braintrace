@@ -118,6 +118,18 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         xh = u.math.concatenate([x, self.h.value], axis=-1)
         self.h.value = self.activation(self.W(xh))
         return self.h.value
@@ -203,6 +215,18 @@ class GRUCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         old_h = self.h.value
         xh = u.math.concatenate([x, old_h], axis=-1)
         z = brainstate.nn.sigmoid(self.Wz(xh))
@@ -293,6 +317,18 @@ class CFNCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         old_h = self.h.value
         xh = u.math.concatenate([x, old_h], axis=-1)
         f = brainstate.nn.sigmoid(self.Wf(xh))
@@ -396,6 +432,18 @@ class MGUCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         old_h = self.h.value
         xh = u.math.concatenate([x, old_h], axis=-1)
         f = brainstate.nn.sigmoid(self.Wf(xh))
@@ -520,6 +568,20 @@ class LSTMCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Updates both the cell state ``c`` and the hidden state ``h`` in place.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state ``h``, of shape ``(..., out_size)``.
+        """
         h, c = self.h.value, self.c.value
         xh = u.math.concatenate([x, h], axis=-1)
         i = self.Wi(xh)
@@ -621,6 +683,20 @@ class URLSTMCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x: ArrayLike) -> ArrayLike:
+        r"""Advance the cell by one time step.
+
+        Updates both the cell state ``c`` and the hidden state ``h`` in place.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state ``h``, of shape ``(..., out_size)``.
+        """
         h, c = self.h.value, self.c.value
         xh = u.math.concatenate([x, h], axis=-1)
         f = self.Wf(xh)
@@ -728,6 +804,18 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         z = self.phi(x)
         f = brainstate.nn.sigmoid(self.W_u(u.math.concatenate([z, self.h.value], axis=-1)))
         self.h.value = f * self.h.value + (1 - f) * z
@@ -814,6 +902,18 @@ class MiniGRU(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         z = brainstate.nn.sigmoid(self.W_z(u.math.concatenate([x, self.h.value], axis=-1)))
         self.h.value = (1 - z) * self.h.value + z * self.W_x(x)
         return self.h.value
@@ -900,6 +1000,18 @@ class MiniLSTM(brainstate.nn.RNNCell):
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
     def update(self, x):
+        r"""Advance the cell by one time step.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input for the current step, of shape ``(..., in_size)``.
+
+        Returns
+        -------
+        ArrayLike
+            The updated hidden state, of shape ``(..., out_size)``.
+        """
         xh = u.math.concatenate([x, self.h.value], axis=-1)
         f = brainstate.nn.sigmoid(self.W_f(xh))
         i = brainstate.nn.sigmoid(self.W_i(xh))
@@ -1015,6 +1127,21 @@ class LRUCell(brainstate.nn.Module):
         self.h_im.value = braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size)
 
     def update(self, inputs):
+        r"""Advance the unit by one time step.
+
+        Updates the real and imaginary parts of the complex hidden state
+        (``h_re`` and ``h_im``) in place and returns the projected output.
+
+        Parameters
+        ----------
+        inputs : ArrayLike
+            Input for the current step, of shape ``(..., d_model)``.
+
+        Returns
+        -------
+        ArrayLike
+            The real-valued output ``y``, of shape ``(..., d_model)``.
+        """
         a = u.math.exp(-u.math.exp(element_wise(self.nu_log.value)))
         b = u.math.exp(element_wise(self.theta_log.value))
         c = u.math.exp(element_wise(self.gamma_log.value))

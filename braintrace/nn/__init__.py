@@ -13,6 +13,33 @@
 # limitations under the License.
 # ==============================================================================
 
+"""Neural-network layers wired for Eligibility Trace Propagation (ETP).
+
+This subpackage mirrors a subset of :mod:`brainstate.nn` but routes the
+trainable forward passes through ETP primitives (``braintrace.matmul``,
+``braintrace.conv``, ``braintrace.sparse_matmul``, ``braintrace.lora_matmul``,
+``braintrace.element_wise``). As a result, the parameters of these layers are
+automatically recognised by the ETP compiler and become eligible for online
+learning, while the public construction and call signatures stay compatible
+with their :mod:`brainstate.nn` counterparts.
+
+The exported building blocks fall into four groups:
+
+- **Linear maps** — :class:`Linear`, :class:`SignedWLinear`,
+  :class:`SparseLinear`, :class:`LoRA`.
+- **Convolutions** — :class:`Conv1d`, :class:`Conv2d`, :class:`Conv3d`.
+- **Read-outs** — :class:`LeakyRateReadout`.
+- **Recurrent cells** — :class:`ValinaRNNCell`, :class:`GRUCell`,
+  :class:`MGUCell`, :class:`LSTMCell`, :class:`URLSTMCell`,
+  :class:`MinimalRNNCell`, :class:`MiniGRU`, :class:`MiniLSTM`,
+  :class:`LRUCell`.
+
+Activation, normalisation and pooling layers are intentionally not
+re-implemented here; accessing them through ``braintrace.nn`` emits a
+:class:`DeprecationWarning` and forwards to :mod:`brainstate.nn` /
+:mod:`brainstate.state`.
+"""
+
 from ._conv import Conv1d, Conv2d, Conv3d
 from ._linear import Linear, SignedWLinear, SparseLinear, LoRA
 from ._readout import LeakyRateReadout

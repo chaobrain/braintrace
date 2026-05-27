@@ -226,6 +226,14 @@ class HiddenParamOpRelation(NamedTuple):
         return vals_of_hidden_groups
 
     def dict(self) -> Dict[str, Any]:
+        """Return this relation's named fields as a plain dictionary.
+
+        Returns
+        -------
+        dict
+            An ordered mapping from field name to value, as produced by the
+            underlying :class:`typing.NamedTuple`.
+        """
         return self._asdict()
 
     def __repr__(self) -> str:

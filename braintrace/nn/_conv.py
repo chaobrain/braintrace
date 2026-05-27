@@ -23,6 +23,26 @@ __all__ = ['Conv1d', 'Conv2d', 'Conv3d']
 
 
 def _etp_conv_op(self, x, params):
+    """Route a convolution through the ETP ``conv`` primitive.
+
+    Shared ``_conv_op`` override installed on :class:`Conv1d`, :class:`Conv2d`
+    and :class:`Conv3d`. Using :func:`braintrace.conv` instead of a plain JAX
+    convolution is what makes the kernel eligible for online-learning trace
+    computation; all convolution hyper-parameters are taken from ``self``.
+
+    Parameters
+    ----------
+    x : ArrayLike
+        Input feature map.
+    params : dict
+        Parameter dict holding the convolution ``'weight'`` and an optional
+        ``'bias'``.
+
+    Returns
+    -------
+    ArrayLike
+        The convolution output.
+    """
     w = params['weight']
     if self.w_mask is not None:
         w = w * self.w_mask
