@@ -14,14 +14,14 @@
 # ==============================================================================
 # -*- coding: utf-8 -*-
 
-from typing import Callable, Union
+from typing import Any, Callable, Union
 
 import brainstate
 import braintools
 import saiunit as u
 
 from braintrace._etrace_op import element_wise
-from braintrace._typing import ArrayLike
+from braintrace._typing import ArrayLike, as_size_tuple as _as_size_tuple
 from ._linear import Linear
 
 __all__ = [
@@ -89,12 +89,12 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
         activation: str | Callable = 'relu',
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # activation function
         if isinstance(activation, str):
@@ -105,7 +105,7 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
 
         # weights
         self.W = Linear(
-            self.in_size[-1] + self.out_size[-1], self.out_size[-1],
+            _as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1],
             w_init=w_init,
             b_init=b_init,
         )
@@ -188,12 +188,12 @@ class GRUCell(brainstate.nn.RNNCell):
         activation: str | Callable = 'tanh',
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # activation function
         if isinstance(activation, str):
@@ -203,10 +203,10 @@ class GRUCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init)
-        self.Wz = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wr = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wh = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
+        self.Wz = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wr = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wh = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
@@ -290,12 +290,12 @@ class CFNCell(brainstate.nn.RNNCell):
         activation: str | Callable = 'tanh',
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # activation function
         if isinstance(activation, str):
@@ -305,10 +305,10 @@ class CFNCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init)
-        self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wi = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wh = Linear(self.out_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
+        self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wi = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wh = Linear(_as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
@@ -406,12 +406,12 @@ class MGUCell(brainstate.nn.RNNCell):
         activation: str | Callable = 'tanh',
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # activation function
         if isinstance(activation, str):
@@ -421,9 +421,9 @@ class MGUCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init)
-        self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wh = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
+        self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wh = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
@@ -536,11 +536,11 @@ class LSTMCell(brainstate.nn.RNNCell):
         activation: str | Callable = 'tanh',
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # initializers
         self._state_initializer = state_init
@@ -553,11 +553,11 @@ class LSTMCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=b_init)
-        self.Wi = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wg = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wo = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
+        self.Wi = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wg = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wo = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.c = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
@@ -644,11 +644,11 @@ class URLSTMCell(brainstate.nn.RNNCell):
         activation: str | Callable = 'tanh',
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # initializers
         self._state_initializer = state_init
@@ -661,15 +661,15 @@ class URLSTMCell(brainstate.nn.RNNCell):
             self.activation = activation
 
         # weights
-        params = dict(w_init=w_init, b_init=None)
-        self.Wu = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wf = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wr = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.Wo = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=None)
+        self.Wu = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wr = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.Wo = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.bias = brainstate.ParamState(self._forget_bias())
 
     def _forget_bias(self):
-        rand_val = brainstate.random.uniform(1 / self.out_size[-1], 1 - 1 / self.out_size[-1], (self.out_size[-1],))
+        rand_val = brainstate.random.uniform(1 / _as_size_tuple(self.out_size)[-1], 1 - 1 / _as_size_tuple(self.out_size)[-1], (_as_size_tuple(self.out_size)[-1],))
         return -u.math.log(1 / rand_val - 1)
 
     def init_state(self, batch_size: int = None, **kwargs):
@@ -780,22 +780,22 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         phi: Callable = None,
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # functions
-        params = dict(w_init=w_init, b_init=b_init)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
         if phi is None:
-            phi = Linear(self.in_size[-1], self.out_size[-1], **params)
+            phi = Linear(_as_size_tuple(self.in_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         assert callable(phi), f"The phi function should be a callable function. But got {phi}"
         self.phi = phi
 
         # weights
-        self.W_u = Linear(self.out_size[-1] * 2, self.out_size[-1], **params)
+        self.W_u = Linear(_as_size_tuple(self.out_size)[-1] * 2, _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
@@ -881,19 +881,19 @@ class MiniGRU(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # functions
-        params = dict(w_init=w_init, b_init=b_init)
-        self.W_x = Linear(self.in_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
+        self.W_x = Linear(_as_size_tuple(self.in_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
         # weights
-        self.W_z = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
+        self.W_z = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
@@ -978,20 +978,20 @@ class MiniLSTM(brainstate.nn.RNNCell):
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         name: str = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
         self._state_initializer = state_init
-        self.out_size = out_size
-        self.in_size = in_size
+        self.out_size = _as_size_tuple(out_size)
+        self.in_size = _as_size_tuple(in_size)
 
         # functions
-        params = dict(w_init=w_init, b_init=b_init)
-        self.W_x = Linear(self.in_size[-1], self.out_size[-1], **params)
+        params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
+        self.W_x = Linear(_as_size_tuple(self.in_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
         # weights
-        self.W_f = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
-        self.W_i = Linear(self.in_size[-1] + self.out_size[-1], self.out_size[-1], **params)
+        self.W_f = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        self.W_i = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int = None, **kwargs):
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))

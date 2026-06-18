@@ -31,7 +31,7 @@ __all__ = [
 
 class Linear(brainstate.nn.Linear):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.Linear.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.Linear.__doc__ or '').replace('brainstate', 'braintrace')
 
     def update(self, x):
         """Apply the linear transform through the ETP ``matmul`` primitive.
@@ -59,7 +59,7 @@ class Linear(brainstate.nn.Linear):
 
 class SignedWLinear(brainstate.nn.SignedWLinear):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.SignedWLinear.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.SignedWLinear.__doc__ or '').replace('brainstate', 'braintrace')
 
     def update(self, x):
         """Apply the sign-constrained linear transform through ETP ``matmul``.
@@ -86,7 +86,7 @@ class SignedWLinear(brainstate.nn.SignedWLinear):
 
 class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.ScaledWSLinear.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.ScaledWSLinear.__doc__ or '').replace('brainstate', 'braintrace')
 
     def update(self, x):
         """Apply the weight-standardized linear transform through ETP ``matmul``.
@@ -115,7 +115,7 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
 
 class SparseLinear(brainstate.nn.SparseLinear):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.SparseLinear.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.SparseLinear.__doc__ or '').replace('brainstate', 'braintrace')
 
     def update(self, x):
         """Apply the sparse linear transform through the ETP ``sparse_matmul``.

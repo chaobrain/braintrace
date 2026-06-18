@@ -146,7 +146,7 @@ class Test_find_hidden_groups_from_module:
         print()
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -180,7 +180,7 @@ class Test_find_hidden_groups_from_module:
         print()
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -556,7 +556,7 @@ class TestHiddenGroup_state_transition:
             print(out_vals)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -591,7 +591,7 @@ class TestHiddenGroup_state_transition:
             print(out_vals)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -689,7 +689,7 @@ class TestHiddenGroup_diagonal_jacobian:
             assert (u.math.allclose(diag_jac, jax_jac, atol=1e-5))
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -724,7 +724,7 @@ class TestHiddenGroup_diagonal_jacobian:
             print(diag_jac)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -767,7 +767,7 @@ class TestHiddenGroup_diagonal_jacobian:
             assert (u.math.allclose(diag_jac, jax_jac, atol=1e-5))
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -801,7 +801,7 @@ class TestHiddenGroup_diagonal_jacobian:
             print(diag_jac)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,

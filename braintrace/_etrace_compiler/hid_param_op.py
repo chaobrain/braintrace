@@ -800,6 +800,8 @@ def find_hidden_param_op_relations_from_jaxpr(
                 invar, t_path, producers, weight_path_to_invars,
             )
             t_state = path_to_state.get(t_path)
+            # ``t_path`` is a trainable weight path, so its state is always a present ParamState.
+            assert isinstance(t_state, brainstate.ParamState)
             trainable_vars[key] = invar
             trainable_paths[key] = t_path
             trainable_leaf_indices[key] = t_leaf

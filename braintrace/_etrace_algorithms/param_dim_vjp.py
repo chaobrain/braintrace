@@ -533,7 +533,7 @@ def _solve_param_dim_weight_gradients(
         _update_dict(dG_weights, key, val)
 
 
-def _remove_units(xs_maybe_quantity: brainstate.typing.PyTree):
+def _remove_units(xs_maybe_quantity: PyTree):
     """
     Removes units from a PyTree of quantities, returning a unitless PyTree and a function to restore the units.
 
@@ -542,10 +542,10 @@ def _remove_units(xs_maybe_quantity: brainstate.typing.PyTree):
     original units to the unitless PyTree.
 
     Args:
-        xs_maybe_quantity (brainstate.typing.PyTree): A PyTree structure containing quantities with units.
+        xs_maybe_quantity (PyTree): A PyTree structure containing quantities with units.
 
     Returns:
-        Tuple[brainstate.typing.PyTree, Callable]: A tuple containing:
+        Tuple[PyTree, Callable]: A tuple containing:
             - A PyTree with the same structure as the input, but with units removed from each quantity.
             - A function that takes a unitless PyTree and restores the original units to it.
     """
@@ -556,7 +556,7 @@ def _remove_units(xs_maybe_quantity: brainstate.typing.PyTree):
         new_leaves.append(leaf)
         units.append(unit)
 
-    def restore_units(xs_unitless: brainstate.typing.PyTree):
+    def restore_units(xs_unitless: PyTree):
         leaves, treedef2 = jax.tree.flatten(xs_unitless)
         # jax's PyTreeDef stubs omit __eq__; the comparison is valid at runtime.
         assert treedef == treedef2, 'The tree structure should be the same. '  # type: ignore[operator]

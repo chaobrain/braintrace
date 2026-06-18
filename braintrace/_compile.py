@@ -32,7 +32,7 @@ __all__ = ['compile']
 # Canonical lowercase name (+ aliases) -> algorithm class. No bare ``ostl``
 # alias: the ambiguous OSTL factory was removed in 0.2.0, so callers pick
 # ``ostl_recurrent`` vs ``ostl_feedforward`` explicitly.
-_ALGORITHM_REGISTRY = {
+_ALGORITHM_REGISTRY: dict[str, type[ETraceAlgorithm]] = {
     'd_rtrl': D_RTRL,
     'pp_prop': pp_prop,
     'es_d_rtrl': pp_prop,

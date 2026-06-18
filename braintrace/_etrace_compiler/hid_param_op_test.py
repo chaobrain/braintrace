@@ -59,7 +59,7 @@ class TestFindRelationsFromModule:
             assert relation.connected_hidden_paths[0] == ('h',)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -87,7 +87,7 @@ class TestFindRelationsFromModule:
             print(relations)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,

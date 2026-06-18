@@ -60,17 +60,17 @@ def _etp_conv_op(self, x, params):
 
 class Conv1d(brainstate.nn.Conv1d):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.Conv1d.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.Conv1d.__doc__ or '').replace('brainstate', 'braintrace')
     _conv_op = _etp_conv_op
 
 
 class Conv2d(brainstate.nn.Conv2d):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.Conv2d.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.Conv2d.__doc__ or '').replace('brainstate', 'braintrace')
     _conv_op = _etp_conv_op
 
 
 class Conv3d(brainstate.nn.Conv3d):
     __module__ = 'braintrace.nn'
-    __doc__ = brainstate.nn.Conv3d.__doc__.replace('brainstate', 'braintrace')
+    __doc__ = (brainstate.nn.Conv3d.__doc__ or '').replace('brainstate', 'braintrace')
     _conv_op = _etp_conv_op
