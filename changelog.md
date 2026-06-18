@@ -1,6 +1,39 @@
 # Release Notes
 
 
+## Version 0.2.1
+
+This is a maintenance release that restores compatibility with the latest
+brain-ecosystem dependencies and toolchain. It contains no functional or
+public-API changes — code written against 0.2.0 continues to work unchanged —
+and exists to keep BrainTrace green against `brainstate` 0.5, `saiunit`/
+`brainunit` 0.5.1, and `pytest` 9.1.
+
+### Fixes
+
+#### Dependency Compatibility
+
+- **`brainstate` 0.5 typed API**: adopted `brainstate`'s PEP 561 `py.typed`
+  surface throughout the source — routed `PyTree` through BrainTrace's existing
+  type alias, centralized an `as_size_tuple()` helper in `_typing`, dropped
+  `FlattedDict` subscripts, and added boundary asserts/casts. This clears the
+  154 mypy errors newly exposed by the upstream typing, with minimal
+  `# type: ignore` only where `brainstate`'s typing makes it unavoidable.
+- **`brainstate` 0.5.0 convolution validation**: updated convolution test
+  expectations for the hardened validation (bare `assert` → `ValueError`) and
+  the new one-value-per-spatial-dimension padding-tuple semantics.
+- **`pytest` 9.1.0 collection**: removed trailing commas in single-argument
+  `parametrize` ids that `pytest` 9.1.0 mis-parses as two values, fixing a
+  collection-time `GraphNodeMeta has no len()` error.
+
+### Notes
+
+- All changes are BrainTrace-side. A related upstream `saiunit` issue is
+  resolved in `saiunit`/`brainunit` 0.5.1 and requires no change here.
+- Verified locally: full suite 1367 passed (2 xfailed), mypy clean across 51
+  files, and wheel + sdist build with `py.typed` shipped (PEP 561).
+
+
 ## Version 0.2.0
 
 This release is a major step for BrainTrace. It adds a family of spiking neural
