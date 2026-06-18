@@ -45,7 +45,7 @@
 # -*- coding: utf-8 -*-
 
 from itertools import combinations
-from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any
+from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
 
 import brainstate
 import jax.core
@@ -989,7 +989,9 @@ def find_hidden_groups_from_jaxpr(
         weight_invars=weight_invars,
         invar_to_hidden_path=invar_to_hidden_path,
         outvar_to_hidden_path=outvar_to_hidden_path,
-        path_to_state=path_to_state,
+        # the evaluator only indexes hidden-state paths, whose entries are HiddenStates,
+        # even though the passed mapping carries every model state.
+        path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),
     )
     hidden_groups, hid_path_to_group = evaluator.compile()
     return hidden_groups, brainstate.util.PrettyDict(hid_path_to_group)

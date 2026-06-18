@@ -19,6 +19,7 @@ from typing import Dict, Sequence, Union, FrozenSet, List, Tuple, Any, TypeAlias
 
 import brainstate
 import jax
+import numpy as np
 
 from ._compatible_imports import Var
 
@@ -32,6 +33,31 @@ StateID: TypeAlias = int
 WeightID: TypeAlias = int
 Size: TypeAlias = brainstate.typing.Size
 Axis: TypeAlias = int
+
+
+def as_size_tuple(size: Size) -> Tuple[int, ...]:
+    """Normalize an ``in_size``/``out_size`` spec to a tuple of ints.
+
+    ``brainstate``'s size setters accept a scalar ``int`` or a sequence, while
+    the matching getters are typed as the broad :data:`Size` union, which static
+    type checkers do not treat as indexable. Routing values through this helper
+    yields a concrete ``tuple[int, ...]`` so both property assignment and
+    trailing-dimension lookups (``size[-1]``) type-check cleanly, reproducing
+    ``brainstate``'s own normalization at runtime.
+
+    Parameters
+    ----------
+    size : Size
+        A scalar ``int`` / numpy integer, or a sequence of them.
+
+    Returns
+    -------
+    tuple of int
+        The size expressed as a tuple of Python ints.
+    """
+    if isinstance(size, (int, np.integer)):
+        return (int(size),)
+    return tuple(int(s) for s in size)
 Axes: TypeAlias = Union[int, Sequence[int]]
 Path: TypeAlias = Tuple[str, ...]
 

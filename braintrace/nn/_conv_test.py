@@ -494,12 +494,12 @@ class TestConv3d:
         assert y.shape[-1] == 64
 
     def test_conv3d_explicit_padding_tuple(self):
-        """Test Conv3d with explicit tuple padding."""
+        """Test Conv3d with explicit tuple padding (one value per spatial dim)."""
         conv = braintrace.nn.Conv3d(
             in_size=(16, 16, 16, 3),
             out_channels=64,
             kernel_size=3,
-            padding=(1, 1)
+            padding=(1, 1, 1)
         )
         x = brainstate.random.randn(2, 16, 16, 16, 3)
         y = conv(x)
@@ -662,17 +662,17 @@ class TestConvEdgeCases:
 
     def test_conv_invalid_groups_out_channels(self):
         """Test that out_channels must be divisible by groups."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             braintrace.nn.Conv2d(in_size=(28, 28, 4), out_channels=9, kernel_size=3, groups=2)
 
     def test_conv_invalid_groups_in_channels(self):
         """Test that in_channels must be divisible by groups."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             braintrace.nn.Conv2d(in_size=(28, 28, 3), out_channels=8, kernel_size=3, groups=2)
 
     def test_conv_invalid_padding_string(self):
         """Test that only SAME and VALID are accepted as string padding."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             braintrace.nn.Conv2d(
                 in_size=(28, 28, 3),
                 out_channels=32,
@@ -693,7 +693,7 @@ class TestConvEdgeCases:
 
     def test_conv_invalid_in_size_length(self):
         """Test that in_size must have correct length."""
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             braintrace.nn.Conv2d(
                 in_size=(28, 3),  # Should be 3D for Conv2d
                 out_channels=32,

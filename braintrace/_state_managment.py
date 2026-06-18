@@ -18,12 +18,12 @@ from typing import Sequence, Tuple, List, Hashable, Dict, Mapping, Any
 import brainstate
 
 pass  # ParamState removed (primitive-based ETP)
-from ._typing import Path
+from ._typing import Path, PyTree
 
 
 def assign_dict_state_values(
-    states: Dict[Path, brainstate.State],
-    state_values: Dict[Path, brainstate.typing.PyTree],
+    states: Mapping[Path, brainstate.State],
+    state_values: Mapping[Path, PyTree],
     write: bool = True
 ):
     """
@@ -38,7 +38,7 @@ def assign_dict_state_values(
     states : Dict[Path, brainstate.State]
         A dictionary where keys are paths and values are state objects
         to which values will be assigned or restored.
-    state_values : Dict[Path, brainstate.typing.PyTree]
+    state_values : Dict[Path, PyTree]
         A dictionary where keys are paths and values are the values
         corresponding to each state in `states`.
     write : bool, optional
@@ -62,7 +62,7 @@ def assign_dict_state_values(
 
 def assign_state_values_v2(
     states: Mapping[Any, brainstate.State],
-    state_values: Mapping[Any, brainstate.typing.PyTree],
+    state_values: Mapping[Any, PyTree],
     write: bool = True
 ):
     """
@@ -77,7 +77,7 @@ def assign_state_values_v2(
     states : Dict[Hashable, brainstate.State]
         A dictionary where keys are hashable identifiers and values are state objects
         to which values will be assigned or restored.
-    state_values : Dict[Hashable, brainstate.typing.PyTree]
+    state_values : Dict[Hashable, PyTree]
         A dictionary where keys are hashable identifiers and values are the values
         corresponding to each state in `states`.
     write : bool, optional
@@ -106,18 +106,18 @@ def assign_state_values_v2(
 
 def sequence_split_state_values(
     states: Sequence[brainstate.State],
-    state_values: List[brainstate.typing.PyTree],
+    state_values: List[PyTree],
     include_weight: bool = True
 ) -> (
     Tuple[
-        Sequence[brainstate.typing.PyTree],
-        Sequence[brainstate.typing.PyTree],
-        Sequence[brainstate.typing.PyTree]
+        Sequence[PyTree],
+        Sequence[PyTree],
+        Sequence[PyTree]
     ]
     |
     Tuple[
-        Sequence[brainstate.typing.PyTree],
-        Sequence[brainstate.typing.PyTree]
+        Sequence[PyTree],
+        Sequence[PyTree]
     ]
 ):
     """

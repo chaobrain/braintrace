@@ -23,6 +23,8 @@ import jax
 import jax.numpy as jnp
 import saiunit as u
 
+from braintrace._typing import PyTree
+
 __all__ = [
     'PresynapticTrace',
     'KappaFilter',
@@ -388,7 +390,7 @@ def _unit_safe_add(a, b):
     return u.math.add(a, b)
 
 
-def _extract_leaf(pytree_val: brainstate.typing.PyTree, leaf_idx: int):
+def _extract_leaf(pytree_val: PyTree, leaf_idx: int):
     """Return the leaf at ``leaf_idx`` in ``jax.tree.leaves(pytree_val)``.
 
     Bare arrays (treedef with a single leaf) return the array unchanged.
@@ -405,7 +407,7 @@ def _extract_leaf(pytree_val: brainstate.typing.PyTree, leaf_idx: int):
 
 
 def _wrap_leaves_as_pytree(
-    reference_pytree: brainstate.typing.PyTree,
+    reference_pytree: PyTree,
     leaf_grads: Dict[int, jax.Array],
 ):
     """Build a pytree matching ``reference_pytree`` with ``leaf_grads``
@@ -441,8 +443,8 @@ def _wrap_leaves_as_pytree(
 def _route_grads_by_path(
     relation,
     per_key_grads: Dict[str, jax.Array],
-    weight_vals: Dict[Any, brainstate.typing.PyTree],
-    target_dict: Dict[Any, brainstate.typing.PyTree],
+    weight_vals: Dict[Any, PyTree],
+    target_dict: Dict[Any, PyTree],
 ) -> None:
     """Route per-key gradients from a dict-API rule into per-path pytrees.
 
@@ -474,7 +476,7 @@ def _route_grads_by_path(
 def _update_dict(
     the_dict: Dict,
     key: Any,
-    value: brainstate.typing.PyTree,
+    value: PyTree,
     error_when_no_key: Optional[bool] = False
 ):
     """Update the dictionary.

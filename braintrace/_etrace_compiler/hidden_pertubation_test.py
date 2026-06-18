@@ -62,7 +62,7 @@ class TestFindHiddenGroupsFromModule:
         assert len(states) == len(hidden_perturb.init_perturb_data())
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -94,7 +94,7 @@ class TestFindHiddenGroupsFromModule:
         assert len(states) == len(perturb)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,

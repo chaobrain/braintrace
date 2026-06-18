@@ -33,6 +33,7 @@ from braintrace._misc import (
 from braintrace._state_managment import sequence_split_state_values
 from braintrace._typing import (
     Path,
+    PyTree,
     StateID,
     Inputs,
     Outputs,
@@ -269,11 +270,11 @@ class ModuleInfo(NamedTuple):
     closed_jaxpr: ClosedJaxpr
 
     # states
-    retrieved_model_states: brainstate.util.FlattedDict[Path, brainstate.State]
+    retrieved_model_states: brainstate.util.FlattedDict
     compiled_model_states: Sequence[brainstate.State]
     state_id_to_path: Dict[StateID, Path]
-    state_tree_invars: brainstate.typing.PyTree[Var]
-    state_tree_outvars: brainstate.typing.PyTree[Var]
+    state_tree_invars: PyTree
+    state_tree_outvars: PyTree
 
     # hidden states
     hidden_path_to_invar: Dict[Path, Var]
@@ -434,7 +435,10 @@ class ModuleInfo(NamedTuple):
         cache_key = self.stateful_model.get_arg_cache_key(*args, compile_if_miss=True)
         i_start = self.num_var_out
         i_end = i_start + self.num_var_state
-        out, new_state_vals = self.stateful_model.get_out_treedef_by_cache(cache_key).unflatten(jaxpr_outs[:i_end])
+        # brainstate types the cached treedef as the broad ``PyTree``; at runtime it is a
+        # ``jax`` ``PyTreeDef`` that exposes ``unflatten``.
+        out, new_state_vals = self.stateful_model.get_out_treedef_by_cache(cache_key).unflatten(  # type: ignore[attr-defined]
+            jaxpr_outs[:i_end])
 
         #
         # check state value

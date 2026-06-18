@@ -15,7 +15,6 @@
 
 # -*- coding: utf-8 -*-
 
-import numbers
 from typing import Callable, Optional
 
 import brainstate
@@ -23,7 +22,7 @@ import braintools
 import saiunit as u
 
 from braintrace._etrace_op import matmul
-from braintrace._typing import Size, ArrayLike
+from braintrace._typing import Size, ArrayLike, as_size_tuple
 
 __all__ = [
     'LeakyRateReadout',
@@ -104,16 +103,16 @@ class LeakyRateReadout(brainstate.nn.Module):
         self,
         in_size: Size,
         out_size: Size,
-        tau: ArrayLike = 5. * u.ms,
+        tau: ArrayLike = 5. * u.ms,  # type: ignore[assignment]  # saiunit types `float * Unit` as `Unit | Quantity`
         w_init: Callable = braintools.init.KaimingNormal(),
         r_init: Callable = braintools.init.ZeroInit(),
         name: Optional[str] = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]  # brainstate hides Module.__init__ from type checkers
 
         # parameters
-        self.in_size = (in_size,) if isinstance(in_size, numbers.Integral) else tuple(in_size)
-        self.out_size = (out_size,) if isinstance(out_size, numbers.Integral) else tuple(out_size)
+        self.in_size = as_size_tuple(in_size)
+        self.out_size = as_size_tuple(out_size)
         self.tau = braintools.init.param(tau, self.out_size)
         # Compute decay handling units properly
         tau_normalized = u.maybe_decimal(self.tau / brainstate.environ.get_dt())
@@ -122,7 +121,7 @@ class LeakyRateReadout(brainstate.nn.Module):
 
         # weights
         self.W = brainstate.ParamState(
-            braintools.init.param(w_init, (self.in_size[0], self.out_size[0]))
+            braintools.init.param(w_init, (as_size_tuple(self.in_size)[0], as_size_tuple(self.out_size)[0]))
         )
 
     def init_state(self, batch_size=None, **kwargs):

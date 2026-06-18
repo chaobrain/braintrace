@@ -90,7 +90,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         graph_executor: ETraceGraphExecutor,
         name: Optional[str] = None,
     ):
-        super().__init__(name=name)
+        super().__init__(name=name)  # type: ignore[call-arg]  # brainstate hides Module.__init__ from type checkers
 
         # the model
         if not isinstance(model, brainstate.nn.Module):
@@ -115,9 +115,9 @@ class ETraceAlgorithm(brainstate.nn.Module):
         self.running_index = brainstate.LongTermState(0)
 
         # other states
-        self._param_states = None
-        self._hidden_states = None
-        self._other_states = None
+        self._param_states: Optional[brainstate.util.FlattedDict] = None
+        self._hidden_states: Optional[brainstate.util.FlattedDict] = None
+        self._other_states: Optional[brainstate.util.FlattedDict] = None
 
     @property
     def graph(self) -> ETraceGraph:
@@ -144,7 +144,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         return self.graph_executor
 
     @property
-    def param_states(self) -> brainstate.util.FlattedDict[Path, brainstate.ParamState]:
+    def param_states(self) -> brainstate.util.FlattedDict:
         """
         Get the parameter weight states.
 
@@ -155,10 +155,11 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         if self._param_states is None:
             self._split_state()
+        assert self._param_states is not None
         return self._param_states
 
     @property
-    def hidden_states(self) -> brainstate.util.FlattedDict[Path, brainstate.HiddenState]:
+    def hidden_states(self) -> brainstate.util.FlattedDict:
         """
         Get the hidden states.
 
@@ -169,10 +170,11 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         if self._hidden_states is None:
             self._split_state()
+        assert self._hidden_states is not None
         return self._hidden_states
 
     @property
-    def other_states(self) -> brainstate.util.FlattedDict[Path, brainstate.State]:
+    def other_states(self) -> brainstate.util.FlattedDict:
         """
         Get the other states.
 
@@ -183,6 +185,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         if self._other_states is None:
             self._split_state()
+        assert self._other_states is not None
         return self._other_states
 
     def _split_state(self):
@@ -235,7 +238,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
             self.is_compiled = True
 
     @property
-    def path_to_states(self) -> brainstate.util.FlattedDict[Path, brainstate.State]:
+    def path_to_states(self) -> brainstate.util.FlattedDict:
         """
         Get the path to the states.
 

@@ -59,8 +59,10 @@ def finite_difference_param_gradients(
     """
     template = model_factory()
     brainstate.nn.init_all_states(template, batch_size=1)
+    template_params = template.states(brainstate.ParamState)
+    assert isinstance(template_params, brainstate.util.FlattedDict)
     base_values = {
-        k: np.asarray(v.value) for k, v in template.states(brainstate.ParamState).items()
+        k: np.asarray(v.value) for k, v in template_params.items()
     }
 
     def loss_with(values):

@@ -110,7 +110,7 @@ class ETraceGraphExecutor:
         return self._compiled_graph
 
     @property
-    def states(self) -> brainstate.util.FlattedDict[Path, brainstate.State]:
+    def states(self) -> brainstate.util.FlattedDict:
         """
         The states for the model.
 
@@ -122,7 +122,7 @@ class ETraceGraphExecutor:
         return self.graph.module_info.retrieved_model_states
 
     @property
-    def path_to_states(self) -> brainstate.util.FlattedDict[Path, brainstate.State]:
+    def path_to_states(self) -> brainstate.util.FlattedDict:
         """
         The path to the states.
 
@@ -216,6 +216,8 @@ class ETraceGraphExecutor:
         # other hidden states
         other_states = []
         short_states = self.states.filter(brainstate.ShortTermState)
+        # a single-type filter returns one FlattedDict (brainstate types it as a union)
+        assert isinstance(short_states, brainstate.util.FlattedDict)
         for i, path in enumerate(short_states.keys()):
             if path not in hidden_paths:
                 other_states.append(path)
@@ -239,7 +241,9 @@ class ETraceGraphExecutor:
             msg += '\n\n'
 
         # non etrace weights
-        non_etratce_weight_paths = set(self.states.filter(brainstate.ParamState).keys())
+        param_states = self.states.filter(brainstate.ParamState)
+        assert isinstance(param_states, brainstate.util.FlattedDict)
+        non_etratce_weight_paths = set(param_states.keys())
         non_etratce_weight_paths = non_etratce_weight_paths.difference(etratce_weight_paths)
         if len(non_etratce_weight_paths):
             msg += 'The non-etrace weight parameters are:\n\n'

@@ -18,6 +18,8 @@ import brainstate
 import jax.tree
 import saiunit as u
 
+from braintrace._typing import PyTree
+
 __all__ = [
     'GradExpon',
 ]
@@ -31,7 +33,7 @@ class GradExpon(brainstate.nn.Module):
 
     Parameters
     ----------
-    grad_shape : brainstate.typing.PyTree
+    grad_shape : PyTree
         A pytree whose leaves give the shape and dtype of the gradients to
         accumulate. The accumulator is initialised to zeros matching each
         leaf.
@@ -69,7 +71,7 @@ class GradExpon(brainstate.nn.Module):
 
     def __init__(
         self,
-        grad_shape: brainstate.typing.PyTree,
+        grad_shape: PyTree,
         tau_or_decay: u.Quantity | float,
     ):
         super().__init__()
@@ -90,7 +92,7 @@ class GradExpon(brainstate.nn.Module):
             raise TypeError(f"tau_or_decay must be a Quantity or a float, but got {tau_or_decay}")
         self.decay = decay
 
-    def update(self, grads: brainstate.typing.PyTree):
+    def update(self, grads: PyTree):
         r"""Update the accumulated gradients with the exponential decay rule.
 
         Applies :math:`g_{t+1} = \mathrm{decay} \cdot g_t + \mathrm{grads}`,
@@ -100,7 +102,7 @@ class GradExpon(brainstate.nn.Module):
 
         Parameters
         ----------
-        grads : brainstate.typing.PyTree
+        grads : PyTree
             The new gradients to incorporate into the accumulated gradients.
             Must match the pytree structure of the accumulator.
 

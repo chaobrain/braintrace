@@ -57,7 +57,7 @@ class Test_extract_model_info:
         pprint(minfo)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
@@ -85,7 +85,7 @@ class Test_extract_model_info:
             pprint(minfo)
 
     @pytest.mark.parametrize(
-        'cls,',
+        'cls',
         [
             IF_Delta_Dense_Layer,
             LIF_ExpCo_Dense_Layer,
