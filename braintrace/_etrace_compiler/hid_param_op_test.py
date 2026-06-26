@@ -18,7 +18,7 @@ from pprint import pprint
 
 import brainstate
 import pytest
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace import find_hidden_param_op_relations_from_module

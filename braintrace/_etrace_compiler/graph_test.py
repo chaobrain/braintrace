@@ -18,7 +18,7 @@ import unittest
 from pprint import pprint
 
 import brainstate
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_model_test import (

@@ -77,7 +77,7 @@ dict, so the legacy (no-bias) code path is unchanged in behaviour.
 
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from ._primitive import register_primitive
 

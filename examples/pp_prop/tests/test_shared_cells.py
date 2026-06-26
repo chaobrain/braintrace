@@ -5,7 +5,7 @@ import pathlib
 
 import brainstate
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 
 def _load_shared():

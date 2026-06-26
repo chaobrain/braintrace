@@ -62,7 +62,7 @@ so both parameter sets end up in the trace.
 | Sparse matmul | `braintrace.sparse_matmul`, `braintrace.nn.SparseLinear` | — (skipped; see below) |
 | LoRA matmul | `braintrace.lora_matmul`, `braintrace.nn.LoRA` | 07 |
 
-> **Sparse-matmul note:** `saiunit.sparse` COO/CSR primitives do not yet
+> **Sparse-matmul note:** `brainunit.sparse` COO/CSR primitives do not yet
 > have JAX batching rules, which D_RTRL's internal Jacobian vmap requires.
 > `06-operator-sparse.py` is therefore not shipped. Adding batching rules
 > (or integrating `jax.experimental.sparse.BCOO`) is future framework work.

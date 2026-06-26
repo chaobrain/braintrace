@@ -21,7 +21,7 @@ Coverage:
   under SAME and VALID padding, with and without bias.
 * The ``etp_conv_p`` primitive appears in the jaxpr and carries the
   expected static parameters.
-* saiunit support — quantities with units multiply correctly.
+* brainunit support — quantities with units multiply correctly.
 * JAX rules — jit / grad work.
 * Four ETP rules — the ``conv`` rules use a VJP-based ``xy_to_dw`` that
   must match a hand-written JAX VJP; the init fns return arrays of the
@@ -36,7 +36,7 @@ import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_op import (
@@ -153,10 +153,10 @@ class TestPrimitiveAndParams:
 
 
 # ---------------------------------------------------------------------------
-# saiunit
+# brainunit
 # ---------------------------------------------------------------------------
 
-class TestSaiunit:
+class TestBrainunit:
 
     def test_unitless(self):
         x = jnp.ones((1, 3, 8))

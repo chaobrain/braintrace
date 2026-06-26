@@ -79,7 +79,7 @@ dict, so the legacy (no-bias) code path is unchanged in behaviour.
 
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from ._primitive import register_primitive
 
@@ -330,7 +330,7 @@ def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
     weight_data : ArrayLike
         Sparse-matrix data, i.e. the non-zero values, shape ``(nnz,)``.
     sparse_mat : object
-        Sparse-matrix structure (e.g. a ``saiunit.sparse`` matrix object).
+        Sparse-matrix structure (e.g. a ``brainunit.sparse`` matrix object).
         Must expose ``with_data`` (substitute new data into the structure)
         and ``yw_to_w_transposed`` (apply the transposed sparse pattern to
         a trace).

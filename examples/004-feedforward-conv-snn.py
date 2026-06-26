@@ -22,7 +22,7 @@ sys.path.append('../')
 import brainstate
 import brainpy.state
 import braintools
-import saiunit as u
+import brainunit as u
 import jax
 import numpy as np
 import tonic
@@ -442,7 +442,7 @@ def get_nmnist_data(
 def data_processing(x_local):
     assert x_local.ndim == 5  # (sequence, batch, channel, height, width)
     x_local = x_local.permute(0, 1, 3, 4, 2)  # (sequence, batch, height, width, channel)
-    # x_local is a torch tensor here; convert via numpy first so saiunit stays on
+    # x_local is a torch tensor here; convert via numpy first so brainunit stays on
     # the numpy/jax backend (u.math.asarray would otherwise dispatch to the torch
     # backend and reject the JAX dtype).
     return u.math.asarray(np.asarray(x_local), dtype=brainstate.environ.dftype())

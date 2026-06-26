@@ -30,7 +30,7 @@ from typing import Callable, Dict, Tuple, Optional, Sequence, Any
 import brainstate
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from braintrace._etrace_compiler import HiddenGroup, HiddenParamOpRelation
 from braintrace._etrace_op import (

@@ -20,7 +20,7 @@ from typing import Sequence, Callable, Any
 
 import brainstate
 import jax.tree
-import saiunit as u
+import brainunit as u
 
 from ._compatible_imports import Var
 from ._typing import Path, ETraceDF_Key

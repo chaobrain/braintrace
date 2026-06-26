@@ -9,7 +9,7 @@ import braintools
 import jax
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 DEFAULT_DT = 1.0 * u.ms
 DEFAULT_SEED = 42
@@ -107,7 +107,7 @@ def make_poisson_mnist(
 # --- SNN cells -----------------------------------------------------------
 #
 # All cells use the AlignPostProj + Expon + CUBA pattern with consistent
-# saiunit units. Pattern:
+# brainunit units. Pattern:
 #
 #     linear (mA) -> Expon syn (mA) -> CUBA (scales to current) -> LIF/ALIF/GIF (mV)
 #

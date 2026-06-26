@@ -21,7 +21,7 @@ import brainstate
 import jax
 import numpy as np
 import pytest
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_compiler import model4test as group_etrace_model

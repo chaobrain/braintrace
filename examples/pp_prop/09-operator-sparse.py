@@ -7,7 +7,7 @@ zero because Linear multiplies the weight by `w_mask` on every forward
 pass; pp_prop sees the combined op as a dense matmul and gradients for
 absent connections are zeroed by the same mask.
 
-Note: the sparse ETP primitive `etp_sp_mm_p` exists but `saiunit.sparse`
+Note: the sparse ETP primitive `etp_sp_mm_p` exists but `brainunit.sparse`
 COO/CSR formats lack JAX batching rules today (same constraint noted for
 `examples/drtrl/06-operator-sparse.py`). This masked-dense fallback still
 exercises `pp_prop` over a sparse connectivity pattern end-to-end.
@@ -22,7 +22,7 @@ import brainstate
 import braintools
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 import braintrace
 

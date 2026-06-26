@@ -14,7 +14,7 @@ from typing import Dict, List
 import brainstate
 import braintools
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import _shared  # noqa: E402

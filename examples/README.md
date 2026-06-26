@@ -22,7 +22,7 @@ The examples require the following packages:
 - numpy
 - matplotlib
 - braintrace
-- saiunit
+- brainunit
 - brainstate
 - tqdm
 - torch

@@ -25,7 +25,7 @@ import braintools
 import jax
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 import braintrace
 

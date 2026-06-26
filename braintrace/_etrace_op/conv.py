@@ -17,7 +17,7 @@ r"""Convolution ETP primitive (``etp_conv_p``).
 
 Always expects a batch dimension on the input. The full keyword surface
 of ``jax.lax.conv_general_dilated`` is preserved; the wrapper splits and
-recombines saiunit quantities for the input and kernel.
+recombines brainunit quantities for the input and kernel.
 
 **Forward operation**
 
@@ -73,7 +73,7 @@ from typing import Any, Optional, Sequence
 
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from ._primitive import register_primitive
 

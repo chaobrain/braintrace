@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import jax
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 from .._etrace_op import (
     conv as _new_conv,
@@ -430,7 +430,7 @@ class SpMatMulOp(ETraceOp):
 
     Parameters
     ----------
-    sparse_mat : saiunit.sparse.SparseMatrix
+    sparse_mat : brainunit.sparse.SparseMatrix
         The sparse matrix whose structure is reused; its data is replaced
         by the weight values.
     weight_fn : Callable, optional
@@ -451,7 +451,7 @@ class SpMatMulOp(ETraceOp):
         super().__init__(is_diagonal=False)
         if not isinstance(sparse_mat, u.sparse.SparseMatrix):
             raise TypeError(
-                f'sparse_mat must be a saiunit SparseMatrix, got {type(sparse_mat)}'
+                f'sparse_mat must be a brainunit SparseMatrix, got {type(sparse_mat)}'
             )
         self.sparse_mat = sparse_mat
         assert callable(weight_fn)

@@ -28,7 +28,7 @@ All examples run on CPU in roughly 1–2 minutes. Task 09 (MNIST) requires
 | BPTT baseline                              | 01, 09, 10, 12     |
 
 > **Note — skipped example:** `06-operator-sparse.py` is not currently
-> shipped. The ``saiunit.sparse`` COO/CSR primitives lack JAX batching
+> shipped. The ``brainunit.sparse`` COO/CSR primitives lack JAX batching
 > rules, which blocks D_RTRL's internal Jacobian vmap. Adding batching
 > rules (or an alternative sparse backend such as
 > ``jax.experimental.sparse.BCOO``) is tracked as future framework work.

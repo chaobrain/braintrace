@@ -82,7 +82,7 @@ Keys ``'lora_b'`` / ``'lora_a'`` match the pytree leaf names in
 
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from ._primitive import register_primitive
 

@@ -20,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
-import saiunit as u
+import brainunit as u
 
 from braintrace._etrace_algorithms._common import (
     FixedRandomFeedback,

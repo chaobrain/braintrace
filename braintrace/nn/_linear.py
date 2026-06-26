@@ -16,7 +16,7 @@
 # -*- coding: utf-8 -*-
 
 import brainstate
-import saiunit as u
+import brainunit as u
 
 from braintrace._etrace_op import matmul, sparse_matmul, lora_matmul
 from braintrace._typing import ArrayLike

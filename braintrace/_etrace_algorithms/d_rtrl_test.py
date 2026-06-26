@@ -18,7 +18,7 @@ import jax
 import jax.numpy as jnp
 import numpy.testing as npt
 import pytest
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_algorithms.d_rtrl import D_RTRL
@@ -227,7 +227,7 @@ class TestRemoveUnits:
         npt.assert_array_almost_equal(restored, x)
 
     def test_quantity_round_trip(self):
-        """A saiunit Quantity should be stripped and restored."""
+        """A brainunit Quantity should be stripped and restored."""
         x = jnp.array([1.0, 2.0]) * u.mV
         unitless, restore = _remove_units(x)
         # unitless should be the mantissa
