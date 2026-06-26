@@ -17,6 +17,8 @@
 
 import brainstate
 import braintools
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 import saiunit as u

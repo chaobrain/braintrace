@@ -34,6 +34,8 @@ import brainstate
 import braintools
 import jax
 import jax.numpy as jnp
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -211,7 +213,7 @@ def train_online(n_epochs=5):
 print("=" * 60)
 print("Training with BPTT")
 print("=" * 60)
-# bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
+bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
 
 print()
 print("=" * 60)

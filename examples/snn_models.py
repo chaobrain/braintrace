@@ -21,6 +21,8 @@ import brainpy.state
 import brainstate
 import braintools
 import jax
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numba
 import numpy as np
@@ -411,9 +413,13 @@ class OnlineTrainer(Trainer):
         def init():
             brainstate.nn.init_all_states(self.target)
             model.compile_graph(inputs[0, 0])
-            model.show_graph()
 
         init()
+        # show_graph() is a post-compile diagnostic: call it once *after* init()
+        # rather than inside it. The vmap_new_states discovery probe runs init()
+        # once with compilation deferred to the real mapped pass, so the graph is
+        # only available here, after init() has returned.
+        model.show_graph()
         model = brainstate.nn.Vmap(model, vmap_states='new')
 
         def _etrace_grad(inp):
@@ -434,8 +440,14 @@ class OnlineTrainer(Trainer):
             # forward propagation
             grads = jax.tree.map(u.math.zeros_like, weights.to_dict_values())
             grads, (outs, losses) = brainstate.transform.scan(_etrace_step, grads, inputs_)
-            # gradient updates
-            grads = brainstate.functional.clip_grad_norm(grads, 1.)
+            # gradient updates. The scan *sums* the per-step gradients, but the
+            # optimised/reported objective is ``losses.mean()`` — so divide by the
+            # number of accumulated steps to make the update the gradient of that
+            # mean (the scale BPTT differentiates). A global-norm clip to 1.0 here
+            # instead couples every parameter (the large recurrent eligibility
+            # trace dominates the norm and starves the small readout gradient),
+            # pinning accuracy at chance.
+            grads = jax.tree.map(lambda g: g / losses.shape[0], grads)
             self.opt.update(grads)
             # accuracy
             return losses.mean(), outs

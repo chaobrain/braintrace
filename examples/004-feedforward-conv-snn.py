@@ -69,16 +69,25 @@ class ConvSNN(brainstate.nn.Module):
             R=1.
         )
 
+        # NOTE: ``use_fast_variance=False`` is required for the online (D_RTRL)
+        # trainers. The param-dim eligibility trace reads the instantaneous
+        # ``dh/dy`` through this norm via a single all-ones jvp, whose value for a
+        # mean-subtracting (shift-invariant) op is the Jacobian row-sums = exactly
+        # 0. The fast-variance formula ``E[x^2] - E[x]^2`` loses that exactness in
+        # float32 (catastrophic cancellation), and under ``Vmap(vmap_states='new')``
+        # the residual is amplified by the recurrent trace and the large
+        # ``rsqrt(var+eps)`` factor (tiny variance on sparse spike inputs) into an
+        # overflow. The stable two-pass variance keeps the row-sums exactly 0.
         self.layer1 = brainstate.nn.Sequential(
             braintrace.nn.Conv2d(in_size, n_channel, kernel_size=3, padding=1, **conv_inits),
-            braintrace.nn.LayerNorm.desc(),
+            brainstate.nn.LayerNorm.desc(use_fast_variance=False),
             brainpy.state.IF.desc(**if_param),
             brainstate.nn.MaxPool2d.desc(kernel_size=2, stride=2)  # 14 * 14
         )
 
         self.layer2 = brainstate.nn.Sequential(
             braintrace.nn.Conv2d(self.layer1.out_size, n_channel, kernel_size=3, padding=1, **conv_inits),
-            braintrace.nn.LayerNorm.desc(),
+            brainstate.nn.LayerNorm.desc(use_fast_variance=False),
             brainpy.state.IF.desc(**if_param),
         )
         self.layer3 = brainstate.nn.Sequential(
@@ -235,9 +244,12 @@ class OnlineVmapTrainer(Trainer):
             # initialize the online learning model
             with brainstate.environ.context(fit=True):
                 model.compile_graph(inputs[0, 0])
-                model.show_graph()
 
         init()
+        # show_graph() is a post-compile diagnostic: call it once *after* init().
+        # The vmap_new_states discovery probe runs init() with compilation deferred
+        # to the real mapped pass, so the graph is only available after init().
+        model.show_graph()
         model = brainstate.nn.Vmap(model, vmap_states='new')
 
         # weights
@@ -430,7 +442,10 @@ def get_nmnist_data(
 def data_processing(x_local):
     assert x_local.ndim == 5  # (sequence, batch, channel, height, width)
     x_local = x_local.permute(0, 1, 3, 4, 2)  # (sequence, batch, height, width, channel)
-    return u.math.asarray(x_local, dtype=brainstate.environ.dftype())
+    # x_local is a torch tensor here; convert via numpy first so saiunit stays on
+    # the numpy/jax backend (u.math.asarray would otherwise dispatch to the torch
+    # backend and reject the JAX dtype).
+    return u.math.asarray(np.asarray(x_local), dtype=brainstate.environ.dftype())
 
 
 if __name__ == '__main__':

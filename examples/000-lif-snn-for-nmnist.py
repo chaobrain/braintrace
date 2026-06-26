@@ -18,6 +18,8 @@
 
 import brainstate
 import braintools
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 import saiunit as u
@@ -43,8 +45,12 @@ if __name__ == '__main__':
         in_shape = NMNIST.sensor_size
         out_shape = 10
         data = NMNIST(
-            save_to='D:/data/mnist',
-            # save_to='/mnt/d/data/mnist',
+            # Use the POSIX path to the D: drive on Linux/WSL so the dataset is
+            # NOT written to a literal ``./D:/data/mnist`` folder under the repo
+            # (a bare ``D:/...`` is a *relative* path off Windows). Swap these two
+            # lines back when running natively on Windows.
+            save_to='/mnt/d/data/mnist',
+            # save_to='D:/data/mnist',
             train=True,
             first_saccade_only=True,
             transform=tonic.transforms.ToFrame(sensor_size=in_shape, n_time_bins=200)

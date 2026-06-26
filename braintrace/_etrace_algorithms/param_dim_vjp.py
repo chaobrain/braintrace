@@ -288,13 +288,32 @@ def _update_param_dim_etrace_scan_fn(
             @partial(jax.vmap, in_axes=-1, out_axes=-1)
             def _inner(df_slice):
                 if batched:
-                    return jax.vmap(comp_dw_with_x)(x, df_slice)
+                    df_b = df_slice
+                    # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-
+                    # state trace (df) is per-lane and has lost its leading batch
+                    # axis, while a conv input still carries the singleton batch its
+                    # forward API requires (x = [1, *spatial, C]). Re-insert the
+                    # matching singleton so the per-sample vmap maps consistent
+                    # leading axes (collapsed again by the solve-time batch sum).
+                    if x is not None and x.ndim == df_b.ndim + 1:
+                        df_b = df_b[None]
+                    return jax.vmap(comp_dw_with_x)(x, df_b)
                 return comp_dw_with_x(x, df_slice)
 
             return _inner(df_all)
 
         def _comp_recurrent_legacy(diag_, old_bwg_, num_state_):
             """Legacy nested-vmap yw_to_w + sum path."""
+
+            # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-state
+            # Jacobian (diag) is per-lane and has lost its leading batch axis,
+            # while the weight trace (old_bwg) still carries the singleton batch
+            # from ``init_drtrl`` (``batch = x_var.shape[0]`` == 1 for a conv whose
+            # forward forces a batch axis). Re-insert the matching singleton on
+            # diag so the ``yw_to_w`` rule sees a consistent batch prefix on both
+            # the cotangent and the trace (collapsed again by the solve-time sum).
+            if batched and x is not None and diag_.ndim == x.ndim + 1:
+                diag_ = diag_[None]
 
             def fn_bwg_pre(d, _old=old_bwg_):
                 return jax.tree.map(
@@ -448,10 +467,19 @@ def _solve_param_dim_weight_gradients(
     # Paths whose gradient was already batch-reduced inside the fast-path einsum
     # (fold_batch). The trailing batch-sum must skip these.
     folded_paths: set = set()
+    # Paths owned by a *batched* primitive: only these carry a leading batch axis
+    # in ``temp_data`` and so only these may be batch-summed. A model can mix
+    # batched and unbatched primitives in one solve — under
+    # ``brainstate.nn.Vmap(vmap_states='new')`` a conv stays batched while a
+    # ``Linear`` dispatches to the unbatched ``etp_mv`` (1-D per-lane input) — and
+    # summing the unbatched gradient would collapse its leading (in-feature) axis.
+    batched_paths: set = set()
     for relation in weight_hidden_relations:
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
+        if batched:
+            batched_paths.update(relation.trainable_paths.values())
         use_fast = fast_solve and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
 
         def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
@@ -473,6 +501,21 @@ def _solve_param_dim_weight_gradients(
             # dimensionless processing (unit strip + restore). Apply per-leaf.
             etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
             dg_hidden_unitless, _ = _remove_units(dg_hidden)
+
+            # Under ``brainstate.nn.Vmap(vmap_states='new')`` a batched primitive
+            # (necessarily conv here — dense/lora/sparse dispatch to their
+            # unbatched variants when per-lane) has a per-lane hidden cotangent
+            # that lost its leading batch axis, while the weight trace keeps the
+            # singleton batch from ``init_drtrl``. Both the batched ``yw_to_w`` and
+            # the closed-form solve map a shared leading batch axis, so re-insert
+            # the matching singleton on the cotangent; the trailing solve-time sum
+            # (``has_batched`` branch below) collapses it again.
+            if batched:
+                _trace_lead = jax.tree.leaves(etrace_data_unitless)[0].shape[0]
+                dg_hidden_unitless = jax.tree.map(
+                    lambda a: a[None] if (a.ndim >= 1 and a.shape[0] != _trace_lead) else a,
+                    dg_hidden_unitless,
+                )
 
             if use_fast:
                 # Upcast a reduced-precision trace to (at least) the learning-
@@ -520,12 +563,12 @@ def _solve_param_dim_weight_gradients(
     #
     # sum up the batched weight gradients
     # Check if ANY relation uses a batched primitive
-    has_batched = any(is_batched_primitive(r.primitive) for r in weight_hidden_relations)
-    if has_batched:
-        for key, val in temp_data.items():
-            if key in folded_paths:
-                # already batch-reduced inside the fast-path einsum (fold_batch)
-                continue
+    # Collapse the leading batch axis on batched-primitive gradients only. Paths
+    # routed through the fast-path einsum (``folded_paths``) were already reduced
+    # via ``fold_batch``; unbatched-primitive paths (not in ``batched_paths``)
+    # never grew a batch axis and must be left intact.
+    for key, val in temp_data.items():
+        if key in batched_paths and key not in folded_paths:
             temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
 
     # update the weight gradients

@@ -20,6 +20,8 @@ from functools import reduce
 from typing import Callable, Union
 
 import brainpy.state
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 

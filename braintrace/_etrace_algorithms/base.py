@@ -222,6 +222,18 @@ class ETraceAlgorithm(brainstate.nn.Module):
             The input arguments.
         """
 
+        # ``vmap_new_states`` / ``vmap2_new_states`` run an eager *discovery
+        # probe* that executes the surrounding ``init`` (including this call)
+        # once against throwaway, un-batched states before the real mapped
+        # pass. Compiling there would bind the executor to those probe states
+        # (which are discarded and left untagged), so the subsequent
+        # ``brainstate.nn.Vmap(..., vmap_states='new')`` would not cover them
+        # and writing a batched value raises ``BatchAxisError``. Defer to the
+        # real mapped pass, which creates the 'new'-tagged batched states.
+        _in_probe = getattr(brainstate.transform, 'in_new_state_probe', None)
+        if _in_probe is not None and _in_probe():
+            return
+
         if not self.is_compiled:
             # --- invalidate cached state splits --- #
             self._param_states = None

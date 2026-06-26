@@ -19,6 +19,8 @@ import time
 from functools import reduce
 from typing import Callable, Union
 
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -624,7 +626,11 @@ class Trainer(object):
                 f'time = {mean_time:.5f} s, '
                 f'memory = {mean_mem:.2f} GB'
             )
-            self.opt.step()
+            # Advance the per-epoch LR schedule. The latest braintools optimizer
+            # API repurposed ``opt.step()`` to apply gradients (it now requires a
+            # ``grads`` arg); the epoch LR advance moved to ``opt.lr.step_epoch()``
+            # (this matches the sibling -batched benchmark, which was migrated).
+            self.opt.lr.step_epoch()
 
             # training accuracy
             if mean_acc > max_acc:
