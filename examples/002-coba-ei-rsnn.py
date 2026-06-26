@@ -21,6 +21,8 @@ import brainstate
 import braintools
 import jax
 import jax.numpy as jnp
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 import saiunit as u
@@ -122,12 +124,13 @@ class EvidenceAccumulation:
                 # X[i_seq:i_seq + t_cue, i_start: i_start + 25] = fr
                 X = jax.lax.dynamic_update_slice(X, update, (i_seq, i_start))
 
-            X = u.Quantity(X)
-            # recall cue
-            X[-t_recall:, self.feat_neurons['recall']] = self.feat_fr['recall'] * dt
+            # recall cue (functional update: in-place ``Quantity[...] =`` is
+            # rejected under jit/vmap on the latest saiunit; ``feat_fr * dt``
+            # auto-simplifies Hz*ms to a plain dimensionless probability)
+            X = X.at[-t_recall:, self.feat_neurons['recall']].set(self.feat_fr['recall'] * dt)
 
             # background noise
-            X[:, self.feat_neurons['noise']] = self.feat_fr['noise'] * dt
+            X = X.at[:, self.feat_neurons['noise']].set(self.feat_fr['noise'] * dt)
 
             # generate inputs and targets
             # X = u.math.asarray(rng.rand(*X.shape) < X, dtype=float)

@@ -244,38 +244,36 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             #
             # [ KEY ]
             #
-            # # ---- Method 1: using ``backward_pass`` ---- #
-            # Assuming the function is linear. One cheap way is to use
-            # the backward pass for computing the gradients of the hidden states.
-            # For most situations, the ``y --> hidden`` relation is linear. Therefore,
-            # we use ``backward_pass`` to compute the ``Df`` while avoids the overhead
-            # of computing the forward pass. Otherwise, we should use ``jax.vjp`` instead.
-            # Please also see ``jax.linear_transpose()`` for the same purpose.
+            # ``df`` is the diagonal instantaneous Jacobian ``dh_i/dy_i`` of the
+            # ``y -> hidden group`` map, read off with a single ``jax.jvp`` carrying
+            # an all-ones tangent.
             #
-            # [df] = backward_pass(relation.jaxpr_y2hid, [], True, consts, invars, outvars)
+            # When that map is *elementwise* (the common case: an op output feeds
+            # exactly one neuron, e.g. conv/dense -> spiking neuron) the Jacobian is
+            # diagonal and the all-ones jvp returns that diagonal exactly.
             #
-            # # ---- Method 2: using ``jax.vjp`` ---- #
-            # For general cases, we should use ``jax.vjp`` to compute the gradients.
+            # When a non-elementwise op sits between the weight op and the neuron
+            # (e.g. LayerNorm: ``conv -> LayerNorm -> IF``) the Jacobian is no
+            # longer diagonal and the all-ones jvp returns its *row sums*. The
+            # param-dim trace cannot represent a non-diagonal ``dh/dy``, so this is
+            # the chosen approximation: for a mean-subtracting (shift-invariant) op
+            # the row sums are *exactly* zero — the upstream op simply does not get
+            # an eligibility gradient through the norm. That exactness matters: a
+            # norm computed with ``use_fast_variance=True`` (``E[x^2]-E[x]^2``)
+            # leaves a float32 residual here instead of zero which, under
+            # ``Vmap(vmap_states='new')``, the recurrent trace and the large
+            # ``rsqrt(var+eps)`` factor amplify into an overflow. Build norm layers
+            # feeding an etrace op with ``use_fast_variance=False``.
             #
-            # # ---- Method 3: using ``jax.jvp`` ---- #
-            # For computational efficiency, we use ``jax.jvp`` to compute the gradients,
-            # since this is the one-to-many mapping.
-            #
-            primals, hidden_group_tangents = jax.jvp(
-                lambda y_val: relation.y_to_hidden_groups(
-                    y_val,
-                    intermediate_values,
-                    concat_hidden_vals=True,
-                ),
-                [y],
-                [u.math.ones_like(y)]
+            def _y_to_hidden(y_val, _rel=relation):
+                return _rel.y_to_hidden_groups(
+                    y_val, intermediate_values, concat_hidden_vals=True,
+                )
+
+            _, hidden_group_tangents = jax.jvp(
+                _y_to_hidden, (y,), (u.math.ones_like(y),)
             )
 
-            #
-            # compute the df we want
-            #
-            #    df = jvp gradient of "y -> hidden group"
-            #
             for tangent, group in zip(hidden_group_tangents, relation.hidden_groups):
                 dfs[etrace_df_key(relation.y_var, group.index)] = tangent
 

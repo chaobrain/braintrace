@@ -18,6 +18,8 @@
 import brainstate
 import braintools
 import jax
+import matplotlib
+matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
@@ -100,6 +102,7 @@ class Trainer(object):
             x_local = jax.numpy.asarray(np.transpose(x_local, (1, 0, 2)))
             y_local = jax.numpy.asarray(np.transpose(y_local, (1, 0)))
             r = self.batch_train(x_local, y_local)
+            losses.append(float(r))
             bar.set_description(f'Training {i:5d}, loss = {float(r):.5f}', refresh=True)
         return np.asarray(losses)
 
@@ -163,6 +166,14 @@ class OnlineTrainer(Trainer):
             grads = jax.tree.map(lambda a: jax.numpy.zeros_like(a), {k: v.value for k, v in weights.items()})
             # 沿着时间轴计算和累积梯度
             grads, (outs, losses) = brainstate.transform.scan(_etrace_grad, grads, (inputs_, target))
+            # The scan *sums* the per-step gradients, but the optimised/reported
+            # objective is ``losses.mean()`` — so divide by the number of
+            # accumulated steps to make the update the gradient of that mean (the
+            # same scale BPTT differentiates). Summing gives a ~n_learn x too-large
+            # effective learning rate: the (directionally correct) online gradient
+            # then overshoots and the recurrent GRU drifts unstable until the long
+            # free-running trace overflows to NaN. Mean-scaling tracks BPTT stably.
+            grads = jax.tree.map(lambda g: g / losses.shape[0], grads)
             # 更新梯度
             self.opt.update(grads)
             return losses.mean()

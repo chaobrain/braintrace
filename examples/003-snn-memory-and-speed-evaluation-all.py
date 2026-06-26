@@ -385,8 +385,11 @@ class Trainer(object):
         def _etrace_step(prev_grads, inputs, targets):
             i, inp = inputs
             # no need to return weights and states, since they are generated then no longer needed
+            # The latest brainstate ``grad`` requires grad_states to be State
+            # instances (a pytree of States), not a StateManager object; convert
+            # via ``to_pytree()`` (matches the sibling -batched benchmark).
             f_grad = brainstate.transform.grad(
-                _etrace_grad, grad_states=self.opt.param_states, has_aux=True, return_value=True)
+                _etrace_grad, grad_states=self.opt.param_states.to_pytree(), has_aux=True, return_value=True)
             cur_grads, local_loss, out = f_grad(i, inp, targets)
             next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
             return next_grads, (out, local_loss)
@@ -411,8 +414,10 @@ class Trainer(object):
         inputs = np.reshape(inputs, (inputs.shape[0], inputs.shape[1], -1))  # [n_steps, n_samples, n_in]
         self._etrace_reset_fun()
 
-        # initial gradients
-        grads = jax.tree.map(lambda a: jnp.zeros_like(a), self.opt.param_states.to_dict_values())
+        # initial gradients -- a pytree of zeros matching the grad_states pytree
+        # used in ``_etrace_step`` (``opt.param_states.to_pytree()``), so the
+        # per-step ``jax.tree.map(a + b, ...)`` accumulation aligns.
+        grads = jax.tree.map(lambda a: jnp.zeros_like(a), self.opt.param_states.to_pytree_value())
 
         # training
         indices = np.arange(inputs.shape[0])
