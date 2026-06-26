@@ -19,7 +19,7 @@ from typing import Callable, Dict, Tuple, Any, List, Optional, Sequence
 import brainstate
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from braintrace._input_data import has_multistep_data
 from braintrace._state_managment import assign_state_values_v2

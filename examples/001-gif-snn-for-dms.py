@@ -21,7 +21,7 @@ import matplotlib
 matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 from snn_models import DMSDataset, GifNet, OnlineTrainer
 

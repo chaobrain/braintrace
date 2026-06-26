@@ -23,7 +23,7 @@ verifies:
 * ``element_wise(w)`` (default ``fn=identity``) round-trips ``w``.
 * ``element_wise(w, fn=lambda w: 2*w)`` applies ``fn`` *before* the bind
   (the primitive itself is the identity).
-* saiunit quantities pass through.
+* brainunit quantities pass through.
 * JAX rules — jit, vmap, grad, jvp.
 * Four ETP rules return the documented values / shapes.
 """
@@ -35,7 +35,7 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_op import (
@@ -122,10 +122,10 @@ class TestPrimitiveInJaxpr:
 
 
 # ---------------------------------------------------------------------------
-# saiunit
+# brainunit
 # ---------------------------------------------------------------------------
 
-class TestSaiunit:
+class TestBrainunit:
 
     def test_unitless_passthrough(self):
         w = jnp.array([1.0, 2.0, 3.0])

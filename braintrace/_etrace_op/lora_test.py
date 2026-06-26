@@ -29,7 +29,7 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_op import (
@@ -147,10 +147,10 @@ class TestPrimitiveParams:
 
 
 # ---------------------------------------------------------------------------
-# saiunit
+# brainunit
 # ---------------------------------------------------------------------------
 
-class TestSaiunit:
+class TestBrainunit:
 
     def test_unitless(self):
         x = jnp.ones((2, 3))

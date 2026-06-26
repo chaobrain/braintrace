@@ -31,8 +31,8 @@ import pytest
 
 brainstate = pytest.importorskip("brainstate")
 braintools = pytest.importorskip("braintools")
-saiunit = pytest.importorskip("saiunit")
-u = saiunit
+brainunit = pytest.importorskip("brainunit")
+u = brainunit
 jnp = pytest.importorskip("jax.numpy")
 init = braintools.init
 braintrace = pytest.importorskip("braintrace")

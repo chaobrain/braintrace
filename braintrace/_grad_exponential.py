@@ -16,7 +16,7 @@
 
 import brainstate
 import jax.tree
-import saiunit as u
+import brainunit as u
 
 from braintrace._typing import PyTree
 
@@ -37,8 +37,8 @@ class GradExpon(brainstate.nn.Module):
         A pytree whose leaves give the shape and dtype of the gradients to
         accumulate. The accumulator is initialised to zeros matching each
         leaf.
-    tau_or_decay : saiunit.Quantity or float
-        Either a decay time constant (as a :class:`~saiunit.Quantity`), from
+    tau_or_decay : brainunit.Quantity or float
+        Either a decay time constant (as a :class:`~brainunit.Quantity`), from
         which the decay factor is computed as
         :math:`\exp(-1 / (\tau / \mathrm{dt}))`, or the decay factor itself
         (a ``float`` in the open interval :math:`(0, 1)`).

@@ -42,7 +42,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import brainstate
 import jax.core
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 from brainstate._compatible_import import get_aval
 from jax.extend import linear_util as lu
 from jax.interpreters import partial_eval as pe

@@ -112,7 +112,7 @@ but runs slower.
 ### 3.5 Operators (files 09-11)
 
 `09-operator-sparse.py` uses a fixed sparse connectivity mask on the
-recurrent matrix. Because `saiunit.sparse` COO/CSR primitives lack JAX
+recurrent matrix. Because `brainunit.sparse` COO/CSR primitives lack JAX
 batching rules today, the file uses a masked-dense fallback via
 `braintrace.nn.Linear(..., w_mask=...)` that still exercises pp_prop's
 per-primitive trace rule.

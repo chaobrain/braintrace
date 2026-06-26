@@ -23,7 +23,7 @@ The sparse structure is supplied by the user as a static parameter
 * ``yw_to_w_transposed(hidden_dim, trace)`` — apply the transposed
   pattern when propagating the trace.
 
-For end-to-end forward correctness a real ``saiunit.sparse.CSR`` works.
+For end-to-end forward correctness a real ``brainunit.sparse.CSR`` works.
 For rule-level tests a tiny stub class fits the contract exactly so the
 test does not depend on the upstream sparse-matrix surface area.
 """
@@ -36,8 +36,8 @@ import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
-import saiunit as u
-from saiunit import sparse as ss
+import brainunit as u
+from brainunit import sparse as ss
 
 import braintrace
 from braintrace._etrace_op import (
@@ -187,10 +187,10 @@ class TestAutoDispatch:
 
 
 # ---------------------------------------------------------------------------
-# saiunit
+# brainunit
 # ---------------------------------------------------------------------------
 
-class TestSaiunit:
+class TestBrainunit:
 
     def test_unitless(self):
         dense = jnp.eye(3) * 2.0
@@ -339,7 +339,7 @@ class TestSparseMMBiasGradient:
     """D-RTRL gradient correctness for etp_sp_mm_p with a bias vector.
 
     Uses a hashable stub sparse matrix (backed by a dense 3×4 identity-like
-    template) so the test does not depend on saiunit.CSR being hashable in JAX.
+    template) so the test does not depend on brainunit.CSR being hashable in JAX.
     The stub's ``with_data`` reconstructs the dense matrix from the flat data
     vector (one value per non-zero), and ``yw_to_w_transposed`` applies the
     transposed pattern.

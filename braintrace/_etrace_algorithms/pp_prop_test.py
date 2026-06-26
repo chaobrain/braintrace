@@ -17,7 +17,7 @@ import brainstate
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_algorithms.io_dim_vjp import (

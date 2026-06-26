@@ -25,7 +25,7 @@ import matplotlib
 matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
-import saiunit as u
+import brainunit as u
 
 import braintrace
 
@@ -125,7 +125,7 @@ class EvidenceAccumulation:
                 X = jax.lax.dynamic_update_slice(X, update, (i_seq, i_start))
 
             # recall cue (functional update: in-place ``Quantity[...] =`` is
-            # rejected under jit/vmap on the latest saiunit; ``feat_fr * dt``
+            # rejected under jit/vmap on the latest brainunit; ``feat_fr * dt``
             # auto-simplifies Hz*ms to a plain dimensionless probability)
             X = X.at[-t_recall:, self.feat_neurons['recall']].set(self.feat_fr['recall'] * dt)
 

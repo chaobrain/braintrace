@@ -22,7 +22,7 @@ import matplotlib
 matplotlib.use('Agg')  # headless backend: render to file, no display needed
 import matplotlib.pyplot as plt
 import numpy as np
-import saiunit as u
+import brainunit as u
 import tonic
 from tonic.datasets import NMNIST
 from torch.utils.data import DataLoader

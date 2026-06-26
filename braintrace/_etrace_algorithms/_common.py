@@ -21,7 +21,7 @@ from typing import Any, Dict, Optional
 import brainstate
 import jax
 import jax.numpy as jnp
-import saiunit as u
+import brainunit as u
 
 from braintrace._typing import PyTree
 

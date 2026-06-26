@@ -50,7 +50,7 @@ from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTu
 import brainstate
 import jax.core
 import numpy as np
-import saiunit as u
+import brainunit as u
 from brainstate import HiddenGroupState
 
 from braintrace._compatible_imports import Var, Literal, JaxprEqn, Jaxpr

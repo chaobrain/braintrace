@@ -21,7 +21,7 @@ Coverage:
   ``etp_mv_p``. Verified by jaxpr inspection.
 * Forward correctness — agrees with ``x @ w (+ b)``.
 * Bias presence — ``has_bias`` parameter is propagated through ``bind``.
-* saiunit support — quantities, mixed units, unitless inputs.
+* brainunit support — quantities, mixed units, unitless inputs.
 * JAX rules — jit, vmap, grad, jvp work with no extra plumbing.
 * Four ETP rules — ``yw_to_w``, ``xy_to_dw``, ``init_drtrl``, ``init_pp``
   return tensors of the documented shape and value.
@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
-import saiunit as u
+import brainunit as u
 
 import braintrace
 from braintrace._etrace_op import (
@@ -123,10 +123,10 @@ class TestHasBiasParam:
 
 
 # ---------------------------------------------------------------------------
-# saiunit support
+# brainunit support
 # ---------------------------------------------------------------------------
 
-class TestSaiunit:
+class TestBrainunit:
 
     def test_unitless_input_returns_unitless(self):
         x = jnp.ones((2, 3))

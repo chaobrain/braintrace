@@ -18,7 +18,7 @@ from typing import Dict, Sequence, List, Tuple, Optional, NamedTuple, Any
 
 import brainstate
 import jax
-import saiunit as u
+import brainunit as u
 
 from braintrace._compatible_imports import (
     Var,
