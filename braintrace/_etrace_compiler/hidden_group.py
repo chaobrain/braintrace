@@ -990,8 +990,10 @@ def find_hidden_groups_from_jaxpr(
         invar_to_hidden_path=invar_to_hidden_path,
         outvar_to_hidden_path=outvar_to_hidden_path,
         # the evaluator only indexes hidden-state paths, whose entries are HiddenStates,
-        # even though the passed mapping carries every model state.
-        path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),
+        # even though the passed mapping carries every model state. The cast is a real
+        # State -> HiddenState narrowing; mypy flags it as redundant only because
+        # brainstate is currently untyped (both collapse to Any).
+        path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),  # type: ignore[redundant-cast]
     )
     hidden_groups, hid_path_to_group = evaluator.compile()
     return hidden_groups, brainstate.util.PrettyDict(hid_path_to_group)

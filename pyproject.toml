@@ -116,7 +116,7 @@ no_implicit_reexport = false
 
 # Third-party scientific deps that ship without inline types or a py.typed
 # marker. Scoped per-module so missing stubs here never mask errors in our
-# own code. brainunit DOES ship types, so it is intentionally absent.
+# own code.
 [[tool.mypy.overrides]]
 module = [
     "brainstate.*",
@@ -125,4 +125,20 @@ module = [
     "brainevent.*",
     "numba.*",
 ]
+ignore_missing_imports = true
+
+# brainunit ships a py.typed marker, but its public API (brainunit.math.*,
+# Quantity, units, ...) is merely re-exported via `from saiunit... import *`,
+# and saiunit ships NO py.typed. mypy therefore cannot resolve any of the
+# re-exported names and emits spurious `attr-defined` errors at every call
+# site. Skip following both packages so they are treated as untyped (Any),
+# matching how saiunit itself was handled before it was renamed to brainunit.
+[[tool.mypy.overrides]]
+module = [
+    "brainunit",
+    "brainunit.*",
+    "saiunit",
+    "saiunit.*",
+]
+follow_imports = "skip"
 ignore_missing_imports = true
