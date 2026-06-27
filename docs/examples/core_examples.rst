@@ -77,9 +77,8 @@ Tutorial Series
 - **drtrl/** - A tutorial-linear example suite for ``braintrace.D_RTRL``.
   The series covers integrator basics, batching modes, VJP variants, LoRA and
   convolutional operators, row-scan MNIST classification, toy character-level
-  language modeling, and the ``fast_solve`` plus
-  ``normalize_matrix_spectrum`` knobs. See ``examples/drtrl/README.md`` and
-  ``docs/tutorials/drtrl.md``.
+  language modeling, and the ``fast_solve`` knob. See
+  ``examples/drtrl/README.md`` and ``docs/tutorials/drtrl.md``.
 
 
 Supporting Files

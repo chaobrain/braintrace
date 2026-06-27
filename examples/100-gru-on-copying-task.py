@@ -168,11 +168,13 @@ class OnlineTrainer(Trainer):
             grads, (outs, losses) = brainstate.transform.scan(_etrace_grad, grads, (inputs_, target))
             # The scan *sums* the per-step gradients, but the optimised/reported
             # objective is ``losses.mean()`` — so divide by the number of
-            # accumulated steps to make the update the gradient of that mean (the
-            # same scale BPTT differentiates). Summing gives a ~n_learn x too-large
-            # effective learning rate: the (directionally correct) online gradient
-            # then overshoots and the recurrent GRU drifts unstable until the long
-            # free-running trace overflows to NaN. Mean-scaling tracks BPTT stably.
+            # accumulated steps to make the update the gradient of that mean, i.e.
+            # the same scale BPTT differentiates. (This is only a learning-rate
+            # scale match; it is *not* what fixed the historical NaN. That was a
+            # library bug where the coupled-cell recurrent Jacobian was computed
+            # as a column sum instead of the true per-position block diagonal,
+            # so the eligibility trace grew ~1.16x/step and overflowed float32;
+            # see HiddenGroup.diagonal_jacobian.)
             grads = jax.tree.map(lambda g: g / losses.shape[0], grads)
             # 更新梯度
             self.opt.update(grads)

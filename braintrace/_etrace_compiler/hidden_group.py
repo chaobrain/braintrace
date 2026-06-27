@@ -48,9 +48,9 @@ from itertools import combinations
 from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
 
 import brainstate
+import brainunit as u
 import jax.core
 import numpy as np
-import brainunit as u
 from brainstate import HiddenGroupState
 
 from braintrace._compatible_imports import Var, Literal, JaxprEqn, Jaxpr
@@ -69,6 +69,19 @@ __all__ = [
     'find_hidden_groups_from_minfo',
     'find_hidden_groups_from_module',
 ]
+
+# Primitives that mix information across the leading ``varshape`` (per-position)
+# axis of a hidden state, i.e. that can make ``h_i^t`` depend on ``h_j^{t-1}``
+# for ``i != j``: dense/convolutional weights (plain JAX and the braintrace ETP
+# primitives ``etp_mv``/``etp_mm``/``etp_conv``; ``etp_elemwise`` is *not* here),
+# and cross-axis aggregation/reordering ops.
+_RECURRENT_MIXING_PRIMITIVES = frozenset({
+    'dot_general', 'conv_general_dilated',
+    'etp_mv', 'etp_mm', 'etp_conv',
+    'reduce_sum', 'reduce_prod', 'reduce_max', 'reduce_min', 'reduce_and', 'reduce_or',
+    'argmax', 'argmin', 'cumsum', 'cumprod', 'cummax', 'cummin',
+    'sort', 'top_k', 'gather', 'scatter', 'scatter_add', 'scatter_mul',
+})
 
 
 class HiddenGroup(NamedTuple):
@@ -137,6 +150,20 @@ class HiddenGroup(NamedTuple):
 
     # the other input variables for transition_jaxpr evaluation
     transition_jaxpr_constvars: List[Var]
+
+    # whether the recurrence is diagonal across the leading ``varshape``
+    # positions, i.e. ``h_i^t`` depends only on ``h_i^{t-1}`` (and the input),
+    # never on ``h_j^{t-1}`` for ``i != j``. When ``True`` (e.g. SNN per-neuron
+    # dynamics with no recurrent weight, a diagonal LRU, leaky integrators) the
+    # cheap column-sum Jacobian computed by :func:`jacrev_last_dim` already
+    # equals the true per-position block diagonal. When ``False`` (a recurrent
+    # weight couples the positions, as in GRU/LSTM/recurrent SNNs) the column sum
+    # over-counts the off-diagonal cross-position terms, so the true block
+    # diagonal must be extracted explicitly. Determined structurally at
+    # construction by :func:`_transition_is_diagonal` (trace-safe). Defaults to
+    # ``True`` to preserve the historical cheap behavior for any positional
+    # construction.
+    is_diagonal_recurrence: bool = True
 
     @property
     def varshape(self) -> Tuple[int, ...]:
@@ -220,13 +247,28 @@ class HiddenGroup(NamedTuple):
         Returns
         -------
         jax.Array
-            The diagonal Jacobian matrix, with shape
-            ``(*varshape, num_states, num_states)``.
+            The per-position block-diagonal of the recurrent Jacobian
+            ``d h^t / d h^{t-1}``, with shape
+            ``(*varshape, num_states, num_states)``. Entry ``[p, a, b]`` is
+            ``d h^t[p, a] / d h^{t-1}[p, b]`` -- the cross-position terms
+            ``d h^t[p] / d h^{t-1}[q]`` (``p != q``) are intentionally dropped
+            (the D-RTRL / e-prop diagonal approximation).
+
+        Notes
+        -----
+        For diagonal recurrence (:attr:`is_diagonal_recurrence` is ``True``) the
+        positions are independent, so the cheap column-sum produced by
+        :func:`jacrev_last_dim` already equals this block diagonal. For coupled
+        recurrence the column sum would instead add in the off-diagonal
+        cross-position terms -- inflating every entry and driving the eligibility
+        trace to overflow -- so the true block diagonal is extracted directly via
+        :func:`block_diagonal_last_dim`.
         """
-        return jacrev_last_dim(
-            lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals)),
-            self.concat_hidden(hidden_vals)
-        )
+        fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
+        concat_hid = self.concat_hidden(hidden_vals)
+        if self.is_diagonal_recurrence:
+            return jacrev_last_dim(fn, concat_hid)
+        return block_diagonal_last_dim(fn, concat_hid)
 
     def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]):
         """Concatenate split hidden-state values into a single array.
@@ -337,6 +379,103 @@ def jacrev_last_dim(
     g_primals = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
     jac = jax.vmap(f_vjp, in_axes=-2, out_axes=-2)(g_primals)
     return jac[0]
+
+
+def block_diagonal_last_dim(
+    fn: Callable[..., jax.Array],
+    hid_vals: jax.Array,
+) -> jax.Array:
+    """Compute the per-position block diagonal of ``fn``'s Jacobian.
+
+    Like :func:`jacrev_last_dim`, but valid when ``fn`` *couples* the leading
+    ``varshape`` positions (e.g. a recurrent weight matrix). It materializes the
+    full Jacobian ``(*varshape, num_state, *varshape, num_state)`` and extracts,
+    for every position ``p``, the ``num_state x num_state`` block
+    ``d fn(hid)[p] / d hid[p]`` -- dropping the cross-position terms. This is the
+    quantity :func:`jacrev_last_dim` only happens to return when the recurrence is
+    already diagonal.
+
+    Parameters
+    ----------
+    fn : Callable[[jax.Array], jax.Array]
+        A shape-preserving map on ``(*varshape, num_state)`` arrays.
+    hid_vals : jax.Array
+        The point at which to linearize, shape ``(*varshape, num_state)``.
+
+    Returns
+    -------
+    jax.Array
+        The block-diagonal Jacobian with shape ``(*varshape, num_state, num_state)``.
+
+    Notes
+    -----
+    The full Jacobian is ``O((prod(varshape) * num_state) ** 2)`` in memory --
+    the same order as the recurrent-weight eligibility trace it feeds, so it is
+    affordable for the dense recurrent cells that need it. If a far larger
+    coupled group ever appears, a per-position ``vmap(jacrev)`` (recomputing the
+    transition once per position) trades this memory for compute.
+    """
+    num_state = hid_vals.shape[-1]
+    varshape = hid_vals.shape[:-1]
+    num_pos = int(np.prod(varshape)) if varshape else 1
+    full_jac = jax.jacrev(fn)(hid_vals)  # (*varshape, num_state, *varshape, num_state)
+    full_jac = u.math.reshape(full_jac, (num_pos, num_state, num_pos, num_state))
+    # take the per-position block: block[p] = full_jac[p, :, p, :]
+    block = u.math.diagonal(full_jac, axis1=0, axis2=2)  # (num_state, num_state, num_pos)
+    block = u.math.moveaxis(block, -1, 0)  # (num_pos, num_state, num_state)
+    return u.math.reshape(block, (*varshape, num_state, num_state))
+
+
+def _is_jaxpr_like(x: Any) -> bool:
+    """Whether ``x`` is a ``Jaxpr`` or wraps one (``ClosedJaxpr``)."""
+    return hasattr(x, 'eqns') or hasattr(getattr(x, 'jaxpr', None), 'eqns')
+
+
+def _eqn_has_subjaxpr(eqn: JaxprEqn) -> bool:
+    """Whether an equation carries a nested jaxpr (higher-order primitive)."""
+    for p in eqn.params.values():
+        if _is_jaxpr_like(p):
+            return True
+        if isinstance(p, (tuple, list)) and any(_is_jaxpr_like(x) for x in p):
+            return True
+    return False
+
+
+def _transition_is_diagonal(jaxpr: Jaxpr) -> bool:
+    r"""Whether a hidden-group transition has diagonal (per-position) recurrence.
+
+    Returns ``True`` when no hidden-state-derived value flows into a primitive
+    that couples the leading ``varshape`` positions -- a matmul/conv recurrent
+    weight (see :data:`_RECURRENT_MIXING_PRIMITIVES`), a cross-axis
+    reduction/gather, or any nested-jaxpr (higher-order) primitive. In that case
+    ``h_i^t`` depends only on ``h_i^{t-1}`` (and the input), so the cheap
+    column-sum Jacobian in :func:`jacrev_last_dim` already equals the true
+    per-position block diagonal. When a coupling primitive consumes the hidden
+    state the recurrence is *coupled* and :func:`block_diagonal_last_dim` is
+    needed instead.
+
+    The transition jaxpr is ``h_1^t, ... = f(h_1^{t-1}, ..., x^t)`` with the
+    previous hidden states as ``jaxpr.invars`` and the input ``x^t`` among
+    ``jaxpr.constvars``. A matmul that consumes only ``constvars`` (a pure input
+    projection ``x @ W``) therefore does *not* couple the recurrence -- only a
+    matmul that consumes a hidden-derived value does.
+
+    The check is purely structural (no concrete values), so it is safe to run
+    while tracing under ``jax.jit``. It is conservative: anything it cannot prove
+    to be position-local is treated as coupling, which only ever costs extra
+    computation, never correctness.
+    """
+    hidden_derived: Set = set(v for v in jaxpr.invars if isinstance(v, Var))
+    for eqn in jaxpr.eqns:
+        consumes_hidden = any(
+            isinstance(iv, Var) and iv in hidden_derived for iv in eqn.invars
+        )
+        if not consumes_hidden:
+            continue
+        if eqn.primitive.name in _RECURRENT_MIXING_PRIMITIVES or _eqn_has_subjaxpr(eqn):
+            return False
+        hidden_derived.update(ov for ov in eqn.outvars if isinstance(ov, Var))
+    return True
 
 
 class HiddenToHiddenGroupTracer(NamedTuple):
@@ -773,6 +912,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 ],
                 transition_jaxpr=jaxpr,
                 transition_jaxpr_constvars=list(jaxpr.constvars),
+                is_diagonal_recurrence=_transition_is_diagonal(jaxpr),
             )
             hidden_groups.append(group)
 

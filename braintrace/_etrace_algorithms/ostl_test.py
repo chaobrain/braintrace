@@ -101,11 +101,10 @@ class TestOSTLRecurrent(unittest.TestCase):
         algo = OSTLRecurrent(
             _tiny_rec_net(),
             fast_solve=False,
-            normalize_matrix_spectrum=True,
             vjp_method='single-step',
         )
         assert algo.fast_solve is False
-        assert algo.normalize_matrix_spectrum is True
+        assert algo.vjp_method == 'single-step'
 
     def test_get_etrace_of_named_weight(self):
         net = _tiny_rec_net()

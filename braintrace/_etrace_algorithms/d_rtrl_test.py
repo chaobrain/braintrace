@@ -24,8 +24,6 @@ import braintrace
 from braintrace._etrace_algorithms.d_rtrl import D_RTRL
 from braintrace._etrace_algorithms.param_dim_vjp import (
     ParamDimVjpAlgorithm,
-    _normalize_vector,
-    _normalize_matrix_spectrum,
     _remove_units,
     _fast_solve_contract,
 )
@@ -42,173 +40,6 @@ from braintrace._etrace_model_test import (
     ALIF_STPExpCu_Dense_Layer,
 )
 from braintrace._etrace_op import etp_mm_p
-
-
-# ---------------------------------------------------------------------------
-# Tests for _normalize_vector
-# ---------------------------------------------------------------------------
-
-class TestNormalizeVector:
-    """Unit tests for the _normalize_vector function."""
-
-    def test_all_values_within_unit_range(self):
-        """When max(abs(v)) <= 1 the vector should be returned unchanged."""
-        v = jnp.array([0.1, -0.5, 0.9])
-        result = _normalize_vector(v)
-        npt.assert_array_almost_equal(result, v)
-
-    def test_exactly_one(self):
-        """max(abs(v)) == 1 should NOT trigger normalization (> 1 condition)."""
-        v = jnp.array([1.0, -0.5, 0.0])
-        result = _normalize_vector(v)
-        npt.assert_array_almost_equal(result, v)
-
-    def test_all_large_values(self):
-        """When all values exceed 1, the vector should be divided by max(abs)."""
-        v = jnp.array([2.0, -4.0, 3.0])
-        result = _normalize_vector(v)
-        expected = v / 4.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_mixed_values(self):
-        """When only some values are large, normalization should still apply."""
-        v = jnp.array([0.1, -5.0, 0.5])
-        result = _normalize_vector(v)
-        expected = v / 5.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_all_zeros(self):
-        """A zero vector should be returned unchanged (max abs is 0, not > 1)."""
-        v = jnp.array([0.0, 0.0, 0.0])
-        result = _normalize_vector(v)
-        npt.assert_array_almost_equal(result, v)
-
-    def test_single_element_large(self):
-        """A single-element vector with value > 1 should be normalized to 1."""
-        v = jnp.array([3.0])
-        result = _normalize_vector(v)
-        npt.assert_array_almost_equal(result, jnp.array([1.0]))
-
-    def test_single_element_small(self):
-        """A single-element vector with value <= 1 should be unchanged."""
-        v = jnp.array([0.7])
-        result = _normalize_vector(v)
-        npt.assert_array_almost_equal(result, jnp.array([0.7]))
-
-    def test_negative_large_values(self):
-        """Normalization should work correctly with negative values."""
-        v = jnp.array([-10.0, 5.0, -3.0])
-        result = _normalize_vector(v)
-        expected = v / 10.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_2d_array(self):
-        """Function should work with multi-dimensional arrays."""
-        v = jnp.array([[2.0, -4.0], [1.0, 3.0]])
-        result = _normalize_vector(v)
-        expected = v / 4.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_max_abs_just_above_one(self):
-        """Edge case: max abs is just slightly above 1."""
-        v = jnp.array([1.001, 0.5, -0.3])
-        result = _normalize_vector(v)
-        expected = v / 1.001
-        npt.assert_array_almost_equal(result, expected, decimal=3)
-
-    def test_preserves_sign(self):
-        """Normalization should preserve the sign of all elements."""
-        v = jnp.array([-3.0, 2.0, -1.0, 4.0])
-        result = _normalize_vector(v)
-        # Signs should be preserved
-        assert jnp.all((result > 0) == (v > 0))
-        assert jnp.all((result < 0) == (v < 0))
-
-
-# ---------------------------------------------------------------------------
-# Tests for _normalize_matrix_spectrum
-# ---------------------------------------------------------------------------
-
-class TestNormalizeMatrixSpectrum:
-    """Unit tests for the _normalize_matrix_spectrum function."""
-
-    def test_identity_matrix_unchanged(self):
-        """Identity matrix has max eigenvalue = 1, should be returned unchanged."""
-        mat = jnp.eye(3)
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, mat)
-
-    def test_scaled_identity_above_one(self):
-        """2*I has max eigenvalue = 2, so the matrix should be divided by 2."""
-        mat = 2.0 * jnp.eye(3)
-        result = _normalize_matrix_spectrum(mat)
-        expected = jnp.eye(3)
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_scaled_identity_below_one(self):
-        """0.5*I has max eigenvalue = 0.5, so the matrix should be unchanged."""
-        mat = 0.5 * jnp.eye(3)
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, mat)
-
-    def test_diagonal_matrix_above_one(self):
-        """Diagonal matrix with max eigenvalue > 1 should be normalized."""
-        mat = jnp.diag(jnp.array([3.0, 1.0, 0.5]))
-        result = _normalize_matrix_spectrum(mat)
-        expected = mat / 3.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_diagonal_matrix_below_one(self):
-        """Diagonal matrix with all eigenvalues <= 1 should be unchanged."""
-        mat = jnp.diag(jnp.array([0.9, 0.3, 0.1]))
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, mat)
-
-    def test_zero_matrix(self):
-        """Zero matrix has eigenvalue 0, should be returned unchanged."""
-        mat = jnp.zeros((3, 3))
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, mat)
-
-    def test_batched_3d(self):
-        """3D input (batch of matrices) should apply normalization per matrix."""
-        mat1 = 4.0 * jnp.eye(2)  # max eigenvalue = 4
-        mat2 = 0.5 * jnp.eye(2)  # max eigenvalue = 0.5
-        batch = jnp.stack([mat1, mat2], axis=0)  # shape (2, 2, 2)
-        result = _normalize_matrix_spectrum(batch)
-
-        expected_mat1 = jnp.eye(2)  # 4*I / 4 = I
-        expected_mat2 = 0.5 * jnp.eye(2)  # unchanged
-        expected = jnp.stack([expected_mat1, expected_mat2], axis=0)
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_batched_4d(self):
-        """4D input should vmap over two leading dims."""
-        mat = 2.0 * jnp.eye(2)
-        # shape (2, 3, 2, 2)
-        batch = jnp.broadcast_to(mat, (2, 3, 2, 2))
-        result = _normalize_matrix_spectrum(batch)
-        expected = jnp.broadcast_to(jnp.eye(2), (2, 3, 2, 2))
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_1x1_matrix_above_one(self):
-        """1x1 matrix with value > 1 should be normalized to 1."""
-        mat = jnp.array([[5.0]])
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, jnp.array([[1.0]]))
-
-    def test_1x1_matrix_below_one(self):
-        """1x1 matrix with value <= 1 should be unchanged."""
-        mat = jnp.array([[0.3]])
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, jnp.array([[0.3]]))
-
-    def test_negative_eigenvalues_above_one_abs(self):
-        """Negative eigenvalues with abs > 1 should trigger normalization."""
-        mat = jnp.diag(jnp.array([-3.0, 0.5]))
-        result = _normalize_matrix_spectrum(mat)
-        expected = mat / 3.0
-        npt.assert_array_almost_equal(result, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +144,6 @@ class TestParamDimVjpAlgorithmAlias:
         # Constructor defaults preserved through inheritance.
         assert algo.vjp_method == 'single-step'
         assert algo.fast_solve is True
-        assert algo.normalize_matrix_spectrum is False
 
 
 class TestParamDimVjpAlgorithmInit:
@@ -577,51 +407,6 @@ class TestParamDimVjpAlgorithmForwardPass:
             for v in grads.values()
         )
         # After first step, it is possible all grads are zero, so we just check it runs.
-
-
-class TestNormalizeVectorEdgeCases:
-    """Additional edge-case tests for _normalize_vector under JIT."""
-
-    def test_jit_compatible(self):
-        """_normalize_vector should work under jax.jit."""
-        v = jnp.array([3.0, -1.0, 2.0])
-        jitted = jax.jit(_normalize_vector)
-        result = jitted(v)
-        expected = v / 3.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_float64_precision(self):
-        """Test with float64 precision if available."""
-        v = jnp.array([0.5, -0.5], dtype=jnp.float32)
-        result = _normalize_vector(v)
-        npt.assert_array_almost_equal(result, v)
-
-
-class TestNormalizeMatrixSpectrumEdgeCases:
-    """Additional edge-case tests for _normalize_matrix_spectrum."""
-
-    def test_jit_compatible(self):
-        """_normalize_matrix_spectrum should work under jax.jit."""
-        mat = 3.0 * jnp.eye(2)
-        jitted = jax.jit(_normalize_matrix_spectrum)
-        result = jitted(mat)
-        expected = jnp.eye(2)
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_non_symmetric_matrix(self):
-        """Non-symmetric matrix: should use abs of eigenvalues."""
-        # Upper triangular with known eigenvalues on diagonal
-        mat = jnp.array([[2.0, 1.0], [0.0, 0.5]])
-        # Eigenvalues are 2.0 and 0.5, max abs = 2.0
-        result = _normalize_matrix_spectrum(mat)
-        expected = mat / 2.0
-        npt.assert_array_almost_equal(result, expected)
-
-    def test_2x2_matrix_eigenvalue_exactly_one(self):
-        """Identity matrix has eigenvalue exactly 1, should not normalize."""
-        mat = jnp.eye(2)
-        result = _normalize_matrix_spectrum(mat)
-        npt.assert_array_almost_equal(result, mat)
 
 
 class TestRemoveUnitsEdgeCases:
@@ -1046,12 +831,6 @@ class TestTraceDtypeKnob:
             # bf16 trace -> ~2-3 significant digits; assert bounded divergence.
             npt.assert_allclose(b, a, rtol=0.2, atol=1e-2)
 
-    def test_bf16_with_normalize_raises(self):
-        with pytest.raises((ValueError, AssertionError)):
-            ParamDimVjpAlgorithm(
-                _rnn_mm(), trace_dtype=jnp.bfloat16, normalize_matrix_spectrum=True
-            )
-
 
 # ---------------------------------------------------------------------------
 # The S==1 broadcast branch must NOT perturb the multi-state (num_state>1) path
@@ -1166,3 +945,45 @@ class TestSolveBatchFold:
             ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=False), xs
         )
         self._assert_grads_close(g_fast, g_legacy, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Regression: coupled-cell eligibility trace stays bounded over a long sequence
+# ---------------------------------------------------------------------------
+
+class TestCoupledTraceBoundedness:
+    """Guards against the ``HiddenGroup.diagonal_jacobian`` column-sum bug.
+
+    For a *coupled* cell (e.g. GRU) the recurrent Jacobian used to be returned as
+    the column sum of the true Jacobian. Those column sums exceed 1, so the
+    per-step eligibility trace ``eps_t = D_t . eps_{t-1} + imm`` grew ~1.16x per
+    step and overflowed float32 to NaN within a couple hundred free-running steps
+    (the failure originally reported on ``examples/100-gru-on-copying-task.py``).
+    With the true per-position block diagonal the trace stays bounded.
+    """
+
+    def _etrace_leaves(self, algo):
+        return [
+            u.get_mantissa(leaf)
+            for v in algo.etrace_bwg.values()
+            for leaf in jax.tree.leaves(v.value)
+        ]
+
+    def test_gru_per_step_trace_is_bounded(self):
+        brainstate.random.seed(0)
+        model = braintrace.nn.GRUCell(3, 16)
+        brainstate.nn.init_all_states(model)
+        algo = ParamDimVjpAlgorithm(model)  # default single-step per-step trace path
+        xs = brainstate.random.randn(150, 3)
+        algo.compile_graph(xs[0])
+        algo.init_etrace_state()
+        for t in range(xs.shape[0]):
+            algo.update(xs[t])
+
+        leaves = self._etrace_leaves(algo)
+        assert len(leaves) >= 1
+        # finite (no inf/NaN from overflow) ...
+        assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
+        # ... and bounded well below the pre-fix ~1e12 explosion.
+        max_abs = max(float(jnp.max(jnp.abs(leaf))) for leaf in leaves)
+        assert max_abs < 1e3, f'eligibility trace grew to {max_abs}'

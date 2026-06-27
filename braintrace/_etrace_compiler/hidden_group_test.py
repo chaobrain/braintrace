@@ -625,6 +625,26 @@ class TestHiddenGroup_state_transition:
             print(out_vals)
 
 
+def _true_block_diagonal(group, hidden_vals, input_vals):
+    """Independent oracle for ``group.diagonal_jacobian``.
+
+    Materializes the full recurrent Jacobian with ``jax.jacrev`` and, for every
+    ``varshape`` position ``p``, picks the ``num_state x num_state`` block
+    ``full[p, :, p, :]`` (dropping the cross-position terms). Uses a plain Python
+    loop + ``stack`` so it shares no code with the production
+    ``diagonal``/``moveaxis`` extraction it is meant to check.
+    """
+    fn = lambda hid: group.concat_hidden(group.transition(group.split_hidden(hid), input_vals))
+    hid = group.concat_hidden(hidden_vals)
+    num_state = hid.shape[-1]
+    varshape = hid.shape[:-1]
+    num_pos = int(np.prod(varshape)) if varshape else 1
+    full = jax.jacrev(fn)(hid)  # (*varshape, num_state, *varshape, num_state)
+    full = u.math.reshape(full, (num_pos, num_state, num_pos, num_state))
+    blocks = u.math.stack([full[p, :, p, :] for p in range(num_pos)], axis=0)
+    return u.math.reshape(blocks, (*varshape, num_state, num_state))
+
+
 class TestHiddenGroup_diagonal_jacobian:
     @pytest.mark.parametrize(
         "cls",
@@ -687,6 +707,96 @@ class TestHiddenGroup_diagonal_jacobian:
             print(jax_jac)
 
             assert (u.math.allclose(diag_jac, jax_jac, atol=1e-5))
+
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            braintrace.nn.GRUCell,
+            braintrace.nn.LSTMCell,
+            braintrace.nn.LRUCell,
+            braintrace.nn.MGUCell,
+            braintrace.nn.MinimalRNNCell,
+        ]
+    )
+    def test_gru_accuracy_multiunit(self, cls):
+        # Regression for the column-sum bug: with n_out > 1 a coupled cell has
+        # cross-position terms, so ``diagonal_jacobian`` must equal the true
+        # per-position block diagonal (not the column sum over output positions).
+        # The single-unit ``test_gru_accuracy`` (n_out == 1) cannot see this.
+        n_in = 3
+        n_out = 4
+
+        gru = cls(n_in, n_out)
+        brainstate.nn.init_all_states(gru)
+
+        input = brainstate.random.rand(n_in)
+        hidden_groups, _ = find_hidden_groups_from_module(gru, input)
+
+        assert len(hidden_groups) >= 1
+        for group in hidden_groups:
+            hidden_vals = [brainstate.random.rand_like(invar.aval) for invar in group.hidden_invars]
+            input_vals = [brainstate.random.rand_like(invar.aval) for invar in group.transition_jaxpr_constvars]
+            diag_jac = group.diagonal_jacobian(hidden_vals, input_vals)
+            truth = _true_block_diagonal(group, hidden_vals, input_vals)
+            assert diag_jac.shape == (*group.varshape, group.num_state, group.num_state)
+            assert u.math.allclose(diag_jac, truth, atol=1e-5)
+
+    def test_is_diagonal_recurrence_flag(self):
+        # Coupled gate cells take the explicit block-diagonal path; the LRU has an
+        # explicitly diagonal recurrence and keeps the cheap column-sum path.
+        for cls in (braintrace.nn.GRUCell, braintrace.nn.LSTMCell,
+                    braintrace.nn.MGUCell, braintrace.nn.MinimalRNNCell):
+            model = cls(3, 4)
+            brainstate.nn.init_all_states(model)
+            groups, _ = find_hidden_groups_from_module(model, brainstate.random.rand(3))
+            assert len(groups) >= 1
+            assert all(not g.is_diagonal_recurrence for g in groups), cls.__name__
+
+        lru = braintrace.nn.LRUCell(3, 4)
+        brainstate.nn.init_all_states(lru)
+        groups, _ = find_hidden_groups_from_module(lru, brainstate.random.rand(3))
+        assert len(groups) >= 1
+        assert all(g.is_diagonal_recurrence for g in groups)
+
+    @pytest.mark.parametrize(
+        'cls',
+        [
+            IF_Delta_Dense_Layer,
+            LIF_ExpCo_Dense_Layer,
+            ALIF_ExpCo_Dense_Layer,
+            LIF_ExpCu_Dense_Layer,
+            LIF_STDExpCu_Dense_Layer,
+            LIF_STPExpCu_Dense_Layer,
+            ALIF_ExpCu_Dense_Layer,
+            ALIF_Delta_Dense_Layer,
+            ALIF_STDExpCu_Dense_Layer,
+            ALIF_STPExpCu_Dense_Layer,
+        ]
+    )
+    def test_snn_single_layer_accuracy_multiunit(self, cls):
+        # The dense SNN layers are *recurrent* (they feed spikes back through a
+        # recurrent weight), so their multi-neuron recurrence is coupled. Hence
+        # ``diagonal_jacobian`` must equal the true per-position block diagonal;
+        # the n_out == 1 ``test_snn_single_layer_accuracy`` could not detect the
+        # column-sum bug here.
+        n_in = 3
+        n_out = 4
+        input = brainstate.random.rand(n_in)
+
+        with brainstate.environ.context(dt=0.1 * u.ms):
+            layer = cls(n_in, n_out)
+            brainstate.nn.init_all_states(layer)
+            hidden_groups, _ = find_hidden_groups_from_module(layer, input)
+
+        assert len(hidden_groups) >= 1
+        assert any(not g.is_diagonal_recurrence for g in hidden_groups)
+        for group in hidden_groups:
+            hidden_vals = [brainstate.random.rand_like(invar.aval) for invar in group.hidden_invars]
+            input_vals = [brainstate.random.rand_like(invar.aval) for invar in group.transition_jaxpr_constvars]
+            diag_jac = group.diagonal_jacobian(hidden_vals, input_vals)
+            truth = _true_block_diagonal(group, hidden_vals, input_vals)
+            assert diag_jac.shape == (*group.varshape, group.num_state, group.num_state)
+            assert u.math.allclose(diag_jac, truth, atol=1e-5)
 
     @pytest.mark.parametrize(
         'cls',

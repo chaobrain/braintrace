@@ -71,7 +71,7 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     ----------
     model : brainstate.nn.Module
         The recurrent SNN whose weights are trained online.
-    name, vjp_method, fast_solve, normalize_matrix_spectrum : optional
+    name, vjp_method, fast_solve : optional
         Forwarded verbatim to :class:`~braintrace.ParamDimVjpAlgorithm`.
 
     Examples
