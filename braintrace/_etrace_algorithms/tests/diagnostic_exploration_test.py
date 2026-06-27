@@ -40,9 +40,6 @@ import warnings
 
 import pytest
 
-if importlib.util.find_spec("hypothesis") is None:
-    pytest.skip("hypothesis not installed", allow_module_level=True)
-
 import jax.numpy as jnp
 import numpy as np
 from hypothesis import HealthCheck, given, settings, strategies as st
