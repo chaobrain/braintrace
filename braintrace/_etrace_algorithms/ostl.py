@@ -109,6 +109,11 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     #: Identifies the OSTL regime this class implements.
     regime = 'with-H'
 
+    #: 'with-H' keeps the full recurrent (hidden-to-hidden) Jacobian, so the
+    #: hidden-group transition must trace recurrent ETP mixing primitives and
+    #: extract the true per-position block-diagonal (bounded) Jacobian.
+    _include_recurrent_mixing = True
+
 
 class OSTLFeedforward(pp_prop):
     r"""OSTL 'without-H' regime — feedforward / no recurrent Jacobian.

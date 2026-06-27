@@ -131,6 +131,11 @@ class OSTTP(ParamDimVjpAlgorithm):
 
     __module__ = 'braintrace'
 
+    #: OSTTP carries the temporal credit exactly as OSTLRecurrent ('with-H'), so
+    #: the hidden-group transition must trace recurrent ETP mixing primitives and
+    #: extract the true per-position block-diagonal (bounded) Jacobian.
+    _include_recurrent_mixing = True
+
     def __init__(
         self,
         model: brainstate.nn.Module,

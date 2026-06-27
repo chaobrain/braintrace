@@ -53,10 +53,10 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-    "brainstate>=0.2.2",
+    "brainstate",
     "brainunit",
     "brainstate",
-    "brainpy-state",
+    "brainpy.state",
     "braintools",
 ]
 dynamic = ["version"]
@@ -98,7 +98,7 @@ addopts = "-m 'not diagnostic'"
 
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 files = ["braintrace"]
 # Test files, test-only helpers, and non-shipped sources are not part of the
 # typed public surface and are excluded from release type checking.

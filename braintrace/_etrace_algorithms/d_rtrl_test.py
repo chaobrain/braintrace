@@ -987,3 +987,34 @@ class TestCoupledTraceBoundedness:
         # ... and bounded well below the pre-fix ~1e12 explosion.
         max_abs = max(float(jnp.max(jnp.abs(leaf))) for leaf in leaves)
         assert max_abs < 1e3, f'eligibility trace grew to {max_abs}'
+
+    def test_gru_with_recurrence_trace_is_bounded(self):
+        """The 'with-recurrence' (block-diagonal) path must also stay bounded.
+
+        ``OSTLRecurrent`` opts into ``include_recurrent_mixing=True``, so the
+        coupled GRU recurrent matmul is traced into the hidden-to-hidden
+        transition and the *true* per-position block-diagonal Jacobian is
+        extracted (not the column-sum). The recurrent Jacobian is contractive,
+        so the per-step trace stays bounded just like the default diagonal path.
+        """
+        brainstate.random.seed(0)
+        model = braintrace.nn.GRUCell(3, 16)
+        brainstate.nn.init_all_states(model)
+        algo = braintrace.OSTLRecurrent(model)  # with-recurrence -> block-diagonal
+        xs = brainstate.random.randn(150, 3)
+        algo.compile_graph(xs[0])
+        algo.init_etrace_state()
+
+        # the with-recurrence grouping really took the coupled (block-diagonal)
+        # path -- otherwise this test would not be guarding it.
+        groups = algo.graph_executor.graph.hidden_groups
+        assert any(not g.is_diagonal_recurrence for g in groups)
+
+        for t in range(xs.shape[0]):
+            algo.update(xs[t])
+
+        leaves = self._etrace_leaves(algo)
+        assert len(leaves) >= 1
+        assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
+        max_abs = max(float(jnp.max(jnp.abs(leaf))) for leaf in leaves)
+        assert max_abs < 1e3, f'eligibility trace grew to {max_abs}'

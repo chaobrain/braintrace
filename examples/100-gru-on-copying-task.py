@@ -171,10 +171,14 @@ class OnlineTrainer(Trainer):
             # accumulated steps to make the update the gradient of that mean, i.e.
             # the same scale BPTT differentiates. (This is only a learning-rate
             # scale match; it is *not* what fixed the historical NaN. That was a
-            # library bug where the coupled-cell recurrent Jacobian was computed
-            # as a column sum instead of the true per-position block diagonal,
-            # so the eligibility trace grew ~1.16x/step and overflowed float32;
-            # see HiddenGroup.diagonal_jacobian.)
+            # grouping bug: the recurrent ETP matmul was traced *into* the
+            # hidden-to-hidden transition, making the per-position Jacobian
+            # coupled; the cheap diagonal (column-sum) extraction then exceeded 1
+            # on the coupled GRU, so the eligibility trace grew ~1.16x/step and
+            # overflowed float32. The default HiddenGroup mode now excludes
+            # recurrent ETP mixing from the transition (``include_recurrent_mixing
+            # =False``), so the transition is element-wise and the trace stays
+            # bounded — the standard D-RTRL diagonal approximation.)
             grads = jax.tree.map(lambda g: g / losses.shape[0], grads)
             # 更新梯度
             self.opt.update(grads)
