@@ -201,7 +201,18 @@ class CompilationReport:
         return msg
 
     def show(self, level: int = 1, *, file=None) -> None:
-        """Print :meth:`to_str` to ``file`` (stdout by default)."""
+        """Print :meth:`to_str` to ``file`` (stdout by default).
+
+        Parameters
+        ----------
+        level : int, optional
+            Verbosity passed to :meth:`to_str`: ``1`` (default) renders the
+            full structural summary; ``2`` also appends WARNING/ERROR compiler
+            diagnostics.
+        file : file-like, optional
+            Destination forwarded to :func:`print`. Defaults to ``None``
+            (standard output).
+        """
         print(self.to_str(level), file=file)
 
     def __repr__(self) -> str:

@@ -161,13 +161,14 @@ during compilation into a single inspectable object.
    * - Member
      - Description
    * - ``counts``
-     - Dict of summary counts: number of hidden groups, ETP relations, etrace
-       weights, excluded weights, and dynamic states.
+     - Dict of summary counts with keys ``hidden_groups``, ``etrace_weights``,
+       ``excluded_weights``, ``warnings``, and ``errors``.
    * - ``diagnostics``
      - Sequence of :class:`CompilationRecord` objects, one per compiler
        decision (inclusions, exclusions, warnings, errors).
    * - ``dynamic_states``
-     - List of hidden-state paths discovered by the compiler.
+     - List of ``ShortTermState`` (dynamic, non-hidden) state paths discovered
+       by the compiler.
    * - ``etrace_weights``
      - List of weight paths that participate in online learning (have ETP
        relations).
@@ -196,8 +197,8 @@ during compilation into a single inspectable object.
 
    # Inspect counts programmatically
    print(learner.report.counts)
-   # e.g. {'hidden_groups': 1, 'etrace_relations': 2, 'etrace_weights': 2,
-   #        'excluded_weights': 1, 'dynamic_states': 1}
+   # e.g. {'hidden_groups': 1, 'etrace_weights': 2, 'excluded_weights': 1,
+   #        'warnings': 1, 'errors': 0}
 
    # Iterate diagnostics to find warnings
    from braintrace import DiagnosticLevel
