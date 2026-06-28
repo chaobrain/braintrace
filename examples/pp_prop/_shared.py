@@ -317,7 +317,6 @@ class LeakyReadout(brainstate.nn.Module):
 
 
 # --- Training helpers ----------------------------------------------------
-# kept manual: vmap_states='new' path not yet covered by compile()
 
 
 def online_train_epoch(
@@ -332,17 +331,11 @@ def online_train_epoch(
     """Run one online-training epoch using pp_prop. Returns traced mean step loss (wrap in jit)."""
     import braintrace
     weights = model.states(brainstate.ParamState)
-    online_model = braintrace.pp_prop(
-        model, decay_or_rank=decay_or_rank, vjp_method=vjp_method
+    vmap_model = braintrace.compile(
+        model, braintrace.pp_prop, inputs[0],
+        batch_size=inputs.shape[1], vmap=True,
+        decay_or_rank=decay_or_rank, vjp_method=vjp_method,
     )
-
-    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
-    def init():
-        brainstate.nn.init_all_states(model)
-        online_model.compile_graph(inputs[0, 0])
-
-    init()
-    vmap_model = brainstate.nn.Vmap(online_model, vmap_states="new")
 
     def step_loss(inp, tar):
         out = vmap_model(inp)
@@ -372,17 +365,11 @@ def online_train_epoch_fixed_target(
     """Classification variant: fixed label per batch, softmax-xent loss applied each step."""
     import braintrace
     weights = model.states(brainstate.ParamState)
-    online_model = braintrace.pp_prop(
-        model, decay_or_rank=decay_or_rank, vjp_method=vjp_method
+    vmap_model = braintrace.compile(
+        model, braintrace.pp_prop, inputs[0],
+        batch_size=inputs.shape[1], vmap=True,
+        decay_or_rank=decay_or_rank, vjp_method=vjp_method,
     )
-
-    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
-    def init():
-        brainstate.nn.init_all_states(model)
-        online_model.compile_graph(inputs[0, 0])
-
-    init()
-    vmap_model = brainstate.nn.Vmap(online_model, vmap_states="new")
 
     def step_loss(inp):
         out = vmap_model(inp)
@@ -412,6 +399,7 @@ def bptt_train_epoch_fixed_target(
     """BPTT baseline with per-step softmax-cross-entropy over a fixed label."""
     weights = model.states(brainstate.ParamState)
 
+    # kept manual: BPTT re-init — no algorithm construction, no compile_graph
     @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
     def init():
         brainstate.nn.init_all_states(model)

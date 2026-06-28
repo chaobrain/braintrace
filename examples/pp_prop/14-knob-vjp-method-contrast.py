@@ -1,5 +1,4 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-# kept manual: delegates to _shared helpers that use vmap_states='new' path not yet covered by compile()
 """14 · single-step vs multi-step VJP vs BPTT head-to-head on DMS.
 
 Trains three identical LIF RSNNs on the same DMS data:
@@ -36,6 +35,7 @@ def _accuracy(outputs_seq, labels):
 
 
 def _eval(model, inputs, labels):
+    # kept manual: eval re-init, no online construction
     @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
     def init():
         brainstate.nn.init_all_states(model)
