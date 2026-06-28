@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Legacy (v0.1.x) ETraceOp shims.
+"""Legacy (v0.1.x and 0.0.x) ETraceOp shims.
 
 Each op's ``xw_to_y`` routes through the new ETP primitive user-API
 (``braintrace.matmul``, ``braintrace.conv``, ...). Each op also exposes
