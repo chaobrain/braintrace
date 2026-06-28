@@ -37,28 +37,24 @@ class RNN(brainstate.nn.Module):
 
 
 def _grad_run(model, weights, inputs, targets, *, fast_solve: bool):
+    # compile outside jit so init_all_states + compile_graph run eagerly
+    online = braintrace.compile(
+        model, 'D_RTRL', inputs[0], batch_size=inputs.shape[1],
+        fast_solve=fast_solve,
+    )
+
+    def step_loss(inp, tar):
+        out = online(inp)
+        return braintools.metric.squared_error(out, tar).mean(), out
+
+    def grad_step(prev_grads, pair):
+        inp, tar = pair
+        f = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
+        cur, l, _ = f(inp, tar)
+        return jax.tree.map(lambda a, b: a + b, prev_grads, cur), l
+
     @brainstate.transform.jit
     def f_grad(inputs, targets):
-        online = braintrace.D_RTRL(model, fast_solve=fast_solve)
-
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model)
-            online.compile_graph(inputs[0, 0])
-
-        init()
-        vm = brainstate.nn.Vmap(online, vmap_states='new')
-
-        def step_loss(inp, tar):
-            out = vm(inp)
-            return braintools.metric.squared_error(out, tar).mean(), out
-
-        def grad_step(prev_grads, pair):
-            inp, tar = pair
-            f = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
-            cur, l, _ = f(inp, tar)
-            return jax.tree.map(lambda a, b: a + b, prev_grads, cur), l
-
         init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
         grads, _ = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
         return grads

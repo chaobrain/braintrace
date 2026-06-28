@@ -33,34 +33,29 @@ class GRUNet(brainstate.nn.Module):
 def main(*, n_epochs: int = 50, batch_size: int = 32, plot: bool = True) -> dict:
     n_in, n_rec, n_out, time_lag = 10, 64, 10, 10
     model = GRUNet(n_in, n_rec, n_out)
+    online = braintrace.compile(
+        model, 'D_RTRL', jnp.zeros((batch_size, n_in)), batch_size=batch_size,
+        vjp_method='multi-step',
+    )
     weights = model.states(brainstate.ParamState)
     opt = braintools.optim.Adam(1e-3);
     opt.register_trainable_weights(weights)
 
+    def step_loss(inp, tar):
+        out = online(inp)
+        return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean(), out
+
+    def grad_step(prev_grads, pair):
+        inp, tar = pair
+        f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
+        cur_grads, local_loss, _ = f_grad(inp, tar)
+        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
+
+    warmup_len = time_lag + 20 - 10  # seq_length - output_window
+
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        online = braintrace.D_RTRL(model, vjp_method='multi-step')
-
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model)
-            online.compile_graph(inputs[0, 0])
-
-        init()
-        vmap_model = brainstate.nn.Vmap(online, vmap_states='new')
-        warmup_len = inputs.shape[0] - 10
-        brainstate.transform.for_loop(lambda inp: vmap_model(inp), inputs[:warmup_len])
-
-        def step_loss(inp, tar):
-            out = vmap_model(inp)
-            return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean(), out
-
-        def grad_step(prev_grads, pair):
-            inp, tar = pair
-            f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, _ = f_grad(inp, tar)
-            return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
-
+        brainstate.transform.for_loop(lambda inp: online(inp), inputs[:warmup_len])
         init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
         grads, step_losses = brainstate.transform.scan(
             grad_step, init_grads, (inputs[warmup_len:], targets)

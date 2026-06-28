@@ -317,6 +317,7 @@ class LeakyReadout(brainstate.nn.Module):
 
 
 # --- Training helpers ----------------------------------------------------
+# kept manual: vmap_states='new' path not yet covered by compile()
 
 
 def online_train_epoch(

@@ -34,26 +34,25 @@ class RNN(brainstate.nn.Module):
 def main(*, n_epochs: int = 30, batch_size: int = 64, plot: bool = True) -> dict:
     num_step, num_hidden = 25, 32
     model = RNN(1, num_hidden)
+    online_model = braintrace.compile(
+        model, 'D_RTRL', jnp.zeros((batch_size, 1)), batch_size=batch_size,
+    )
     weights = model.states(brainstate.ParamState)
     opt = braintools.optim.Adam(lr=5e-3, eps=1e-1)
     opt.register_trainable_weights(weights)
 
+    def step_loss(inp, tar):
+        out = online_model(inp)
+        return braintools.metric.squared_error(out, tar).mean(), out
+
+    def grad_step(prev_grads, x):
+        inp, tar = x
+        f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
+        cur_grads, local_loss, _ = f_grad(inp, tar)
+        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
+
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        online_model = braintrace.D_RTRL(model, mode=brainstate.mixin.Batching())
-        brainstate.nn.init_all_states(model, batch_size=inputs.shape[1])
-        online_model.compile_graph(inputs[0])
-
-        def step_loss(inp, tar):
-            out = online_model(inp)
-            return braintools.metric.squared_error(out, tar).mean(), out
-
-        def grad_step(prev_grads, x):
-            inp, tar = x
-            f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, _ = f_grad(inp, tar)
-            return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
-
         init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
         grads, step_losses = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
         opt.update(grads)

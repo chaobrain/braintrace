@@ -1,4 +1,5 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
+# kept manual: vmap_states='new' path not yet covered by compile()
 """05 · Batching via brainstate.nn.Vmap(vmap_states='new').
 
 The network and the pp_prop algorithm are defined unbatched, then replicated

@@ -68,28 +68,23 @@ def main(*, n_epochs: int = 20, batch_size: int = 16, plot: bool = True) -> dict
     opt_bptt = braintools.optim.Adam(3e-3);
     opt_bptt.register_trainable_weights(w_bptt)
 
+    # compile outside jit: init_all_states + compile_graph run once eagerly
+    om = braintrace.compile(
+        model_online, 'D_RTRL', jnp.zeros((batch_size, vocab_size)), batch_size=batch_size,
+    )
+
+    def step_loss(inp, tar):
+        out = om(inp)
+        return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean(), out
+
+    def grad_step(prev_grads, pair):
+        inp, tar = pair
+        f_grad = brainstate.transform.grad(step_loss, w_online, has_aux=True, return_value=True)
+        cur_grads, loss, _ = f_grad(inp, tar)
+        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), loss
+
     @brainstate.transform.jit
     def online_step(inputs, targets):
-        om = braintrace.D_RTRL(model_online)
-
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model_online)
-            om.compile_graph(inputs[0, 0])
-
-        init()
-        vm = brainstate.nn.Vmap(om, vmap_states='new')
-
-        def step_loss(inp, tar):
-            out = vm(inp)
-            return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean(), out
-
-        def grad_step(prev_grads, pair):
-            inp, tar = pair
-            f_grad = brainstate.transform.grad(step_loss, w_online, has_aux=True, return_value=True)
-            cur_grads, loss, _ = f_grad(inp, tar)
-            return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), loss
-
         init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in w_online.items()})
         grads, step_losses = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
         opt_online.update(grads)

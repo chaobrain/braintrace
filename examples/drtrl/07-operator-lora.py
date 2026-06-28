@@ -1,4 +1,5 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
+# kept manual: vmap_states='new' path not yet covered by compile()
 """07 · ``braintrace.lora_matmul`` adapter on a frozen base.
 
 The base recurrent weight is a regular ``brainstate.ParamState`` accessed via

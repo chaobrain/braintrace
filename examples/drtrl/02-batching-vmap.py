@@ -1,4 +1,5 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
+# kept manual: vmap_states='new' path not yet covered by compile()
 """02 · Batching via ``vmap_new_states``.
 
 Shows the per-sample-init pattern explicitly:
