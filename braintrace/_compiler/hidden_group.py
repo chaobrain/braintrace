@@ -563,6 +563,7 @@ def _simplify_hid2hid_tracer(
     hidden_invar_to_path: Dict[HiddenInVar, Path],
     hidden_outvar_to_path: Dict[HiddenOutVar, Path],
     path_to_state: Dict[Path, brainstate.HiddenState],
+    debug_info=None,
 ) -> Optional[Hidden2GroupTransition]:
     """
     Simplifying the hidden-to-hidden state tracer.
@@ -572,6 +573,8 @@ def _simplify_hid2hid_tracer(
         hidden_invar_to_path: The mapping from the hidden input variable to the hidden state path.
         hidden_outvar_to_path: The mapping from the hidden output variable to the hidden state path.
         path_to_state: The mapping from the hidden state path to the state.
+        debug_info: The debug info threaded from the source model jaxpr onto the
+            simplified transition jaxpr (avoids the missing-DebugInfo deprecation).
 
     Returns:
         The hidden-to-hidden state transition.
@@ -638,6 +641,7 @@ def _simplify_hid2hid_tracer(
         outvars=list(hidden_outvars),
         # the new equations which are simplified
         eqns=list(reversed(new_trace)),
+        debug_info=debug_info,
     )
 
     # [final step]
@@ -870,6 +874,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                     self.invar_to_hidden_path,
                     self.outvar_to_hidden_path,
                     self.path_to_state,
+                    debug_info=self.jaxpr.debug_info,
                 )
                 for tracer in self.active_tracers.values()
             )
@@ -911,6 +916,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                     hidden_invar_to_transition,
                     hidden_invars,
                     hidden_outvars,
+                    debug_info=self.jaxpr.debug_info,
                 )
             )
 
@@ -981,6 +987,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 invars=[invar],
                 outvars=[outvar],
                 eqns=[],
+                debug_info=self.jaxpr.debug_info,
             )
             group = HiddenGroup(
                 index=len(hidden_groups),
@@ -1023,6 +1030,7 @@ def write_jaxpr_of_hidden_group_transition(
     hidden_invar_to_transition: Dict[HiddenInVar, Hidden2GroupTransition],
     hidden_invars: List[HiddenInVar],
     hidden_outvars: List[HiddenOutVar],
+    debug_info=None,
 ) -> Jaxpr:
     assert len(hidden_invars) >= 1
 
@@ -1095,7 +1103,8 @@ def write_jaxpr_of_hidden_group_transition(
         constvars=list(other_invars),
         invars=hidden_invars,
         outvars=hidden_outvars,
-        eqns=new_eqns
+        eqns=new_eqns,
+        debug_info=debug_info,
     )
 
 

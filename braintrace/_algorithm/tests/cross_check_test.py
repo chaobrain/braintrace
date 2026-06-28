@@ -58,7 +58,7 @@ def _grad(algo):
     def loss(x_):
         return (algo.update(x_) ** 2).sum()
 
-    grads, _ = brainstate.augment.grad(
+    grads, _ = brainstate.transform.grad(
         loss, algo.param_states, return_value=True
     )(x)
     return grads[next(iter(grads))]

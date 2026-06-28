@@ -285,17 +285,21 @@ class TestCheckUnsupportedOp(unittest.TestCase):
                 check_unsupported_op(obj, eqn, op_name)
             self.assertIn(op_name, str(ctx.exception))
 
-    def test_error_message_includes_path(self):
+    def test_error_message_identifies_weight_variable(self):
+        """The weight-in-control-flow error identifies the offending weight
+        variable and includes the equation. A weight var has no hidden-state
+        path, so the message renders the variable directly rather than indexing
+        the hidden-path map with it (the former F-SCAN-WEIGHT KeyError)."""
         w = _make_var(0)
-        eqn = _make_eqn([w], [_make_var(1)])
-        path = ('my_module', 'my_weight')
-        obj = self._make_self_obj(
-            weight_invars={w},
-            invar_to_hidden_path={w: path},
-        )
+        out = _make_var(1)
+        eqn = _make_eqn([w], [out])
+        obj = self._make_self_obj(weight_invars={w})
         with self.assertRaises(NotImplementedError) as ctx:
             check_unsupported_op(obj, eqn, 'scan')
-        self.assertIn(str(path), str(ctx.exception))
+        msg = str(ctx.exception)
+        self.assertIn('weight states', msg)
+        self.assertIn('scan', msg)
+        self.assertIn(str(w), msg)
 
     def test_literal_invars_dont_trigger_weight_error(self):
         """Literals in invars should not be matched as weight vars."""

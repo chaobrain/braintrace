@@ -481,7 +481,7 @@ class BPTTTrainer(Trainer):
         grads, loss, outs = brainstate.transform.grad(_bptt_grad_step, weights, has_aux=True, return_value=True)()
 
         # optimization
-        grads = brainstate.functional.clip_grad_norm(grads, 1.)
+        grads = brainstate.nn.clip_grad_norm(grads, 1.)
         self.opt.update(grads)
 
         return loss, self._acc(outs, targets)

@@ -290,7 +290,8 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             constvars=list(self.closed_jaxpr.jaxpr.constvars),
             invars=list(self.closed_jaxpr.jaxpr.invars) + list(self.perturb_invars.values()),
             outvars=list(self.closed_jaxpr.jaxpr.outvars),
-            eqns=self.revised_eqns
+            eqns=self.revised_eqns,
+            debug_info=self.closed_jaxpr.jaxpr.debug_info,
         )
         revised_closed_jaxpr = ClosedJaxpr(jaxpr, self.closed_jaxpr.literals)
 
