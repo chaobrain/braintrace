@@ -281,6 +281,7 @@ def compile_etrace_graph(
     model: brainstate.nn.Module,
     *model_args: Tuple,
     include_hidden_perturb: bool = True,
+    include_recurrent_mixing: bool = False,
 ) -> ETraceGraph:
     """Construct the eligibility-trace graph for a given model and inputs.
 
@@ -299,6 +300,17 @@ def compile_etrace_graph(
         The positional arguments required by the model.
     include_hidden_perturb : bool, optional
         Whether to include hidden perturbations in the graph. Default ``True``.
+    include_recurrent_mixing : bool, optional
+        Hidden-group grouping mode for the hidden-to-hidden transition. When
+        ``False`` (default, "without recurrence"), recurrent ETP mixing
+        primitives (e.g. the recurrent ``etp_mv``/``etp_mm``) are treated as
+        boundaries and excluded from the transition jaxpr, so the transition is
+        element-wise and the per-position recurrent Jacobian is diagonal (the
+        bounded D-RTRL / e-prop approximation). When ``True`` ("with
+        recurrence"), those primitives are traced into the transition, the
+        recurrence becomes coupled, and the true per-position block-diagonal
+        Jacobian is extracted (RTRL-exact temporal credit, e.g. for
+        :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`).
 
     Returns
     -------
@@ -336,7 +348,9 @@ def compile_etrace_graph(
         minfo = extract_module_info(model, *model_args)
 
         # ---       evaluating the relationship for hidden-to-hidden        --- #
-        hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(minfo)
+        hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(
+            minfo, include_recurrent_mixing=include_recurrent_mixing
+        )
         order_hidden_group_index(hidden_groups)
 
         # ---       evaluating the jaxpr for (hidden, param, op) relationships      --- #

@@ -625,6 +625,26 @@ class TestHiddenGroup_state_transition:
             print(out_vals)
 
 
+def _true_block_diagonal(group, hidden_vals, input_vals):
+    """Independent oracle for ``group.diagonal_jacobian``.
+
+    Materializes the full recurrent Jacobian with ``jax.jacrev`` and, for every
+    ``varshape`` position ``p``, picks the ``num_state x num_state`` block
+    ``full[p, :, p, :]`` (dropping the cross-position terms). Uses a plain Python
+    loop + ``stack`` so it shares no code with the production
+    ``diagonal``/``moveaxis`` extraction it is meant to check.
+    """
+    fn = lambda hid: group.concat_hidden(group.transition(group.split_hidden(hid), input_vals))
+    hid = group.concat_hidden(hidden_vals)
+    num_state = hid.shape[-1]
+    varshape = hid.shape[:-1]
+    num_pos = int(np.prod(varshape)) if varshape else 1
+    full = jax.jacrev(fn)(hid)  # (*varshape, num_state, *varshape, num_state)
+    full = u.math.reshape(full, (num_pos, num_state, num_pos, num_state))
+    blocks = u.math.stack([full[p, :, p, :] for p in range(num_pos)], axis=0)
+    return u.math.reshape(blocks, (*varshape, num_state, num_state))
+
+
 class TestHiddenGroup_diagonal_jacobian:
     @pytest.mark.parametrize(
         "cls",
@@ -687,6 +707,250 @@ class TestHiddenGroup_diagonal_jacobian:
             print(jax_jac)
 
             assert (u.math.allclose(diag_jac, jax_jac, atol=1e-5))
+
+    @pytest.mark.parametrize("include_recurrent_mixing", [False, True])
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            braintrace.nn.GRUCell,
+            braintrace.nn.LSTMCell,
+            braintrace.nn.LRUCell,
+            braintrace.nn.MGUCell,
+            braintrace.nn.MinimalRNNCell,
+        ]
+    )
+    def test_gru_accuracy_multiunit(self, cls, include_recurrent_mixing):
+        # ``diagonal_jacobian`` must equal the true per-position block diagonal
+        # (never the column sum over output positions) in *both* grouping modes:
+        #   - default (without recurrence): the transition is element-wise, so the
+        #     block diagonal is trivially correct;
+        #   - with recurrence: the transition is coupled, so the block-diagonal
+        #     extraction must drop the cross-position terms (the column-sum bug).
+        # The single-unit ``test_gru_accuracy`` (n_out == 1) cannot see this.
+        n_in = 3
+        n_out = 4
+
+        gru = cls(n_in, n_out)
+        brainstate.nn.init_all_states(gru)
+
+        input = brainstate.random.rand(n_in)
+        hidden_groups, _ = find_hidden_groups_from_module(
+            gru, input, include_recurrent_mixing=include_recurrent_mixing)
+
+        assert len(hidden_groups) >= 1
+        for group in hidden_groups:
+            hidden_vals = [brainstate.random.rand_like(invar.aval) for invar in group.hidden_invars]
+            input_vals = [brainstate.random.rand_like(invar.aval) for invar in group.transition_jaxpr_constvars]
+            diag_jac = group.diagonal_jacobian(hidden_vals, input_vals)
+            truth = _true_block_diagonal(group, hidden_vals, input_vals)
+            assert diag_jac.shape == (*group.varshape, group.num_state, group.num_state)
+            assert u.math.allclose(diag_jac, truth, atol=1e-5)
+
+    def test_is_diagonal_recurrence_flag(self):
+        # ``is_diagonal_recurrence`` is determined purely by the grouping mode:
+        # it equals ``not include_recurrent_mixing`` for every cell.
+        cells = (braintrace.nn.GRUCell, braintrace.nn.LSTMCell,
+                 braintrace.nn.MGUCell, braintrace.nn.MinimalRNNCell,
+                 braintrace.nn.LRUCell)
+
+        # Default mode (without recurrence): the recurrent-mixing boundary skip
+        # leaves an element-wise / position-diagonal transition -> flag True.
+        for cls in cells:
+            model = cls(3, 4)
+            brainstate.nn.init_all_states(model)
+            groups, _ = find_hidden_groups_from_module(model, brainstate.random.rand(3))
+            assert len(groups) >= 1
+            assert all(g.is_diagonal_recurrence for g in groups), cls.__name__
+
+        # With recurrence: the flag flips to False for *every* cell -- including
+        # the LRU, whose transition is structurally diagonal (element-wise complex
+        # decay, no matmul) but whose flag now follows the mode. The block-diagonal
+        # extraction is correct for the diagonal case too, so this is safe (just
+        # not the cheapest possible path for the LRU on this opt-in branch).
+        for cls in cells:
+            model = cls(3, 4)
+            brainstate.nn.init_all_states(model)
+            groups, _ = find_hidden_groups_from_module(
+                model, brainstate.random.rand(3), include_recurrent_mixing=True)
+            assert len(groups) >= 1
+            assert all(not g.is_diagonal_recurrence for g in groups), cls.__name__
+
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            braintrace.nn.GRUCell,
+            braintrace.nn.LSTMCell,
+            braintrace.nn.MGUCell,
+            braintrace.nn.MinimalRNNCell,
+            braintrace.nn.ValinaRNNCell,
+        ]
+    )
+    def test_default_mode_transition_is_element_wise(self, cls):
+        # Root-cause regression: in the default ("without recurrence") mode the
+        # recurrent ETP mixing primitives must NOT appear in the transition jaxpr
+        # (this is the 0.1.2 behaviour that keeps D^t contractive). A coupled
+        # recurrent matmul in the transition was the cause of the trace overflow.
+        model = cls(3, 4)
+        brainstate.nn.init_all_states(model)
+        groups, _ = find_hidden_groups_from_module(model, brainstate.random.rand(3))
+        assert len(groups) >= 1
+        mixing = {'etp_mv', 'etp_mm', 'etp_conv'}
+        for g in groups:
+            prims = {e.primitive.name for e in g.transition_jaxpr.eqns}
+            assert not (prims & mixing), (cls.__name__, prims & mixing)
+
+    @pytest.mark.parametrize(
+        "cls",
+        [
+            braintrace.nn.GRUCell,
+            braintrace.nn.LSTMCell,
+            braintrace.nn.MGUCell,
+            braintrace.nn.MinimalRNNCell,
+            braintrace.nn.ValinaRNNCell,
+        ]
+    )
+    def test_with_recurrence_includes_mixing(self, cls):
+        # The opt-in ("with recurrence") mode traces the recurrent ETP matmul into
+        # the transition jaxpr (the 0.2.x behaviour, now explicit and bounded via
+        # the block-diagonal extraction).
+        model = cls(3, 4)
+        brainstate.nn.init_all_states(model)
+        groups, _ = find_hidden_groups_from_module(
+            model, brainstate.random.rand(3), include_recurrent_mixing=True)
+        assert len(groups) >= 1
+        mixing = {'etp_mv', 'etp_mm', 'etp_conv'}
+        assert any(
+            (prims := {e.primitive.name for e in g.transition_jaxpr.eqns}) & mixing
+            for g in groups
+        ), cls.__name__
+
+    def test_vanilla_rnn_zero_recurrence_group(self):
+        # A vanilla RNN's only h^{t-1} dependence flows through the recurrent
+        # matmul; default mode excludes it, leaving no recurrent path. The hidden
+        # state must still get a (singleton) group with D^t = 0 so every hidden
+        # outvar carries a group index (the hid->weight compiler asserts this).
+        rnn = braintrace.nn.ValinaRNNCell(3, 4, activation='tanh')
+        brainstate.nn.init_all_states(rnn)
+        groups, _ = find_hidden_groups_from_module(rnn, brainstate.random.rand(3))
+        assert len(groups) == 1
+        g = groups[0]
+        assert g.is_diagonal_recurrence
+        hidden_vals = [brainstate.random.rand_like(invar.aval) for invar in g.hidden_invars]
+        input_vals = [brainstate.random.rand_like(invar.aval) for invar in g.transition_jaxpr_constvars]
+        diag_jac = g.diagonal_jacobian(hidden_vals, input_vals)
+        # D^t == 0 : the recurrence was fully excluded.
+        assert u.math.allclose(diag_jac, u.math.zeros_like(diag_jac), atol=1e-6)
+
+    def test_non_etp_reservoir_recurrence_modes(self):
+        # Coverage for the *non-ETP* recurrent-weight skip (skip #2): a plain
+        # ``dot_general`` that reads the hidden state (a fixed reservoir matrix)
+        # couples the leading ``varshape`` positions exactly like the ETP matmul,
+        # so the default ("without recurrence") mode must treat it as a boundary
+        # too -- otherwise the cheap column-sum Jacobian would be applied to a
+        # coupled transition and overflow. With recurrence it is traced in and the
+        # block-diagonal extraction must match the independent oracle. This guards
+        # the deliberate narrowness of ``_RECURRENT_WEIGHT_MIXING_PRIMITIVES``
+        # (matmul/conv only -- within-position gathers stay in the transition).
+        n_in, n_out = 3, 4
+
+        class _PlainReservoir(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                # ETP input projection: feed-forward, never enters the transition.
+                self.w_in = brainstate.ParamState(
+                    brainstate.random.randn(n_in, n_out) * 0.1)
+                # Fixed reservoir matrix -> recurrence via a *plain* dot_general
+                # (a regular JAX op, not ``braintrace.matmul``).
+                self.w_rec = brainstate.random.randn(n_out, n_out) * 0.3
+                self.h = brainstate.HiddenState(jax.numpy.zeros(n_out))
+
+            def update(self, x):
+                rec = self.h.value @ self.w_rec  # plain dot_general reading hidden
+                inp = braintrace.matmul(x, self.w_in.value)  # ETP, feed-forward
+                self.h.value = jax.nn.tanh(rec + inp)
+                return self.h.value
+
+        x = brainstate.random.rand(n_in)
+
+        # Default ("without recurrence"): the recurrent dot_general is a boundary,
+        # so the transition is position-diagonal and carries no ``dot_general``.
+        model = _PlainReservoir()
+        brainstate.nn.init_all_states(model)
+        groups, _ = find_hidden_groups_from_module(model, x)
+        assert len(groups) >= 1
+        assert all(g.is_diagonal_recurrence for g in groups)
+        for g in groups:
+            prims = {e.primitive.name for e in g.transition_jaxpr.eqns}
+            assert 'dot_general' not in prims, prims
+
+        # With recurrence: the dot_general is traced in -> coupled transition, and
+        # the block-diagonal extraction matches the independent jacrev oracle.
+        model = _PlainReservoir()
+        brainstate.nn.init_all_states(model)
+        groups, _ = find_hidden_groups_from_module(
+            model, x, include_recurrent_mixing=True)
+        assert len(groups) >= 1
+        assert all(not g.is_diagonal_recurrence for g in groups)
+        assert any(
+            'dot_general' in {e.primitive.name for e in g.transition_jaxpr.eqns}
+            for g in groups
+        )
+        for g in groups:
+            hidden_vals = [brainstate.random.rand_like(iv.aval) for iv in g.hidden_invars]
+            input_vals = [brainstate.random.rand_like(iv.aval)
+                          for iv in g.transition_jaxpr_constvars]
+            diag_jac = g.diagonal_jacobian(hidden_vals, input_vals)
+            truth = _true_block_diagonal(g, hidden_vals, input_vals)
+            assert diag_jac.shape == (*g.varshape, g.num_state, g.num_state)
+            assert u.math.allclose(diag_jac, truth, atol=1e-5)
+
+    @pytest.mark.parametrize("include_recurrent_mixing", [False, True])
+    @pytest.mark.parametrize(
+        'cls',
+        [
+            IF_Delta_Dense_Layer,
+            LIF_ExpCo_Dense_Layer,
+            ALIF_ExpCo_Dense_Layer,
+            LIF_ExpCu_Dense_Layer,
+            LIF_STDExpCu_Dense_Layer,
+            LIF_STPExpCu_Dense_Layer,
+            ALIF_ExpCu_Dense_Layer,
+            ALIF_Delta_Dense_Layer,
+            ALIF_STDExpCu_Dense_Layer,
+            ALIF_STPExpCu_Dense_Layer,
+        ]
+    )
+    def test_snn_single_layer_accuracy_multiunit(self, cls, include_recurrent_mixing):
+        # The dense SNN layers are *recurrent* (they feed spikes back through a
+        # recurrent ETP weight). ``diagonal_jacobian`` must equal the true
+        # per-position block diagonal in BOTH grouping modes (the n_out == 1
+        # ``test_snn_single_layer_accuracy`` could not detect the column-sum bug):
+        #   - default: the recurrent matmul is excluded -> diagonal transition;
+        #   - with recurrence: the matmul is traced in -> coupled, exercised via
+        #     the block-diagonal extraction.
+        n_in = 3
+        n_out = 4
+        input = brainstate.random.rand(n_in)
+
+        with brainstate.environ.context(dt=0.1 * u.ms):
+            layer = cls(n_in, n_out)
+            brainstate.nn.init_all_states(layer)
+            hidden_groups, _ = find_hidden_groups_from_module(
+                layer, input, include_recurrent_mixing=include_recurrent_mixing)
+
+        assert len(hidden_groups) >= 1
+        # The flag is mode-derived: diagonal iff recurrent mixing is excluded.
+        assert all(
+            g.is_diagonal_recurrence == (not include_recurrent_mixing)
+            for g in hidden_groups
+        )
+        for group in hidden_groups:
+            hidden_vals = [brainstate.random.rand_like(invar.aval) for invar in group.hidden_invars]
+            input_vals = [brainstate.random.rand_like(invar.aval) for invar in group.transition_jaxpr_constvars]
+            diag_jac = group.diagonal_jacobian(hidden_vals, input_vals)
+            truth = _true_block_diagonal(group, hidden_vals, input_vals)
+            assert diag_jac.shape == (*group.varshape, group.num_state, group.num_state)
+            assert u.math.allclose(diag_jac, truth, atol=1e-5)
 
     @pytest.mark.parametrize(
         'cls',

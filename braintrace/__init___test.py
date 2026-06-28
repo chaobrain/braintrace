@@ -13,10 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 
-"""L0 public-API contract: every ``braintrace.__all__`` symbol resolves to a
-usable object; public algorithms run a minimal end-to-end step; documented error
-paths fire on their real triggers; legacy/nn deprecations warn. Also pins the
-implementation facts that drifted from CLAUDE.md (F-17)."""
+"""Tests for the ``braintrace`` package root (``braintrace/__init__.py``).
+
+Two concerns, both owned by the package root:
+
+* **Public-API contract** — every ``braintrace.__all__`` symbol resolves to a
+  usable object; public algorithms run a minimal end-to-end step; documented
+  error paths fire on their real triggers; legacy/nn deprecations warn; and the
+  implementation facts that drifted from CLAUDE.md (F-17) stay pinned.
+* **Legacy deprecation forwarding** — the v0.1.x shims served lazily by
+  ``__getattr__`` warn on access, stay out of ``__all__``, and appear in
+  ``__dir__``.
+"""
 
 import brainstate
 import jax
@@ -24,8 +32,13 @@ import jax.numpy as jnp
 import pytest
 
 import braintrace
+import braintrace._legacy as legacy
 from braintrace._etrace_algorithms.oracle_models import tanh_rnn
 
+
+# ===========================================================================
+# Public-API contract
+# ===========================================================================
 
 # --- Task 1: every __all__ symbol resolves to a non-None object --------------
 
@@ -212,3 +225,42 @@ def test_expected_rnn_cells_exist():
     for cell in ('ValinaRNNCell', 'GRUCell', 'MGUCell', 'LSTMCell', 'URLSTMCell',
                  'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell'):
         assert hasattr(nn, cell), f"missing cell: {cell}"
+
+
+# ===========================================================================
+# Legacy v0.1.x deprecation forwarding
+# ===========================================================================
+
+_LEGACY_NAMES = [
+    'ETraceOp', 'MatMulOp', 'ElemWiseOp', 'ConvOp', 'SpMatMulOp', 'LoraOp',
+    'ETraceParam', 'ElemWiseParam', 'NonTempParam',
+    'FakeETraceParam', 'FakeElemWiseParam',
+]
+
+
+@pytest.mark.parametrize('name', _LEGACY_NAMES)
+def test_legacy_access_warns_and_returns_class(name):
+    with pytest.warns(DeprecationWarning):
+        obj = getattr(braintrace, name)
+    assert obj is getattr(legacy, name)
+
+
+@pytest.mark.parametrize('name', _LEGACY_NAMES)
+def test_legacy_names_not_in_all(name):
+    assert name not in braintrace.__all__
+
+
+def test_from_import_warns():
+    with pytest.warns(DeprecationWarning):
+        from braintrace import MatMulOp  # noqa: F401
+
+
+def test_unknown_attribute_raises_attribute_error():
+    with pytest.raises(AttributeError):
+        _ = braintrace.ThisNameDoesNotExist
+
+
+def test_legacy_names_in_dir():
+    d = dir(braintrace)
+    for name in _LEGACY_NAMES:
+        assert name in d

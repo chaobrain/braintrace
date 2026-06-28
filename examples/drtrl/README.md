@@ -3,7 +3,7 @@
 A tutorial-linear walk through ``braintrace.D_RTRL`` — the online
 eligibility-trace gradient estimator.
 
-Each file is self-contained. Read them in order (01 → 12) to follow the
+Each file is self-contained. Read them in order (01 → 11) to follow the
 companion tutorial at `docs/tutorials/drtrl.md`.
 
 ## How to run
@@ -24,8 +24,7 @@ All examples run on CPU in roughly 1–2 minutes. Task 09 (MNIST) requires
 | Batching mode                              | 02, 03             |
 | vjp method                                 | 04, 05             |
 | fast_solve knob                            | 11                 |
-| normalize_matrix_spectrum knob             | 12                 |
-| BPTT baseline                              | 01, 09, 10, 12     |
+| BPTT baseline                              | 01, 09, 10         |
 
 > **Note — skipped example:** `06-operator-sparse.py` is not currently
 > shipped. The ``brainunit.sparse`` COO/CSR primitives lack JAX batching

@@ -29,7 +29,6 @@ def _load(fname: str):
     )),
     "10-char-lm-generation.py",
     "11-knob-fast-solve.py",
-    "12-knob-normalize-spectrum.py",
 ])
 def test_example_runs(fname):
     mod = _load(fname)

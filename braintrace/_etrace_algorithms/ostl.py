@@ -71,7 +71,7 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     ----------
     model : brainstate.nn.Module
         The recurrent SNN whose weights are trained online.
-    name, vjp_method, fast_solve, normalize_matrix_spectrum : optional
+    name, vjp_method, fast_solve : optional
         Forwarded verbatim to :class:`~braintrace.ParamDimVjpAlgorithm`.
 
     Examples
@@ -108,6 +108,11 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
 
     #: Identifies the OSTL regime this class implements.
     regime = 'with-H'
+
+    #: 'with-H' keeps the full recurrent (hidden-to-hidden) Jacobian, so the
+    #: hidden-group transition must trace recurrent ETP mixing primitives and
+    #: extract the true per-position block-diagonal (bounded) Jacobian.
+    _include_recurrent_mixing = True
 
 
 class OSTLFeedforward(pp_prop):

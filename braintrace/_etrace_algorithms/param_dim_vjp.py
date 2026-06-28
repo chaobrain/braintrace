@@ -186,7 +186,6 @@ def _update_param_dim_etrace_scan_fn(
     ],
     weight_path_to_vals: Dict[Path, PyTree],
     hidden_param_op_relations,
-    normalize_matrix_spectrum: bool = False,
     fast_solve: bool = True,
     trace_dtype: Optional[DTypeLike] = None,
 ):
@@ -239,8 +238,6 @@ def _update_param_dim_etrace_scan_fn(
     # the hidden-to-hidden Jacobians
     #
     hid_group_jacobians: Sequence[jax.Array] = jacobians[2]
-    if normalize_matrix_spectrum:
-        hid_group_jacobians = [_normalize_matrix_spectrum(diag) for diag in hid_group_jacobians]
 
     # The etrace weight gradients at the current time step.
     # i.e., The "hist_etrace_vals" at the next time step
@@ -347,8 +344,6 @@ def _update_param_dim_etrace_scan_fn(
                 )
             else:
                 phg_to_pw = _comp_instant_legacy(df)
-            if normalize_matrix_spectrum:
-                phg_to_pw = jax.tree.map(_normalize_vector, phg_to_pw)
 
             w_key = (id(relation.y_var), group.index)
             diag = hid_group_jacobians[group.index]
@@ -370,38 +365,9 @@ def _update_param_dim_etrace_scan_fn(
             new_bwg = jax.tree.map(
                 u.math.add, new_bwg_pre, phg_to_pw, is_leaf=u.math.is_quantity,
             )
-            if normalize_matrix_spectrum:
-                new_bwg = jax.tree.map(_normalize_vector, new_bwg)
             new_etrace_bwg[w_key] = new_bwg
 
     return new_etrace_bwg, None
-
-
-def _normalize_matrix_spectrum(diag):
-    """Branch-free spectral clipping: divide by max(|eigvals|, 1).
-
-    The previous implementation used ``jax.lax.cond`` which blocks XLA
-    fusion and serialises into a control-flow region per call. Dividing by
-    ``max(max_eigenvalue, 1)`` is semantically identical (the conditional
-    only clipped when ``max_eigenvalue > 1``) and stays in a single fused
-    kernel with the rest of the update.
-    """
-
-    def base_fn(matrix):
-        eigenvalues = jnp.linalg.eigvals(matrix)
-        max_eigenvalue = jnp.max(jnp.abs(eigenvalues))
-        return matrix / jnp.maximum(max_eigenvalue, 1.0)
-
-    fn = base_fn
-    for _ in range(diag.ndim - 2):
-        fn = jax.vmap(fn)
-    return fn(diag)
-
-
-def _normalize_vector(v):
-    """Branch-free magnitude clipping: divide by max(max_abs, 1)."""
-    max_elem = jnp.abs(v).max()
-    return v / jnp.maximum(max_elem, 1.0)
 
 
 def _fast_solve_contract(primitive, diag_like, etrace_data, fold_batch=False):
@@ -720,7 +686,6 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
-        normalize_matrix_spectrum: bool = False,
         trace_dtype: Optional[DTypeLike] = None,
         **kwargs,
     ):
@@ -729,27 +694,9 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
         # Conv / sparse / LoRA primitives always use the legacy path.
         self.fast_solve = fast_solve
-        # When True, clip trace magnitudes > 1 each step via a branch-free
-        # ``v / max(max_abs, 1)``. Default False (disabled). The previous
-        # implementation applied this unconditionally to the instantaneous
-        # term only, which silently distorted gradients.
-        self.normalize_matrix_spectrum = normalize_matrix_spectrum
         # Optional reduced-precision storage for the eligibility trace (e.g.
         # ``jnp.bfloat16`` / ``jnp.float16``); ``None`` keeps native fp32. Only
-        # the mm/mv/elemwise fast path honors it. Reduced-precision eigenvalues
-        # are unreliable, so this is incompatible with spectral normalization.
-        if (
-            trace_dtype is not None
-            and normalize_matrix_spectrum
-            and jnp.issubdtype(jnp.dtype(trace_dtype), jnp.floating)
-            and jnp.dtype(trace_dtype).itemsize < 4
-        ):
-            raise ValueError(
-                f'trace_dtype={trace_dtype!r} has reduced precision (<4 bytes), '
-                'which is incompatible with normalize_matrix_spectrum=True: '
-                'spectral normalization needs full-precision eigenvalues. Use '
-                'trace_dtype=None (or float32) with normalization, or disable it.'
-            )
+        # the mm/mv/elemwise fast path honors it.
         self.trace_dtype = trace_dtype
 
     def init_etrace_state(self, *args, **kwargs):
@@ -882,7 +829,6 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             _update_param_dim_etrace_scan_fn,
             weight_path_to_vals=weight_vals,
             hidden_param_op_relations=self.graph.hidden_param_op_relations,
-            normalize_matrix_spectrum=self.normalize_matrix_spectrum,
             fast_solve=self.fast_solve,
             trace_dtype=self.trace_dtype,
         )
