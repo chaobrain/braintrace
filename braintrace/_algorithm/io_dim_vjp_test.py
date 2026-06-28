@@ -391,3 +391,33 @@ class TestElemwiseBatchingMode:
         _assert_batching_matches_per_example(
             lambda m, **kw: braintrace.IODimVjpAlgorithm(m, 0.9, **kw)
         )
+
+
+def _docstring_rnn():
+    """The exact ``RNN`` model used in the ``IODimVjpAlgorithm`` docstring example."""
+
+    class RNN(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+            self.out = braintrace.nn.Linear(20, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    return RNN()
+
+
+def test_docstring_compile_example_runs():
+    """Verify the ``braintrace.compile`` example in ``IODimVjpAlgorithm``'s docstring.
+
+    Exercises the integer-rank variant (``decay_or_rank=19``) flagged in the
+    docstring comment, which is distinct from ``pp_prop_test``'s decay variant.
+    """
+    model = _docstring_rnn()
+    x0 = brainstate.random.randn(1)
+    learner = braintrace.compile(model, braintrace.pp_prop, x0, decay_or_rank=19)
+    y = learner(x0)
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1

@@ -68,10 +68,9 @@ class pp_prop(IODimVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = RNN()
-        >>> _ = brainstate.nn.init_all_states(model)
-        >>> learner = braintrace.pp_prop(model, decay_or_rank=0.9)  # or rank: decay_or_rank=19
         >>> x0 = brainstate.random.randn(1)
-        >>> learner.compile_graph(x0)   # trace the graph once
+        >>> # one call: initialise states, build the trace graph, return a learner
+        >>> learner = braintrace.compile(model, braintrace.pp_prop, x0, decay_or_rank=0.9)  # or rank: decay_or_rank=19
         >>> y = learner(x0)             # forward pass + eligibility-trace update
 
     References

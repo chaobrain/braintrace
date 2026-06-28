@@ -407,3 +407,29 @@ def test_compile_both_modes_finite_nonzero_grad(name, builder, algo, kw, feat, v
         f'{name} vmap={vmap}: non-finite grad'
     assert sum(float(jnp.sum(jnp.asarray(g) ** 2)) for g in leaves) > 0.0, \
         f'{name} vmap={vmap}: zero grad'
+
+
+# --- docstring example: braintrace.compile -----------------------------------
+
+def test_compile_docstring_example_runs():
+    """Verify the runnable, self-contained example in ``compile``'s docstring.
+
+    Mirrors the public-API example exactly (``braintrace.nn`` building blocks +
+    ``braintrace.compile``), so the docstring is guaranteed to execute.
+    """
+    class RNN(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(3, 4, activation='tanh')
+            self.out = braintrace.nn.Linear(4, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    model = RNN()
+    x0 = brainstate.random.randn(1, 3)
+    learner = braintrace.compile(model, 'D_RTRL', x0, batch_size=1)
+    y = learner.update(x0)
+    assert y.shape == (1, 1)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1

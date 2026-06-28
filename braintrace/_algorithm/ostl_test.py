@@ -245,3 +245,40 @@ class TestSmokeLossDecreases(unittest.TestCase):
     def test_ostl(self):
         losses = _run(OSTLRecurrent(_toy_net()))
         assert losses[-1] < losses[0]
+
+
+def _docstring_net():
+    """The exact ``Net`` model used in the ``OSTL*`` docstring examples."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+            self.out = braintrace.nn.Linear(20, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    return Net()
+
+
+def test_docstring_ostl_recurrent_compile_example_runs():
+    """Verify the ``braintrace.compile`` example in ``OSTLRecurrent``'s docstring."""
+    model = _docstring_net()
+    x0 = brainstate.random.randn(1)
+    learner = braintrace.compile(model, braintrace.OSTLRecurrent, x0)
+    y = learner(x0)
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+def test_docstring_ostl_feedforward_compile_example_runs():
+    """Verify the ``braintrace.compile`` example in ``OSTLFeedforward``'s docstring."""
+    model = _docstring_net()
+    x0 = brainstate.random.randn(1)
+    learner = braintrace.compile(model, braintrace.OSTLFeedforward, x0)
+    y = learner(x0)
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1

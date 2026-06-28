@@ -218,11 +218,22 @@ def compile(
     --------
     .. code-block:: python
 
-        >>> import braintrace, jax.numpy as jnp
-        >>> model = MyRNN()
-        >>> x0 = jnp.ones((1, 3))
-        >>> learner = braintrace.compile(model, 'D_RTRL', x0, batch_size=1, verbose=1)
-        >>> y = learner.update(x0)
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> class RNN(brainstate.nn.Module):
+        ...     def __init__(self):
+        ...         super().__init__()
+        ...         self.cell = braintrace.nn.ValinaRNNCell(3, 4, activation='tanh')
+        ...         self.out = braintrace.nn.Linear(4, 1)
+        ...     def update(self, x):
+        ...         return x >> self.cell >> self.out
+        >>>
+        >>> model = RNN()
+        >>> x0 = brainstate.random.randn(1, 3)   # (batch, features)
+        >>> # one call: initialise states, build the trace graph, return a learner
+        >>> learner = braintrace.compile(model, 'D_RTRL', x0, batch_size=1)
+        >>> y = learner.update(x0)               # forward pass + eligibility-trace update
     """
     cls = _resolve_algorithm(algorithm)
     if len(example_inputs) == 0:

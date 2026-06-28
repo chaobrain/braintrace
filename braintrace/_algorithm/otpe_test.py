@@ -187,3 +187,29 @@ class TestSmokeLossDecreases(unittest.TestCase):
     def test_otpe(self):
         losses = _run(OTPE(_toy_net(), leak=0.9))
         assert losses[-1] < losses[0]
+
+
+def _docstring_net():
+    """The exact ``Net`` model used in the ``OTPE`` docstring example."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+            self.out = braintrace.nn.Linear(20, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    return Net()
+
+
+def test_docstring_compile_example_runs():
+    """Verify the runnable ``braintrace.compile`` example in ``OTPE``'s docstring."""
+    model = _docstring_net()
+    x0 = brainstate.random.randn(1)
+    learner = braintrace.compile(model, braintrace.OTPE, x0, mode='full', leak=0.9)
+    y = learner(x0)
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1
