@@ -71,7 +71,7 @@ so both parameter sets end up in the trace.
 
 | Target | Loss | Example |
 |---|---|---|
-| Regression | `braintools.metric.squared_error` | 01–03, 07, 12 |
+| Regression | `braintools.metric.squared_error` | 01–03, 07 |
 | Classification | `softmax_cross_entropy_with_integer_labels` | 04–06, 08, 09 |
 | Autoregressive generation | next-token cross-entropy | 10 |
 
@@ -80,10 +80,6 @@ so both parameter sets end up in the trace.
 - **`fast_solve` (default True)** — einsum fast path for mm/mv/elemwise
   primitives. Conv/sparse/LoRA always legacy. See
   [`11-knob-fast-solve.py`](../../examples/drtrl/11-knob-fast-solve.py).
-- **`normalize_matrix_spectrum` (default False)** — branch-free
-  `v / max(|v|_max, 1)` clip on the trace each step. Turn on if training
-  diverges with spectral radius above 1. See
-  [`12-knob-normalize-spectrum.py`](../../examples/drtrl/12-knob-normalize-spectrum.py).
 - **`num_state == 1` shortcut** — automatic; drops the state-axis einsum
   for single-state hidden groups.
 
@@ -103,8 +99,6 @@ so both parameter sets end up in the trace.
   through `Wh`'s matmul.
 - **Batching-mode split** — `brainstate.mixin.Batching()` vs
   `vmap_new_states` have different semantics; pick one per model.
-- **Spectral clip off by default** — numerical stability is your
-  responsibility unless `normalize_matrix_spectrum=True`.
 - **`multi-step` vs `single-step`** — speed/bias tradeoff. No free lunch.
 - **Long-horizon credit assignment** — traces still decay exponentially; very
   long dependencies suffer.
@@ -113,8 +107,8 @@ so both parameter sets end up in the trace.
 
 ## 10. FAQ / troubleshooting
 
-- **NaN traces** → spectral radius likely above 1. Set
-  `normalize_matrix_spectrum=True` or rescale the recurrent init.
+- **NaN traces** → spectral radius likely above 1. Rescale the recurrent
+  init.
 - **`compile_graph` fails "no hidden state reachable"** → the weight is used
   only through plain `x @ w` or the ETP primitive does not reach any
   `HiddenState`.

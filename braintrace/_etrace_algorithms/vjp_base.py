@@ -101,6 +101,14 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     __module__ = 'braintrace'
     graph_executor: ETraceVjpGraphExecutor
 
+    #: Hidden-group grouping mode for the hidden-to-hidden transition. ``False``
+    #: (default) excludes recurrent ETP mixing primitives from the transition
+    #: (bounded D-RTRL / e-prop diagonal approximation). Recurrence-defining
+    #: algorithms that keep the full temporal term (RTRL-exact "with-H", e.g.
+    #: :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`) override
+    #: this to ``True``. Not a user-facing constructor argument by design.
+    _include_recurrent_mixing: bool = False
+
     def __init__(
         self,
         model: brainstate.nn.Module,
@@ -116,7 +124,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         self.vjp_method = vjp_method
 
         # graph
-        graph_executor = ETraceVjpGraphExecutor(model, vjp_method=vjp_method)
+        graph_executor = ETraceVjpGraphExecutor(
+            model,
+            vjp_method=vjp_method,
+            include_recurrent_mixing=self._include_recurrent_mixing,
+        )
 
         # super initialization
         super().__init__(model=model, name=name, graph_executor=graph_executor)

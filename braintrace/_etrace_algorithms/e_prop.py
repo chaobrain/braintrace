@@ -109,7 +109,7 @@ class EProp(ParamDimVjpAlgorithm):
         ``feedback='random'``; ignored otherwise.
     name : str, optional
         Name of the algorithm instance.
-    vjp_method, fast_solve, normalize_matrix_spectrum
+    vjp_method, fast_solve
         Forwarded verbatim to :class:`~braintrace.D_RTRL`.
 
     Raises
@@ -159,7 +159,6 @@ class EProp(ParamDimVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
-        normalize_matrix_spectrum: bool = False,
         **kwargs,
     ):
         if feedback not in ('symmetric', 'random'):
@@ -175,7 +174,6 @@ class EProp(ParamDimVjpAlgorithm):
             name=name,
             vjp_method=vjp_method,
             fast_solve=fast_solve,
-            normalize_matrix_spectrum=normalize_matrix_spectrum,
             **kwargs,
         )
         self.feedback = feedback

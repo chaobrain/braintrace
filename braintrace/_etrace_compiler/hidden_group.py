@@ -48,12 +48,13 @@ from itertools import combinations
 from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
 
 import brainstate
+import brainunit as u
 import jax.core
 import numpy as np
-import brainunit as u
 from brainstate import HiddenGroupState
 
 from braintrace._compatible_imports import Var, Literal, JaxprEqn, Jaxpr
+from braintrace._etrace_op import is_etp_primitive, is_etp_enable_gradient_primitive
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     PyTree,
@@ -69,6 +70,25 @@ __all__ = [
     'find_hidden_groups_from_minfo',
     'find_hidden_groups_from_module',
 ]
+
+# Recurrent-weight mixing primitives -- dense / convolutional weights -- whose
+# consumption of a hidden state is a genuine *cross-position* coupling, i.e. that
+# can make ``h_i^t`` depend on ``h_j^{t-1}`` for ``i != j`` through a learned or
+# fixed recurrent weight. The default ("without recurrence") grouping mode
+# excludes these (when they read the hidden state) from the hidden-to-hidden
+# transition so it stays position-diagonal.
+#
+# This set is deliberately narrow: it does NOT list within-position
+# reductions/gathers (e.g. the ``gather`` that splits a stacked
+# ``HiddenGroupState`` such as an ALIF ``('neu', 'st')`` into its ``V``/``a``
+# components over the ``num_state`` axis). Those operate *within* a position and
+# must stay in the transition -- excluding them would drop a real, diagonal
+# ``D^t`` term and corrupt the grouped-state transition. The ETP mixing
+# primitives (``etp_mv``/``etp_mm``/``etp_conv``) are handled separately by the
+# ETP-boundary skip in ``_eval_eqn``.
+_RECURRENT_WEIGHT_MIXING_PRIMITIVES = frozenset({
+    'dot_general', 'conv_general_dilated',
+})
 
 
 class HiddenGroup(NamedTuple):
@@ -137,6 +157,25 @@ class HiddenGroup(NamedTuple):
 
     # the other input variables for transition_jaxpr evaluation
     transition_jaxpr_constvars: List[Var]
+
+    # whether the recurrence is diagonal across the leading ``varshape``
+    # positions, i.e. ``h_i^t`` depends only on ``h_i^{t-1}`` (and the input),
+    # never on ``h_j^{t-1}`` for ``i != j``. When ``True`` the cheap column-sum
+    # Jacobian computed by :func:`jacrev_last_dim` already equals the true
+    # per-position block diagonal; when ``False`` (a recurrent weight couples the
+    # positions) the column sum over-counts the off-diagonal cross-position terms,
+    # so the true block diagonal is extracted explicitly by
+    # :func:`block_diagonal_last_dim`.
+    #
+    # This flag is determined entirely by the grouping mode:
+    # ``is_diagonal_recurrence = not include_recurrent_mixing``. In the default
+    # ("without recurrence") mode the cross-position weight-mixing primitives are
+    # excluded from the transition (see ``_eval_eqn``), so it is position-diagonal
+    # by construction even when the transition still contains within-position ops
+    # (a stacked-state ``gather``, an element-wise leak). ``include_recurrent_mixing``
+    # opts into the coupled transition that needs the block-diagonal path. Defaults
+    # to ``True`` to preserve the cheap behavior for any positional construction.
+    is_diagonal_recurrence: bool = True
 
     @property
     def varshape(self) -> Tuple[int, ...]:
@@ -220,13 +259,28 @@ class HiddenGroup(NamedTuple):
         Returns
         -------
         jax.Array
-            The diagonal Jacobian matrix, with shape
-            ``(*varshape, num_states, num_states)``.
+            The per-position block-diagonal of the recurrent Jacobian
+            ``d h^t / d h^{t-1}``, with shape
+            ``(*varshape, num_states, num_states)``. Entry ``[p, a, b]`` is
+            ``d h^t[p, a] / d h^{t-1}[p, b]`` -- the cross-position terms
+            ``d h^t[p] / d h^{t-1}[q]`` (``p != q``) are intentionally dropped
+            (the D-RTRL / e-prop diagonal approximation).
+
+        Notes
+        -----
+        For diagonal recurrence (:attr:`is_diagonal_recurrence` is ``True``) the
+        positions are independent, so the cheap column-sum produced by
+        :func:`jacrev_last_dim` already equals this block diagonal. For coupled
+        recurrence the column sum would instead add in the off-diagonal
+        cross-position terms -- inflating every entry and driving the eligibility
+        trace to overflow -- so the true block diagonal is extracted directly via
+        :func:`block_diagonal_last_dim`.
         """
-        return jacrev_last_dim(
-            lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals)),
-            self.concat_hidden(hidden_vals)
-        )
+        fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
+        concat_hid = self.concat_hidden(hidden_vals)
+        if self.is_diagonal_recurrence:
+            return jacrev_last_dim(fn, concat_hid)
+        return block_diagonal_last_dim(fn, concat_hid)
 
     def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]):
         """Concatenate split hidden-state values into a single array.
@@ -337,6 +391,51 @@ def jacrev_last_dim(
     g_primals = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
     jac = jax.vmap(f_vjp, in_axes=-2, out_axes=-2)(g_primals)
     return jac[0]
+
+
+def block_diagonal_last_dim(
+    fn: Callable[..., jax.Array],
+    hid_vals: jax.Array,
+) -> jax.Array:
+    """Compute the per-position block diagonal of ``fn``'s Jacobian.
+
+    Like :func:`jacrev_last_dim`, but valid when ``fn`` *couples* the leading
+    ``varshape`` positions (e.g. a recurrent weight matrix). It materializes the
+    full Jacobian ``(*varshape, num_state, *varshape, num_state)`` and extracts,
+    for every position ``p``, the ``num_state x num_state`` block
+    ``d fn(hid)[p] / d hid[p]`` -- dropping the cross-position terms. This is the
+    quantity :func:`jacrev_last_dim` only happens to return when the recurrence is
+    already diagonal.
+
+    Parameters
+    ----------
+    fn : Callable[[jax.Array], jax.Array]
+        A shape-preserving map on ``(*varshape, num_state)`` arrays.
+    hid_vals : jax.Array
+        The point at which to linearize, shape ``(*varshape, num_state)``.
+
+    Returns
+    -------
+    jax.Array
+        The block-diagonal Jacobian with shape ``(*varshape, num_state, num_state)``.
+
+    Notes
+    -----
+    The full Jacobian is ``O((prod(varshape) * num_state) ** 2)`` in memory --
+    the same order as the recurrent-weight eligibility trace it feeds, so it is
+    affordable for the dense recurrent cells that need it. If a far larger
+    coupled group ever appears, a per-position ``vmap(jacrev)`` (recomputing the
+    transition once per position) trades this memory for compute.
+    """
+    num_state = hid_vals.shape[-1]
+    varshape = hid_vals.shape[:-1]
+    num_pos = int(np.prod(varshape)) if varshape else 1
+    full_jac = jax.jacrev(fn)(hid_vals)  # (*varshape, num_state, *varshape, num_state)
+    full_jac = u.math.reshape(full_jac, (num_pos, num_state, num_pos, num_state))
+    # take the per-position block: block[p] = full_jac[p, :, p, :]
+    block = u.math.diagonal(full_jac, axis1=0, axis2=2)  # (num_state, num_state, num_pos)
+    block = u.math.moveaxis(block, -1, 0)  # (num_pos, num_state, num_state)
+    return u.math.reshape(block, (*varshape, num_state, num_state))
 
 
 class HiddenToHiddenGroupTracer(NamedTuple):
@@ -576,10 +675,17 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         invar_to_hidden_path: Dict[HiddenInVar, Path],
         outvar_to_hidden_path: Dict[HiddenOutVar, Path],
         path_to_state: Dict[Path, brainstate.HiddenState],
+        include_recurrent_mixing: bool = False,
     ):
         # the jaxpr of the original model, assuming that the model is well-defined,
         # see the doc for the model which can be online learning compiled.
         self.jaxpr = jaxpr
+
+        # whether the recurrent ETP mixing primitives (``etp_mv``/``etp_mm``/
+        # ``etp_conv``) are *traced into* the hidden-to-hidden transition jaxpr
+        # (``True``) or treated as boundaries and excluded (``False``, default).
+        # See :func:`find_hidden_groups_from_jaxpr` for the rationale.
+        self.include_recurrent_mixing = include_recurrent_mixing
 
         # the hidden state groups
         self.hidden_outvar_to_invar = hidden_outvar_to_invar
@@ -625,6 +731,44 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         Evaluating the normal jaxpr equation.
         """
         if eqn.primitive.name == 'stop_gradient':
+            return
+
+        # Treat a recurrent ETP *mixing* primitive (e.g. ``etp_mv``/``etp_mm``/
+        # ``etp_conv`` -- ``is_etp_primitive`` but not ``is_etp_enable_gradient_primitive``)
+        # as a boundary: its output is supplied separately (carried by the weight
+        # eligibility trace), so it must not be traced into the hidden-to-hidden
+        # transition. Skipping it here keeps the transition element-wise, which
+        # restores the bounded D-RTRL recurrence (the 0.1.2 behaviour). Identity-
+        # like, gradient-enabled ETP ops (e.g. ``etp_elemwise``) are *not* skipped.
+        # ``include_recurrent_mixing=True`` opts back into tracing through them.
+        if (
+            not self.include_recurrent_mixing
+            and is_etp_primitive(eqn.primitive)
+            and not is_etp_enable_gradient_primitive(eqn.primitive)
+        ):
+            return
+
+        # A *non-ETP* recurrent-weight mixing primitive that reads the hidden
+        # state (a plain ``dot_general``/``conv_general_dilated`` recurrent weight,
+        # as in a reservoir) couples the leading ``varshape`` positions just like
+        # the ETP matmul does. In the default ("without recurrence") mode it is
+        # likewise treated as a boundary so the hidden-to-hidden transition stays
+        # position-diagonal -- which is what makes
+        # ``is_diagonal_recurrence = not include_recurrent_mixing`` correct rather
+        # than a footgun (a cross-position-coupled transition driven by the cheap
+        # column-sum Jacobian is exactly what overflows the eligibility trace).
+        # Only ops that *read the hidden state* are skipped: a feed-forward input
+        # projection (``x @ W_in``) does not couple the recurrence and is kept.
+        # The set is deliberately narrow (matmul/conv only): within-position
+        # reductions/gathers over the ``num_state`` axis -- e.g. the ``gather`` that
+        # splits a stacked ``HiddenGroupState`` (ALIF ``V``/``a``) -- are NOT
+        # cross-position coupling and must remain in the transition (``jacrev_last_dim``
+        # already handles the resulting per-position block correctly).
+        if (
+            not self.include_recurrent_mixing
+            and eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES
+            and self._eqn_consumes_hidden(eqn)
+        ):
             return
 
         # check whether the invars have one of the hidden states.
@@ -689,6 +833,23 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         for outvar in eqn.outvars:
             if outvar in self.hidden_outvars:
                 tracer.connected_hidden_outvars.add(outvar)
+
+    def _eqn_consumes_hidden(self, eqn: JaxprEqn) -> bool:
+        """Whether ``eqn`` reads a hidden-derived value.
+
+        Returns ``True`` when any input variable is a previous hidden state
+        (:attr:`hidden_invars`) or a value transitively derived from one (tracked
+        by an active tracer's ``invar_needed_in_oth_eqns``). Used to decide
+        whether a recurrent-mixing primitive couples the hidden state and must be
+        excluded from the transition in the default grouping mode.
+        """
+        for invar in eqn.invars:
+            if isinstance(invar, Var) and invar in self.hidden_invars:
+                return True
+        for tracer in self.active_tracers.values():
+            if find_matched_vars(eqn.invars, tracer.invar_needed_in_oth_eqns):
+                return True
+        return False
 
     def _post_check(self) -> Tuple[
         Sequence[HiddenGroup],
@@ -759,6 +920,18 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         #
         hidden_groups: list = []
         for hidden_invars, hidden_outvars, jaxpr in zip(invar_groups, outvar_groups, jaxpr_groups):
+            # ``is_diagonal_recurrence`` is fully determined by the grouping mode:
+            # in the default mode the recurrent-weight boundary skip (see
+            # ``_eval_eqn``) removes every *cross-position* coupling, leaving a
+            # transition that is position-diagonal across the leading ``varshape``
+            # axis -- so the cheap column-sum Jacobian (:func:`jacrev_last_dim`) is
+            # exact, even when the transition still contains within-position
+            # operations (a stacked-state ``gather``, an element-wise leak).
+            # ``include_recurrent_mixing=True`` opts into the cross-position-coupled
+            # transition that needs the block-diagonal path. (A structural re-check
+            # of the transition would be unreliable here: it cannot cheaply tell a
+            # within-position gather/reduction -- legitimately diagonal across
+            # positions -- from genuine cross-position coupling.)
             group = HiddenGroup(
                 index=len(hidden_groups),
                 hidden_invars=list(hidden_invars),
@@ -773,6 +946,54 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 ],
                 transition_jaxpr=jaxpr,
                 transition_jaxpr_constvars=list(jaxpr.constvars),
+                is_diagonal_recurrence=not self.include_recurrent_mixing,
+            )
+            hidden_groups.append(group)
+
+        # [ fourth-b step ]
+        #
+        # Zero-recurrence groups for hidden states whose entire recurrence was
+        # excluded.
+        #
+        # When recurrent ETP mixing primitives are treated as boundaries
+        # (``include_recurrent_mixing=False``), a hidden state whose *only*
+        # dependence on its previous value flows through such a primitive (e.g. a
+        # vanilla RNN ``h^t = tanh(W @ [x, h^{t-1}])``) has no surviving
+        # hidden-to-hidden path, so the steps above produce no group for it.
+        # Every hidden outvar must nonetheless carry a group index (the
+        # hidden->weight relation compiler asserts this). Give each uncovered
+        # hidden state a singleton group whose transition is independent of
+        # ``h^{t-1}`` -- i.e. ``D^t = 0`` -- by routing its current value through
+        # a constvar. The recurrent weight's temporal credit is then carried
+        # entirely by its eligibility trace's immediate term (the e-prop / RFLO
+        # approximation), and the trace stays bounded.
+        covered_outvars: Set[Var] = set()
+        for group in hidden_groups:
+            covered_outvars.update(group.hidden_outvars)
+        for outvar in self.hidden_outvars:
+            if outvar in covered_outvars:
+                continue
+            invar = self.hidden_outvar_to_invar[outvar]
+            # ``h^t = outvar`` (a constvar): no eqns, output does not depend on the
+            # ``h^{t-1}`` invar, so the recurrent Jacobian is exactly zero.
+            zero_jaxpr = Jaxpr(
+                constvars=[outvar],
+                invars=[invar],
+                outvars=[outvar],
+                eqns=[],
+            )
+            group = HiddenGroup(
+                index=len(hidden_groups),
+                hidden_invars=[invar],
+                hidden_outvars=[outvar],
+                hidden_paths=[self.outvar_to_hidden_path[outvar]],
+                hidden_states=[self.path_to_state[self.outvar_to_hidden_path[outvar]]],
+                transition_jaxpr=zero_jaxpr,
+                transition_jaxpr_constvars=list(zero_jaxpr.constvars),
+                # A zero-recurrence transition (``D^t = 0``) is trivially diagonal;
+                # keep the flag mode-derived for uniformity (this fallback only
+                # fires in the default mode in practice).
+                is_diagonal_recurrence=not self.include_recurrent_mixing,
             )
             hidden_groups.append(group)
 
@@ -966,6 +1187,7 @@ def find_hidden_groups_from_jaxpr(
     invar_to_hidden_path: Dict[HiddenInVar, Path],
     outvar_to_hidden_path: Dict[HiddenOutVar, Path],
     path_to_state: Dict[Path, brainstate.State],
+    include_recurrent_mixing: bool = False,
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """
     Find hidden groups from the jaxpr.
@@ -977,6 +1199,21 @@ def find_hidden_groups_from_jaxpr(
         invar_to_hidden_path: Mapping from weight input variable to hidden state path.
         outvar_to_hidden_path: Mapping from hidden output variable to hidden state path.
         path_to_state: Mapping from hidden state path to state.
+        include_recurrent_mixing: Whether to trace recurrent ETP *mixing* primitives
+            (``etp_mv``/``etp_mm``/``etp_conv``) into the hidden-to-hidden
+            transition jaxpr.
+
+            - ``False`` (default, "without recurrence"): these primitives are
+              treated as boundaries and excluded, so the transition keeps only
+              element-wise (and non-ETP) state-to-state paths. The recurrent
+              weight's temporal credit is carried by its eligibility trace. This
+              keeps the recurrent Jacobian ``D^t`` contractive and the trace
+              bounded (the standard D-RTRL / e-prop diagonal approximation).
+            - ``True`` ("with recurrence"): the mixing primitives are traced into
+              the transition, so ``D^t`` carries the full per-step recurrent
+              coupling. The resulting (coupled) Jacobian is extracted per
+              position via :func:`block_diagonal_last_dim` (selected automatically
+              by :attr:`HiddenGroup.is_diagonal_recurrence`).
 
     Returns:
         A tuple containing:
@@ -994,13 +1231,15 @@ def find_hidden_groups_from_jaxpr(
         # State -> HiddenState narrowing; mypy flags it as redundant only because
         # brainstate is currently untyped (both collapse to Any).
         path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),  # type: ignore[redundant-cast]
+        include_recurrent_mixing=include_recurrent_mixing,
     )
     hidden_groups, hid_path_to_group = evaluator.compile()
     return hidden_groups, brainstate.util.PrettyDict(hid_path_to_group)
 
 
 def find_hidden_groups_from_minfo(
-    minfo: ModuleInfo
+    minfo: ModuleInfo,
+    include_recurrent_mixing: bool = False,
 ):
     """Find the hidden groups from the model information.
 
@@ -1008,6 +1247,9 @@ def find_hidden_groups_from_minfo(
     ----------
     minfo : ModuleInfo
         The model information.
+    include_recurrent_mixing : bool, default False
+        Whether to trace recurrent ETP mixing primitives into the transition
+        jaxpr. See :func:`find_hidden_groups_from_jaxpr` for the full semantics.
 
     Returns
     -------
@@ -1030,6 +1272,7 @@ def find_hidden_groups_from_minfo(
         invar_to_hidden_path=minfo.invar_to_hidden_path,
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         path_to_state=minfo.retrieved_model_states,
+        include_recurrent_mixing=include_recurrent_mixing,
     )
     return hidden_groups, hid_path_to_group
 
@@ -1037,6 +1280,7 @@ def find_hidden_groups_from_minfo(
 def find_hidden_groups_from_module(
     model: brainstate.nn.Module,
     *model_args,
+    include_recurrent_mixing: bool = False,
     **model_kwargs,
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """Find hidden groups from a model.
@@ -1047,6 +1291,10 @@ def find_hidden_groups_from_module(
         The model.
     *model_args
         The positional arguments of the model.
+    include_recurrent_mixing : bool, default False
+        Whether to trace recurrent ETP mixing primitives into the transition
+        jaxpr. Keyword-only. See :func:`find_hidden_groups_from_jaxpr` for the
+        full semantics.
     **model_kwargs
         The keyword arguments of the model.
 
@@ -1075,4 +1323,4 @@ def find_hidden_groups_from_module(
         1
     """
     minfo = extract_module_info(model, *model_args, **model_kwargs)
-    return find_hidden_groups_from_minfo(minfo)
+    return find_hidden_groups_from_minfo(minfo, include_recurrent_mixing=include_recurrent_mixing)

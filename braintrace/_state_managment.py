@@ -17,7 +17,6 @@ from typing import Sequence, Tuple, List, Hashable, Dict, Mapping, Any
 
 import brainstate
 
-pass  # ParamState removed (primitive-based ETP)
 from ._typing import Path, PyTree
 
 

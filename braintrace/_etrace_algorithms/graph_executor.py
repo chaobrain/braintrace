@@ -69,6 +69,7 @@ class ETraceGraphExecutor:
     def __init__(
         self,
         model: brainstate.nn.Module,
+        include_recurrent_mixing: bool = False,
     ):
         # The original model
         if not isinstance(model, brainstate.nn.Module):
@@ -78,6 +79,10 @@ class ETraceGraphExecutor:
                 'better debugging.'
             )
         self.model = model
+
+        # hidden-group grouping mode for the hidden-to-hidden transition; see
+        # ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
+        self.include_recurrent_mixing = include_recurrent_mixing
 
         # the compiled graph
         self._compiled_graph: Optional[ETraceGraph] = None
@@ -175,7 +180,10 @@ class ETraceGraphExecutor:
         args = get_single_step_data(*args)
 
         # compile the graph
-        self._compiled_graph = compile_etrace_graph(self.model, *args)
+        self._compiled_graph = compile_etrace_graph(
+            self.model, *args,
+            include_recurrent_mixing=self.include_recurrent_mixing,
+        )
 
     def show_graph(
         self,

@@ -45,10 +45,8 @@ if sklearn is missing).
 | 13 | `13-knob-decay-vs-rank.py`          | Sweep `decay_or_rank` across floats and ints            |
 | 14 | `14-knob-vjp-method-contrast.py`    | single-step vs multi-step vs BPTT head-to-head on DMS   |
 
-Cross-reference: for `fast_solve` / `normalize_matrix_spectrum` knobs
-(shared with D_RTRL but not required for pp_prop), see
-`examples/drtrl/11-knob-fast-solve.py` and
-`examples/drtrl/12-knob-normalize-spectrum.py`.
+Cross-reference: for the `fast_solve` knob (shared with D_RTRL but not
+required for pp_prop), see `examples/drtrl/11-knob-fast-solve.py`.
 
 ## Tutorial
 

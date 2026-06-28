@@ -157,9 +157,10 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     def __init__(
         self,
         model: brainstate.nn.Module,
-        vjp_method: str = 'single-step'
+        vjp_method: str = 'single-step',
+        include_recurrent_mixing: bool = False,
     ):
-        super().__init__(model)
+        super().__init__(model, include_recurrent_mixing=include_recurrent_mixing)
 
         # the VJP method
         assert vjp_method in ('single-step', 'multi-step'), (
@@ -210,7 +211,11 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         args = get_single_step_data(*args)
 
         # compile the graph
-        self._compiled_graph = compile_etrace_graph(self.model, *args, include_hidden_perturb=self.is_single_step_vjp)
+        self._compiled_graph = compile_etrace_graph(
+            self.model, *args,
+            include_hidden_perturb=self.is_single_step_vjp,
+            include_recurrent_mixing=self.include_recurrent_mixing,
+        )
 
     def _compute_hid2weight_jacobian(
         self,
