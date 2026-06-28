@@ -4,6 +4,7 @@ matplotlib
 
 
 pytest
+pytest-cov  # coverage measurement + Codecov XML report
 hypothesis  # property-based tests (compiler_property_test, diagnostic_exploration_test)
 numba  # for brainevent cpu operator
 mypy>=1.8  # static type checking

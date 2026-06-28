@@ -492,6 +492,27 @@ class TestLoRA:
         y = lora(x)
         assert y.shape == (4, 2048)
 
+
+class TestScaledWSLinear:
+    """Weight-standardized linear layer (routed through ETP ``matmul``)."""
+
+    def test_forward_shape(self):
+        from braintrace.nn._linear import ScaledWSLinear
+
+        layer = ScaledWSLinear(in_size=5, out_size=3)
+        x = brainstate.random.randn(8, 5)
+        y = layer(x)
+        assert y.shape == (8, 3)
+
+    def test_forward_with_weight_mask(self):
+        # Exercises the ``w_mask`` multiplication branch in update().
+        from braintrace.nn._linear import ScaledWSLinear
+
+        layer = ScaledWSLinear(in_size=4, out_size=2, w_mask=jnp.ones((4, 2)))
+        x = brainstate.random.randn(6, 4)
+        y = layer(x)
+        assert y.shape == (6, 2)
+
     def test_lora_with_callable_base_module(self):
         """Test LoRA with a callable base module."""
 

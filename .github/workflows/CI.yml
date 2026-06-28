@@ -59,7 +59,18 @@ jobs:
           python -m pip install . || exit 1
       - name: Test with pytest
         run: |
-          pytest braintrace/
+          pytest braintrace/ --cov=braintrace --cov-report=xml --cov-report=term-missing
+      - name: Upload coverage to Codecov
+        # Upload from a single matrix entry (latest JAX) to avoid duplicate
+        # reports. Never fail CI on an upload hiccup / missing token.
+        if: matrix.jax-version == ''
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          flags: unittests
+          name: braintrace-coverage
+          fail_ci_if_error: false
 
 
   typecheck_and_build:

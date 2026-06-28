@@ -1,0 +1,32 @@
+# Codecov configuration for braintrace.
+# Docs: https://docs.codecov.com/docs/codecov-yaml
+coverage:
+  # Round/precision of the reported percentage.
+  precision: 2
+  round: down
+  range: "70...100"
+  status:
+    # Overall project coverage must stay at or above the target.
+    project:
+      default:
+        target: 90%
+        threshold: 1%
+    # Coverage of the lines changed by a pull request.
+    patch:
+      default:
+        target: 90%
+        threshold: 1%
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+
+# Files excluded from the Codecov report. Mirrors the coverage `omit` list in
+# pyproject.toml (co-located tests + test-only helper modules) so the Codecov
+# percentage matches the locally measured source coverage.
+ignore:
+  - "**/*_test.py"
+  - "**/model4test.py"
+  - "**/scenario_catalog.py"
+  - "**/oracle_models.py"

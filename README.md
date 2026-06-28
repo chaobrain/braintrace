@@ -11,6 +11,7 @@
   	<a href="https://brainx.chaobrain.com/braintrace/"><img alt="Documentation" src="https://readthedocs.org/projects/braintrace/badge/?version=latest"></a>
   	<a href="https://badge.fury.io/py/braintrace"><img alt="PyPI version" src="https://badge.fury.io/py/braintrace.svg"></a>
     <a href="https://github.com/chaobrain/braintrace/actions/workflows/CI.yml"><img alt="Continuous Integration" src="https://github.com/chaobrain/braintrace/actions/workflows/CI.yml/badge.svg"></a>
+    <a href="https://codecov.io/gh/chaobrain/braintrace"><img alt="Code Coverage" src="https://codecov.io/gh/chaobrain/braintrace/branch/main/graph/badge.svg"></a>
 </p>
 
 [``braintrace``](https://github.com/chaobrain/braintrace) provides online learning algorithms for biological neural networks.
