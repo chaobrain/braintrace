@@ -145,18 +145,9 @@ def train_online(n_epochs=5, num_batch=512, num_hidden=100, n_batches_per_epoch=
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
-        # Wrap model with the D-RTRL online learning algorithm
-        online_model = braintrace.D_RTRL(model)
-
-        # Initialize states per-sample via vmap, then compile the ETP graph
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model)
-            online_model.compile_graph(inputs[0, 0])
-
-        init()
-        vmap_model = brainstate.nn.Vmap(online_model, vmap_states='new')
+        # Wrap model with the D-RTRL online learning algorithm and vmap over the batch dimension
+        vmap_model = braintrace.compile(model, braintrace.D_RTRL, inputs[0],
+                                        batch_size=inputs.shape[1], vmap=True)
 
         # Loss at a single timestep (with L2 regularization matching BPTT)
         def step_loss(inp, tar, l2_reg=2e-4):

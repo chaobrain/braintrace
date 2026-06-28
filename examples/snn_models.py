@@ -405,23 +405,11 @@ class OnlineTrainer(Trainer):
         # weights
         weights = self.target.states().subset(brainstate.ParamState)
 
-        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
         # initialize the online learning model
-        model = braintrace.pp_prop(self.target, self.decay_or_rank)
-
-        # initialize the states
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(self.target)
-            model.compile_graph(inputs[0, 0])
-
-        init()
-        # show_graph() is a post-compile diagnostic: call it once *after* init()
-        # rather than inside it. The vmap_new_states discovery probe runs init()
-        # once with compilation deferred to the real mapped pass, so the graph is
-        # only available here, after init() has returned.
-        model.show_graph()
-        model = brainstate.nn.Vmap(model, vmap_states='new')
+        model = braintrace.compile(self.target, braintrace.pp_prop, inputs[0],
+                                   batch_size=inputs.shape[1], vmap=True,
+                                   decay_or_rank=self.decay_or_rank)
+        model.module.show_graph()
 
         def _etrace_grad(inp):
             # call the model

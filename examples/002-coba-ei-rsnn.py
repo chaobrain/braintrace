@@ -432,22 +432,15 @@ class Trainer:
         inputs = jnp.asarray(inputs, dtype=brainstate.environ.dftype())  # [T, B, N]
         weights = self.target.states().subset(brainstate.ParamState)
 
-        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
         # initialize the online learning model
         if self.method == 'expsm_diag':
-            model = braintrace.ES_D_RTRL(self.target, decay_or_rank=0.99)
+            model = braintrace.compile(self.target, braintrace.ES_D_RTRL, inputs[0],
+                                       batch_size=inputs.shape[1], vmap=True, decay_or_rank=0.99)
         elif self.method == 'diag':
-            model = braintrace.D_RTRL(self.target)
+            model = braintrace.compile(self.target, braintrace.D_RTRL, inputs[0],
+                                       batch_size=inputs.shape[1], vmap=True)
         else:
             raise ValueError(f'Unknown online learning methods: {self.method}.')
-
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(self.target)
-            model.compile_graph(inputs[0, 0])
-
-        init()
-        model = brainstate.nn.Vmap(model, vmap_states='new')
 
         def _etrace_grad(inp):
             # call the model

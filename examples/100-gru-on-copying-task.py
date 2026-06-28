@@ -122,18 +122,9 @@ class OnlineTrainer(Trainer):
         if self.batch_train_method == 'vmap':
             # 初始化在线学习模型
             # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的
-            model = braintrace.ParamDimVjpAlgorithm(self.target, vjp_method=self.vjp_method)
-
-            # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
-            @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-            def init():
-                # 对于每一个batch的数据，重新初始化模型状态
-                brainstate.nn.init_all_states(self.target)
-                # 使用一个样例数据编译在线学习eligibility trace
-                model.compile_graph(inputs[0, 0])
-
-            init()
-            model = brainstate.nn.Vmap(model, vmap_states='new')
+            model = braintrace.compile(self.target, braintrace.ParamDimVjpAlgorithm, inputs[0],
+                                       batch_size=inputs.shape[1], vmap=True,
+                                       vjp_method=self.vjp_method)
 
         elif self.batch_train_method == 'batch':
             # kept manual: re-initializes states inside @jit every batch; braintrace.compile must live outside jit

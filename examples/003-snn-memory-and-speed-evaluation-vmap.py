@@ -458,7 +458,8 @@ class Trainer(object):
         return losses.mean(), acc
 
     def _compile_etrace_function(self, input_info):
-        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
+        # kept manual: data-dependent (DVSGesture) — no smoke coverage to verify a
+        # compile() migration; uses ShapeDtypeStruct example incompatible with compile's vmap axis-strip
         if self.args.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, )
         elif self.args.method == 'diag':
