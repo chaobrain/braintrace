@@ -15,6 +15,7 @@
 
 import jax
 import brainstate
+import braintools
 import jax.numpy as jnp
 import pytest
 
@@ -269,3 +270,140 @@ def test_compile_vmap_returns_wrapper_exposing_report():
     assert isinstance(learner.module, braintrace.D_RTRL)
     assert learner.module.report is not None
     assert learner.module.is_compiled
+
+
+# --- both-modes coverage across RNN architectures + algorithms ---------------
+# Each architecture/algorithm must build, forward, and back-prop a finite,
+# non-zero gradient under BOTH compile(vmap=False) (internal batch primitive)
+# and compile(vmap=True) (per-sample vmap lanes). A multi-step scan exercises
+# the eligibility trace (single-step would never engage it).
+
+_NI, _NR = 3, 4
+
+
+class _ValinaNet(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rnn = braintrace.nn.ValinaRNNCell(in_size=_NI, out_size=_NR, activation='tanh')
+        self.out = braintrace.nn.Linear(_NR, 2)
+
+    def update(self, x):
+        return self.out(self.rnn(x))
+
+
+class _GRU1Net(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rnn = braintrace.nn.GRUCell(in_size=_NI, out_size=_NR)
+        self.out = braintrace.nn.Linear(_NR, 2)
+
+    def update(self, x):
+        return self.out(self.rnn(x))
+
+
+class _GRU2Net(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rnn1 = braintrace.nn.GRUCell(in_size=_NI, out_size=_NR)
+        self.rnn2 = braintrace.nn.GRUCell(in_size=_NR, out_size=_NR)
+        self.out = braintrace.nn.Linear(_NR, 2)
+
+    def update(self, x):
+        return self.out(self.rnn2(self.rnn1(x)))
+
+
+class _MiniGRUNet(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.rnn = braintrace.nn.MiniGRU(in_size=_NI, out_size=_NR)
+        self.out = braintrace.nn.Linear(_NR, 2)
+
+    def update(self, x):
+        return self.out(self.rnn(x))
+
+
+class _Conv1dMiniGRUNet(brainstate.nn.Module):
+    """Conv1d feature extractor -> MiniGRU recurrence (the drtrl/08 pattern)."""
+
+    def __init__(self):
+        super().__init__()
+        self.conv = braintrace.nn.Conv1d(in_size=(_NI, 1), out_channels=4,
+                                         kernel_size=3, padding='SAME')
+        self.rnn = braintrace.nn.MiniGRU(in_size=_NI * 4, out_size=_NR)
+        self.out = braintrace.nn.Linear(_NR, 2)
+
+    def update(self, x):
+        y = self.conv(x)
+        y = y.reshape(y.shape[0], -1) if y.ndim > 2 else y.reshape(-1)
+        return self.out(self.rnn(y))
+
+
+class _LoRACell(brainstate.nn.RNNCell):
+    def __init__(self, n_in=_NI, n_hidden=_NR, rank=2):
+        super().__init__()
+        import braintools
+        self.in_size, self.out_size = n_in, n_hidden
+        self.frozen_base = brainstate.ParamState(
+            braintools.init.XavierNormal()((n_in + n_hidden, n_hidden)))
+        self.lora = braintrace.nn.LoRA(in_features=n_in + n_hidden, lora_rank=rank,
+                                       out_features=n_hidden)
+
+    def init_state(self, batch_size=None, **kwargs):
+        import braintools
+        self.h = brainstate.HiddenState(
+            braintools.init.param(braintools.init.ZeroInit(), self.out_size, batch_size))
+
+    def update(self, x):
+        xh = jnp.concatenate([x, self.h.value], axis=-1)
+        self.h.value = jax.nn.tanh(xh @ self.frozen_base.value + self.lora(xh))
+        return self.h.value
+
+
+class _LoRANet(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.cell = _LoRACell()
+        self.readout = braintrace.nn.Linear(_NR, 2)
+
+    def update(self, x):
+        return self.readout(self.cell(x))
+
+
+_BOTH_MODE_CASES = [
+    ('valina_d_rtrl', _ValinaNet, braintrace.D_RTRL, {}, (_NI,)),
+    ('gru1_d_rtrl', _GRU1Net, braintrace.D_RTRL, {}, (_NI,)),
+    ('gru2_d_rtrl', _GRU2Net, braintrace.D_RTRL, {}, (_NI,)),
+    ('minigru_d_rtrl', _MiniGRUNet, braintrace.D_RTRL, {}, (_NI,)),
+    ('conv1d_minigru_d_rtrl', _Conv1dMiniGRUNet, braintrace.D_RTRL, {}, (_NI, 1)),
+    ('lora_d_rtrl', _LoRANet, braintrace.D_RTRL, {}, (_NI,)),
+    ('minigru_es_d_rtrl', _MiniGRUNet, braintrace.ES_D_RTRL, {'decay_or_rank': 0.99}, (_NI,)),
+    ('minigru_param_dim_vjp', _MiniGRUNet, braintrace.ParamDimVjpAlgorithm,
+     {'vjp_method': 'single-step'}, (_NI,)),
+]
+
+
+@pytest.mark.parametrize('name,builder,algo,kw,feat', _BOTH_MODE_CASES,
+                         ids=[c[0] for c in _BOTH_MODE_CASES])
+@pytest.mark.parametrize('vmap', [False, True], ids=['no_vmap', 'vmap'])
+def test_compile_both_modes_finite_nonzero_grad(name, builder, algo, kw, feat, vmap):
+    B, T = 4, 5
+    xs = brainstate.random.randn(T, B, *feat)
+    model = builder()
+    learner = braintrace.compile(model, algo, xs[0], batch_size=B, vmap=vmap, **kw)
+    if vmap:
+        assert isinstance(learner, brainstate.nn.Vmap)
+    weights = model.states(brainstate.ParamState)
+
+    def total_loss(xs):
+        def step(carry, x):
+            return carry, jnp.mean(jnp.asarray(learner(x)) ** 2)
+
+        _, ls = brainstate.transform.scan(step, None, xs)
+        return jnp.sum(ls)
+
+    grads = brainstate.transform.grad(total_loss, weights)(xs)
+    leaves = jax.tree.leaves(grads)
+    assert all(bool(jnp.all(jnp.isfinite(jnp.asarray(g)))) for g in leaves), \
+        f'{name} vmap={vmap}: non-finite grad'
+    assert sum(float(jnp.sum(jnp.asarray(g) ** 2)) for g in leaves) > 0.0, \
+        f'{name} vmap={vmap}: zero grad'

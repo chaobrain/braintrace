@@ -64,10 +64,12 @@ class GIF(brainpy.state.Neuron):
         self._V_initializer = V_initializer
         self._I2_initializer = I2_initializer
 
-    def init_state(self):
-        # 将模型用于在线学习，需要初始化状态变量
-        self.V = brainstate.HiddenState(braintools.init.param(self._V_initializer, self.varshape))
-        self.I2 = brainstate.HiddenState(braintools.init.param(self._I2_initializer, self.varshape))
+    def init_state(self, batch_size=None, **kwargs):
+        # 将模型用于在线学习，需要初始化状态变量。batch_size 让非 vmap 的批量
+        # 初始化路径 (init_all_states(model, batch_size=B)) 也能工作，和 LIF/ALIF
+        # 等其它神经元保持一致。
+        self.V = brainstate.HiddenState(braintools.init.param(self._V_initializer, self.varshape, batch_size))
+        self.I2 = brainstate.HiddenState(braintools.init.param(self._I2_initializer, self.varshape, batch_size))
 
     def update(self, x=0.):
         # 如果前一时刻发放了脉冲，则将膜电位和适应性电流进行重置
