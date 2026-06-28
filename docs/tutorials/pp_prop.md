@@ -71,6 +71,12 @@ gradient estimate is needed. Fall back to BPTT when the sequence is short
 enough to fit in memory and you need exact gradients for a published
 benchmark.
 
+## Quick start
+
+> **Quick start:** most users should call `braintrace.compile(model, braintrace.pp_prop, x0,
+> batch_size=B, decay_or_rank=0.99)` (or `braintrace.compile(..., vmap=True)` for batched
+> lanes). The sections below describe `pp_prop`'s internals and the knobs it exposes.
+
 ## 3. Walk-through of the example series
 
 Each paragraph below points at the example and the single axis it is

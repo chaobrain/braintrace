@@ -135,3 +135,71 @@ it only reaches a hidden state through another trainable primitive.
    CompilationRecord
    DiagnosticKind
    DiagnosticLevel
+
+
+Compilation Report
+------------------
+
+:class:`CompilationReport` is the structured summary attached to every learner
+returned by :func:`compile`. Access it via ``learner.report`` after compiling a
+model. It aggregates the diagnostics, counts, and graph information produced
+during compilation into a single inspectable object.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   CompilationReport
+
+**Key members:**
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Member
+     - Description
+   * - ``counts``
+     - Dict of summary counts: number of hidden groups, ETP relations, etrace
+       weights, excluded weights, and dynamic states.
+   * - ``diagnostics``
+     - Sequence of :class:`CompilationRecord` objects, one per compiler
+       decision (inclusions, exclusions, warnings, errors).
+   * - ``dynamic_states``
+     - List of hidden-state paths discovered by the compiler.
+   * - ``etrace_weights``
+     - List of weight paths that participate in online learning (have ETP
+       relations).
+   * - ``excluded_weights``
+     - List of weight paths excluded from online learning (e.g., weights that
+       only reach a hidden state through another trainable ETP primitive).
+   * - ``graph``
+     - The underlying :class:`ETraceGraph` object.
+   * - ``hidden_groups``
+     - Sequence of :class:`HiddenGroup` objects discovered by the compiler.
+   * - ``show(level)``
+     - Print a human-readable summary at the given verbosity level (0–2).
+   * - ``to_str(...)``
+     - Return the summary as a string.
+
+**Usage example:**
+
+.. code-block:: python
+
+   import braintrace
+
+   learner = braintrace.compile(model, braintrace.D_RTRL, x0, batch_size=1, verbose=2)
+
+   # Show a summary at level 1 (groups + weight lists, no raw diagnostics)
+   learner.report.show(1)
+
+   # Inspect counts programmatically
+   print(learner.report.counts)
+   # e.g. {'hidden_groups': 1, 'etrace_relations': 2, 'etrace_weights': 2,
+   #        'excluded_weights': 1, 'dynamic_states': 1}
+
+   # Iterate diagnostics to find warnings
+   from braintrace import DiagnosticLevel
+   warnings = [d for d in learner.report.diagnostics
+               if d.level == DiagnosticLevel.WARNING]

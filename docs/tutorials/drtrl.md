@@ -32,6 +32,10 @@ Compared with BPTT, D-RTRL:
 
 ## 3. Minimal example — integrator
 
+> **Quick start:** most users should call `braintrace.compile(model, braintrace.D_RTRL, x0,
+> batch_size=B)` (or `braintrace.compile(..., vmap=True)` for batched lanes). The sections
+> below describe how `D_RTRL` works under the hood and the knobs it exposes.
+
 [`01-basics-integrator.py`](../../examples/drtrl/01-basics-integrator.py).
 Path `ValinaRNNCell → Linear`. Both cells use `braintrace.matmul` internally,
 so both parameter sets end up in the trace.
