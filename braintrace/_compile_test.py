@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
+import jax
 import brainstate
 import jax.numpy as jnp
 import pytest
@@ -221,3 +222,50 @@ def test_documented_options_are_real_constructor_params(algo_name, options):
     params = inspect.signature(cls.__init__).parameters
     for opt in options:
         assert opt in params, f'{algo_name}: documented option {opt!r} is not a constructor parameter'
+
+
+# --- Task 5a: vmap= parameter ------------------------------------------------
+
+class _VmapRNN(brainstate.nn.Module):
+    def __init__(self, n_in=3, n_hidden=4):
+        super().__init__()
+        self.rnn = braintrace.nn.MiniGRU(in_size=n_in, out_size=n_hidden)
+        self.out = braintrace.nn.Linear(n_hidden, 1)
+
+    def update(self, x):
+        return x >> self.rnn >> self.out
+
+
+def test_compile_vmap_builds_forwards_and_grads():
+    model = _VmapRNN()
+    B = 4
+    xb = jnp.ones((B, 3), dtype='float32')
+    learner = braintrace.compile(model, 'D_RTRL', xb, batch_size=B, vmap=True)
+    assert isinstance(learner, brainstate.nn.Vmap)
+
+    out = learner(xb)
+    assert out.shape[0] == B
+    assert bool(jnp.all(jnp.isfinite(out)))
+
+    weights = model.states(brainstate.ParamState)
+    def loss(inp): return jnp.mean(learner(inp) ** 2)
+    grads = brainstate.transform.grad(loss, weights)(xb)
+    leaves = jax.tree.leaves(grads)
+    assert all(bool(jnp.all(jnp.isfinite(g))) for g in leaves)
+    assert sum(float(jnp.sum(g ** 2)) for g in leaves) > 0.0
+
+
+def test_compile_vmap_requires_batch_size():
+    with pytest.raises(ValueError) as exc:
+        braintrace.compile(_VmapRNN(), 'D_RTRL', jnp.ones((4, 3)), vmap=True)
+    assert 'batch_size' in str(exc.value)
+
+
+def test_compile_vmap_returns_wrapper_exposing_report():
+    model = _VmapRNN()
+    B = 4
+    xb = jnp.ones((B, 3), dtype='float32')
+    learner = braintrace.compile(model, 'D_RTRL', xb, batch_size=B, vmap=True)
+    assert isinstance(learner.module, braintrace.D_RTRL)
+    assert learner.module.report is not None
+    assert learner.module.is_compiled

@@ -15,6 +15,7 @@
 
 from typing import Type, Union
 
+import jax
 import brainstate
 
 from ._misc import CompilationError
@@ -104,6 +105,7 @@ def compile(
     batch_size=None,
     seed=None,
     verbose=0,
+    vmap=False,
     **options,
 ):
     """Define an eligibility-trace online-learning model in one call.
@@ -139,20 +141,35 @@ def compile(
         Report verbosity printed at compile time: ``0`` (default) silent, ``1``
         the structural summary, ``2`` additionally compiler WARNING/ERROR
         diagnostics. Other values raise :class:`ValueError`.
+    vmap : bool, optional
+        When ``False`` (default) states are initialized with
+        ``init_all_states(model, batch_size=batch_size)``. When ``True``, states
+        are created under
+        ``brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)``
+        and the learner is wrapped in
+        ``brainstate.nn.Vmap(vmap_states='new')``. In vmap mode:
+        ``example_inputs`` carry the batch axis (axis 0); ``batch_size`` is
+        **required** and used as the vmap ``axis_size``; the return value is a
+        ``brainstate.nn.Vmap`` whose ``.module`` is the learner (use
+        ``result.module.report``). Requires a model whose hidden states are all
+        (re)created in ``init_all_states``; models holding construction-time
+        states may raise ``brainstate.transform.BatchAxisError``.
     **options
         Forwarded to the algorithm constructor. See *Algorithm options* below.
 
     Returns
     -------
-    ETraceAlgorithm
+    ETraceAlgorithm or brainstate.nn.Vmap
         The compiled learner, carrying a :attr:`~ETraceAlgorithm.report`. Call
-        ``.update(*inputs)`` to train.
+        ``.update(*inputs)`` to train. When ``vmap=True``, returns a
+        ``brainstate.nn.Vmap`` wrapper; access the learner via ``.module``.
 
     Raises
     ------
     ValueError
-        If ``algorithm`` is an unknown name, no ``example_inputs`` are given, or
-        ``verbose`` is not in ``{0, 1, 2}``.
+        If ``algorithm`` is an unknown name, no ``example_inputs`` are given,
+        ``verbose`` is not in ``{0, 1, 2}``, or ``vmap=True`` without
+        ``batch_size``.
     TypeError
         If ``algorithm`` is neither an ``ETraceAlgorithm`` subclass nor a string,
         or a required algorithm option (see below) is missing.
@@ -216,19 +233,44 @@ def compile(
         )
     if verbose not in (0, 1, 2):
         raise ValueError(f'verbose must be 0, 1, or 2, got {verbose!r}.')
+    if vmap and batch_size is None:
+        raise ValueError(
+            'compile(..., vmap=True) requires batch_size, used as the per-sample '
+            'vmap axis size. Pass batch_size=<n_batch> matching the batch axis '
+            '(axis 0) of example_inputs.'
+        )
 
-    # --- state initialization (always) --- #
-    if seed is not None:
-        with brainstate.random.seed_context(seed):
-            brainstate.nn.init_all_states(model, batch_size=batch_size)
+    if vmap:
+        # Per-sample vmap scheme: example_inputs carry the batch axis (axis 0);
+        # the eligibility-trace graph is built per-lane on an unbatched sample,
+        # while hidden + trace states are created with the new per-sample axis.
+        learner = cls(model, **options)
+        unbatched = jax.tree.map(lambda a: a[0], example_inputs)
+
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)
+        def _init():
+            brainstate.nn.init_all_states(model)
+            learner.compile_graph(*unbatched)
+
+        if seed is not None:
+            with brainstate.random.seed_context(seed):
+                _init()
+        else:
+            _init()
+        result = brainstate.nn.Vmap(learner, vmap_states='new')
     else:
-        brainstate.nn.init_all_states(model, batch_size=batch_size)
+        # --- state initialization (always) --- #
+        if seed is not None:
+            with brainstate.random.seed_context(seed):
+                brainstate.nn.init_all_states(model, batch_size=batch_size)
+        else:
+            brainstate.nn.init_all_states(model, batch_size=batch_size)
+        # --- construct + compile the graph --- #
+        learner = cls(model, **options)
+        learner.compile_graph(*example_inputs)
+        result = learner
 
-    # --- construct + compile the graph --- #
-    learner = cls(model, **options)
-    learner.compile_graph(*example_inputs)
-
-    # --- guardrail: nothing trainable online --- #
+    # --- guardrail: nothing trainable online (uses learner.graph in both modes) --- #
     if len(learner.graph.hidden_param_op_relations) == 0:
         raise CompilationError(
             'No trainable weights are routed through ETP ops, so the model has '
@@ -241,4 +283,4 @@ def compile(
     if verbose >= 1:
         learner.report.show(level=verbose)
 
-    return learner
+    return result
