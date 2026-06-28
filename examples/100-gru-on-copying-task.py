@@ -232,28 +232,51 @@ class BPTTTrainer(Trainer):
         return loss
 
 
-online = OnlineTrainer(
-    target=GRUNet(10, 200, 10, 1),
-    opt=braintools.optim.Adam(0.001),
-    n_epochs=1000,
-    n_seq=200,
-    batch_size=128,
-    # batch_train='batch',
-    vjp_method='multi-step',
-)
-online_losses = online.f_train()
+def main(
+    *,
+    n_epochs: int = 1000,
+    n_seq: int = 200,
+    batch_size: int = 128,
+    n_rec: int = 200,
+    vjp_method: str = 'multi-step',
+    run_bptt: bool = True,
+    plot: bool = True,
+) -> dict:
+    online = OnlineTrainer(
+        target=GRUNet(10, n_rec, 10, 1),
+        opt=braintools.optim.Adam(0.001),
+        n_epochs=n_epochs,
+        n_seq=n_seq,
+        batch_size=batch_size,
+        # batch_train='batch',
+        vjp_method=vjp_method,
+    )
+    online_losses = online.f_train()
 
-bptt = BPTTTrainer(
-    target=GRUNet(10, 200, 10, 1),
-    opt=braintools.optim.Adam(0.001),
-    n_epochs=1000,
-    n_seq=200,
-    batch_size=128,
-)
-bptt_losses = bptt.f_train()
+    result = {"losses": list(online_losses)}
 
-plt.plot(online_losses, label='Online Learning')
-plt.plot(bptt_losses, label='BPTT')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.legend()
+    if run_bptt:
+        bptt = BPTTTrainer(
+            target=GRUNet(10, n_rec, 10, 1),
+            opt=braintools.optim.Adam(0.001),
+            n_epochs=n_epochs,
+            n_seq=n_seq,
+            batch_size=batch_size,
+        )
+        bptt_losses = bptt.f_train()
+        result["bptt_losses"] = list(bptt_losses)
+
+    if plot:
+        plt.plot(online_losses, label='Online Learning')
+        if run_bptt:
+            plt.plot(bptt_losses, label='BPTT')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.show()
+
+    return result
+
+
+if __name__ == '__main__':
+    main()

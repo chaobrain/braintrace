@@ -485,6 +485,7 @@ class Trainer:
     def f_train(self):
         acc_max = 0.
         t0 = time.time()
+        losses = []
         for bar_idx, (inputs, outputs) in enumerate(self.loader):
             if bar_idx > self.n_epochs:
                 break
@@ -503,6 +504,7 @@ class Trainer:
                 f'time={time.time() - t0:.2f} s'
             )
             print(desc)
+            losses.append(float(mse_ls))
             if acc > acc_max:
                 acc_max = acc
 
@@ -510,6 +512,7 @@ class Trainer:
             if acc_max > self.acc_threshold:
                 print(f'Accuracy reaches {self.acc_threshold * 100.}% at {bar_idx}th epoch. Stop training.')
                 break
+        return losses
 
 
 def training(
@@ -526,14 +529,16 @@ def training(
     tau_syn=10. * u.ms,  # Time constant of the synapse
     tau_out=10. * u.ms,  # Time constant of the output
     method='expsm_diag',  # Online learning method
+    n_epochs=1000,  # Maximum number of training batches
+    visualize=False,  # Whether to visualize network activity before training
 ):
     # data
     loader = EvidenceAccumulation(batch_size=batch_size)
 
     # network
     assert net in ['coba', 'cuba'], 'Unknown network type.'
-    cls = SNNCobaNet if net == 'coba' else SNNCubaNet
-    net = cls(
+    net_cls = SNNCobaNet if net == 'coba' else SNNCubaNet
+    net_obj = net_cls(
         loader.num_inputs,
         n_rec,
         loader.num_outputs,
@@ -546,19 +551,50 @@ def training(
         rec_scale=rec_scale,
         w_ei_ratio=w_ei_ratio,
     )
-    net.visualize(loader.sampling(brainstate.random.split_key(5))[0], n2show=5)
+    if visualize:
+        net_obj.visualize(loader.sampling(brainstate.random.split_key(5))[0], n2show=5)
 
     # trainer
     trainer = Trainer(
-        net,
+        net_obj,
         braintools.optim.Adam(lr=lr),
         loader,
         loader.n_sim,
-        n_epochs=1000,
+        n_epochs=n_epochs,
         method=method,
         acc_threshold=0.90,
     )
-    trainer.f_train()
+    return trainer.f_train()
+
+
+def main(
+    *,
+    batch_size: int = 128,
+    n_rec: int = 200,
+    n_epochs: int = 1000,
+    net: str = 'coba',
+    method: str = 'expsm_diag',
+    plot: bool = True,
+) -> dict:
+    with brainstate.environ.context(dt=1.0 * u.ms):
+        losses = training(
+            batch_size=batch_size,
+            n_rec=n_rec,
+            n_epochs=n_epochs,
+            net=net,
+            method=method,
+            visualize=False,
+        )
+    if plot:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        plt.plot(losses)
+        plt.xlabel('Batch')
+        plt.ylabel('CE Loss')
+        plt.title('002 · COBA EI-RSNN')
+        plt.show()
+    return {"losses": losses}
 
 
 if __name__ == '__main__':
@@ -572,5 +608,6 @@ if __name__ == '__main__':
             net='coba',
             tau_a=1500.0 * u.ms,
             tau_syn=5. * u.ms,
-            tau_neu=400. * u.ms
+            tau_neu=400. * u.ms,
+            visualize=True,
         )
