@@ -979,3 +979,29 @@ class TestPPPropDictGradientRouting:
         # All gradient leaves should be finite.
         for leaf in flat:
             assert jnp.all(jnp.isfinite(leaf)), f"Non-finite gradient leaf with shape {leaf.shape}"
+
+
+def _docstring_rnn():
+    """The exact ``RNN`` model used in the ``pp_prop`` docstring example."""
+
+    class RNN(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+            self.out = braintrace.nn.Linear(20, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    return RNN()
+
+
+def test_docstring_compile_example_runs():
+    """Verify the runnable ``braintrace.compile`` example in ``pp_prop``'s docstring."""
+    model = _docstring_rnn()
+    x0 = brainstate.random.randn(1)
+    learner = braintrace.compile(model, braintrace.pp_prop, x0, decay_or_rank=0.9)
+    y = learner(x0)
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1

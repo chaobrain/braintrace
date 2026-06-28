@@ -431,3 +431,29 @@ class TestElemwiseBatchingMode:
 
     def test_d_rtrl_batching_matches_per_example(self):
         _assert_batching_matches_per_example(lambda m, **kw: braintrace.D_RTRL(m, **kw))
+
+
+def _docstring_rnn():
+    """The exact ``RNN`` model used in the ``ParamDimVjpAlgorithm`` docstring example."""
+
+    class RNN(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+            self.out = braintrace.nn.Linear(20, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    return RNN()
+
+
+def test_docstring_compile_example_runs():
+    """Verify the ``braintrace.compile`` example in ``ParamDimVjpAlgorithm``'s docstring."""
+    model = _docstring_rnn()
+    x0 = brainstate.random.randn(1)
+    learner = braintrace.compile(model, braintrace.D_RTRL, x0)
+    y = learner(x0)
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1

@@ -685,10 +685,10 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = RNN()
-        >>> _ = brainstate.nn.init_all_states(model)
-        >>> learner = braintrace.D_RTRL(model)  # alias of ParamDimVjpAlgorithm
         >>> x0 = brainstate.random.randn(1)
-        >>> learner.compile_graph(x0)   # trace the graph once
+        >>> # ``braintrace.D_RTRL`` is an alias of ``ParamDimVjpAlgorithm``; one call
+        >>> # initialises states, builds the trace graph, and returns a learner.
+        >>> learner = braintrace.compile(model, braintrace.D_RTRL, x0)
         >>> y = learner(x0)             # forward pass + eligibility-trace update
 
     References

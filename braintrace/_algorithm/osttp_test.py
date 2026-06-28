@@ -170,3 +170,31 @@ class TestSmokeLossDecreases(unittest.TestCase):
         y = jnp.ones((1, 3))
         losses = _run(algo, y_target=y, pass_y=True)
         assert losses[-1] < losses[0]
+
+
+def _docstring_net():
+    """The exact ``Net`` model used in the ``OSTTP`` docstring example."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.cell = braintrace.nn.ValinaRNNCell(1, 20, activation='tanh')
+            self.out = braintrace.nn.Linear(20, 1)
+
+        def update(self, x):
+            return x >> self.cell >> self.out
+
+    return Net()
+
+
+def test_docstring_compile_example_runs():
+    """Verify the runnable ``braintrace.compile`` example in ``OSTTP``'s docstring."""
+    model = _docstring_net()
+    x0 = brainstate.random.randn(1)
+    # one (n_target, n_l) feedback matrix per HiddenGroup (here n_l = 20)
+    B = jax.random.normal(jax.random.PRNGKey(0), (1, 20))
+    learner = braintrace.compile(model, braintrace.OSTTP, x0, B_list=[B])
+    y = learner.update(x0, y_target=brainstate.random.randn(1))
+    assert y.shape == (1,)
+    assert bool(jnp.all(jnp.isfinite(y)))
+    assert len(learner.graph.hidden_param_op_relations) >= 1

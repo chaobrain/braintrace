@@ -138,12 +138,11 @@ class OTTT(ETraceVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = Net()
-        >>> _ = brainstate.nn.init_all_states(model)
-        >>> # ``leak`` is the postsynaptic membrane leak and must be passed
-        >>> # explicitly; it is never inferred from the model.
-        >>> learner = braintrace.OTTT(model, mode='A', leak=0.9)
         >>> x0 = brainstate.random.randn(1)
-        >>> learner.compile_graph(x0)
+        >>> # ``leak`` is the postsynaptic membrane leak and must be passed
+        >>> # explicitly; it is never inferred from the model. ``compile`` does the
+        >>> # state init + graph build in one call.
+        >>> learner = braintrace.compile(model, braintrace.OTTT, x0, mode='A', leak=0.9)
         >>> y = learner(x0)
 
     References

@@ -108,12 +108,11 @@ class OSTTP(ParamDimVjpAlgorithm):
         ...         return x >> self.cell >> self.out
         >>>
         >>> model = Net()
-        >>> _ = brainstate.nn.init_all_states(model)
+        >>> x0 = brainstate.random.randn(1)
         >>> # one (n_target, n_l) feedback matrix per HiddenGroup (here n_l = 20)
         >>> B = jax.random.normal(jax.random.PRNGKey(0), (1, 20))
-        >>> learner = braintrace.OSTTP(model, B_list=[B])
-        >>> x0 = brainstate.random.randn(1)
-        >>> learner.compile_graph(x0)
+        >>> # ``compile`` initialises states + builds the trace graph in one call
+        >>> learner = braintrace.compile(model, braintrace.OSTTP, x0, B_list=[B])
         >>> y = learner.update(x0, y_target=brainstate.random.randn(1))
 
     References
