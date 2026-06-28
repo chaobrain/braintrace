@@ -33,8 +33,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: [ "3.13" ]
-        jax-version: [ "0.7.0", "0.8.0", "0.9.0", "" ]  # "" means latest version
+        python-version: [ "3.14" ]
+        jax-version: [ "0.8.0", "0.9.0", "" ]  # "" means latest version
 
     steps:
       - name: Cancel Previous Runs
