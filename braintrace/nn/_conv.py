@@ -17,7 +17,7 @@
 
 import brainstate
 
-from braintrace._etrace_op import conv as etp_conv
+from braintrace._op import conv as etp_conv
 
 __all__ = ['Conv1d', 'Conv2d', 'Conv3d']
 

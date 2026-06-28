@@ -199,12 +199,12 @@ class NonTempParam(brainstate.ParamState):
     ):
         super().__init__(value, name=name)
         if isinstance(op, ETraceOp):
-            self._etrace_op: Optional[ETraceOp] = op
+            self._op: Optional[ETraceOp] = op
             self.op = op.raw_xw_to_y
         else:
             if not callable(op):
                 raise TypeError(f'op must be callable, got {type(op)}')
-            self._etrace_op = None
+            self._op = None
             self.op = op
 
     def execute(self, x):
@@ -246,12 +246,12 @@ class FakeETraceParam(object):
     def __init__(self, value, op):
         self.value = value
         if isinstance(op, ETraceOp):
-            self._etrace_op = op
+            self._op = op
             self.op = op.raw_xw_to_y
         else:
             if not callable(op):
                 raise TypeError(f'op must be callable, got {type(op)}')
-            self._etrace_op = None
+            self._op = None
             self.op = op
 
     def execute(self, x):
@@ -302,13 +302,13 @@ class FakeElemWiseParam(object):
                 raise TypeError(
                     f'op must be ElemWiseOp when an ETraceOp is supplied, got {type(op)}'
                 )
-            self._etrace_op: Optional[ElemWiseOp] = op
+            self._op: Optional[ElemWiseOp] = op
             self.op = op.raw_xw_to_y
             self._is_etrace_op = True
         else:
             if not callable(op):
                 raise TypeError(f'op must be callable, got {type(op)}')
-            self._etrace_op = None
+            self._op = None
             self.op = op
         self.value = weight
         self.name = name

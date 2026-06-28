@@ -32,7 +32,7 @@ import jax
 import numpy as np
 import brainunit as u
 
-from .._etrace_op import (
+from .._op import (
     conv as _new_conv,
     element_wise as _new_element_wise,
     lora_matmul as _new_lora_matmul,

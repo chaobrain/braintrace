@@ -21,7 +21,7 @@ import brainstate
 import braintools
 import brainunit as u
 
-from braintrace._etrace_op import matmul
+from braintrace._op import matmul
 from braintrace._typing import Size, ArrayLike, as_size_tuple
 
 __all__ = [

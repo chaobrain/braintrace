@@ -70,7 +70,7 @@ from typing import TYPE_CHECKING
 
 from . import nn
 from ._compile import compile
-from ._etrace_algorithms import (
+from ._algorithm import (
     ETraceAlgorithm,
     EligibilityTrace,
     ETraceGraphExecutor,
@@ -91,7 +91,7 @@ from ._etrace_algorithms import (
     KappaFilter,
     PresynapticTrace,
 )
-from ._etrace_compiler import (
+from ._compiler import (
     ETraceGraph,
     compile_etrace_graph,
     HiddenParamOpRelation,
@@ -110,7 +110,7 @@ from ._etrace_compiler import (
     DiagnosticKind,
     DiagnosticLevel,
 )
-from ._etrace_op import (
+from ._op import (
     ETPPrimitive,
     matmul,
     element_wise,

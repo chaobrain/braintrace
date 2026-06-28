@@ -1,0 +1,189 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+import unittest
+
+import brainstate
+import jax
+import jax.numpy as jnp
+
+import braintrace
+from braintrace._algorithm.otpe import OTPE
+
+
+def _otpe_net_single_layer():
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = 0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _two_state_net():
+    """Net whose two coupled hidden states form one group with num_state == 2."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+            self.a = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            v, a = self.v.value, self.a.value
+            self.v.value = 0.9 * v + braintrace.matmul(x, self.w.value) - 0.1 * a
+            self.a.value = 0.95 * a + v
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+class TestOTPEConstruction(unittest.TestCase):
+    def test_default_mode_full(self):
+        algo = OTPE(_otpe_net_single_layer(), leak=0.9)
+        assert algo.mode == 'full'
+
+    def test_invalid_mode_raises(self):
+        with self.assertRaises(ValueError):
+            OTPE(_otpe_net_single_layer(), mode='bogus', leak=0.9)
+
+    def test_leak_is_required(self):
+        """leak is never inferred from the model; omitting it is a TypeError."""
+        with self.assertRaises(TypeError):
+            OTPE(_otpe_net_single_layer())
+
+    def test_leak_out_of_range_raises(self):
+        with self.assertRaises(ValueError):
+            OTPE(_otpe_net_single_layer(), leak=1.5)
+
+    def test_num_state_gt_one_raises(self):
+        """Multi-state hidden groups are outside OTPE's LIF regime."""
+        algo = OTPE(_two_state_net(), leak=0.9)
+        with self.assertRaises(ValueError):
+            algo.compile_graph(jnp.ones((1, 3)))
+
+    def test_compile_allocates_R_hat(self):
+        algo = OTPE(_otpe_net_single_layer(), leak=0.9)
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        assert len(algo._R_hat) == len(algo.graph.hidden_param_op_relations)
+
+
+class TestOTPESingleLayer(unittest.TestCase):
+    def test_update_runs_and_produces_gradients(self):
+        net = _otpe_net_single_layer()
+        algo = OTPE(net, leak=0.9, mode='full')
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        def loss(x_):
+            return (algo.update(x_) ** 2).sum()
+
+        grads, _ = brainstate.augment.grad(
+            loss, algo.param_states, return_value=True
+        )(x)
+        g = grads[next(iter(grads))]
+        assert g.shape == (3, 3)
+        assert jnp.any(g != 0.0)
+
+
+class TestOTPEApproxMode(unittest.TestCase):
+    def test_approx_uses_factored_traces(self):
+        net = _otpe_net_single_layer()
+        algo = OTPE(net, mode='approx', leak=0.9)
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        assert len(algo._R_hat_x) == len(algo.graph.hidden_param_op_relations)
+        assert len(algo._R_hat_g) == len(algo.graph.hidden_param_op_relations)
+
+    def test_approx_runs(self):
+        net = _otpe_net_single_layer()
+        algo = OTPE(net, mode='approx', leak=0.9)
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        def loss(x_):
+            return (algo.update(x_) ** 2).sum()
+
+        grads, _ = brainstate.augment.grad(
+            loss, algo.param_states, return_value=True
+        )(x)
+        g = grads[next(iter(grads))]
+        assert g.shape == (3, 3)
+
+
+def _toy_net():
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = jax.nn.tanh(
+                0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
+    x = jnp.ones((1, 3))
+    algo.compile_graph(x)
+    algo.init_etrace_state()
+
+    losses = []
+    for _ in range(n_steps):
+        def loss_fn(x_):
+            out = algo.update(x_, y_target=y_target) if pass_y else algo.update(x_)
+            target = jnp.ones_like(out)
+            return ((out - target) ** 2).mean()
+
+        grads, loss_val = brainstate.augment.grad(
+            loss_fn, algo.param_states, return_value=True
+        )(x)
+        for path, st in algo.param_states.items():
+            st.value = st.value - lr * grads[path]
+        losses.append(float(loss_val))
+    return losses
+
+
+class TestSmokeLossDecreases(unittest.TestCase):
+    def test_otpe(self):
+        losses = _run(OTPE(_toy_net(), leak=0.9))
+        assert losses[-1] < losses[0]

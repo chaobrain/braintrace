@@ -18,7 +18,7 @@
 import brainstate
 import brainunit as u
 
-from braintrace._etrace_op import matmul, sparse_matmul, lora_matmul
+from braintrace._op import matmul, sparse_matmul, lora_matmul
 from braintrace._typing import ArrayLike
 
 __all__ = [
