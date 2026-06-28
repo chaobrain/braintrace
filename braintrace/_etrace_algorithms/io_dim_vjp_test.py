@@ -367,3 +367,27 @@ class TestRNNCells:
         assert leaves
         for leaf in leaves:
             assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
+
+
+# ---------------------------------------------------------------------------
+# Internal Batching() mode — elemwise eligibility trace regression
+# ---------------------------------------------------------------------------
+
+class TestElemwiseBatchingMode:
+    """Regression: ``etp_elemwise`` under ``brainstate.mixin.Batching()`` for the
+    IO-dimension (ES-D-RTRL) solver.
+
+    See ``param_dim_vjp_test.TestElemwiseBatchingMode`` for the full description.
+    The batched eligibility-trace gradient of a per-element ``element_wise`` weight
+    must equal the batch-mean of the per-example unbatched gradients, with no
+    leaked batch axis — the elemwise primitive is registered ``batched=False`` so
+    the batch axis must be detected by shape and reduced in the solve stage.
+    """
+
+    def test_io_dim_batching_matches_per_example(self):
+        # Imported lazily from the sibling test module to share the leaky-cell
+        # harness and ground-truth comparison without duplicating it.
+        from .param_dim_vjp_test import _assert_batching_matches_per_example
+        _assert_batching_matches_per_example(
+            lambda m, **kw: braintrace.IODimVjpAlgorithm(m, 0.9, **kw)
+        )
