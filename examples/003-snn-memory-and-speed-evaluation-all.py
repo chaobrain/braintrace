@@ -399,7 +399,7 @@ class Trainer(object):
         @brainstate.transform.jit
         def _update_and_acc(grads, outs, targets):
             # gradient updates
-            grads = brainstate.functional.clip_grad_norm(grads, 1.)
+            grads = brainstate.nn.clip_grad_norm(grads, 1.)
             self.opt.update(grads)
 
             # accuracy

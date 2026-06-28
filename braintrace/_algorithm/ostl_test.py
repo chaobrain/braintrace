@@ -70,7 +70,7 @@ def _train_loss(algo, n_steps=10, lr=0.05):
             out = algo.update(x_)
             return ((out - jnp.ones_like(out)) ** 2).mean()
 
-        grads, loss_val = brainstate.augment.grad(
+        grads, loss_val = brainstate.transform.grad(
             loss_fn, algo.param_states, return_value=True
         )(x)
         for path, st in algo.param_states.items():
@@ -184,7 +184,7 @@ class TestRegimesDiffer(unittest.TestCase):
             def loss(x_):
                 return (algo.update(x_) ** 2).sum()
 
-            grads, _ = brainstate.augment.grad(
+            grads, _ = brainstate.transform.grad(
                 loss, algo.param_states, return_value=True
             )(x)
             return grads[next(iter(grads))]
@@ -232,7 +232,7 @@ def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
             target = jnp.ones_like(out)
             return ((out - target) ** 2).mean()
 
-        grads, loss_val = brainstate.augment.grad(
+        grads, loss_val = brainstate.transform.grad(
             loss_fn, algo.param_states, return_value=True
         )(x)
         for path, st in algo.param_states.items():

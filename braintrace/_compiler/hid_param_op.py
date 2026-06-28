@@ -621,6 +621,7 @@ def _build_transition_jaxpr(
         invars=[y_var],
         outvars=list(group.hidden_outvars),
         eqns=selected,
+        debug_info=jaxpr.debug_info,
     )
 
 

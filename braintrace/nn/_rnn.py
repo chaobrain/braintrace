@@ -98,7 +98,7 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
 
         # activation function
         if isinstance(activation, str):
-            self.activation = getattr(brainstate.functional, activation)
+            self.activation = getattr(brainstate.nn, activation)
         else:
             assert callable(activation), "The activation function should be a string or a callable function. "
             self.activation = activation
@@ -197,7 +197,7 @@ class GRUCell(brainstate.nn.RNNCell):
 
         # activation function
         if isinstance(activation, str):
-            self.activation = getattr(brainstate.functional, activation)
+            self.activation = getattr(brainstate.nn, activation)
         else:
             assert callable(activation), "The activation function should be a string or a callable function. "
             self.activation = activation
@@ -299,7 +299,7 @@ class CFNCell(brainstate.nn.RNNCell):
 
         # activation function
         if isinstance(activation, str):
-            self.activation = getattr(brainstate.functional, activation)
+            self.activation = getattr(brainstate.nn, activation)
         else:
             assert callable(activation), "The activation function should be a string or a callable function. "
             self.activation = activation
@@ -415,7 +415,7 @@ class MGUCell(brainstate.nn.RNNCell):
 
         # activation function
         if isinstance(activation, str):
-            self.activation = getattr(brainstate.functional, activation)
+            self.activation = getattr(brainstate.nn, activation)
         else:
             assert callable(activation), "The activation function should be a string or a callable function. "
             self.activation = activation
@@ -547,7 +547,7 @@ class LSTMCell(brainstate.nn.RNNCell):
 
         # activation function
         if isinstance(activation, str):
-            self.activation = getattr(brainstate.functional, activation)
+            self.activation = getattr(brainstate.nn, activation)
         else:
             assert callable(activation), "The activation function should be a string or a callable function. "
             self.activation = activation
@@ -655,7 +655,7 @@ class URLSTMCell(brainstate.nn.RNNCell):
 
         # activation function
         if isinstance(activation, str):
-            self.activation = getattr(brainstate.functional, activation)
+            self.activation = getattr(brainstate.nn, activation)
         else:
             assert callable(activation), "The activation function should be a string or a callable function. "
             self.activation = activation

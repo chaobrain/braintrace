@@ -608,7 +608,7 @@ class TestComputeLearningSignalHook:
             out = algo.update(x)
             return (out ** 2).sum()
 
-        grads, _ = brainstate.augment.grad(
+        grads, _ = brainstate.transform.grad(
             loss, algo.param_states, return_value=True
         )(x0)
         assert 'autodiff' in captured  # hook was invoked
