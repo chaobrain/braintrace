@@ -1,7 +1,7 @@
 # D_RTRL: Online Gradient Learning via Eligibility Traces
 
 This tutorial walks through
-[`braintrace.D_RTRL`](../../braintrace/_etrace_algorithms/d_rtrl.py), the online
+[`braintrace.D_RTRL`](../../braintrace/_algorithm/d_rtrl.py), the online
 eligibility-trace gradient estimator shipped with BrainTrace, using the
 numbered examples under `examples/drtrl/`.
 
@@ -123,12 +123,12 @@ so both parameter sets end up in the trace.
 
 ## 11. API reference pointers
 
-- [`braintrace.D_RTRL`](../../braintrace/_etrace_algorithms/d_rtrl.py) — alias for
+- [`braintrace.D_RTRL`](../../braintrace/_algorithm/d_rtrl.py) — alias for
   `ParamDimVjpAlgorithm`.
-- [`braintrace.ES_D_RTRL` / `braintrace.pp_prop`](../../braintrace/_etrace_algorithms/pp_prop.py)
+- [`braintrace.ES_D_RTRL` / `braintrace.pp_prop`](../../braintrace/_algorithm/pp_prop.py)
   — the I/O-dimension variant (separate future tutorial).
-- [`braintrace.compile_etrace_graph`](../../braintrace/_etrace_compiler/graph.py)
+- [`braintrace.compile_etrace_graph`](../../braintrace/_compiler/graph.py)
   — called internally by `D_RTRL.compile_graph`.
-- [`braintrace.register_primitive`](../../braintrace/_etrace_op/_primitive.py)
+- [`braintrace.register_primitive`](../../braintrace/_op/_primitive.py)
   — add your own ETP primitive.
 - [`CLAUDE.md`](../../CLAUDE.md) — architectural overview of BrainTrace.

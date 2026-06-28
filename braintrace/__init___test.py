@@ -33,7 +33,7 @@ import pytest
 
 import braintrace
 import braintrace._legacy as legacy
-from braintrace._etrace_algorithms.oracle_models import tanh_rnn
+from braintrace._algorithm.oracle_models import tanh_rnn
 
 
 # ===========================================================================
@@ -206,8 +206,8 @@ def test_nn_unknown_name_raises_attribute_error():
 # --- Task 7: lock the drifted implementation facts (F-17) --------------------
 
 def test_ostl_is_two_classes_not_a_factory():
-    from braintrace._etrace_algorithms.param_dim_vjp import ParamDimVjpAlgorithm
-    from braintrace._etrace_algorithms.io_dim_vjp import IODimVjpAlgorithm
+    from braintrace._algorithm.param_dim_vjp import ParamDimVjpAlgorithm
+    from braintrace._algorithm.io_dim_vjp import IODimVjpAlgorithm
     assert isinstance(braintrace.OSTLRecurrent, type)
     assert isinstance(braintrace.OSTLFeedforward, type)
     assert issubclass(braintrace.OSTLRecurrent, ParamDimVjpAlgorithm)
@@ -215,7 +215,7 @@ def test_ostl_is_two_classes_not_a_factory():
 
 
 def test_iodim_lives_in_io_dim_vjp_module():
-    from braintrace._etrace_algorithms.io_dim_vjp import IODimVjpAlgorithm
+    from braintrace._algorithm.io_dim_vjp import IODimVjpAlgorithm
     assert braintrace.IODimVjpAlgorithm is IODimVjpAlgorithm
     assert braintrace.pp_prop is braintrace.ES_D_RTRL  # aliases
 

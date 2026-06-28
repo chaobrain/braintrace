@@ -95,7 +95,7 @@ trained to match the cumulative spike rate.
 adaptation currents. `04-neurons-coba-ei-rsnn.py` builds a Dale-law E/I
 block where recurrent signs are fixed by the initialiser. In all three
 cases, pp_prop needs no modification — the per-primitive rules in
-`braintrace/_etrace_op/` cover the dense matmul gate, and the neuron
+`braintrace/_op/` cover the dense matmul gate, and the neuron
 dynamics are transparent to the algorithm.
 
 ### 3.3 Batching (files 05-06)
@@ -153,7 +153,7 @@ one axis.
    feeds multiple disjoint hidden groups, pp_prop allocates one trace per
    group but relies on the per-primitive rule to handle the summation.
 3. **Operator-invariant rule.** Each new operator needs a hand-written
-   `xy_to_dw` / `init_pp` rule in `braintrace/_etrace_op/`. See
+   `xy_to_dw` / `init_pp` rule in `braintrace/_op/`. See
    `CLAUDE.md` for the "adding a new primitive" recipe.
 4. **Weight-through-weight pathways are not supported.** If a trainable
    ETP weight $W_1$ feeds another trainable ETP weight $W_2$ before
@@ -174,7 +174,7 @@ where the diagonal approximation loses signal it will lag.
 
 - The `ES-D-RTRL` manuscript:
   [https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2](https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2)
-- `braintrace/_etrace_algorithms/pp_prop.py` — full docstrings and mathematical
+- `braintrace/_algorithm/pp_prop.py` — full docstrings and mathematical
   derivation of the update rules.
 - `docs/tutorials/drtrl.md` — the parameter-dimensional dual algorithm
   (D_RTRL / `ParamDimVjpAlgorithm`).

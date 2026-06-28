@@ -20,7 +20,7 @@ import brainstate
 import braintools
 import brainunit as u
 
-from braintrace._etrace_op import element_wise
+from braintrace._op import element_wise
 from braintrace._typing import ArrayLike, as_size_tuple as _as_size_tuple
 from ._linear import Linear
 

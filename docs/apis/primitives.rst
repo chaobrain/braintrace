@@ -93,7 +93,7 @@ algorithms look up the rule for a primitive at compile time.
      - pp_prop / ES-D-RTRL trace initialiser. Returns a zero array shaped to
        hold the IO-dim trace.
 
-The four registries live in :mod:`braintrace._etrace_op` and are populated by
+The four registries live in :mod:`braintrace._op` and are populated by
 :func:`register_primitive`.
 
 

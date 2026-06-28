@@ -19,7 +19,7 @@ import jax
 import brainstate
 
 from ._misc import CompilationError
-from ._etrace_algorithms import (
+from ._algorithm import (
     ETraceAlgorithm,
     D_RTRL,
     pp_prop,
