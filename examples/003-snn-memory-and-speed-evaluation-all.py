@@ -352,6 +352,8 @@ class Trainer(object):
         return losses.mean(), acc
 
     def _compile_etrace_function(self, input_info):
+        # kept manual: uses vmap_init_all_states with state_tag='new' and Batching() mode;
+        # braintrace.compile uses init_all_states which is incompatible with this vmap state scheme
         if self.args.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, mode=brainstate.mixin.Batching())
         elif self.args.method == 'diag':
@@ -440,6 +442,7 @@ class Trainer(object):
         inputs = u.math.flatten(inputs, start_axis=2)
         indices = np.arange(inputs.shape[0])
 
+        # kept manual: BPTT baseline — no online algorithm to migrate
         # initialize the states
         brainstate.nn.vmap_init_all_states(self.target, axis_size=inputs.shape[1], state_tag='new')
         model = brainstate.nn.Vmap(self.target, vmap_states='new')

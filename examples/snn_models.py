@@ -405,6 +405,7 @@ class OnlineTrainer(Trainer):
         # weights
         weights = self.target.states().subset(brainstate.ParamState)
 
+        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
         # initialize the online learning model
         model = braintrace.pp_prop(self.target, self.decay_or_rank)
 
@@ -465,6 +466,7 @@ class BPTTTrainer(Trainer):
     def batch_train(self, inputs, targets):
         weights = self.target.states().subset(brainstate.ParamState)
 
+        # kept manual: BPTT baseline — no online algorithm to migrate
         # initialize the states
         @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
         def init():

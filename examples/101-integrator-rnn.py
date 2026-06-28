@@ -143,6 +143,7 @@ def train_online(n_epochs=5):
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
+        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
         # Wrap model with the D-RTRL online learning algorithm
         online_model = braintrace.D_RTRL(model)
 

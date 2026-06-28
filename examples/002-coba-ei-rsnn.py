@@ -432,6 +432,7 @@ class Trainer:
         inputs = jnp.asarray(inputs, dtype=brainstate.environ.dftype())  # [T, B, N]
         weights = self.target.states().subset(brainstate.ParamState)
 
+        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
         # initialize the online learning model
         if self.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, decay_or_rank=0.99)
