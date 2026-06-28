@@ -9,6 +9,10 @@ EXAMPLES_DIR = pathlib.Path(__file__).resolve().parents[1]
 
 
 def _load(fname: str):
+    import sys
+    # Clear any stale '_shared' from a previous example suite so each test
+    # suite loads its own _shared (drtrl vs pp_prop have different symbols).
+    sys.modules.pop("_shared", None)
     spec = importlib.util.spec_from_file_location(f"_drtrl_{fname}", EXAMPLES_DIR / fname)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
