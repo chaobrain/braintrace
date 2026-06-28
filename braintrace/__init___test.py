@@ -143,18 +143,12 @@ def test_dynamic_weight_assignment_raises_not_supported():
 
 # --- Task 5: weight inside control flow raises NotImplementedError -----------
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F-SCAN-WEIGHT: the weight-in-control-flow guard intends to raise "
-           "NotImplementedError, but its error-message construction at "
-           "base.py:133 indexes invar_to_hidden_path with the *weight* var "
-           "(absent from that hidden-path map), so a KeyError escapes instead. "
-           "The guard fires, but the wrong exception type surfaces.",
-)
 def test_weight_used_inside_scan_raises_not_implemented():
-    """check_unsupported_op should raise NotImplementedError when a weight var is
-    used within a control-flow op. Today it raises KeyError while building the
-    message (F-SCAN-WEIGHT) — this test pins the intended contract via xfail."""
+    """check_unsupported_op raises NotImplementedError when a weight var is used
+    within a control-flow op. Previously (F-SCAN-WEIGHT) the message construction
+    indexed the hidden-path map with the weight var and a KeyError escaped instead;
+    the message now renders the weight variable directly, so the intended
+    NotImplementedError surfaces."""
 
     class ScanModel(brainstate.nn.Module):
         def __init__(self):

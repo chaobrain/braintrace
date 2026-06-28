@@ -93,7 +93,7 @@ class TestOSTTPTargetProjection(unittest.TestCase):
             out = algo.update(x_, y_target=y)
             return (out ** 2).sum()
 
-        grads, _ = brainstate.augment.grad(
+        grads, _ = brainstate.transform.grad(
             loss, algo.param_states, return_value=True
         )(x)
         g_osttp = grads[next(iter(grads))]
@@ -108,7 +108,7 @@ class TestOSTTPTargetProjection(unittest.TestCase):
             out = algo2.update(x_)
             return (out ** 2).sum()
 
-        grads2, _ = brainstate.augment.grad(
+        grads2, _ = brainstate.transform.grad(
             loss2, algo2.param_states, return_value=True
         )(x)
         g_drtrl = grads2[next(iter(grads2))]
@@ -153,7 +153,7 @@ def _run(algo, n_steps=10, lr=0.05, y_target=None, pass_y=False):
             target = jnp.ones_like(out)
             return ((out - target) ** 2).mean()
 
-        grads, loss_val = brainstate.augment.grad(
+        grads, loss_val = brainstate.transform.grad(
             loss_fn, algo.param_states, return_value=True
         )(x)
         for path, st in algo.param_states.items():

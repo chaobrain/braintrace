@@ -130,7 +130,7 @@ def check_unsupported_op(
         raise NotImplementedError(
             f'Currently, we do not support the weight states are used within a {op_name} function. \n'
             f'Please remove your {op_name} on the intermediate steps. \n\n'
-            f'The weight state is: {self.invar_to_hidden_path[invar]}. \n'
+            f'The weight state variable is: {invar}. \n'
             f'The Jaxpr of the {op_name} function is: \n\n'
             f'{eqn} \n\n'
         )
