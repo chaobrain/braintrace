@@ -106,6 +106,7 @@ from ._etrace_compiler import (
     ModuleInfo,
     extract_module_info,
     CompilationRecord,
+    CompilationReport,
     DiagnosticKind,
     DiagnosticLevel,
 )
@@ -198,6 +199,7 @@ __all__ = [
 
     # compiler diagnostics
     'CompilationRecord',
+    'CompilationReport',
     'DiagnosticKind',
     'DiagnosticLevel',
 
