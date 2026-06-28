@@ -9,9 +9,10 @@ eligibility-trace compilation result. It is a pure view: it owns no state beyond
 the graph it wraps, and it is safe to build lazily whenever a graph is available.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple, cast
 
 import brainstate
+from brainstate.util import FlattedDict
 
 from .diagnostics import CompilationRecord, DiagnosticKind, DiagnosticLevel
 from .graph import ETraceGraph
@@ -73,8 +74,8 @@ class CompilationReport:
         """List of ``(group_index, hidden_paths)`` for each hidden group."""
         return [(g.index, list(g.hidden_paths)) for g in self._graph.hidden_groups]
 
-    def _etrace_paths(self) -> set:
-        paths = set()
+    def _etrace_paths(self) -> Set[Path]:
+        paths: Set[Path] = set()
         for rel in self._graph.hidden_param_op_relations:
             paths.update(rel.trainable_paths.values())
         return paths
@@ -101,7 +102,9 @@ class CompilationReport:
     def excluded_weights(self) -> List[Tuple[Path, Optional[str]]]:
         """``ParamState`` paths not routed through any ETP op, with a reason if known."""
         states = self._graph.module_info.retrieved_model_states
-        param_states = states.filter(brainstate.ParamState)
+        # A single-filter ``filter`` call returns one FlattedDict; narrow the
+        # variadic ``FlattedDict | tuple[FlattedDict, ...]`` return type.
+        param_states = cast(FlattedDict, states.filter(brainstate.ParamState))
         etrace = self._etrace_paths()
         reasons = self._exclusion_reasons()
         return [
@@ -117,7 +120,7 @@ class CompilationReport:
         for g in self._graph.hidden_groups:
             group_paths.update(g.hidden_paths)
         states = self._graph.module_info.retrieved_model_states
-        short = states.filter(brainstate.ShortTermState)
+        short = cast(FlattedDict, states.filter(brainstate.ShortTermState))
         return [p for p in short.keys() if p not in group_paths]
 
     @property
