@@ -222,9 +222,12 @@ class LoRA(brainstate.nn.LoRA):
     def update(self, x: ArrayLike):
         r"""Apply the low-rank adaptation through the ETP ``lora_matmul``.
 
-        Computes :math:`\frac{1}{r} B A\, x` via :func:`braintrace.lora_matmul`
-        (so the LoRA factors participate in online-learning trace
-        computation) and adds the optional base-module output.
+        Computes :math:`y = \frac{1}{r}\, x\, \mathbf{A}\, \mathbf{B}` via
+        :func:`braintrace.lora_matmul`, where :math:`\mathbf{A}` is the
+        input-facing factor ``lora_a`` of shape ``(in, rank)`` and
+        :math:`\mathbf{B}` is the output-facing factor ``lora_b`` of shape
+        ``(rank, out)`` (so the LoRA factors participate in online-learning
+        trace computation), and adds the optional base-module output.
 
         Parameters
         ----------
@@ -238,7 +241,27 @@ class LoRA(brainstate.nn.LoRA):
         """
         param = self.weight.value
         lora_rank = param['lora_b'].shape[0]
-        out = lora_matmul(x, param['lora_b'], param['lora_a'], alpha=1.0 / lora_rank)
+        # ``lora_a`` is the input-facing ``(in, rank)`` factor and must be
+        # applied before ``lora_b`` the ``(rank, out)`` factor:
+        # ``y = alpha * x @ lora_a @ lora_b``.
+        out = lora_matmul(x, param['lora_a'], param['lora_b'], alpha=1.0 / lora_rank)
         if self.base_module is not None:
+            if not callable(self.base_module):
+                raise ValueError('`self.base_module` must be callable.')
             out += self.base_module(x)
         return out
+
+    def __call__(self, x: ArrayLike):
+        """Route the forward pass through the ETP-aware :meth:`update`.
+
+        The upstream :class:`brainstate.nn.LoRA` defines its own ``__call__``
+        that computes the low-rank product directly via plain matmuls,
+        bypassing ``update``. Overriding it here ensures ``layer(x)``
+        dispatches to the ETP-routed :meth:`update`, so the LoRA factors
+        participate in eligibility-trace computation.
+
+        See Also
+        --------
+        update : The ETP-routed forward pass; documents parameters and returns.
+        """
+        return self.update(x)

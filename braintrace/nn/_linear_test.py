@@ -24,6 +24,7 @@ Tests cover:
 """
 
 import brainstate
+import jax
 import jax.numpy as jnp
 import pytest
 import brainunit as u
@@ -491,6 +492,102 @@ class TestLoRA:
         x = brainstate.random.randn(4, 1024)
         y = lora(x)
         assert y.shape == (4, 2048)
+
+    def test_lora_call_routes_through_etp_primitive(self):
+        """``lora(x)`` must bind the ETP ``etp_lora`` primitive (not plain
+        ``dot_general``).
+
+        Regression: the base ``brainstate.nn.LoRA.__call__`` computed the
+        forward directly via ``dot_general`` and never dispatched to
+        braintrace's ETP-routed ``update``, so the LoRA factors silently
+        bypassed eligibility-trace computation.
+        """
+        lora = braintrace.nn.LoRA(in_features=5, lora_rank=2, out_features=4)
+        # batched input -> etp_lora_mm
+        jp = jax.make_jaxpr(lambda z: lora(z))(jnp.ones((8, 5)))
+        prims = {str(e.primitive) for e in jp.jaxpr.eqns}
+        assert 'etp_lora_mm' in prims, prims
+        assert 'dot_general' not in prims, prims
+        # unbatched input -> etp_lora_mv
+        jp1 = jax.make_jaxpr(lambda z: lora(z))(jnp.ones((5,)))
+        prims1 = {str(e.primitive) for e in jp1.jaxpr.eqns}
+        assert 'etp_lora_mv' in prims1, prims1
+
+    def test_lora_call_with_base_module_still_binds_etp_primitive(self):
+        """With a ``base_module``, ``lora(x)`` must STILL bind the ETP
+        primitive for the LoRA branch and add the base output.
+
+        Guards the ``base_module is not None`` path in ``update`` against a
+        regression of the ``__call__`` bypass: the LoRA factors must route
+        through ``etp_lora`` even when a base module is present.
+        """
+        base = brainstate.nn.Linear(5, 4)
+        lora = braintrace.nn.LoRA(
+            in_features=5, lora_rank=2, out_features=4, base_module=base,
+        )
+        x = jnp.ones((8, 5))
+        jp = jax.make_jaxpr(lambda z: lora(z))(x)
+        prims = {str(e.primitive) for e in jp.jaxpr.eqns}
+        assert 'etp_lora_mm' in prims, prims
+        # Output is the ETP LoRA branch plus the base-module output.
+        La = lora.weight.value['lora_a']
+        Lb = lora.weight.value['lora_b']
+        lora_part = (1.0 / 2) * (x @ La @ Lb)
+        assert jnp.allclose(lora(x), lora_part + base(x), atol=1e-5)
+
+    def test_lora_forward_applies_rank_scaling(self):
+        """Forward equals ``(1/rank) * x @ lora_a @ lora_b``.
+
+        Verifies both the ``1/lora_rank`` scaling and the corrected factor
+        order (``lora_a`` is the input-facing ``(in, rank)`` factor, applied
+        before ``lora_b`` the ``(rank, out)`` factor).
+        """
+        lora = braintrace.nn.LoRA(
+            in_features=3, lora_rank=2, out_features=4,
+            kernel_init=init.Constant(0.5),
+        )
+        x = brainstate.random.randn(6, 3)
+        y = lora(x)
+        La = lora.weight.value['lora_a']  # (3, 2)
+        Lb = lora.weight.value['lora_b']  # (2, 4)
+        expected = (1.0 / 2) * (x @ La @ Lb)
+        assert jnp.allclose(y, expected, atol=1e-5)
+
+    def test_lora_compile_yields_temporal_relation(self):
+        """A LoRA-driven hidden update yields >=1 ETP hidden-param relation
+        under D_RTRL.
+
+        Regression for the ``drtrl/07`` 0-relations bug: because ``lora(x)``
+        previously bypassed the ETP primitive, the compiler saw no ETP op and
+        produced zero ``hidden_param_op_relations`` for the LoRA factors.
+        """
+
+        class LoRACell(brainstate.nn.RNNCell):
+            def __init__(self, n_in, n_hidden, rank=2):
+                super().__init__()
+                self.in_size = n_in
+                self.out_size = n_hidden
+                self.lora = braintrace.nn.LoRA(
+                    in_features=n_in + n_hidden, lora_rank=rank,
+                    out_features=n_hidden, kernel_init=init.KaimingNormal(),
+                )
+
+            def init_state(self, batch_size=None, **kw):
+                self.h = brainstate.HiddenState(
+                    init.param(init.ZeroInit(), self.out_size, batch_size)
+                )
+
+            def update(self, x):
+                xh = jnp.concatenate([x, self.h.value], axis=-1)
+                self.h.value = jax.nn.tanh(self.lora(xh))
+                return self.h.value
+
+        n_in, n_hidden, batch = 2, 6, 4
+        cell = LoRACell(n_in, n_hidden)
+        brainstate.nn.init_all_states(cell, batch_size=batch)
+        learner = braintrace.D_RTRL(cell)
+        learner.compile_graph(jnp.ones((batch, n_in)))
+        assert len(learner.graph.hidden_param_op_relations) >= 1
 
 
 class TestScaledWSLinear:

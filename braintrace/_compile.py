@@ -271,19 +271,10 @@ def compile(
         result = learner
 
     # --- guardrail: nothing trainable online (uses learner.graph in both modes) --- #
-    # A model is trainable online iff at least one ETP primitive involving a
-    # trainable weight was found during graph compilation.  We detect this by
-    # checking whether any RELATION_* diagnostic was emitted: even a
-    # RELATION_EXCLUDED_NON_TEMPORAL record means an ETP op was seen, so the
-    # model has non-temporal ETP params that still receive online gradients.
-    # If neither relations nor diagnostics exist, no ETP primitive touched a
-    # weight — nothing to train online.
-    _graph = learner.graph
-    _has_etp_activity = (
-        len(_graph.hidden_param_op_relations) > 0
-        or len(_graph.diagnostics) > 0
-    )
-    if not _has_etp_activity:
+    # A model is trainable online iff the compiler discovered at least one
+    # hidden<->parameter ETP relation. No relations means no trainable weight
+    # reaches a hidden state through an ETP op — nothing to train online.
+    if len(learner.graph.hidden_param_op_relations) == 0:
         raise CompilationError(
             'No trainable weights are routed through ETP ops, so the model has '
             'nothing to train online. Route trainable parameters through an ETP '
