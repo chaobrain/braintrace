@@ -35,15 +35,13 @@ class Net(brainstate.nn.Module):
 def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 50, plot: bool = True) -> Dict:
     with brainstate.environ.context(dt=1.0 * u.ms):
         model = Net(n_in=1, n_rec=48, n_out=1)
-        brainstate.nn.init_all_states(model, batch_size=batch_size)
+        online_model = braintrace.compile(
+            model, 'pp_prop', jnp.zeros((batch_size, 1)),
+            batch_size=batch_size, decay_or_rank=0.95, vjp_method="single-step",
+        )
         weights = model.states(brainstate.ParamState)
         opt = braintools.optim.Adam(lr=1e-3)
         opt.register_trainable_weights(weights)
-
-        online_model = braintrace.pp_prop(
-            model, decay_or_rank=0.95, vjp_method="single-step"
-        )
-        online_model.compile_graph(jnp.zeros((batch_size, 1)))
 
         def step_loss(inp, tar):
             out = online_model(inp)

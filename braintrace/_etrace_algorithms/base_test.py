@@ -580,5 +580,28 @@ class TestETraceAlgorithmTwoLayerIntegration(unittest.TestCase):
         self.assertGreaterEqual(len(algo.hidden_states), 2)
 
 
+def test_report_before_compile_raises():
+    import brainstate, pytest, braintrace
+    from braintrace._etrace_algorithms.oracle_models import tanh_rnn
+    model = tanh_rnn(n_in=3, n_rec=4, seed=0).factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    algo = braintrace.D_RTRL(model)
+    with pytest.raises(RuntimeError):
+        _ = algo.report
+
+
+def test_report_after_compile_matches_show_graph():
+    import brainstate, jax.numpy as jnp, braintrace
+    from braintrace import CompilationReport
+    from braintrace._etrace_algorithms.oracle_models import tanh_rnn
+    model = tanh_rnn(n_in=3, n_rec=4, seed=0).factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    algo = braintrace.D_RTRL(model)
+    algo.compile_graph(jnp.ones((3,), 'float32'))
+    assert isinstance(algo.report, CompilationReport)
+    # show_graph(return_msg=True) is exactly report.to_str(1)
+    assert algo.show_graph(verbose=False, return_msg=True) == algo.report.to_str(1)
+
+
 if __name__ == '__main__':
     unittest.main()

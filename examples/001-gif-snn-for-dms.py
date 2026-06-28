@@ -15,6 +15,11 @@
 
 # see braintrace documentations for more details.
 
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
 import brainstate
 import braintools
 import matplotlib
@@ -25,30 +30,40 @@ import brainunit as u
 
 from snn_models import DMSDataset, GifNet, OnlineTrainer
 
-if __name__ == '__main__':
+
+def main(
+    *,
+    batch_size: int = 128,
+    num_batch: int = 100,
+    n_rec: int = 200,
+    t_fixation: float = 10.,   # ms
+    t_sample: float = 500.,    # ms
+    t_delay: float = 1000.,    # ms
+    t_test: float = 500.,      # ms
+    plot: bool = True,
+) -> dict:
     with brainstate.environ.context(dt=1. * u.ms):
         data = DMSDataset(
             bg_fr=1. * u.Hz,
-            t_fixation=10. * u.ms,
-            t_sample=500. * u.ms,
-            t_delay=1000. * u.ms,
-            t_test=500. * u.ms,
+            t_fixation=t_fixation * u.ms,
+            t_sample=t_sample * u.ms,
+            t_delay=t_delay * u.ms,
+            t_test=t_test * u.ms,
             n_input=100,
             firing_rate=100. * u.Hz,
-            batch_size=128,
-            num_batch=100,
+            batch_size=batch_size,
+            num_batch=num_batch,
         )
 
         net = GifNet(
             n_in=data.num_inputs,
-            n_rec=200,
+            n_rec=n_rec,
             n_out=data.num_outputs,
             tau_neu=100. * u.ms,
             tau_syn=100. * u.ms,
             tau_I2=1500. * u.ms,
             A2=1. * u.mA,
         )
-        # net.verify(next(iter(data))[0], num_show=2)
 
         onliner = OnlineTrainer(
             target=net,
@@ -59,13 +74,20 @@ if __name__ == '__main__':
         )
         losses, accs = onliner.f_train()
 
-    fig, gs = braintools.visualize.get_figure(1, 2, 4., 5.)
-    fig.add_subplot(gs[0, 0])
-    plt.plot(losses)
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    fig.add_subplot(gs[0, 1])
-    plt.plot(accs)
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy')
-    plt.show()
+    if plot:
+        fig, gs = braintools.visualize.get_figure(1, 2, 4., 5.)
+        fig.add_subplot(gs[0, 0])
+        plt.plot(losses)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        fig.add_subplot(gs[0, 1])
+        plt.plot(accs)
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.show()
+
+    return {"losses": list(losses), "accs": list(accs)}
+
+
+if __name__ == '__main__':
+    main()

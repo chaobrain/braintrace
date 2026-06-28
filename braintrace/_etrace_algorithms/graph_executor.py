@@ -190,75 +190,25 @@ class ETraceGraphExecutor:
         verbose: bool = True,
         return_msg: bool = False,
     ) -> None | str:
-        """
-        Display the graph illustrating the relationships between weights, operators, and hidden states.
+        """Display the graph illustrating weights, operators, and hidden states.
 
-        This function generates a detailed message that describes the structure of the graph, including
-        hidden groups, dynamic states, and weight parameters associated with hidden states. It can either
-        print this message to the console or return it as a string.
+        Renders via :class:`braintrace.CompilationReport`, the single source of
+        truth for the structural summary.
 
         Parameters
         ----------
         verbose : bool, optional
-            If True, the function will print the graph details to the console. Default is True.
+            If True (default), print the summary to stdout.
         return_msg : bool, optional
-            If True, the function will return the graph details as a string. Default is False.
+            If True, also return the summary string. Default False.
 
         Returns
         -------
         None or str
-            If `return_msg` is True, returns a string containing the graph details. Otherwise, returns None.
+            The summary string if ``return_msg`` is True, else None.
         """
-
-        # hidden group
-        msg = '===' * 40 + '\n'
-        msg += 'The hidden groups are:\n\n'
-        hidden_paths = []
-        group_mapping = dict()
-        for group in self.graph.hidden_groups:
-            msg += f'   Group {group.index}: {group.hidden_paths}\n'
-            group_mapping[id(group)] = group.index
-            hidden_paths.extend(group.hidden_paths)
-        msg += '\n\n'
-
-        # other hidden states
-        other_states = []
-        short_states = self.states.filter(brainstate.ShortTermState)
-        # a single-type filter returns one FlattedDict (brainstate types it as a union)
-        assert isinstance(short_states, brainstate.util.FlattedDict)
-        for i, path in enumerate(short_states.keys()):
-            if path not in hidden_paths:
-                other_states.append(path)
-        if len(other_states):
-            msg += 'The dynamic (non-hidden) states are:\n\n'
-            for i, path in enumerate(other_states):
-                msg += f'   Dynamic state {i}: {path}\n'
-            msg += '\n\n'
-
-        # etrace weights
-        etratce_weight_paths = set()
-        if len(self.graph.hidden_param_op_relations):
-            msg += 'The weight parameters which are associated with the hidden states are:\n\n'
-            for i, hp_relation in enumerate(self.graph.hidden_param_op_relations):
-                etratce_weight_paths.add(hp_relation.path)
-                group_indices = [group_mapping[id(group)] for group in hp_relation.hidden_groups]
-                if len(group_indices) == 1:
-                    msg += f'   Weight {i}: {hp_relation.path}  is associated with hidden group {group_indices[0]}\n'
-                else:
-                    msg += f'   Weight {i}: {hp_relation.path}  is associated with hidden groups {group_indices}\n'
-            msg += '\n\n'
-
-        # non etrace weights
-        param_states = self.states.filter(brainstate.ParamState)
-        assert isinstance(param_states, brainstate.util.FlattedDict)
-        non_etratce_weight_paths = set(param_states.keys())
-        non_etratce_weight_paths = non_etratce_weight_paths.difference(etratce_weight_paths)
-        if len(non_etratce_weight_paths):
-            msg += 'The non-etrace weight parameters are:\n\n'
-            for i, path in enumerate(non_etratce_weight_paths):
-                msg += f'   Weight {i}: {path}\n'
-            msg += '\n\n'
-
+        from braintrace._etrace_compiler import CompilationReport
+        msg = CompilationReport(self.graph).to_str(1)
         if verbose:
             print(msg)
         if return_msg:

@@ -26,11 +26,9 @@ Basic Usage
            return self.out(self.rnn(x))
 
    model = MyRNN()
-   model.init_all_states()
 
-   # Wrap with an online learning algorithm (just 2 lines)
-   trainer = braintrace.D_RTRL(model)
-   trainer.compile_graph(example_input)
+   # One call initialises states, compiles the graph, and returns a ready learner
+   learner = braintrace.compile(model, braintrace.D_RTRL, example_input, batch_size=1)
 
    # Now use brainstate.transform.grad as usual — gradients are
    # computed online via eligibility traces, not BPTT.

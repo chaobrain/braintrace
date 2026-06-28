@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Legacy (v0.1.x) parameter-state shims.
+"""Legacy (v0.1.x and 0.0.x) parameter-state shims.
 
 * :class:`ETraceParam` — ``ParamState`` subclass that routes
   :meth:`execute` through an ETP primitive; picked up by the compiler.

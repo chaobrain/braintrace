@@ -32,6 +32,9 @@ from braintrace._etrace_compiler.graph import (
     ETraceGraph,
     compile_etrace_graph,
 )
+from braintrace._etrace_compiler.report import (
+    CompilationReport,
+)
 from braintrace._etrace_compiler.hid_param_op import (
     HiddenParamOpRelation,
     find_hidden_param_op_relations_from_minfo,

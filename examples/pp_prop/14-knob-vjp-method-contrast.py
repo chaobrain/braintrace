@@ -35,6 +35,7 @@ def _accuracy(outputs_seq, labels):
 
 
 def _eval(model, inputs, labels):
+    # kept manual: eval re-init, no online construction
     @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
     def init():
         brainstate.nn.init_all_states(model)

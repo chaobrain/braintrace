@@ -56,25 +56,20 @@ class ConvRNN(brainstate.nn.Module):
 def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict:
     n_classes, n_hidden = 4, 32
     model = ConvRNN(n_hidden, n_classes)
+    # example input: one timestep of shape (B, 28, 1) matching Conv1d in_size=(28,1)
+    online = braintrace.compile(
+        model, 'D_RTRL', jnp.zeros((batch_size, 28, 1)), batch_size=batch_size,
+    )
     weights = model.states(brainstate.ParamState)
     opt = braintools.optim.Adam(3e-3);
     opt.register_trainable_weights(weights)
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        online = braintrace.D_RTRL(model)
-
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model)
-            online.compile_graph(inputs[0, 0])
-
-        init()
-        vmap_model = brainstate.nn.Vmap(online, vmap_states='new')
-        brainstate.transform.for_loop(lambda inp: vmap_model(inp), inputs[:-1])
+        brainstate.transform.for_loop(lambda inp: online(inp), inputs[:-1])
 
         def final_loss():
-            out = vmap_model(inputs[-1])
+            out = online(inputs[-1])
             return braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean(), out
 
         grads, loss, _ = brainstate.transform.grad(final_loss, weights, has_aux=True, return_value=True)()

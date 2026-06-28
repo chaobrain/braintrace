@@ -232,6 +232,7 @@ class OnlineVmapTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
+        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
         # model = braintrace.ES_D_RTRL(self.target, self.decay_or_rank)
         model = braintrace.D_RTRL(self.target)
 
@@ -291,6 +292,7 @@ class OnlineBatchTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
+        # kept manual: re-initializes states inside @jit every batch; braintrace.compile must live outside jit
         # model = braintrace.ES_D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
         model = braintrace.D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
 
@@ -334,6 +336,7 @@ class BPTTTrainer(Trainer):
     def batch_train(self, inputs, targets):
         # inputs: [n_step, n_batch, ...]
 
+        # kept manual: BPTT baseline — no online algorithm to migrate
         brainstate.nn.vmap_init_all_states(self.target, axis_size=inputs.shape[1], state_tag='new')
         model = brainstate.nn.Vmap(self.target, vmap_states='new')
 

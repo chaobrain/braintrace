@@ -47,8 +47,6 @@ import braintrace
 
 dt = 0.04
 num_step = int(1.0 / dt)
-num_batch = 512
-num_hidden = 100
 
 
 # ---------------------------------------------------------------------------
@@ -67,8 +65,8 @@ def build_inputs_and_targets(mean=0.025, scale=0.01, batch_size=10):
     return inputs, targets
 
 
-def train_data():
-    for _ in range(500):
+def train_data(num_batch=512, n_batches_per_epoch=500):
+    for _ in range(n_batches_per_epoch):
         yield build_inputs_and_targets(0.025, 0.01, num_batch)
 
 
@@ -90,7 +88,7 @@ class RNN(brainstate.nn.Module):
 # BPTT Training
 # ---------------------------------------------------------------------------
 
-def train_bptt(n_epochs=5):
+def train_bptt(n_epochs=5, num_batch=512, num_hidden=100, n_batches_per_epoch=500):
     model = RNN(1, num_hidden)
     weights = model.states(brainstate.ParamState)
 
@@ -120,11 +118,15 @@ def train_bptt(n_epochs=5):
 
     losses = []
     for i_epoch in range(n_epochs):
-        for i_batch, (inps, tars) in enumerate(train_data()):
+        epoch_losses = []
+        for i_batch, (inps, tars) in enumerate(train_data(num_batch=num_batch, n_batches_per_epoch=n_batches_per_epoch)):
             loss = f_train(inps, tars)
+            epoch_losses.append(float(loss))
             if (i_batch + 1) % 100 == 0:
                 print(f'[BPTT]   Epoch {i_epoch}, Batch {i_batch + 1:3d}, Loss {loss:.5f}')
-                losses.append(float(loss))
+        # Always record at least the mean epoch loss
+        if epoch_losses:
+            losses.append(float(sum(epoch_losses) / len(epoch_losses)))
 
     return model, f_predict, losses
 
@@ -133,7 +135,7 @@ def train_bptt(n_epochs=5):
 # Online Learning Training (D-RTRL)
 # ---------------------------------------------------------------------------
 
-def train_online(n_epochs=5):
+def train_online(n_epochs=5, num_batch=512, num_hidden=100, n_batches_per_epoch=500):
     model = RNN(1, num_hidden)
     weights = model.states(brainstate.ParamState)
 
@@ -143,17 +145,9 @@ def train_online(n_epochs=5):
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        # Wrap model with the D-RTRL online learning algorithm
-        online_model = braintrace.D_RTRL(model)
-
-        # Initialize states per-sample via vmap, then compile the ETP graph
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model)
-            online_model.compile_graph(inputs[0, 0])
-
-        init()
-        vmap_model = brainstate.nn.Vmap(online_model, vmap_states='new')
+        # Wrap model with the D-RTRL online learning algorithm and vmap over the batch dimension
+        vmap_model = braintrace.compile(model, braintrace.D_RTRL, inputs[0],
+                                        batch_size=inputs.shape[1], vmap=True)
 
         # Loss at a single timestep (with L2 regularization matching BPTT)
         def step_loss(inp, tar, l2_reg=2e-4):
@@ -191,11 +185,15 @@ def train_online(n_epochs=5):
 
     losses = []
     for i_epoch in range(n_epochs):
-        for i_batch, (inps, tars) in enumerate(train_data()):
+        epoch_losses = []
+        for i_batch, (inps, tars) in enumerate(train_data(num_batch=num_batch, n_batches_per_epoch=n_batches_per_epoch)):
             loss = f_train(inps, tars)
+            epoch_losses.append(float(loss))
             if (i_batch + 1) % 100 == 0:
                 print(f'[Online] Epoch {i_epoch}, Batch {i_batch + 1:3d}, Loss {loss:.5f}')
-                losses.append(float(loss))
+        # Always record at least the mean epoch loss
+        if epoch_losses:
+            losses.append(float(sum(epoch_losses) / len(epoch_losses)))
 
     # Build a predict function for evaluation
     @brainstate.transform.jit
@@ -207,47 +205,83 @@ def train_online(n_epochs=5):
 
 
 # ---------------------------------------------------------------------------
-# Train both and compare
+# Entry point
 # ---------------------------------------------------------------------------
 
-print("=" * 60)
-print("Training with BPTT")
-print("=" * 60)
-bptt_model, bptt_predict, bptt_losses = train_bptt(n_epochs=5)
+def main(
+    *,
+    n_epochs: int = 5,
+    num_batch: int = 512,
+    num_hidden: int = 100,
+    n_batches_per_epoch: int = 500,
+    run_bptt: bool = True,
+    plot: bool = True,
+) -> dict:
+    result = {}
 
-print()
-print("=" * 60)
-print("Training with Online Learning (D-RTRL)")
-print("=" * 60)
-online_model, online_predict, online_losses = train_online(n_epochs=5)
+    if run_bptt:
+        print("=" * 60)
+        print("Training with BPTT")
+        print("=" * 60)
+        bptt_model, bptt_predict, bptt_losses = train_bptt(
+            n_epochs=n_epochs,
+            num_batch=num_batch,
+            num_hidden=num_hidden,
+            n_batches_per_epoch=n_batches_per_epoch,
+        )
+        result["bptt_losses"] = bptt_losses
 
-# ---------------------------------------------------------------------------
-# Evaluation and visualization
-# ---------------------------------------------------------------------------
+    print()
+    print("=" * 60)
+    print("Training with Online Learning (D-RTRL)")
+    print("=" * 60)
+    online_model, online_predict, online_losses = train_online(
+        n_epochs=n_epochs,
+        num_batch=num_batch,
+        num_hidden=num_hidden,
+        n_batches_per_epoch=n_batches_per_epoch,
+    )
+    result["losses"] = online_losses
 
-x, y = build_inputs_and_targets(0.025, 0.01, 1)
+    if plot:
+        x, y = build_inputs_and_targets(0.025, 0.01, 1)
+        online_preds = online_predict(x)
 
-bptt_preds = bptt_predict(x)
-online_preds = online_predict(x)
+        if run_bptt:
+            bptt_preds = bptt_predict(x)
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+            axes[0].plot(np.asarray(y[:, 0]).flatten(), label='Ground Truth', color='black', linewidth=2)
+            axes[0].plot(np.asarray(bptt_preds[:, 0]).flatten(), label='BPTT', linestyle='--')
+            axes[0].plot(np.asarray(online_preds[:, 0]).flatten(), label='Online (D-RTRL)', linestyle='--')
+            axes[0].set_xlabel('Time step')
+            axes[0].set_ylabel('Value')
+            axes[0].set_title('Integrator Predictions')
+            axes[0].legend()
+            axes[1].plot(bptt_losses, label='BPTT')
+            axes[1].plot(online_losses, label='Online (D-RTRL)')
+            axes[1].set_xlabel('Training checkpoint')
+            axes[1].set_ylabel('Loss')
+            axes[1].set_title('Training Loss')
+            axes[1].legend()
+        else:
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+            axes[0].plot(np.asarray(y[:, 0]).flatten(), label='Ground Truth', color='black', linewidth=2)
+            axes[0].plot(np.asarray(online_preds[:, 0]).flatten(), label='Online (D-RTRL)', linestyle='--')
+            axes[0].set_xlabel('Time step')
+            axes[0].set_ylabel('Value')
+            axes[0].set_title('Integrator Predictions')
+            axes[0].legend()
+            axes[1].plot(online_losses, label='Online (D-RTRL)')
+            axes[1].set_xlabel('Training checkpoint')
+            axes[1].set_ylabel('Loss')
+            axes[1].set_title('Training Loss')
+            axes[1].legend()
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+        plt.tight_layout()
+        plt.show()
 
-# Left: predictions
-axes[0].plot(np.asarray(y[:, 0]).flatten(), label='Ground Truth', color='black', linewidth=2)
-axes[0].plot(np.asarray(bptt_preds[:, 0]).flatten(), label='BPTT', linestyle='--')
-axes[0].plot(np.asarray(online_preds[:, 0]).flatten(), label='Online (D-RTRL)', linestyle='--')
-axes[0].set_xlabel('Time step')
-axes[0].set_ylabel('Value')
-axes[0].set_title('Integrator Predictions')
-axes[0].legend()
+    return result
 
-# Right: training loss curves
-axes[1].plot(bptt_losses, label='BPTT')
-axes[1].plot(online_losses, label='Online (D-RTRL)')
-axes[1].set_xlabel('Training checkpoint')
-axes[1].set_ylabel('Loss')
-axes[1].set_title('Training Loss')
-axes[1].legend()
 
-plt.tight_layout()
-plt.show()
+if __name__ == '__main__':
+    main()

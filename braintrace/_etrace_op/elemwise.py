@@ -135,7 +135,7 @@ def _elemwise_xy_to_dw(x, hidden_dim, weights):
     return {'weight': hidden_dim}
 
 
-def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None):
     r"""Initialise the D-RTRL weight-shaped trace for an identity op.
 
     Weight-shape and output-shape coincide for the identity, so
@@ -146,35 +146,51 @@ def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
 
     Zero-initialised (matches :math:`\boldsymbol{\epsilon}^0 = \mathbf{0}`).
 
+    Unlike matmul, the elemwise output *is* the weight, so ``y_var`` carries no
+    batch axis. The trace, however, lives in the hidden-state (group) position
+    space and acquires whatever leading axes the hidden state has — in
+    particular a batch axis under :class:`brainstate.mixin.Batching`. The trace
+    leading shape is therefore taken from ``group.varshape`` (which equals the
+    y-shape in the unbatched / per-lane ``vmap`` case, and prepends the batch
+    under ``Batching()``). This keeps the trace shape consistent with the
+    instantaneous term ``df`` (shape ``(*group.varshape, n_state)``) so the scan
+    carry stays well-typed.
+
     Args:
         x_var: Unused (``x_invar_index=None``).
         y_var: Output variable descriptor with shape.
         weight_vars: Dict with key 'weight' (unused in body).
         num_hidden_state: Number of hidden states :math:`n_{\text{state}}`.
+        group: The owning :class:`HiddenGroup`. When supplied, its (possibly
+            batched) ``varshape`` is used for the trace leading axes; falls back
+            to ``y_var`` shape when ``None`` (e.g. direct unit tests).
 
     Returns:
-        ``{'weight': zeros(*y_shape, n_state)}``.
+        ``{'weight': zeros(*leading_shape, n_state)}``.
     """
-    y_shape = y_var.aval.shape
-    return {'weight': jnp.zeros((*y_shape, num_hidden_state))}
+    leading = tuple(group.varshape) if group is not None else tuple(y_var.aval.shape)
+    return {'weight': jnp.zeros((*leading, num_hidden_state))}
 
 
-def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state, group=None):
     r"""Initialise the pp-prop df trace for an identity op.
 
     .. math::
 
-        \boldsymbol{\epsilon}_f \in \mathbb{R}^{\text{(y-shape)} \times n_{\text{state}}}.
+        \boldsymbol{\epsilon}_f \in \mathbb{R}^{\text{(group.varshape)} \times n_{\text{state}}}.
 
     Same shape as ``init_drtrl`` because the op is diagonal. In
     ES-D-RTRL there is no separate :math:`\boldsymbol{\epsilon}_x`
     factor (``x_invar_index=None``); the weight gradient is assembled
-    directly from :math:`\boldsymbol{\epsilon}_f`.
+    directly from :math:`\boldsymbol{\epsilon}_f`. As for ``init_drtrl`` the
+    leading axes come from ``group.varshape`` so the trace carries the batch
+    axis under :class:`brainstate.mixin.Batching`.
 
     Returns:
-        Single array of shape ``(*y_shape, n_state)``.
+        Single array of shape ``(*leading_shape, n_state)``.
     """
-    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+    leading = tuple(group.varshape) if group is not None else tuple(y_var.aval.shape)
+    return jnp.zeros((*leading, num_hidden_state), dtype=y_var.aval.dtype)
 
 
 etp_elemwise_p = register_primitive(

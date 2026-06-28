@@ -76,15 +76,10 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        online = braintrace.D_RTRL(model)
-
-        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-        def init():
-            brainstate.nn.init_all_states(model)
-            online.compile_graph(inputs[0, 0])
-
-        init()
-        vmap_model = brainstate.nn.Vmap(online, vmap_states='new')
+        vmap_model = braintrace.compile(
+            model, braintrace.D_RTRL, inputs[0],
+            batch_size=inputs.shape[1], vmap=True,
+        )
 
         def step_loss(inp, tar):
             out = vmap_model(inp)

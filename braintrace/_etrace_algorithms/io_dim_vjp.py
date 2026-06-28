@@ -236,12 +236,18 @@ def _init_IO_dim_state(
         #   [∂A^t-1/∂θ1, ∂B^t-1/∂θ1, ...]
         #
         init_fn = ETP_RULES_INIT_PP[relation.primitive]
+        # ``etp_elemwise`` has no x/y batch carrier (its output is the weight),
+        # so the df trace must be sized from the hidden group to pick up the
+        # leading batch axis under ``brainstate.mixin.Batching()``. Only that
+        # primitive accepts ``group``; others are unchanged.
+        init_kw = {'group': group} if relation.primitive is etp_elemwise_p else {}
         etrace_dfs[key] = EligibilityTrace(
             init_fn(
                 relation.x_var,
                 relation.y_var,
                 relation.trainable_vars,
-                group.num_state
+                group.num_state,
+                **init_kw,
             )
         )
 
@@ -459,12 +465,25 @@ def _solve_IO_dim_weight_gradients(
             df = dfs[df_key] / correction_factor
             df_hid = df * dG_hidden_groups[group.index]
 
+            # ``etp_elemwise`` is registered ``batched=False`` (its output is the
+            # weight, so its primitive identity carries no batch), but under
+            # ``brainstate.mixin.Batching()`` the hidden group it feeds *is*
+            # batched. Detect that from the shapes — the batched hidden group
+            # wraps the unbatched elemwise weight, so ``group.varshape`` has a
+            # leading axis that ``y_var`` lacks — and reduce the batch explicitly.
+            # (``is_batched_primitive`` cannot see this, which is why it must not
+            # gate the branch.)
+            elemwise_batched = (
+                relation.primitive is etp_elemwise_p
+                and len(group.varshape) > relation.y_var.aval.ndim
+            )
+
             if fast_solve:
                 # Fast path: sum over n_state first, then ONE xy_to_dw call.
                 # Valid because every xy_to_dw rule is a VJP of a linear map
                 # in its cotangent argument, so sum-then-apply == apply-then-sum.
                 df_summed = u.math.sum(df_hid, axis=-1)
-                if (relation.primitive is etp_elemwise_p) and batched:
+                if elemwise_batched:
                     # Elemwise-in-batched-hidden: strip batch dim via a single
                     # vmap over batch, then sum batch after.
                     dg_dict = jax.tree.map(
@@ -476,7 +495,7 @@ def _solve_IO_dim_weight_gradients(
             else:
                 # Legacy path: vmap xy_to_dw across n_state slices, then sum.
                 fn_vmap = jax.vmap(lambda df_: _call(df_, weights_dict), in_axes=-1, out_axes=-1)
-                if (relation.primitive is etp_elemwise_p) and batched:
+                if elemwise_batched:
                     fn_vmap2 = jax.vmap(fn_vmap)
                     dg_dict = jax.tree.map(
                         lambda a: _sum_dim(_sum_dim(a, axis=-1), axis=0),

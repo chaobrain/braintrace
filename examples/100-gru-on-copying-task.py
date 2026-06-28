@@ -122,19 +122,12 @@ class OnlineTrainer(Trainer):
         if self.batch_train_method == 'vmap':
             # 初始化在线学习模型
             # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的
-            model = braintrace.ParamDimVjpAlgorithm(self.target, vjp_method=self.vjp_method)
-
-            @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
-            def init():
-                # 对于每一个batch的数据，重新初始化模型状态
-                brainstate.nn.init_all_states(self.target)
-                # 使用一个样例数据编译在线学习eligibility trace
-                model.compile_graph(inputs[0, 0])
-
-            init()
-            model = brainstate.nn.Vmap(model, vmap_states='new')
+            model = braintrace.compile(self.target, braintrace.ParamDimVjpAlgorithm, inputs[0],
+                                       batch_size=inputs.shape[1], vmap=True,
+                                       vjp_method=self.vjp_method)
 
         elif self.batch_train_method == 'batch':
+            # kept manual: re-initializes states inside @jit every batch; braintrace.compile must live outside jit
             model = braintrace.ParamDimVjpAlgorithm(
                 self.target, vjp_method=self.vjp_method, mode=brainstate.mixin.Batching())
             brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])
@@ -199,6 +192,7 @@ class BPTTTrainer(Trainer):
         # 需要求解梯度的参数
         weights = self.target.states(brainstate.ParamState)
 
+        # kept manual: BPTT baseline — no online algorithm to migrate
         # initialize the states
         @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
         def init():
@@ -229,28 +223,51 @@ class BPTTTrainer(Trainer):
         return loss
 
 
-online = OnlineTrainer(
-    target=GRUNet(10, 200, 10, 1),
-    opt=braintools.optim.Adam(0.001),
-    n_epochs=1000,
-    n_seq=200,
-    batch_size=128,
-    # batch_train='batch',
-    vjp_method='multi-step',
-)
-online_losses = online.f_train()
+def main(
+    *,
+    n_epochs: int = 1000,
+    n_seq: int = 200,
+    batch_size: int = 128,
+    n_rec: int = 200,
+    vjp_method: str = 'multi-step',
+    run_bptt: bool = True,
+    plot: bool = True,
+) -> dict:
+    online = OnlineTrainer(
+        target=GRUNet(10, n_rec, 10, 1),
+        opt=braintools.optim.Adam(0.001),
+        n_epochs=n_epochs,
+        n_seq=n_seq,
+        batch_size=batch_size,
+        # batch_train='batch',
+        vjp_method=vjp_method,
+    )
+    online_losses = online.f_train()
 
-bptt = BPTTTrainer(
-    target=GRUNet(10, 200, 10, 1),
-    opt=braintools.optim.Adam(0.001),
-    n_epochs=1000,
-    n_seq=200,
-    batch_size=128,
-)
-bptt_losses = bptt.f_train()
+    result = {"losses": list(online_losses)}
 
-plt.plot(online_losses, label='Online Learning')
-plt.plot(bptt_losses, label='BPTT')
-plt.xlabel('Epochs')
-plt.ylabel('Loss')
-plt.legend()
+    if run_bptt:
+        bptt = BPTTTrainer(
+            target=GRUNet(10, n_rec, 10, 1),
+            opt=braintools.optim.Adam(0.001),
+            n_epochs=n_epochs,
+            n_seq=n_seq,
+            batch_size=batch_size,
+        )
+        bptt_losses = bptt.f_train()
+        result["bptt_losses"] = list(bptt_losses)
+
+    if plot:
+        plt.plot(online_losses, label='Online Learning')
+        if run_bptt:
+            plt.plot(bptt_losses, label='BPTT')
+        plt.xlabel('Epochs')
+        plt.ylabel('Loss')
+        plt.legend()
+        plt.show()
+
+    return result
+
+
+if __name__ == '__main__':
+    main()

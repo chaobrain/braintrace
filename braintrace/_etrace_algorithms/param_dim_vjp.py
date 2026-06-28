@@ -98,11 +98,17 @@ def _init_param_dim_state(
         if bwg_key in etrace_bwg:
             raise ValueError(f'The relation {bwg_key} has been added. ')
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
+        # ``etp_elemwise`` has no x/y batch carrier (its output is the weight),
+        # so it needs the hidden group to size the trace's leading (position /
+        # batch) axes. Only that primitive accepts ``group``; others are
+        # unchanged.
+        init_kw = {'group': group} if relation.primitive is etp_elemwise_p else {}
         init_val = init_fn(
             relation.x_var,
             relation.y_var,
             relation.trainable_vars,
             group.num_state,
+            **init_kw,
         )
         if not isinstance(init_val, dict):
             raise TypeError(
@@ -534,8 +540,28 @@ def _solve_param_dim_weight_gradients(
     # via ``fold_batch``; unbatched-primitive paths (not in ``batched_paths``)
     # never grew a batch axis and must be left intact.
     for key, val in temp_data.items():
-        if key in batched_paths and key not in folded_paths:
+        if key in folded_paths:
+            continue
+        if key in batched_paths:
             temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
+        else:
+            # Unbatched-primitive paths usually carry no batch axis. But under
+            # ``brainstate.mixin.Batching()`` a diagonal op with no ``x`` carrier
+            # (``etp_elemwise``: its output is the weight itself, so neither its
+            # input nor output rank reveals the batch) still acquires a leading
+            # batch axis from the batched hidden state it feeds. ``is_batched_
+            # primitive`` does not flag it, so reduce any leading axes the
+            # parameter itself does not have. This is a no-op for genuinely
+            # unbatched paths (e.g. ``etp_mv``) whose gradient already matches
+            # the parameter rank, and for the per-lane vmap path.
+            ref = weight_vals[key]
+            temp_data[key] = jax.tree.map(
+                lambda g, p: (
+                    u.math.sum(g, axis=tuple(range(u.math.ndim(g) - u.math.ndim(p))))
+                    if u.math.ndim(g) > u.math.ndim(p) else g
+                ),
+                val, ref,
+            )
 
     # update the weight gradients
     for key, val in temp_data.items():

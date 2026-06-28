@@ -331,3 +331,103 @@ class TestHelpers:
         unitless, restore = _remove_units(tree)
         restored = restore(unitless)
         npt.assert_array_equal(restored['w'], tree['w'])
+
+
+class _LeakyCell(brainstate.nn.Module):
+    """Recurrent leaky integrator with BOTH an ETP matmul (``W``) and an ETP
+    ``element_wise`` weight (``alpha``); the recurrence makes the eligibility
+    trace non-trivial across time. Used by the ``Batching()``-mode tests."""
+
+    def __init__(self, nin, nh):
+        super().__init__()
+        self.nh = nh
+        self.W = braintrace.nn.Linear(nin + nh, nh)
+        self.alpha = brainstate.ParamState(jnp.linspace(0.5, 0.95, nh))
+
+    def init_state(self, batch_size=None, **kw):
+        size = (self.nh,) if batch_size is None else (batch_size, self.nh)
+        self.u = brainstate.HiddenState(jnp.zeros(size))
+
+    def update(self, x):
+        a = jnp.clip(braintrace.element_wise(self.alpha.value), 0.0, 1.0)
+        wx = self.W(jnp.concatenate([x, self.u.value], axis=-1))
+        u_next = a * self.u.value + (1 - a) * wx
+        self.u.value = u_next
+        return u_next
+
+
+def _accumulate_online_grads(model, algo_ctor, inputs, targets, batched):
+    """Single-step eligibility-trace gradient summed over time.
+
+    ``inputs``/``targets`` are ``(T, B, ...)`` when ``batched`` else ``(T, ...)``.
+    Returns the per-path gradient pytree.
+    """
+    weights = model.states(brainstate.ParamState)
+
+    @brainstate.transform.jit
+    def run(inputs, targets):
+        if batched:
+            online = algo_ctor(model, mode=brainstate.mixin.Batching())
+            brainstate.nn.init_all_states(model, batch_size=inputs.shape[1])
+        else:
+            online = algo_ctor(model)
+            brainstate.nn.init_all_states(model)
+        online.compile_graph(inputs[0])
+
+        def step_loss(inp, tar):
+            out = online(inp)
+            return ((out - tar) ** 2).mean(), out
+
+        def grad_step(prev, x):
+            inp, tar = x
+            fg = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
+            g, _, _ = fg(inp, tar)
+            return jax.tree.map(lambda a, b: a + b, prev, g), None
+
+        init = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
+        grads, _ = brainstate.transform.scan(grad_step, init, (inputs, targets))
+        return grads
+
+    return run(inputs, targets)
+
+
+def _assert_batching_matches_per_example(algo_ctor, atol=1e-4, rtol=1e-3):
+    """The internal ``Batching()`` gradient must equal the batch-mean of the
+    per-example unbatched gradients (the loss averages over the batch), and must
+    carry no leaked batch axis (each gradient leaf matches its parameter shape).
+    """
+    nin, nh, batch, n_time = 4, 6, 5, 7
+    brainstate.random.seed(0)
+    model = _LeakyCell(nin, nh)
+    xs = brainstate.random.randn(n_time, batch, nin)
+    ys = brainstate.random.randn(n_time, batch, nh)
+
+    g_batched = _accumulate_online_grads(model, algo_ctor, xs, ys, batched=True)
+    per = [
+        _accumulate_online_grads(model, algo_ctor, xs[:, b], ys[:, b], batched=False)
+        for b in range(batch)
+    ]
+    g_ref = jax.tree.map(lambda *gs: sum(gs) / batch, *per)
+
+    for key in g_batched:
+        for bl, rl in zip(jax.tree.leaves(g_batched[key]), jax.tree.leaves(g_ref[key])):
+            assert bl.shape == rl.shape, (key, bl.shape, rl.shape)
+            npt.assert_allclose(
+                u.get_mantissa(bl), u.get_mantissa(rl), rtol=rtol, atol=atol
+            )
+
+
+class TestElemwiseBatchingMode:
+    """Regression: ``etp_elemwise`` under ``brainstate.mixin.Batching()``.
+
+    A model with a per-element ``element_wise`` weight (e.g. an SNN leak/``alpha``)
+    trained in the internal ``Batching()`` mode used to crash with a custom-VJP
+    shape mismatch: the elemwise eligibility trace acquired a leading batch axis
+    from the batched hidden state that was never reduced, because ``etp_elemwise``
+    is registered ``batched=False`` and the solve-time batch-sum keyed off
+    ``is_batched_primitive``. The batched gradient must equal the batch-mean of
+    the per-example unbatched gradients, with no leaked batch axis.
+    """
+
+    def test_d_rtrl_batching_matches_per_example(self):
+        _assert_batching_matches_per_example(lambda m, **kw: braintrace.D_RTRL(m, **kw))

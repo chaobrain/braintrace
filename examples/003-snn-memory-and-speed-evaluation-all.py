@@ -352,6 +352,8 @@ class Trainer(object):
         return losses.mean(), acc
 
     def _compile_etrace_function(self, input_info):
+        # kept manual: uses vmap_init_all_states with state_tag='new' and Batching() mode;
+        # braintrace.compile uses init_all_states which is incompatible with this vmap state scheme
         if self.args.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, mode=brainstate.mixin.Batching())
         elif self.args.method == 'diag':
@@ -440,6 +442,7 @@ class Trainer(object):
         inputs = u.math.flatten(inputs, start_axis=2)
         indices = np.arange(inputs.shape[0])
 
+        # kept manual: BPTT baseline — no online algorithm to migrate
         # initialize the states
         brainstate.nn.vmap_init_all_states(self.target, axis_size=inputs.shape[1], state_tag='new')
         model = brainstate.nn.Vmap(self.target, vmap_states='new')
@@ -477,7 +480,7 @@ class Trainer(object):
         mem_after = get_mem_usage()
         return loss, acc, mem_after
 
-    def f_train(self):
+    def f_train(self, n_batches: int = 10):
         x_local = np.random.rand(self.args.data_length, self.args.batch_size, 128 * 128 * 2) < 0.1
         x_local = np.asarray(x_local, dtype=np.float32)
         y_local = np.random.randint(0, 11, size=(self.args.batch_size,))
@@ -486,7 +489,7 @@ class Trainer(object):
 
         # training
         losses, acces, mems, times = [], [], [], []
-        for i_batch in range(10):
+        for i_batch in range(n_batches):
             t0 = time.time()
             if self.args.method == 'bptt':
                 loss, acc, mem = jax.block_until_ready(self.bptt_train(x_local, y_local))
@@ -505,16 +508,18 @@ class Trainer(object):
             losses.append(loss)
             acces.append(acc)
             mems.append(mem)
-        print(
-            f'training loss = {float(np.mean(losses[2:])):.8f}, '
-            f'training acc = {float(np.mean(acces[2:])):.6f}, '
-            f'time = {np.mean(times[2:]):.5f} s, '
-            f'memory before = {mem_before:.2f} GB, '
-            f'memory after = {np.mean(mems[2:]):.2f} GB'
-        )
+        if len(losses) > 2:
+            print(
+                f'training loss = {float(np.mean(losses[2:])):.8f}, '
+                f'training acc = {float(np.mean(acces[2:])):.6f}, '
+                f'time = {np.mean(times[2:]):.5f} s, '
+                f'memory before = {mem_before:.2f} GB, '
+                f'memory after = {np.mean(mems[2:]):.2f} GB'
+            )
+        return losses
 
 
-def network_training(args):
+def network_training(args, n_batches: int = 10):
     brainstate.util.clear_buffer_memory()
     brainstate.random.seed()
     print(args)
@@ -537,7 +542,29 @@ def network_training(args):
 
     # creating the trainer
     trainer = Trainer(net, opt, args)
-    trainer.f_train()
+    return trainer.f_train(n_batches=n_batches)
+
+
+def main(
+    *,
+    method: str = 'diag',
+    n_rec: int = 512,
+    n_layer: int = 3,
+    data_length: int = 1000,
+    batch_size: int = 128,
+    n_batches: int = 10,
+    plot: bool = False,
+) -> dict:
+    setting = default_setting.copy()
+    setting.method = method
+    setting.n_rec = n_rec
+    setting.n_layer = n_layer
+    setting.data_length = data_length
+    setting.batch_size = batch_size
+    if method == 'expsm_diag':
+        setting.etrace_decay = 0.9
+    losses = network_training(setting, n_batches=n_batches)
+    return {"losses": [float(l) for l in losses]}
 
 
 if __name__ == '__main__':

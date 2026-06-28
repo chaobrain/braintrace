@@ -23,7 +23,7 @@ from typing import Dict, Any, Optional
 
 import brainstate
 
-from braintrace._etrace_compiler import ETraceGraph
+from braintrace._etrace_compiler import ETraceGraph, CompilationReport
 from .graph_executor import ETraceGraphExecutor
 from .._typing import Path
 
@@ -130,6 +130,28 @@ class ETraceAlgorithm(brainstate.nn.Module):
             The etrace graph.
         """
         return self.graph_executor.graph
+
+    @property
+    def report(self) -> CompilationReport:
+        """Structured, read-only report of the compiled eligibility-trace graph.
+
+        Returns
+        -------
+        CompilationReport
+            A view over :attr:`graph`.
+
+        Raises
+        ------
+        RuntimeError
+            If accessed before the graph has been compiled.
+        """
+        if not self.is_compiled:
+            raise RuntimeError(
+                'The eligibility-trace graph is not compiled yet. Build the '
+                'learner with braintrace.compile(...) (or call .compile_graph(...)) '
+                'before accessing .report.'
+            )
+        return CompilationReport(self.graph)
 
     @property
     def executor(self) -> ETraceGraphExecutor:
@@ -273,11 +295,28 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         return self.graph_executor.state_id_to_path
 
-    def show_graph(self) -> None:
+    def show_graph(
+        self,
+        verbose: bool = True,
+        return_msg: bool = False,
+    ) -> None | str:
+        """Display the eligibility-trace graph.
+
+        Delegates to :meth:`ETraceGraphExecutor.show_graph`.
+
+        Parameters
+        ----------
+        verbose : bool, optional
+            If True (default), print the summary to stdout.
+        return_msg : bool, optional
+            If True, return the summary string. Default False.
+
+        Returns
+        -------
+        None or str
+            The summary string if ``return_msg`` is True, else None.
         """
-        Show the etrace graph.
-        """
-        self.graph_executor.show_graph()
+        return self.graph_executor.show_graph(verbose=verbose, return_msg=return_msg)
 
     def __call__(self, *args) -> Any:
         """
