@@ -914,3 +914,52 @@ class TestScaledWSLinearWeightFn:
         gain_keys = [k for k in weight_keys if k[-1] == 'gain']
         assert not gain_keys, f"gain key leaked into weight_keys: {gain_keys}"
         assert_param_gradients_close(online, bptt, atol=1e-4, keys=weight_keys)
+
+
+class TestScaledWSLinearForwardBiasGain:
+    """Forward correctness regression: gain must NOT scale the bias.
+
+    The bug introduced in 0b2ccef passed ``bias`` into ``matmul`` and then
+    multiplied the whole result (including bias) by ``gain``, yielding
+    ``(x @ std(w)) * gain + bias * gain`` instead of the correct
+    ``(x @ std(w)) * gain + bias``.  This test sets a non-zero bias and a
+    non-unit gain and asserts the braintrace forward matches the brainstate
+    reference forward.
+    """
+
+    def test_bias_not_scaled_by_gain(self):
+        """Non-zero bias with non-unit gain: braintrace must match brainstate."""
+        brainstate.environ.set(precision=64)
+        brainstate.random.seed(7)
+
+        in_size, out_size = 6, 4
+
+        # Build braintrace layer (the one being fixed).
+        bt_layer = braintrace.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
+        # Build brainstate reference layer (uses the original correct forward).
+        bs_layer = brainstate.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
+
+        # Copy weight params from braintrace to brainstate so they are identical.
+        bt_params = bt_layer.weight.value
+        bs_layer.weight.value = dict(bt_params)
+
+        # Override bias and gain on BOTH layers with non-trivial values.
+        bias_val = jnp.array([1.0, 2.0, 3.0, 4.0])
+        gain_val = jnp.array([[2.0, 0.5, 3.0, 1.5]])  # shape (1, out_size)
+
+        new_params = dict(bt_params)
+        new_params['bias'] = bias_val
+        new_params['gain'] = gain_val
+        bt_layer.weight.value = new_params
+        bs_layer.weight.value = dict(new_params)
+
+        x = brainstate.random.randn(3, in_size)
+
+        bt_out = bt_layer.update(x)
+        bs_out = bs_layer.update(x)
+
+        maxabsdiff = float(jnp.max(jnp.abs(bt_out - bs_out)))
+        assert maxabsdiff < 1e-5, (
+            f"braintrace ScaledWSLinear forward differs from brainstate reference "
+            f"by {maxabsdiff:.6f} (max-abs-diff). Bias is being scaled by gain."
+        )

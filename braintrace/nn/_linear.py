@@ -95,16 +95,18 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
         """Apply the weight-standardized linear transform through ETP ``matmul``.
 
         Weight standardization (and the optional mask) are applied inside
-        ``weight_fn``, which closes over the current ``gain`` and ``eps``
-        values.  Routing the transform through :func:`braintrace.matmul` with
+        ``weight_fn``, which closes over the current ``eps`` value only.
+        Routing the transform through :func:`braintrace.matmul` with
         ``weight_fn=`` causes the ETP compiler to track the gradient w.r.t. the
         raw ``weight`` leaf exactly (the standardization Jacobian is recovered
         via ``jax.vjp``).
 
-        Note on ``gain``:  ``gain`` reaches the hidden state *only through* the
-        standardized weight map and is therefore non-temporal for the
-        eligibility trace.  Its online gradient will not match BPTT; only the
-        standardized ``weight`` leaf participates exactly in trace computation.
+        Note on post-ops: both ``gain`` and ``bias`` are applied OUTSIDE the
+        matmul primitive as post-operations, so the eligibility trace tracks
+        only the standardized ``weight`` leaf.  ``gain`` is non-temporal (its
+        online gradient will not match BPTT), while ``bias`` is added after the
+        gain scale so it is not incorrectly multiplied by ``gain``.  Standard
+        autodiff via the multi-step VJP still recovers exact gradients for both.
 
         Parameters
         ----------
@@ -138,9 +140,13 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
             return w
 
         b = params.get('bias', None)
-        result = matmul(x, params['weight'], b, weight_fn=_wfn)
+        # Do NOT pass bias into matmul; add it after gain so that bias is not
+        # scaled by gain.  Correct forward: (x @ std(w)*mask) * gain + b.
+        result = matmul(x, params['weight'], weight_fn=_wfn)
         if gain is not None:
             result = result * gain
+        if b is not None:
+            result = result + b
         return result
 
 
