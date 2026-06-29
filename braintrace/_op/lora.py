@@ -93,11 +93,18 @@ __all__ = [
 ]
 
 
-def _etp_lora_impl(*args, alpha=1.0, has_bias=False):
+def _etp_lora_impl(*args, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
     x, B, A = args[0], args[1], args[2]
+    if b_fn is not None:
+        B = b_fn(B)
+    if a_fn is not None:
+        A = a_fn(A)
     y = alpha * (x @ B @ A)
     if has_bias:
-        y = y + args[3]
+        b = args[3]
+        if bias_fn is not None:
+            b = bias_fn(b)
+        y = y + b
     return y
 
 
@@ -109,7 +116,7 @@ def _lora_trainable_invars(params):
     return base
 
 
-def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
+def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
     r"""Batched LoRA ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through the :math:`y \to A` link.
 
@@ -161,7 +168,7 @@ def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
     return out
 
 
-def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
+def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
     r"""Unbatched LoRA ``yw_to_w`` — identical algebra with no batch axis.
 
     Trace shapes:
@@ -182,7 +189,7 @@ def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False):
     return out
 
 
-def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False):
+def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
     r"""Instantaneous LoRA Jacobian via fused VJP.
 
     **Role in D-RTRL / ES-D-RTRL.** Produces the full instantaneous
@@ -192,36 +199,49 @@ def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False):
     .. math::
 
         \frac{\partial h}{\partial A_{r, k}}
-          = \alpha\, (xB)_r\, g_k,
+          = \alpha\, (x\,b\_fn(B))_r\, g_k \cdot a\_fn'(A_{r,k}),
 
     .. math::
 
         \frac{\partial h}{\partial B_{i, r}}
-          = \alpha\, \sum_k A_{r, k}\, g_k\, x_i
-          = \alpha\, x_i\, (A g)_r,
+          = \alpha\, \sum_k a\_fn(A)_{r, k}\, g_k\, x_i \cdot b\_fn'(B_{i,r}),
 
     .. math::
 
         \frac{\partial h}{\partial b_k}
-          = g_k.
+          = g_k \cdot bias\_fn'(b_k).
 
     All three are computed simultaneously by differentiating
 
     .. code-block:: python
 
-        def _fwd(w): return alpha * (x @ w['lora_b'] @ w['lora_a']) + w['bias']
+        def _fwd(w):
+            B = b_fn(w['lora_b']) if b_fn else w['lora_b']
+            A = a_fn(w['lora_a']) if a_fn else w['lora_a']
+            return alpha * (x @ B @ A) + (bias_fn(w['bias']) if bias_fn else w['bias'])
 
-    and pulling back the cotangent ``hidden_dim``. In D-RTRL this is
-    the :math:`\operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t`
+    and pulling back the cotangent ``hidden_dim``. When all three transform
+    functions are ``None``, the output is bit-identical to the un-transformed
+    case. In D-RTRL this is the
+    :math:`\operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t`
     contribution; in ES-D-RTRL it is the pullback applied at solve-time
     to combine :math:`\boldsymbol{\epsilon}_f^t` with
     :math:`\boldsymbol{\epsilon}_x^t` into the weight gradient.
     """
 
     def _fwd(w):
-        y = alpha * (x @ w['lora_b'] @ w['lora_a'])
+        B = w['lora_b']
+        A = w['lora_a']
+        if b_fn is not None:
+            B = b_fn(B)
+        if a_fn is not None:
+            A = a_fn(A)
+        y = alpha * (x @ B @ A)
         if has_bias:
-            y = y + w['bias']
+            b = w['bias']
+            if bias_fn is not None:
+                b = bias_fn(b)
+            y = y + b
         return u.get_mantissa(y)
 
     _, vjp_fn = jax.vjp(_fwd, weights)
@@ -335,10 +355,10 @@ etp_lora_mv_p.register_etp_rules(
 )
 
 
-def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
+def lora_matmul(x, B, A, *, alpha=1.0, bias=None, b_fn=None, a_fn=None, bias_fn=None):
     r"""ETP-aware LoRA (Low-Rank Adaptation) matrix multiplication.
 
-    Computes :math:`y = \alpha \cdot x \mathbin{@} B \mathbin{@} A \; (+ b)`,
+    Computes :math:`y = \alpha \cdot x \mathbin{@} b\_fn(B) \mathbin{@} a\_fn(A) \; (+ bias\_fn(b))`,
     routing both low-rank factors (and the optional bias) through an ETP
     primitive so they participate in eligibility-trace computation.
     Auto-dispatches batched/unbatched based on ``x.ndim``.
@@ -355,6 +375,19 @@ def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
         Scalar scaling factor :math:`\alpha`. Default ``1.0``.
     bias : ArrayLike or None, optional
         Bias vector, shape ``(out_features,)``. Default ``None``.
+    b_fn : callable or None, optional
+        Elementwise transform applied to the ``B`` factor before the
+        matrix multiplication.  ``b_fn(B)`` must return an array of the
+        same shape as ``B``.  ``None`` means identity (no transform).
+        The VJP of ``b_fn`` is auto-composed inside ``xy_to_dw`` so that
+        gradients w.r.t. the raw ``lora_b`` weights are correct.
+    a_fn : callable or None, optional
+        Elementwise transform applied to the ``A`` factor before the
+        matrix multiplication.  ``a_fn(A)`` must return an array of the
+        same shape as ``A``.  ``None`` means identity.
+    bias_fn : callable or None, optional
+        Elementwise transform applied to ``bias`` before adding.
+        ``None`` means identity.
 
     Returns
     -------
@@ -383,7 +416,9 @@ def lora_matmul(x, B, A, *, alpha=1.0, bias=None):
     unit = x_u * B_u * A_u
     if bias is not None:
         bias_v = u.Quantity(bias).to_decimal(unit)
-        r = p.bind(x_v, B_v, A_v, bias_v, alpha=alpha, has_bias=True)
+        r = p.bind(x_v, B_v, A_v, bias_v, alpha=alpha, has_bias=True,
+                   b_fn=b_fn, a_fn=a_fn, bias_fn=bias_fn)
     else:
-        r = p.bind(x_v, B_v, A_v, alpha=alpha, has_bias=False)
+        r = p.bind(x_v, B_v, A_v, alpha=alpha, has_bias=False,
+                   b_fn=b_fn, a_fn=a_fn, bias_fn=bias_fn)
     return u.maybe_decimal(r * x_u * B_u * A_u)
