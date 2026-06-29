@@ -101,12 +101,14 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
         raw ``weight`` leaf exactly (the standardization Jacobian is recovered
         via ``jax.vjp``).
 
-        Note on post-ops: both ``gain`` and ``bias`` are applied OUTSIDE the
+        Note on post-ops: ``gain`` and ``bias`` are applied OUTSIDE the
         matmul primitive as post-operations, so the eligibility trace tracks
-        only the standardized ``weight`` leaf.  ``gain`` is non-temporal (its
-        online gradient will not match BPTT), while ``bias`` is added after the
-        gain scale so it is not incorrectly multiplied by ``gain``.  Standard
-        autodiff via the multi-step VJP still recovers exact gradients for both.
+        only the standardized ``weight`` leaf.  ``gain`` and ``bias`` are
+        therefore non-temporal for the eligibility trace — in genuine online
+        training their trace-based gradient is partial.  (The multi-step VJP
+        *oracle* path used in tests, which autodiffs through the full rollout,
+        still recovers them exactly; only the online eligibility-trace gradient
+        is non-temporal.)
 
         Parameters
         ----------

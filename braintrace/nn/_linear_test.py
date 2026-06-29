@@ -910,10 +910,12 @@ class TestScaledWSLinearWeightFn:
         assert weight_keys, (
             f"No 'weight' leaf found after flattening. Keys: {list(bptt.keys())}"
         )
-        # 'gain' must NOT appear among asserted keys (non-temporal parameter).
-        gain_keys = [k for k in weight_keys if k[-1] == 'gain']
-        assert not gain_keys, f"gain key leaked into weight_keys: {gain_keys}"
         assert_param_gradients_close(online, bptt, atol=1e-4, keys=weight_keys)
+        # gain is differentiated exactly by the multi-step VJP oracle path (post-scale,
+        # standard autodiff) — distinct from its non-temporal online eligibility-trace gradient.
+        gain_keys = [k for k in bptt if k[-1] == 'gain']
+        assert gain_keys, list(bptt.keys())
+        assert_param_gradients_close(online, bptt, atol=1e-4, keys=gain_keys)
 
 
 class TestScaledWSLinearForwardBiasGain:

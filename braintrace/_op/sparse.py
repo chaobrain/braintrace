@@ -358,10 +358,14 @@ def sparse_matmul(x, weight, *, sparse_mat, bias=None, weight_fn=None, bias_fn=N
         the transform is applied *inside* the primitive so that
         ``xy_to_dw`` auto-composes the derivative via ``jax.vjp``, returning
         the gradient w.r.t. the **raw** data.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
     bias_fn : callable or None, optional
         Elementwise transform applied to ``bias`` before it is added to the
         output.  ``None`` means identity.  The derivative is composed by the
         same ``jax.vjp`` call as ``weight_fn``.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
 
     Returns
     -------

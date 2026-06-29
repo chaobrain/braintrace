@@ -229,6 +229,8 @@ def element_wise(weight, *, weight_fn=None):
         Element-wise function applied to the raw weight mantissa inside
         the primitive. When ``None`` (default), the identity is used and
         the output equals ``weight`` exactly.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
 
     Returns
     -------

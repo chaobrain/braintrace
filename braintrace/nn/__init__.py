@@ -26,7 +26,7 @@ with their :mod:`brainstate.nn` counterparts.
 The exported building blocks fall into four groups:
 
 - **Linear maps** — :class:`Linear`, :class:`SignedWLinear`,
-  :class:`SparseLinear`, :class:`LoRA`.
+  :class:`ScaledWSLinear`, :class:`SparseLinear`, :class:`LoRA`.
 - **Convolutions** — :class:`Conv1d`, :class:`Conv2d`, :class:`Conv3d`.
 - **Read-outs** — :class:`LeakyRateReadout`.
 - **Recurrent cells** — :class:`ValinaRNNCell`, :class:`GRUCell`,

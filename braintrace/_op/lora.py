@@ -381,13 +381,19 @@ def lora_matmul(x, B, A, *, alpha=1.0, bias=None, b_fn=None, a_fn=None, bias_fn=
         same shape as ``B``.  ``None`` means identity (no transform).
         The VJP of ``b_fn`` is auto-composed inside ``xy_to_dw`` so that
         gradients w.r.t. the raw ``lora_b`` weights are correct.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
     a_fn : callable or None, optional
         Elementwise transform applied to the ``A`` factor before the
         matrix multiplication.  ``a_fn(A)`` must return an array of the
         same shape as ``A``.  ``None`` means identity.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
     bias_fn : callable or None, optional
         Elementwise transform applied to ``bias`` before adding.
         ``None`` means identity.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
 
     Returns
     -------

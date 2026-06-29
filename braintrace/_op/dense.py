@@ -428,10 +428,15 @@ def matmul(x, weight, bias=None, *, weight_fn=None, bias_fn=None):
         Elementwise, shape-preserving transform applied to ``weight`` *inside*
         the primitive: the op computes ``y = x @ weight_fn(weight)``. The
         eligibility trace and gradient are taken w.r.t. the raw ``weight``.
-        Operates on the unitless mantissa. Default ``None`` (identity).
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
+        Default ``None`` (identity).
     bias_fn : Callable or None, optional
         Elementwise transform applied to ``bias`` inside the primitive
-        (``+ bias_fn(bias)``). Ignored when ``bias is None``. Default ``None``.
+        (``+ bias_fn(bias)``). Ignored when ``bias is None``.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
+        Default ``None``.
 
     Returns
     -------

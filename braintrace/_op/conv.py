@@ -518,13 +518,24 @@ def conv(
         Optional transform applied to the kernel *inside* the primitive before
         the convolution, e.g. ``lambda w: w ** 2``. The derivative
         ``kernel_fn'`` is composed automatically via ``jax.vjp`` in the
-        ``xy_to_dw`` rule so the eligibility trace is correct. Default
-        ``None`` (identity, bit-identical to the pre-transform behaviour).
+        ``xy_to_dw`` rule so the eligibility trace is correct.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
+        Default ``None`` (identity, bit-identical to the pre-transform behaviour).
     bias_fn : callable or None, optional
         Optional transform applied to the bias *inside* the primitive before
         adding it to the output. Because the bias trace is deferred (spatial
         summation happens in ``yw_to_w``), the derivative ``bias_fn'(b)`` is
         applied as an explicit per-output-channel factor in ``xy_to_dw``.
+        **``bias_fn`` must be an elementwise (per-channel) map**; the bias
+        gradient is recovered as a per-channel Jacobian-diagonal factor via
+        ``jax.vjp(bias_fn, b)(ones)`` and is therefore exact only when the
+        Jacobian is diagonal.  Non-elementwise bias transforms (e.g. a
+        per-channel softmax that couples channels) are not supported.  By
+        contrast, ``kernel_fn`` is unrestricted — it goes through a full
+        ``jax.vjp`` over the entire kernel.
+        The transform operates on the unitless mantissa; physical units are
+        split off before and recombined after.
         Default ``None`` (identity).
 
     Returns
