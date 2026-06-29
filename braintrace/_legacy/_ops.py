@@ -282,7 +282,7 @@ class ElemWiseOp(ETraceOp):
         return self.xw_to_y(None, weights)
 
     def xw_to_y(self, inputs, weights):
-        return _new_element_wise(weights, self._raw_fn)
+        return _new_element_wise(weights, weight_fn=self._raw_fn)
 
     def raw_xw_to_y(self, inputs, weights):
         return self._raw_fn(weights)
