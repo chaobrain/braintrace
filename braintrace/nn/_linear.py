@@ -51,9 +51,10 @@ class Linear(brainstate.nn.Linear):
             The transformed output, of shape ``(..., out_size)``.
         """
         w = self.weight.value['weight']
-        if self.w_mask is not None:
-            w = w * self.w_mask
         b = self.weight.value.get('bias')
+        if self.w_mask is not None:
+            mask = self.w_mask
+            return matmul(x, w, b, weight_fn=lambda ww: ww * mask)
         return matmul(x, w, b)
 
 
@@ -78,10 +79,11 @@ class SignedWLinear(brainstate.nn.SignedWLinear):
         ArrayLike
             The transformed output, of shape ``(..., out_size)``.
         """
-        w = u.math.abs(self.weight.value)
-        if self.w_sign is not None:
-            w = w * self.w_sign
-        return matmul(x, w)
+        w = self.weight.value
+        sign = self.w_sign
+        if sign is not None:
+            return matmul(x, w, weight_fn=lambda ww: u.math.abs(ww) * sign)
+        return matmul(x, w, weight_fn=lambda ww: u.math.abs(ww))
 
 
 class ScaledWSLinear(brainstate.nn.ScaledWSLinear):

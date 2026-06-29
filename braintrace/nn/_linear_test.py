@@ -767,3 +767,69 @@ class TestLinearIntegration:
 
             assert y1.shape == (batch_size, 32)
             assert y2.shape == (batch_size, 32)
+
+
+class TestNnWeightFnExactness:
+    """Masked Linear and SignedWLinear gradients must match BPTT (now exact)."""
+
+    @staticmethod
+    def _rnn_factory(make_layer):
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.nh = 4
+                self.layer = make_layer()
+
+            def init_state(self, batch_size=None, **kw):
+                size = (self.nh,) if batch_size is None else (batch_size, self.nh)
+                self.h = brainstate.HiddenState(jnp.zeros(size))
+
+            def update(self, x):
+                xh = jnp.concatenate([x.reshape(1, -1), self.h.value], axis=-1)
+                self.h.value = jnp.tanh(self.layer(xh))
+                return self.h.value
+
+        def factory():
+            brainstate.random.seed(0)
+            return Cell()
+
+        return factory
+
+    def test_signed_w_linear_matches_bptt(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        factory = self._rnn_factory(lambda: braintrace.nn.SignedWLinear(2 + 4, 4))
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    @staticmethod
+    def _flatten_grads(grads):
+        """Flatten nested dict grad values from Linear (weight dict) to flat keys."""
+        flat = {}
+        for k, v in grads.items():
+            if isinstance(v, dict):
+                for subk, subv in v.items():
+                    flat[k + (subk,)] = subv
+            else:
+                flat[k] = v
+        return flat
+
+    def test_masked_linear_matches_bptt(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        mask = ((jnp.arange(6)[:, None] + jnp.arange(4)[None, :]) % 3 != 0).astype(float)
+        factory = self._rnn_factory(lambda: braintrace.nn.Linear(2 + 4, 4, w_mask=mask))
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = self._flatten_grads(bptt_param_gradients(factory, inputs))
+        online = self._flatten_grads(online_param_gradients(
+            factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
+        ))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
