@@ -41,7 +41,7 @@ re-implemented here; accessing them through ``braintrace.nn`` emits a
 """
 
 from ._conv import Conv1d, Conv2d, Conv3d
-from ._linear import Linear, SignedWLinear, SparseLinear, LoRA
+from ._linear import Linear, SignedWLinear, ScaledWSLinear, SparseLinear, LoRA
 from ._readout import LeakyRateReadout
 from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
 
@@ -49,7 +49,7 @@ __all__ = [
     # conv
     'Conv1d', 'Conv2d', 'Conv3d',
     # linear
-    'Linear', 'SignedWLinear', 'SparseLinear', 'LoRA',
+    'Linear', 'SignedWLinear', 'ScaledWSLinear', 'SparseLinear', 'LoRA',
     # readout
     'LeakyRateReadout',
     # rnn

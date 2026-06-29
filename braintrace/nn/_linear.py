@@ -24,6 +24,7 @@ from braintrace._typing import ArrayLike
 __all__ = [
     'Linear',
     'SignedWLinear',
+    'ScaledWSLinear',
     'SparseLinear',
     'LoRA',
 ]
@@ -93,9 +94,17 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
     def update(self, x):
         """Apply the weight-standardized linear transform through ETP ``matmul``.
 
-        The weight is standardized (zero-mean, unit-variance per output unit)
-        before being routed through :func:`braintrace.matmul`, so it
-        participates in online-learning trace computation.
+        Weight standardization (and the optional mask) are applied inside
+        ``weight_fn``, which closes over the current ``gain`` and ``eps``
+        values.  Routing the transform through :func:`braintrace.matmul` with
+        ``weight_fn=`` causes the ETP compiler to track the gradient w.r.t. the
+        raw ``weight`` leaf exactly (the standardization Jacobian is recovered
+        via ``jax.vjp``).
+
+        Note on ``gain``:  ``gain`` reaches the hidden state *only through* the
+        standardized weight map and is therefore non-temporal for the
+        eligibility trace.  Its online gradient will not match BPTT; only the
+        standardized ``weight`` leaf participates exactly in trace computation.
 
         Parameters
         ----------
@@ -108,11 +117,31 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
             The transformed output, of shape ``(..., out_size)``.
         """
         params = self.weight.value
-        w = brainstate.nn.weight_standardization(params['weight'], self.eps, params.get('gain', None))
-        if self.w_mask is not None:
-            w = w * self.w_mask
+        eps = self.eps
+        gain = params.get('gain', None)
+        mask = self.w_mask
+
+        # ``gain`` is a trainable ParamState leaf that is *non-temporal* for the
+        # eligibility trace: it reaches the hidden state only through the
+        # standardized weight map, so its online gradient will not match BPTT
+        # exactly.  To avoid a JAX tracer-leak (JAX forbids closing over traced
+        # state values in static primitive parameters), we apply weight
+        # standardization *without* gain inside ``weight_fn`` and multiply by
+        # gain *after* the matmul.  This is mathematically equivalent because
+        #   x @ (std(w) * gain) == (x @ std(w)) * gain
+        # when gain has shape (1, out_size), and the ETP trace's hidden_dim
+        # already carries the gain factor through the hidden-to-output Jacobian.
+        def _wfn(ww):
+            w = brainstate.nn.weight_standardization(ww, eps, None)
+            if mask is not None:
+                w = w * mask
+            return w
+
         b = params.get('bias', None)
-        return matmul(x, w, b)
+        result = matmul(x, params['weight'], b, weight_fn=_wfn)
+        if gain is not None:
+            result = result * gain
+        return result
 
 
 class SparseLinear(brainstate.nn.SparseLinear):
