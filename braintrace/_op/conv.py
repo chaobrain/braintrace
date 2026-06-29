@@ -93,8 +93,12 @@ def _etp_conv_impl(
     feature_group_count=1,
     batch_group_count=1,
     dimension_numbers=None,
+    kernel_fn=None,
+    bias_fn=None,
 ):
     x, kernel = args[0], args[1]
+    if kernel_fn is not None:
+        kernel = kernel_fn(kernel)
     y = jax.lax.conv_general_dilated(
         lhs=x,
         rhs=kernel,
@@ -107,7 +111,10 @@ def _etp_conv_impl(
         dimension_numbers=dimension_numbers,
     )
     if has_bias:
-        y = y + args[2]
+        b = args[2]
+        if bias_fn is not None:
+            b = bias_fn(b)
+        y = y + b
     return y
 
 
@@ -339,10 +346,13 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
     then strip it on the way out implicitly via the VJP.
     """
     has_bias = params.get('has_bias', False)
-    # Build conv_general_dilated kwargs; remap 'strides' -> 'window_strides'.
+    kernel_fn = params.get('kernel_fn', None)
+    bias_fn = params.get('bias_fn', None)
+    # Build conv_general_dilated kwargs; remap 'strides' -> 'window_strides';
+    # drop the ETP-only params that conv does not understand.
     conv_kw = {}
     for k, v in params.items():
-        if k == 'has_bias':
+        if k in ('has_bias', 'kernel_fn', 'bias_fn'):
             continue
         if k == 'strides':
             conv_kw['window_strides'] = v
@@ -363,8 +373,11 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
         x_in = x
         hd_in = hidden_dim
 
-    # Kernel gradient via VJP (needs x).
+    # Kernel gradient via VJP (needs x); apply kernel_fn inside so jax.vjp
+    # auto-composes f' for the kernel gradient.
     def _fwd_w(w):
+        if kernel_fn is not None:
+            w = kernel_fn(w)
         return u.get_mantissa(
             jax.lax.conv_general_dilated(x_in, w, **conv_kw)
         )
@@ -376,7 +389,19 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
     if has_bias:
         # Bias gradient = hidden_dim (cotangent at each output position).
         # No spatial summation — the trace stores per-position ∂h/∂b.
-        out['bias'] = hidden_dim
+        bias_grad = hidden_dim
+        if bias_fn is not None:
+            b = weights['bias']
+            _, b_vjp = jax.vjp(bias_fn, b)
+            db = u.get_mantissa(b_vjp(jnp.ones_like(b))[0])  # bias_fn'(b), shape (out_ch,)
+            _, channel_axis, _, _ = _conv_layout(params)
+            batched_rank = n_spatial + 2  # (batch, *spatial, channel) up to permutation
+            axes_right_of_channel = batched_rank - 1 - channel_axis
+            ax = bias_grad.ndim - 1 - axes_right_of_channel
+            shape = [1] * bias_grad.ndim
+            shape[ax] = db.shape[0]
+            bias_grad = bias_grad * db.reshape(shape)
+        out['bias'] = bias_grad
 
     return out
 
@@ -455,6 +480,8 @@ def conv(
     feature_group_count: int = 1,
     batch_group_count: int = 1,
     dimension_numbers: Any = None,
+    kernel_fn=None,
+    bias_fn=None,
 ):
     r"""ETP-aware convolution.
 
@@ -487,6 +514,18 @@ def conv(
     dimension_numbers : Any, optional
         Convolution dimension numbers (e.g. ``('NHWC', 'HWIO', 'NHWC')``).
         Default ``None``, which uses the JAX default layout.
+    kernel_fn : callable or None, optional
+        Optional transform applied to the kernel *inside* the primitive before
+        the convolution, e.g. ``lambda w: w ** 2``. The derivative
+        ``kernel_fn'`` is composed automatically via ``jax.vjp`` in the
+        ``xy_to_dw`` rule so the eligibility trace is correct. Default
+        ``None`` (identity, bit-identical to the pre-transform behaviour).
+    bias_fn : callable or None, optional
+        Optional transform applied to the bias *inside* the primitive before
+        adding it to the output. Because the bias trace is deferred (spatial
+        summation happens in ``yw_to_w``), the derivative ``bias_fn'(b)`` is
+        applied as an explicit per-output-channel factor in ``xy_to_dw``.
+        Default ``None`` (identity).
 
     Returns
     -------
@@ -507,6 +546,12 @@ def conv(
         >>> y = braintrace.conv(x, kernel, strides=(1,), padding='SAME')
         >>> print(y.shape)
         (8, 4, 16)
+        >>>
+        >>> # Apply a kernel transform (squares each weight before conv)
+        >>> y2 = braintrace.conv(x, kernel, strides=(1,), padding='SAME',
+        ...                      kernel_fn=lambda w: w ** 2)
+        >>> print(y2.shape)
+        (8, 4, 16)
     """
     conv_kwargs = dict(
         strides=tuple(strides),
@@ -516,6 +561,8 @@ def conv(
         feature_group_count=feature_group_count,
         batch_group_count=batch_group_count,
         dimension_numbers=dimension_numbers,
+        kernel_fn=kernel_fn,
+        bias_fn=bias_fn,
     )
     x_v, x_u = u.split_mantissa_unit(x)
     kernel_v, kernel_u = u.split_mantissa_unit(kernel)
