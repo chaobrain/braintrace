@@ -1,6 +1,110 @@
 # Release Notes
 
 
+## Version 0.2.2
+
+This release introduces a unified `braintrace.compile` entry point for building
+eligibility-trace online learners, adds a recurrent mixing mode to the
+graph-construction compiler, and fixes eligibility-trace convergence under
+`vmap` / `brainstate.mixin.Batching()`. It also migrates unit handling from
+`saiunit` to `brainunit`, modernizes the toolchain (Python 3.14,
+`brainstate` >= 0.5.2, Codecov), and ships broad documentation, example, and
+test improvements. Internal modules were renamed for brevity; no documented
+0.2.x public API is removed.
+
+### Highlights
+
+#### New: unified `braintrace.compile` entry point
+
+- **`braintrace.compile(model, algorithm, example_input, ...)`** is now the
+  canonical, single-call way to build a compiled online learner. It always
+  initializes states, accepts a `seed`, applies model guardrails, and can emit a
+  verbose compilation report — replacing the manual
+  `init_states` / `learner.compile_graph(x0)` triad.
+- **`vmap=` parameter** for per-sample vmap state initialization. With
+  `vmap=True`, states are built via `vmap_new_states(state_tag='new', ...)` and
+  the learner is wrapped in `brainstate.nn.Vmap(vmap_states='new')`, so
+  eligibility-trace models compose with brainstate's per-sample vmap scheme.
+- **`CompilationReport`**, a structured view over the eligibility-trace graph
+  (relation/weight counts, `etrace_weights`, `excluded_weights`, `report.show()`
+  with verbosity levels). It is exposed via `ETraceAlgorithm.report` and now
+  backs `show_graph`.
+
+#### New: recurrent mixing mode for graph construction
+
+- Add a recurrent mixing mode to eligibility-trace graph construction, broadening
+  the set of cell topologies the compiler can connect (#108).
+
+### Improvements
+
+#### Dependencies and toolchain
+
+- **Replace `saiunit` with `brainunit`** for all unit handling across source,
+  tests, examples, and docs. `brainunit` re-exports `saiunit` internally, so
+  this is a drop-in change (#106).
+- Raise the `brainstate` floor to **>= 0.5.2**, required by the
+  `compile(vmap=True)` path, and drop a duplicate dependency declaration.
+- Update the supported Python version to **3.14** and adjust the CI JAX version
+  matrix.
+- Add **Codecov** coverage reporting and raise source coverage to 93%, with new
+  tests for previously-untested modules (#109).
+
+#### Refactoring
+
+- **Rename internal module packages** for brevity: `_etrace_op` → `_op`,
+  `_etrace_compiler` → `_compiler`, and `_etrace_algorithms` → `_algorithm`.
+  These are private modules; imports were updated package-wide with
+  word-boundary-anchored replacement (#111).
+- Remove the unused `ParamState` from state management.
+- Remove the per-step spectral-normalization path
+  (`normalize_matrix_spectrum`) from D-RTRL, E-Prop, and the OSTL trace scan; it
+  ran `jnp.linalg.eigvals` on every hidden-group Jacobian, was off by default,
+  and was costly.
+
+### Fixes
+
+- **Eligibility-trace convergence under `vmap` batching.** Defer graph
+  compilation during the `vmap_new_states` discovery probe so the executor binds
+  to the real batched states (fixes a `BatchAxisError` when writing batched
+  values), correctly handle models that mix batched and unbatched ETP primitives
+  in the param-dim VJP solve, and align convolution eligibility traces under
+  `brainstate.nn.Vmap(vmap_states='new')`. Restores convergence for the
+  conv-based SNN/RNN training examples.
+- **Element-wise eligibility traces under `brainstate.mixin.Batching()`.** Size
+  the trace from the (batch-aware) hidden group and sum out the leading batch
+  axis in the solver, fixing a scan-carry type mismatch and a custom-VJP
+  backward shape mismatch. This unblocks the default SHD batch trainer, where
+  every LIF leak is an element-wise weight.
+- **`braintrace.nn.LoRA` now routes its forward through the ETP `lora_matmul`
+  primitive**, so LoRA factors participate in eligibility-trace learning (fixes
+  the zero-relations bug) and the factor order is corrected.
+- Resolve pre-existing `mypy` errors in the compiler's `report.py` (#112) and
+  treat `brainunit` / `saiunit` as untyped for `mypy` to clear spurious
+  `attr-defined` errors from their re-export chain.
+- Convert legacy `xfail` tests to positive assertions, silence the `core.Jaxpr`
+  `DebugInfo` deprecation warning, and migrate deprecated `brainstate` APIs
+  (`brainstate.augment` → `brainstate.transform`, `brainstate.functional` →
+  `brainstate.nn`) (#113).
+
+### Documentation and examples
+
+- Make `braintrace.compile` the canonical entry point in every docstring,
+  tutorial, notebook, and example, and fix broken examples (e.g. self-contained
+  RNNs, consistent batch axes); each documented example is now backed by an
+  executable test (#114).
+- Document `CompilationReport` in the API reference and migrate the onboarding
+  guides, quickstart, and tutorials to the unified compile flow.
+- Add a smoke-test harness and a testable `main()` entry point to the
+  standalone examples; repair all docs notebooks so they execute cleanly.
+
+### Notes
+
+- The internal module renames (`_etrace_*` → `_*`), the removal of `ParamState`,
+  and the removal of `normalize_matrix_spectrum` touch private/internal surfaces
+  only; the documented 0.2.x public API is unchanged.
+- Verified locally: the full CPU test suite is green (1604 passed, 3 skipped).
+
+
 ## Version 0.2.1
 
 This is a maintenance release that restores compatibility with the latest
