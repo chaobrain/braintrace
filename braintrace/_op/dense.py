@@ -88,11 +88,16 @@ __all__ = [
 ]
 
 
-def _etp_matmul_impl(*args, has_bias=False):
+def _etp_matmul_impl(*args, has_bias=False, weight_fn=None, bias_fn=None):
     x, w = args[0], args[1]
+    if weight_fn is not None:
+        w = weight_fn(w)
     y = x @ w
     if has_bias:
-        y = y + args[2]
+        b = args[2]
+        if bias_fn is not None:
+            b = bias_fn(b)
+        y = y + b
     return y
 
 
@@ -108,7 +113,7 @@ def _mm_trainable_invars(params):
     return base
 
 
-def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False):
+def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Batched ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through a weight-shaped D-RTRL trace.
 
@@ -162,24 +167,17 @@ def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False):
     return out
 
 
-def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
+def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Batched ``xy_to_dw`` — instantaneous hidden-to-weight Jacobian.
 
     **Role.** Computes :math:`\partial h / \partial W` (and
-    :math:`\partial h / \partial b`) by VJP of :math:`y = x W + b`,
-    pulling back the cotangent ``hidden_dim`` = :math:`\partial h/\partial y`:
+    :math:`\partial h / \partial b`) by VJP of :math:`y = x \, \text{weight\_fn}(W) + \text{bias\_fn}(b)`,
+    pulling back the cotangent ``hidden_dim`` = :math:`\partial h/\partial y`.
+    When ``weight_fn`` / ``bias_fn`` are ``None`` the identity is used and
+    the result is identical to the undecorated matmul.
 
-    .. math::
-
-        \frac{\partial h}{\partial W_{ik}}
-          \;=\; \sum_j \frac{\partial h}{\partial y_j}\,
-                \frac{\partial y_j}{\partial W_{ik}}
-          \;=\; \frac{\partial h}{\partial y_k}\, x_i ,
-
-    .. math::
-
-        \frac{\partial h}{\partial b_k}
-          \;=\; \frac{\partial h}{\partial y_k}.
+    The VJP is taken w.r.t. the **raw** weight dict (before any transform),
+    so the returned gradient is :math:`\partial h / \partial W_{\text{raw}}`.
 
     In D-RTRL notation this is the instantaneous
     :math:`\operatorname{diag}(\mathbf{D}_f^t) \otimes \mathbf{x}^t` term
@@ -193,9 +191,15 @@ def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
     """
 
     def _fwd(w_dict):
-        y = x @ w_dict['weight']
+        w = w_dict['weight']
+        if weight_fn is not None:
+            w = weight_fn(w)
+        y = x @ w
         if has_bias:
-            y = y + w_dict['bias']
+            b = w_dict['bias']
+            if bias_fn is not None:
+                b = bias_fn(b)
+            y = y + b
         return u.get_mantissa(y)
 
     _, vjp_fn = jax.vjp(_fwd, weights)
@@ -280,7 +284,7 @@ def _mv_trainable_invars(params):
     return base
 
 
-def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False):
+def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Unbatched ``yw_to_w`` — same algebra as the batched case, no batch axis.
 
     **Role in D-RTRL.** Realises the :math:`y \to W` chain factor within
@@ -310,15 +314,19 @@ def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False):
     return out
 
 
-def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
+def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Unbatched ``xy_to_dw`` — instantaneous :math:`\partial h / \partial W`.
 
-    Same chain rule as the batched case with no batch axis:
+    Same chain rule as the batched case with no batch axis. When ``weight_fn``
+    / ``bias_fn`` are provided the VJP propagates through them automatically,
+    returning the gradient w.r.t. the **raw** weight:
 
     .. math::
 
-        \frac{\partial h}{\partial W_{ik}} = x_i\, \frac{\partial h}{\partial y_k}, \qquad
-        \frac{\partial h}{\partial b_k}    = \frac{\partial h}{\partial y_k}.
+        \frac{\partial h}{\partial W_{\text{raw}, ik}} = x_i\,
+            f'(W_{\text{raw}})_{ik}\, \frac{\partial h}{\partial y_k}, \qquad
+        \frac{\partial h}{\partial b_{\text{raw}, k}}    =
+            g'(b_{\text{raw}})_k\, \frac{\partial h}{\partial y_k}.
 
     Supplies :math:`\operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t`
     for D-RTRL and the pp-prop solve-time pullback in ES-D-RTRL.
@@ -327,9 +335,15 @@ def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False):
     """
 
     def _fwd(w_dict):
-        y = x @ w_dict['weight']
+        w = w_dict['weight']
+        if weight_fn is not None:
+            w = weight_fn(w)
+        y = x @ w
         if has_bias:
-            y = y + w_dict['bias']
+            b = w_dict['bias']
+            if bias_fn is not None:
+                b = bias_fn(b)
+            y = y + b
         return u.get_mantissa(y)
 
     _, vjp_fn = jax.vjp(_fwd, weights)
@@ -390,13 +404,17 @@ etp_mv_p.register_etp_rules(
 # Public API
 # ---------------------------------------------------------------------------
 
-def matmul(x, weight, bias=None):
+def matmul(x, weight, bias=None, *, weight_fn=None, bias_fn=None):
     r"""ETP-aware matrix multiplication.
 
-    Computes :math:`y = x \mathbin{@} w \; (+ b)`. The operation is routed
-    through an ETP primitive so the weight (and optional bias) participates
-    in eligibility-trace computation. Auto-dispatches to ``etp_mm_p``
-    (batched) or ``etp_mv_p`` (unbatched) based on ``x.ndim``.
+    Computes :math:`y = x \mathbin{@} \text{weight\_fn}(w) \; (+ \text{bias\_fn}(b))`.
+    The operation is routed through an ETP primitive so the weight (and
+    optional bias) participates in eligibility-trace computation.
+    Auto-dispatches to ``etp_mm_p`` (batched) or ``etp_mv_p`` (unbatched)
+    based on ``x.ndim``.
+
+    The eligibility trace and gradient are always taken w.r.t. the **raw**
+    weight/bias before any transform is applied.
 
     Parameters
     ----------
@@ -406,6 +424,14 @@ def matmul(x, weight, bias=None):
         Weight matrix, shape ``(in_features, out_features)``.
     bias : ArrayLike or None, optional
         Bias vector, shape ``(out_features,)``. Default ``None``.
+    weight_fn : Callable or None, optional
+        Elementwise, shape-preserving transform applied to ``weight`` *inside*
+        the primitive: the op computes ``y = x @ weight_fn(weight)``. The
+        eligibility trace and gradient are taken w.r.t. the raw ``weight``.
+        Operates on the unitless mantissa. Default ``None`` (identity).
+    bias_fn : Callable or None, optional
+        Elementwise transform applied to ``bias`` inside the primitive
+        (``+ bias_fn(bias)``). Ignored when ``bias is None``. Default ``None``.
 
     Returns
     -------
@@ -432,6 +458,11 @@ def matmul(x, weight, bias=None):
         >>> y1 = braintrace.matmul(x1, w, bias=b)
         >>> print(y1.shape)
         (4,)
+        >>>
+        >>> # Constrain weights to be non-negative via a transform
+        >>> y2 = braintrace.matmul(x, w, weight_fn=lambda ww: ww ** 2)
+        >>> print(y2.shape)
+        (16, 4)
     """
     p = etp_mm_p if x.ndim >= 2 else etp_mv_p
     x_v, x_u = u.split_mantissa_unit(x)
@@ -439,7 +470,9 @@ def matmul(x, weight, bias=None):
     unit = x_u * weight_u
     if bias is not None:
         bias_v = u.Quantity(bias).to_decimal(unit)
-        r = p.bind(x_v, weight_v, bias_v, has_bias=True)
+        r = p.bind(x_v, weight_v, bias_v, has_bias=True,
+                   weight_fn=weight_fn, bias_fn=bias_fn)
     else:
-        r = p.bind(x_v, weight_v, has_bias=False)
+        r = p.bind(x_v, weight_v, has_bias=False,
+                   weight_fn=weight_fn, bias_fn=bias_fn)
     return u.maybe_decimal(r * x_u * weight_u)

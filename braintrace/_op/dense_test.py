@@ -552,3 +552,60 @@ class TestSeparateParamStateBias:
                             err_msg='D-RTRL dW does not match BPTT')
         npt.assert_allclose(b_leaf, db_bptt, atol=1e-5,
                             err_msg='D-RTRL db does not match BPTT (was it zero?)')
+
+
+class TestWeightFnBiasFn:
+    """y = x @ weight_fn(w) (+ bias_fn(b)); gradient stays w.r.t. raw w/b."""
+
+    def test_forward_applies_weight_fn(self):
+        x = brainstate.random.randn(2, 3)
+        w = brainstate.random.randn(3, 4)
+        out = matmul(x, w, weight_fn=lambda ww: ww ** 2)
+        np.testing.assert_allclose(out, x @ (w ** 2), atol=1e-5)
+
+    def test_forward_applies_bias_fn(self):
+        x = brainstate.random.randn(2, 3)
+        w = brainstate.random.randn(3, 4)
+        b = brainstate.random.randn(4)
+        out = matmul(x, w, bias=b, weight_fn=u.math.abs, bias_fn=lambda bb: bb * 2.0)
+        np.testing.assert_allclose(out, x @ u.math.abs(w) + b * 2.0, atol=1e-5)
+
+    def test_weight_fn_none_is_identity(self):
+        x = brainstate.random.randn(2, 3)
+        w = brainstate.random.randn(3, 4)
+        np.testing.assert_allclose(matmul(x, w, weight_fn=None), matmul(x, w), atol=1e-6)
+
+    def test_mm_xy_to_dw_matches_vjp_through_weight_fn(self):
+        from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+        rule = ETP_RULES_XY_TO_DW[etp_mm_p]
+        x = brainstate.random.randn(2, 3)
+        weights = {'weight': brainstate.random.randn(3, 4), 'bias': brainstate.random.randn(4)}
+        hidden = brainstate.random.randn(2, 4)
+        params = {'has_bias': True, 'weight_fn': lambda ww: ww ** 2, 'bias_fn': u.math.abs}
+
+        def impl(wd):
+            return x @ (wd['weight'] ** 2) + u.math.abs(wd['bias'])
+
+        assert_xy_to_dw_matches_vjp(rule=rule, impl=impl, x=x, hidden_dim=hidden,
+                                    weights=weights, params=params)
+
+    def test_mv_xy_to_dw_matches_vjp_through_weight_fn(self):
+        from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+        rule = ETP_RULES_XY_TO_DW[etp_mv_p]
+        x = brainstate.random.randn(3)
+        weights = {'weight': brainstate.random.randn(3, 4)}
+        hidden = brainstate.random.randn(4)
+        params = {'has_bias': False, 'weight_fn': jnp.tanh}
+
+        def impl(wd):
+            return x @ jnp.tanh(wd['weight'])
+
+        assert_xy_to_dw_matches_vjp(rule=rule, impl=impl, x=x, hidden_dim=hidden,
+                                    weights=weights, params=params)
+
+    def test_yw_to_w_tolerates_transform_params(self):
+        rule = ETP_RULES_YW_TO_W[etp_mv_p]
+        hidden = jnp.arange(4.0)
+        trace = {'weight': jnp.ones((3, 4))}
+        out = rule(hidden, trace, has_bias=False, weight_fn=jnp.tanh, bias_fn=None)
+        assert out['weight'].shape == (3, 4)
