@@ -37,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 import brainunit as u
 
+import brainstate
 import braintrace
 from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
@@ -269,3 +270,49 @@ class TestElemwiseWeightFnInside:
         hidden = brainstate.random.randn(5)
         out = rule(None, hidden, {'weight': brainstate.random.randn(5)}, weight_fn=None)
         np.testing.assert_allclose(out['weight'], hidden, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Exactness gate: D_RTRL == BPTT when element_wise carries weight_fn=tanh
+# ---------------------------------------------------------------------------
+
+class TestElemwiseWeightFnExactness:
+    """element_wise's own weight gradient must include weight_fn' (D_RTRL==BPTT)."""
+
+    @staticmethod
+    def _factory(weight_fn):
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.nh = 4
+                self.W = brainstate.ParamState(brainstate.random.randn(2 + 4, 4) * 0.2)
+                self.alpha = brainstate.ParamState(brainstate.random.randn(4) * 0.5)
+
+            def init_state(self, batch_size=None, **kw):
+                size = (self.nh,) if batch_size is None else (batch_size, self.nh)
+                self.h = brainstate.HiddenState(jnp.zeros(size))
+
+            def update(self, x):
+                a = braintrace.element_wise(self.alpha.value, weight_fn=weight_fn)
+                xh = jnp.concatenate([x.reshape(1, -1), self.h.value], axis=-1)
+                self.h.value = jnp.tanh(a * braintrace.matmul(xh, self.W.value))
+                return self.h.value
+
+        def factory():
+            brainstate.random.seed(0)
+            return Cell()
+
+        return factory
+
+    def test_d_rtrl_matches_bptt_with_elemwise_weight_fn(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        factory = self._factory(weight_fn=jnp.tanh)
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)
