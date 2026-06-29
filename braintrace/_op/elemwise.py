@@ -62,6 +62,7 @@ primitive when composing Jacobians).
   an identity op the weight-shape coincides with the output-shape.
 """
 
+import jax
 import jax.numpy as jnp
 import brainunit as u
 
@@ -73,15 +74,15 @@ __all__ = [
 ]
 
 
-def _etp_elemwise_impl(y):
-    return y
+def _etp_elemwise_impl(w, weight_fn=None):
+    return w if weight_fn is None else weight_fn(w)
 
 
 def _elem_trainable_invars(params):
     return {'weight': 0}
 
 
-def _elemwise_yw_to_w(hidden_dim, trace):
+def _elemwise_yw_to_w(hidden_dim, trace, *, weight_fn=None):
     r"""Diagonal trace propagation for an identity-like op.
 
     **Role in D-RTRL.** Realises the :math:`y \to w` chain factor inside
@@ -106,33 +107,35 @@ def _elemwise_yw_to_w(hidden_dim, trace):
     return {'weight': trace['weight'] * hidden_dim}
 
 
-def _elemwise_xy_to_dw(x, hidden_dim, weights):
+def _elemwise_xy_to_dw(x, hidden_dim, weights, *, weight_fn=None):
     r"""Instantaneous Jacobian for the identity marker.
 
-    **Role in D-RTRL / ES-D-RTRL.** For :math:`y = w` (identity),
+    **Role in D-RTRL / ES-D-RTRL.** For :math:`y = \text{weight\_fn}(w)`,
 
     .. math::
 
-        \frac{\partial h}{\partial w} = \frac{\partial h}{\partial y},
+        \frac{\partial h}{\partial w} = \frac{\partial h}{\partial y} \cdot \text{weight\_fn}'(w),
 
-    so the instantaneous contribution is simply the hidden cotangent
-    itself. In the D-RTRL update this feeds the
-    :math:`\operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t` term
-    with :math:`\mathbf{x}^t \equiv 1` (no separate input). The chain
-    rule through the *external* ``fn`` supplied to :func:`element_wise`
-    is taken care of by JAX on the ops *before* this primitive binds
-    (``gradient_enabled=True`` propagates standard VJPs through the
-    primitive rather than masking them).
+    computed via VJP. When ``weight_fn`` is ``None`` (identity), the
+    contribution is simply the hidden cotangent itself.
 
     Args:
         x: Unused (``x_invar_index=None``).
         hidden_dim: Cotangent :math:`\partial h / \partial y`, shape matches weight.
-        weights: Dict with key 'weight' (unused in body; matches dict API).
+        weights: Dict with key 'weight' (the raw weight mantissa).
+        weight_fn: Element-wise function applied inside the primitive. When
+            ``None``, behaves as identity.
 
     Returns:
-        ``{'weight': hidden_dim}``.
+        ``{'weight': vjp(weight_fn, w)(hidden_dim)[0]}``, or
+        ``{'weight': hidden_dim}`` when ``weight_fn is None``.
     """
-    return {'weight': hidden_dim}
+    # ∂h/∂w = (∂h/∂y) · weight_fn'(w). For the identity (weight_fn None) this is
+    # just the cotangent itself.
+    if weight_fn is None:
+        return {'weight': hidden_dim}
+    _, vjp_fn = jax.vjp(weight_fn, weights['weight'])
+    return {'weight': u.get_mantissa(vjp_fn(hidden_dim)[0])}
 
 
 def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None):
@@ -209,26 +212,29 @@ etp_elemwise_p.register_etp_rules(
 )
 
 
-def element_wise(weight, fn=lambda w: w):
+def element_wise(weight, *, weight_fn=None):
     r"""ETP-aware element-wise operation.
 
-    Applies ``fn`` to ``weight`` and passes the result through a marker
-    primitive. The operation is treated as *diagonal* in the hidden-state
-    space, so the weight participates in eligibility-trace computation as a
-    per-element trainable parameter.
+    Applies ``weight_fn`` to ``weight`` *inside* the ETP primitive, so
+    the transform is visible to the eligibility-trace compiler. The
+    operation is treated as *diagonal* in the hidden-state space; the
+    weight participates in trace computation as a per-element trainable
+    parameter.
 
     Parameters
     ----------
     weight : ArrayLike
-        Weight parameter.
-    fn : Callable, optional
-        Element-wise function applied to ``weight`` before the primitive
-        binds. Default is the identity ``lambda w: w``.
+        Weight parameter (may be a :class:`brainunit.Quantity`).
+    weight_fn : Callable or None, optional
+        Element-wise function applied to the raw weight mantissa inside
+        the primitive. When ``None`` (default), the identity is used and
+        the output equals ``weight`` exactly.
 
     Returns
     -------
     ArrayLike
-        ``fn(weight)``, with the same shape as ``weight``.
+        ``weight_fn(weight)`` (or ``weight`` when ``weight_fn`` is
+        ``None``), with the same shape as ``weight``.
 
     Examples
     --------
@@ -245,11 +251,10 @@ def element_wise(weight, fn=lambda w: w):
         >>>
         >>> # Apply a non-linearity to the weight
         >>> import jax.numpy as jnp
-        >>> y1 = braintrace.element_wise(w, fn=jnp.tanh)
+        >>> y1 = braintrace.element_wise(w, weight_fn=jnp.tanh)
         >>> print(y1.shape)
         (5,)
     """
-    y = fn(weight)
-    y_v, y_u = u.split_mantissa_unit(y)
-    r = etp_elemwise_p.bind(y_v)
-    return u.maybe_decimal(r * y_u)
+    w_v, w_u = u.split_mantissa_unit(weight)
+    r = etp_elemwise_p.bind(w_v, weight_fn=weight_fn)
+    return u.maybe_decimal(r * w_u)
