@@ -315,11 +315,11 @@ etp_sp_mv_p.register_etp_rules(
 )
 
 
-def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
+def sparse_matmul(x, weight, *, sparse_mat, bias=None):
     r"""ETP-aware sparse matrix multiplication.
 
     Computes :math:`y = x \mathbin{@} \mathrm{sparse}(w) \; (+ b)`, where
-    only the non-zero entries (``weight_data``) of the fixed sparse pattern
+    only the non-zero entries (``weight``) of the fixed sparse pattern
     are trainable and participate in eligibility-trace computation.
     Auto-dispatches batched/unbatched based on ``x.ndim``.
 
@@ -327,7 +327,7 @@ def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
     ----------
     x : ArrayLike
         Input array.
-    weight_data : ArrayLike
+    weight : ArrayLike
         Sparse-matrix data, i.e. the non-zero values, shape ``(nnz,)``.
     sparse_mat : object
         Sparse-matrix structure (e.g. a ``brainunit.sparse`` matrix object).
@@ -344,7 +344,7 @@ def sparse_matmul(x, weight_data, *, sparse_mat, bias=None):
     """
     p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p
     x_v, x_u = u.split_mantissa_unit(x)
-    w_v, w_u = u.split_mantissa_unit(weight_data)
+    w_v, w_u = u.split_mantissa_unit(weight)
     unit = x_u * w_u
     if bias is not None:
         bias_v = u.Quantity(bias).to_decimal(unit)
