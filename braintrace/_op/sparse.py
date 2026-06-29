@@ -90,12 +90,17 @@ __all__ = [
 ]
 
 
-def _etp_sp_matmul_impl(*args, sparse_mat=None, has_bias=False):
+def _etp_sp_matmul_impl(*args, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
     x, weight_data = args[0], args[1]
+    if weight_fn is not None:
+        weight_data = weight_fn(weight_data)
     w = sparse_mat.with_data(weight_data)
     y = x @ w
     if has_bias:
-        y = y + args[2]
+        b = args[2]
+        if bias_fn is not None:
+            b = bias_fn(b)
+        y = y + b
     return y
 
 
@@ -115,7 +120,7 @@ def _sp_trainable_invars(params):
 # etp_sp_mm_p — batched
 # ---------------------------------------------------------------------------
 
-def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
+def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Batched sparse ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through the nnz-shaped D-RTRL trace.
 
@@ -153,7 +158,7 @@ def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
     return out
 
 
-def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False):
+def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Sparse instantaneous Jacobian :math:`\partial h / \partial w_{\text{data}}`,
     and :math:`\partial h / \partial b`.
 
@@ -172,6 +177,11 @@ def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False):
     ``sparse_mat.with_data`` returns exactly this nnz-shaped gradient —
     the zeros outside the pattern are never materialised.
 
+    When ``weight_fn`` is provided, the transform is applied inside ``_fwd``
+    so that ``jax.vjp`` auto-composes the chain rule: the gradient is taken
+    w.r.t. the **raw** data, not the transformed data. Likewise for
+    ``bias_fn``.
+
     Bias gradient: identical to dense,
     :math:`\partial h / \partial b = \partial h / \partial y`.
 
@@ -180,9 +190,15 @@ def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False):
     """
 
     def _fwd(w_dict):
-        y = x @ sparse_mat.with_data(w_dict['weight'])
+        wd = w_dict['weight']
+        if weight_fn is not None:
+            wd = weight_fn(wd)
+        y = x @ sparse_mat.with_data(wd)
         if has_bias:
-            y = y + w_dict['bias']
+            b = w_dict['bias']
+            if bias_fn is not None:
+                b = bias_fn(b)
+            y = y + b
         return u.get_mantissa(y)
 
     _, vjp_fn = jax.vjp(_fwd, weights)
@@ -229,7 +245,7 @@ def _sp_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
 # etp_sp_mv_p — unbatched
 # ---------------------------------------------------------------------------
 
-def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False):
+def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
     r"""Unbatched sparse ``yw_to_w`` — identical algebra to the batched case
     with no batch axis.
 
@@ -315,10 +331,10 @@ etp_sp_mv_p.register_etp_rules(
 )
 
 
-def sparse_matmul(x, weight, *, sparse_mat, bias=None):
+def sparse_matmul(x, weight, *, sparse_mat, bias=None, weight_fn=None, bias_fn=None):
     r"""ETP-aware sparse matrix multiplication.
 
-    Computes :math:`y = x \mathbin{@} \mathrm{sparse}(w) \; (+ b)`, where
+    Computes :math:`y = x \mathbin{@} \mathrm{sparse}(f(w)) \; (+ g(b))`, where
     only the non-zero entries (``weight``) of the fixed sparse pattern
     are trainable and participate in eligibility-trace computation.
     Auto-dispatches batched/unbatched based on ``x.ndim``.
@@ -336,6 +352,16 @@ def sparse_matmul(x, weight, *, sparse_mat, bias=None):
         a trace).
     bias : ArrayLike or None, optional
         Bias vector. Default ``None``.
+    weight_fn : callable or None, optional
+        Elementwise transform applied to the non-zero ``weight`` data before
+        the matmul.  ``None`` means identity (no transform).  When provided,
+        the transform is applied *inside* the primitive so that
+        ``xy_to_dw`` auto-composes the derivative via ``jax.vjp``, returning
+        the gradient w.r.t. the **raw** data.
+    bias_fn : callable or None, optional
+        Elementwise transform applied to ``bias`` before it is added to the
+        output.  ``None`` means identity.  The derivative is composed by the
+        same ``jax.vjp`` call as ``weight_fn``.
 
     Returns
     -------
@@ -348,7 +374,9 @@ def sparse_matmul(x, weight, *, sparse_mat, bias=None):
     unit = x_u * w_u
     if bias is not None:
         bias_v = u.Quantity(bias).to_decimal(unit)
-        r = p.bind(x_v, w_v, bias_v, sparse_mat=sparse_mat, has_bias=True)
+        r = p.bind(x_v, w_v, bias_v, sparse_mat=sparse_mat, has_bias=True,
+                   weight_fn=weight_fn, bias_fn=bias_fn)
     else:
-        r = p.bind(x_v, w_v, sparse_mat=sparse_mat, has_bias=False)
+        r = p.bind(x_v, w_v, sparse_mat=sparse_mat, has_bias=False,
+                   weight_fn=weight_fn, bias_fn=bias_fn)
     return u.maybe_decimal(r * x_u * w_u)
