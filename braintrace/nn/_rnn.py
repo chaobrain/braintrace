@@ -14,6 +14,8 @@
 # ==============================================================================
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from typing import Any, Callable, Union
 
 import brainstate
@@ -87,8 +89,8 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
         w_init: Union[ArrayLike, Callable] = braintools.init.XavierNormal(),
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'relu',
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -110,14 +112,14 @@ class ValinaRNNCell(brainstate.nn.RNNCell):
             b_init=b_init,
         )
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(
             braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -186,8 +188,8 @@ class GRUCell(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -208,13 +210,13 @@ class GRUCell(brainstate.nn.RNNCell):
         self.Wr = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.Wh = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -288,8 +290,8 @@ class CFNCell(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -310,13 +312,13 @@ class CFNCell(brainstate.nn.RNNCell):
         self.Wi = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.Wh = Linear(_as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -404,8 +406,8 @@ class MGUCell(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -425,13 +427,13 @@ class MGUCell(brainstate.nn.RNNCell):
         self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.Wh = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -534,8 +536,8 @@ class LSTMCell(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -559,15 +561,15 @@ class LSTMCell(brainstate.nn.RNNCell):
         self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.Wo = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.c = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.c.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Updates both the cell state ``c`` and the hidden state ``h`` in place.
@@ -642,8 +644,8 @@ class URLSTMCell(brainstate.nn.RNNCell):
         w_init: Union[ArrayLike, Callable] = braintools.init.XavierNormal(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         activation: str | Callable = 'tanh',
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -668,17 +670,17 @@ class URLSTMCell(brainstate.nn.RNNCell):
         self.Wo = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.bias = brainstate.ParamState(self._forget_bias())
 
-    def _forget_bias(self):
+    def _forget_bias(self) -> ArrayLike:
         rand_val = brainstate.random.uniform(1 / _as_size_tuple(self.out_size)[-1], 1 - 1 / _as_size_tuple(self.out_size)[-1], (_as_size_tuple(self.out_size)[-1],))
         return -u.math.log(1 / rand_val - 1)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.c = brainstate.HiddenState(
             braintools.init.param(self._state_initializer, self.out_size, batch_size))
         self.h = brainstate.HiddenState(
             braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.c.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
@@ -778,8 +780,8 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         phi: Callable = None,
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -797,13 +799,13 @@ class MinimalRNNCell(brainstate.nn.RNNCell):
         # weights
         self.W_u = Linear(_as_size_tuple(self.out_size)[-1] * 2, _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -879,8 +881,8 @@ class MiniGRU(brainstate.nn.RNNCell):
         w_init: Union[ArrayLike, Callable] = braintools.init.Orthogonal(),
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -895,13 +897,13 @@ class MiniGRU(brainstate.nn.RNNCell):
         # weights
         self.W_z = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -976,8 +978,8 @@ class MiniLSTM(brainstate.nn.RNNCell):
         w_init: Union[ArrayLike, Callable] = braintools.init.Orthogonal(),
         b_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
         state_init: Union[ArrayLike, Callable] = braintools.init.ZeroInit(),
-        name: str = None,
-    ):
+        name: str | None = None,
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]
 
         # parameters
@@ -993,13 +995,13 @@ class MiniLSTM(brainstate.nn.RNNCell):
         self.W_f = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.W_i = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h.value = braintools.init.param(self._state_initializer, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the cell by one time step.
 
         Parameters
@@ -1019,7 +1021,7 @@ class MiniLSTM(brainstate.nn.RNNCell):
         return self.h.value
 
 
-def glorot_init(s):
+def glorot_init(s: Any) -> ArrayLike:
     return brainstate.random.randn(*s) / u.math.sqrt(s[0])
 
 
@@ -1073,7 +1075,7 @@ class LRUCell(brainstate.nn.Module):
         r_min: float = 0.0,  # smallest lambda norm
         r_max: float = 1.0,  # largest lambda norm
         max_phase: float = 6.28,  # max phase lambda
-    ):
+    ) -> None:
         super().__init__()
 
         self.in_size = d_model
@@ -1118,15 +1120,15 @@ class LRUCell(brainstate.nn.Module):
         # Parameter for skip connection
         self.D = brainstate.ParamState(brainstate.random.randn(d_model))
 
-    def init_state(self, batch_size: int = None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h_re = brainstate.HiddenState(braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size))
         self.h_im = brainstate.HiddenState(braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size))
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h_re.value = braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size)
         self.h_im.value = braintools.init.param(braintools.init.ZeroInit(), self.d_hidden, batch_size)
 
-    def update(self, inputs):
+    def update(self, inputs: ArrayLike) -> ArrayLike:
         r"""Advance the unit by one time step.
 
         Updates the real and imaginary parts of the complex hidden state

@@ -164,6 +164,7 @@ module = [
     "braintrace.nn._linear",
     "braintrace.nn._conv",
     "braintrace.nn._readout",
+    "braintrace.nn._rnn",
 ]
 disallow_untyped_defs = true
 
