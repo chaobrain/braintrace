@@ -142,6 +142,16 @@ module = [
 follow_imports = "skip"
 ignore_missing_imports = true
 
+# Public-API surface: every def in these modules must be fully annotated. This
+# is what makes "every public API is typed" a property mypy enforces, so it
+# cannot silently regress. Explicit module list (no wildcards) so internal /
+# test-helper modules are not dragged in. Later changes append to this list.
+[[tool.mypy.overrides]]
+module = [
+    "braintrace._typing",
+]
+disallow_untyped_defs = true
+
 
 # Coverage configuration (coverage.py / pytest-cov). The measured surface is the
 # shipped `braintrace` package only: co-located `*_test.py` files and the
