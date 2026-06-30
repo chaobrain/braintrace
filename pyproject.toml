@@ -162,6 +162,8 @@ module = [
     "braintrace._grad_exponential",
     "braintrace._misc",
     "braintrace.nn._linear",
+    "braintrace.nn._conv",
+    "braintrace.nn._readout",
 ]
 disallow_untyped_defs = true
 

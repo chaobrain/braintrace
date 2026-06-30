@@ -15,7 +15,9 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Callable, Optional
+from __future__ import annotations
+
+from typing import Any, Callable, Optional
 
 import brainstate
 import braintools
@@ -107,7 +109,7 @@ class LeakyRateReadout(brainstate.nn.Module):
         w_init: Callable = braintools.init.KaimingNormal(),
         r_init: Callable = braintools.init.ZeroInit(),
         name: Optional[str] = None,
-    ):
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]  # brainstate hides Module.__init__ from type checkers
 
         # parameters
@@ -124,13 +126,13 @@ class LeakyRateReadout(brainstate.nn.Module):
             braintools.init.param(w_init, (as_size_tuple(self.in_size)[0], as_size_tuple(self.out_size)[0]))
         )
 
-    def init_state(self, batch_size=None, **kwargs):
+    def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.r = brainstate.HiddenState(braintools.init.param(self.r_init, self.out_size, batch_size))
 
-    def reset_state(self, batch_size=None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.r.value = braintools.init.param(self.r_init, self.out_size, batch_size)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Advance the readout by one time step of leaky integration.
 
         Applies :math:`r_t = \mathrm{decay} \cdot r_{t-1} + W^\top x_t` and
