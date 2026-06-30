@@ -1,14 +1,19 @@
 # Release Notes
 
 
-## UNRELEASED
+## Version 0.2.3
 
 This release adds optional, shape-preserving parameter-transform hooks to the
 eligibility-trace (ETP) operators, so a trainable weight (or bias) can be passed
 through an elementwise / standardizing function *before* it enters the operation
 while the eligibility trace and gradient remain with respect to the **raw**
-stored parameter. It also threads these hooks through the `braintrace.nn` linear
-layers. One public API is renamed (see Breaking changes).
+stored parameter. These hooks are threaded through the `braintrace.nn` linear
+layers and demonstrated in a new tutorial. The release also hardens the public
+API with inline type annotations behind an enforced `mypy` gate, corrects the
+`weight_fn` / `bias_fn` gradients on the closed-form fast path, relocates the
+fast-path kernels into the operator layer, and tightens the `sparse_matmul`
+input contract. Two public APIs are renamed and one operand type is now required
+(see Breaking changes).
 
 ### Highlights
 
@@ -43,6 +48,36 @@ layers. One public API is renamed (see Breaking changes).
 - **Export `braintrace.nn.ScaledWSLinear`** (previously importable only by its
   fully-qualified module path).
 
+#### New: typed public API with an enforced `mypy` gate
+
+- Inline type annotations now cover the public surface — ETP operators and their
+  rule functions, `ETPPrimitive` / `register_primitive`, the `braintrace.compile`
+  entry point and package accessors, input-data containers, the `braintrace.nn`
+  linear / conv / recurrent cells, and the algorithm base classes, executors, and
+  concrete algorithms. A new `WeightFn` alias names the transform-hook signature.
+- An enforced `mypy` gate guards the public API, so type regressions fail the
+  build (#119).
+
+### Improvements
+
+- **Correct `weight_fn` / `bias_fn` gradients on the fast path.** The
+  transform Jacobian `f'(W)` is now applied on the param-dim D-RTRL closed-form
+  fast path (it lives solely in `xy_to_dw`; `yw_to_w` stays transform-free), so
+  transformed-parameter gradients match the slow path. Also fixes an
+  `element_wise` slow-path batched-cotangent crash (#120).
+- **Operator-layer fast-path kernels.** The closed-form fast-path kernels
+  (instant / recurrent / solve) move into the operator layer as a per-primitive
+  `FastPathRules` bundle behind an `ETP_FAST_PATH_RULES` registry, and the
+  algorithm-layer string-match gate is replaced by a per-primitive
+  `applicable()` predicate — keeping primitive knowledge in the operator layer
+  per the layered design (#120).
+
+### Documentation
+
+- **New tutorial: customizing primitive transforms**
+  (`docs/tutorials/customizing_primitive_transforms.ipynb`), plus transform-hook
+  docstrings on the ETP operators (#120).
+
 ### Breaking changes
 
 - **`braintrace.element_wise`**: the `fn` parameter is renamed to **`weight_fn`**
@@ -51,6 +86,23 @@ layers. One public API is renamed (see Breaking changes).
   Migrate `element_wise(w, fn=g)` to `element_wise(w, weight_fn=g)`. Forward
   results are unchanged; only the call signature and the internal
   trace-factorization point differ.
+- **`braintrace.sparse_matmul`**: the weight parameter is renamed from
+  `weight_data` to **`weight`** for a cleaner, more consistent API. All in-tree
+  call sites pass it positionally and are unaffected; update any keyword callers
+  (#116).
+- **`braintrace.sparse_matmul`**: the sparse operand (`sparse_mat`) must now be a
+  **`brainevent.DataRepresentation`** and is enforced with a strict runtime
+  `isinstance` check (raising `TypeError`). `DataRepresentation` supplies the ETP
+  online-learning protocol the compiler / executor require (`with_data`,
+  `yw_to_w`, `yw_to_w_transposed`); `brainunit` sparse types (`u.sparse`) lack
+  these and are no longer accepted. **`brainevent` is now a runtime dependency.**
+  Migrate sparse weights to `brainevent` (e.g. `brainevent.CSR`) (#121).
+
+### Dependencies
+
+- Add **`brainevent`** as a runtime dependency (`pyproject.toml`,
+  `requirements.txt`) (#121).
+- Bump `codecov/codecov-action` from 5 to 7 (#117).
 
 
 ## Version 0.2.2
