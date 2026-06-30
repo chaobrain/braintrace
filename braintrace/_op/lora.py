@@ -80,9 +80,9 @@ Keys ``'lora_b'`` / ``'lora_a'`` match the pytree leaf names in
 ``braintrace.nn.LoRALinear``'s merged ``ParamState``.
 """
 
+import brainunit as u
 import jax
 import jax.numpy as jnp
-import brainunit as u
 
 from ._primitive import register_primitive
 
@@ -116,7 +116,10 @@ def _lora_trainable_invars(params):
     return base
 
 
-def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _lora_mm_yw_to_w(
+    hidden_dim, trace,
+    *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None
+):
     r"""Batched LoRA ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through the :math:`y \to A` link.
 
@@ -168,7 +171,10 @@ def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None,
     return out
 
 
-def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _lora_mv_yw_to_w(
+    hidden_dim, trace,
+    *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None
+):
     r"""Unbatched LoRA ``yw_to_w`` — identical algebra with no batch axis.
 
     Trace shapes:
@@ -189,7 +195,10 @@ def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None,
     return out
 
 
-def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _lora_xy_to_dw(
+    x, hidden_dim, weights,
+    *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None
+):
     r"""Instantaneous LoRA Jacobian via fused VJP.
 
     **Role in D-RTRL / ES-D-RTRL.** Produces the full instantaneous

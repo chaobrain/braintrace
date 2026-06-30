@@ -1,7 +1,7 @@
 # Release Notes
 
 
-## Version 0.2.3
+## UNRELEASED
 
 This release adds optional, shape-preserving parameter-transform hooks to the
 eligibility-trace (ETP) operators, so a trainable weight (or bias) can be passed
