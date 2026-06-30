@@ -66,6 +66,22 @@ __all__ = [
 _ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 
 
+def _has_param_transform(eqn_params):
+    """Whether an ETP equation uses any ``*_fn`` parameter-transform hook.
+
+    The fast closed-form kernels compute the instantaneous trace as the bare
+    outer product ``x ⊗ df`` (i.e. ``∂h/∂V`` w.r.t. the *transformed* weight
+    ``V = f(W)``). When a transform hook (``weight_fn`` / ``bias_fn`` /
+    ``kernel_fn`` / ``a_fn`` / ``b_fn`` / ...) is present, the true eligibility
+    trace is ``∂h/∂W_raw = (x ⊗ df) ⊙ f'(W)``; the ``f'(W)`` factor is supplied
+    only by the rule path's ``xy_to_dw`` (via ``jax.vjp``). So a transform-bearing
+    relation must fall back to the rule path. Detection is generic over the
+    ``*_fn`` naming convention so no per-primitive knowledge leaks into the
+    algorithm layer.
+    """
+    return any(k.endswith('_fn') and v is not None for k, v in eqn_params.items())
+
+
 def _cast_to_dtype(tree, dtype):
     """Cast every array leaf of ``tree`` to ``dtype`` (unit-safe; ``None`` -> no-op).
 
@@ -268,8 +284,14 @@ def _update_param_dim_etrace_scan_fn(
         is_elemwise = relation.primitive is etp_elemwise_p
         batched = is_batched_primitive(relation.primitive)
         has_bias = eqn_params.get('has_bias', False)
-        # Fast path only applies to primitives with elementwise yw_to_w.
-        use_fast = fast_solve and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
+        # Fast path only applies to primitives with elementwise yw_to_w, and
+        # only when no parameter-transform hook is present (the closed-form
+        # kernels drop the f'(W) factor — see ``_has_param_transform``).
+        use_fast = (
+            fast_solve
+            and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
+            and not _has_param_transform(eqn_params)
+        )
 
         if is_elemwise:
             x = None
@@ -452,7 +474,13 @@ def _solve_param_dim_weight_gradients(
         batched = is_batched_primitive(relation.primitive)
         if batched:
             batched_paths.update(relation.trainable_paths.values())
-        use_fast = fast_solve and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
+        # Fast path only for elementwise-yw primitives with no transform hook
+        # (the closed-form solve drops f'(W) — see ``_has_param_transform``).
+        use_fast = (
+            fast_solve
+            and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
+            and not _has_param_transform(eqn_params)
+        )
 
         def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
             return _rule(d, trace_, **_params)

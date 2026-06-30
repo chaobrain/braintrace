@@ -119,23 +119,37 @@ def _elemwise_xy_to_dw(x, hidden_dim, weights, *, weight_fn=None):
     computed via VJP. When ``weight_fn`` is ``None`` (identity), the
     contribution is simply the hidden cotangent itself.
 
+    Because the op is diagonal, ``weight_fn`` is element-wise and its Jacobian is
+    ``diag(weight_fn'(w))``. We therefore extract the per-element derivative once
+    (cotangent of ones, shape ``(*w_shape,)``) and broadcast-multiply it against
+    ``hidden_dim``. This is identical to ``vjp_fn(hidden_dim)`` in the unbatched
+    case (``vjp_fn(c) = c ⊙ weight_fn'(w)`` for a diagonal Jacobian) but, unlike a
+    direct ``vjp_fn(hidden_dim)``, it accepts a ``hidden_dim`` carrying extra
+    leading axes (e.g. a batch axis under :class:`brainstate.mixin.Batching`),
+    which the unbatched VJP would reject as a shape mismatch.
+
     Args:
         x: Unused (``x_invar_index=None``).
-        hidden_dim: Cotangent :math:`\partial h / \partial y`, shape matches weight.
+        hidden_dim: Cotangent :math:`\partial h / \partial y`. Shape matches the
+            weight, optionally with extra leading axes (e.g. a batch axis).
         weights: Dict with key 'weight' (the raw weight mantissa).
         weight_fn: Element-wise function applied inside the primitive. When
             ``None``, behaves as identity.
 
     Returns:
-        ``{'weight': vjp(weight_fn, w)(hidden_dim)[0]}``, or
+        ``{'weight': hidden_dim ⊙ weight_fn'(w)}``, or
         ``{'weight': hidden_dim}`` when ``weight_fn is None``.
     """
     # ∂h/∂w = (∂h/∂y) · weight_fn'(w). For the identity (weight_fn None) this is
     # just the cotangent itself.
     if weight_fn is None:
         return {'weight': hidden_dim}
-    _, vjp_fn = jax.vjp(weight_fn, weights['weight'])
-    return {'weight': u.get_mantissa(vjp_fn(hidden_dim)[0])}
+    w = weights['weight']
+    out, vjp_fn = jax.vjp(weight_fn, w)
+    # Diagonal Jacobian: vjp(ones) yields the per-element derivative weight_fn'(w),
+    # shaped like w. Broadcast it against hidden_dim's (possibly batched) leading axes.
+    deriv = u.get_mantissa(vjp_fn(jnp.ones_like(out))[0])
+    return {'weight': hidden_dim * deriv}
 
 
 def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None):

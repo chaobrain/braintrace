@@ -271,6 +271,28 @@ class TestElemwiseWeightFnInside:
         out = rule(None, hidden, {'weight': brainstate.random.randn(5)}, weight_fn=None)
         np.testing.assert_allclose(out['weight'], hidden, atol=1e-6)
 
+    def test_xy_to_dw_handles_batched_cotangent(self):
+        """A ``hidden_dim`` with leading batch axis must broadcast against the
+        unbatched per-element weight derivative.
+
+        Under a batched hidden state the cotangent ``∂h/∂y`` acquires a leading
+        batch axis ``(batch, n)`` while the weight stays ``(n,)``. Because the
+        op is diagonal, ``∂h/∂w = hidden_dim ⊙ weight_fn'(w)`` broadcasts over
+        the leading axes. The naive ``vjp_fn(hidden_dim)`` rejects the batched
+        cotangent (output shape is ``(n,)``), so the rule must use the
+        per-element derivative.
+        """
+        import brainstate
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_elemwise_p
+        rule = ETP_RULES_XY_TO_DW[etp_elemwise_p]
+        w = brainstate.random.randn(4)
+        hidden = brainstate.random.randn(2, 4)  # (batch, n) cotangent
+        out = rule(None, hidden, {'weight': w}, weight_fn=lambda x: x ** 2)
+        # f'(w) = 2w, broadcast over the batch axis.
+        expected = hidden * (2.0 * w)
+        assert out['weight'].shape == (2, 4)
+        np.testing.assert_allclose(out['weight'], expected, atol=1e-5)
+
 
 # ---------------------------------------------------------------------------
 # Exactness gate: D_RTRL == BPTT when element_wise carries weight_fn=tanh

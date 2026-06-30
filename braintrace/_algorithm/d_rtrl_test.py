@@ -657,7 +657,7 @@ class TestDRtrlDictTraceStorage:
 # Helpers for the trace-update specialization + dtype-knob tests
 # ---------------------------------------------------------------------------
 
-def _rnn_mm(seed=0, n=4, bias=False):
+def _rnn_mm(seed=0, n=4, bias=False, weight_fn=None, bias_fn=None):
     """Batched single-recurrent-weight tanh RNN -> etp_mm_p, num_state==1."""
 
     class Net(brainstate.nn.Module):
@@ -670,7 +670,10 @@ def _rnn_mm(seed=0, n=4, bias=False):
 
         def update(self, x):
             b = self.b.value if self.b is not None else None
-            self.h.value = jax.nn.tanh(braintrace.matmul(self.h.value + x, self.w.value, b))
+            self.h.value = jax.nn.tanh(braintrace.matmul(
+                self.h.value + x, self.w.value, b,
+                weight_fn=weight_fn, bias_fn=bias_fn,
+            ))
             return self.h.value
 
     net = Net()
@@ -678,7 +681,7 @@ def _rnn_mm(seed=0, n=4, bias=False):
     return net
 
 
-def _rnn_mv(seed=0, n=4):
+def _rnn_mv(seed=0, n=4, weight_fn=None):
     """Unbatched single-recurrent-weight tanh RNN -> etp_mv_p, num_state==1."""
 
     class Net(brainstate.nn.Module):
@@ -690,11 +693,34 @@ def _rnn_mv(seed=0, n=4):
             self.h = brainstate.HiddenState(jnp.zeros((n,)))
 
         def update(self, x):
-            self.h.value = jax.nn.tanh(braintrace.matmul(self.h.value + x, self.w.value))
+            self.h.value = jax.nn.tanh(braintrace.matmul(
+                self.h.value + x, self.w.value, weight_fn=weight_fn,
+            ))
             return self.h.value
 
     net = Net()
     brainstate.nn.init_all_states(net)
+    return net
+
+
+def _rnn_elemwise(seed=0, n=4, weight_fn=None):
+    """Single element-wise-weight tanh RNN -> etp_elemwise_p, num_state==1."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.alpha = brainstate.ParamState(
+                0.5 * jax.random.normal(jax.random.PRNGKey(seed), (n,))
+            )
+            self.h = brainstate.HiddenState(jnp.zeros((1, n)))
+
+        def update(self, x):
+            a = braintrace.element_wise(self.alpha.value, weight_fn=weight_fn)
+            self.h.value = jax.nn.tanh(a * (self.h.value + x))
+            return self.h.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
     return net
 
 
@@ -770,6 +796,73 @@ class TestS1RecurrentBroadcastEqualsLegacy:
         xs = self._xs_mv()
         fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=True), xs)
         legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mv(), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+
+# ---------------------------------------------------------------------------
+# weight_fn/bias_fn — the fast closed-form trace must equal the rule (legacy)
+# path when a transform hook is present.
+#
+# The fast kernels compute the instant term as the outer product x ⊗ df, which
+# equals ∂h/∂V (the *transformed* weight). With a transform present the true
+# eligibility trace is ∂h/∂W_raw = (x ⊗ df) ⊙ f'(W); the f' factor is supplied
+# only by the rule path's ``xy_to_dw`` (via jax.vjp). So the fast path must fall
+# back to the rules whenever a ``*_fn`` hook is set, otherwise the trace is the
+# gradient w.r.t. the transformed weight and silently drops f'(W).
+# ---------------------------------------------------------------------------
+
+class TestTransformFastEqualsLegacy:
+    """With a weight_fn/bias_fn hook, the default (fast) trace must match the
+    rule path bit-for-bit — i.e. the fast path falls back to the rules so the
+    f'(W) factor from ``xy_to_dw`` is not dropped.
+
+    Run several steps so the recurrent term (non-zero from the 2nd update) is
+    exercised, not just the instant term."""
+
+    def _xs_mm(self, n=4, steps=4):
+        return brainstate.random.randn(steps, 1, n)
+
+    def _xs_mv(self, n=4, steps=4):
+        return brainstate.random.randn(steps, n)
+
+    def test_mm_weight_fn_fast_equals_legacy(self):
+        xs = self._xs_mm()
+        wfn = lambda w: w ** 2
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(weight_fn=wfn), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(weight_fn=wfn), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+    def test_mm_weight_fn_and_bias_fn_fast_equals_legacy(self):
+        xs = self._xs_mm()
+        fast = _run_updates(
+            ParamDimVjpAlgorithm(
+                _rnn_mm(bias=True, weight_fn=jnp.tanh, bias_fn=lambda b: b * 2.0),
+                fast_solve=True), xs)
+        legacy = _run_updates(
+            ParamDimVjpAlgorithm(
+                _rnn_mm(bias=True, weight_fn=jnp.tanh, bias_fn=lambda b: b * 2.0),
+                fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+    def test_mv_weight_fn_fast_equals_legacy(self):
+        xs = self._xs_mv()
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mv(weight_fn=jnp.tanh), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mv(weight_fn=jnp.tanh), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+    def test_elemwise_weight_fn_fast_equals_legacy(self):
+        xs = self._xs_mm()
+        wfn = jnp.tanh
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_elemwise(weight_fn=wfn), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_elemwise(weight_fn=wfn), fast_solve=False), xs)
+        _assert_etrace_lists_equal(fast, legacy, exact=True)
+
+    def test_no_transform_still_uses_fast_path(self):
+        """Guard: without a transform, fast and legacy remain bit-identical (the
+        gate must not disable the fast path when no ``*_fn`` hook is present)."""
+        xs = self._xs_mm()
+        fast = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(), fast_solve=True), xs)
+        legacy = _run_updates(ParamDimVjpAlgorithm(_rnn_mm(), fast_solve=False), xs)
         _assert_etrace_lists_equal(fast, legacy, exact=True)
 
 
