@@ -75,11 +75,16 @@ When ``has_bias=False`` the ``'bias'`` key is simply absent from every
 dict, so the legacy (no-bias) code path is unchanged in behaviour.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
     'etp_mm_p',
@@ -88,7 +93,9 @@ __all__ = [
 ]
 
 
-def _etp_matmul_impl(*args, has_bias=False, weight_fn=None, bias_fn=None):
+def _etp_matmul_impl(*args: Any, has_bias: bool = False,
+                     weight_fn: WeightFn | None = None,
+                     bias_fn: WeightFn | None = None) -> Any:
     x, w = args[0], args[1]
     if weight_fn is not None:
         w = weight_fn(w)
@@ -105,7 +112,7 @@ def _etp_matmul_impl(*args, has_bias=False, weight_fn=None, bias_fn=None):
 # etp_mm_p — batched
 # ---------------------------------------------------------------------------
 
-def _mm_trainable_invars(params):
+def _mm_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     """Return ``{key: invar_index}`` depending on ``has_bias``."""
     base = {'weight': 1}
     if params.get('has_bias', False):
@@ -113,7 +120,9 @@ def _mm_trainable_invars(params):
     return base
 
 
-def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False, weight_fn=None, bias_fn=None):
+def _mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+                weight_fn: WeightFn | None = None,
+                bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Batched ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through a weight-shaped D-RTRL trace.
 
@@ -167,7 +176,9 @@ def _mm_yw_to_w(hidden_dim, trace, *, has_bias=False, weight_fn=None, bias_fn=No
     return out
 
 
-def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias_fn=None):
+def _mm_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                 has_bias: bool = False, weight_fn: WeightFn | None = None,
+                 bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Batched ``xy_to_dw`` — instantaneous hidden-to-weight Jacobian.
 
     **Role.** Computes :math:`\partial h / \partial W` (and
@@ -190,7 +201,7 @@ def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias
     when ``has_bias=True``.
     """
 
-    def _fwd(w_dict):
+    def _fwd(w_dict: dict[str, Any]) -> Any:
         w = w_dict['weight']
         if weight_fn is not None:
             w = weight_fn(w)
@@ -206,7 +217,8 @@ def _mm_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias
     return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                   num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise the batched D-RTRL weight-shaped trace.
 
     D-RTRL stores one trace per (weight-entry, hidden-state) pair:
@@ -237,7 +249,8 @@ def _mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _mm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                num_hidden_state: int) -> Any:
     r"""Initialise the batched pp-prop / ES-D-RTRL output-shaped df trace.
 
     pp-prop factorises the eligibility trace as
@@ -276,7 +289,7 @@ etp_mm_p.register_etp_rules(
 # etp_mv_p — unbatched
 # ---------------------------------------------------------------------------
 
-def _mv_trainable_invars(params):
+def _mv_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     """Return ``{key: invar_index}`` depending on ``has_bias``."""
     base = {'weight': 1}
     if params.get('has_bias', False):
@@ -284,7 +297,9 @@ def _mv_trainable_invars(params):
     return base
 
 
-def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False, weight_fn=None, bias_fn=None):
+def _mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+                weight_fn: WeightFn | None = None,
+                bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Unbatched ``yw_to_w`` — same algebra as the batched case, no batch axis.
 
     **Role in D-RTRL.** Realises the :math:`y \to W` chain factor within
@@ -314,7 +329,9 @@ def _mv_yw_to_w(hidden_dim, trace, *, has_bias=False, weight_fn=None, bias_fn=No
     return out
 
 
-def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias_fn=None):
+def _mv_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                 has_bias: bool = False, weight_fn: WeightFn | None = None,
+                 bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Unbatched ``xy_to_dw`` — instantaneous :math:`\partial h / \partial W`.
 
     Same chain rule as the batched case with no batch axis. When ``weight_fn``
@@ -334,7 +351,7 @@ def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias
     and bias gradients in one pass.
     """
 
-    def _fwd(w_dict):
+    def _fwd(w_dict: dict[str, Any]) -> Any:
         w = w_dict['weight']
         if weight_fn is not None:
             w = weight_fn(w)
@@ -350,7 +367,8 @@ def _mv_xy_to_dw(x, hidden_dim, weights, *, has_bias=False, weight_fn=None, bias
     return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                   num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise unbatched D-RTRL weight-shaped trace.
 
     .. math::
@@ -372,7 +390,8 @@ def _mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _mv_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                num_hidden_state: int) -> Any:
     r"""Initialise unbatched pp-prop / ES-D-RTRL df trace.
 
     .. math::
@@ -404,7 +423,14 @@ etp_mv_p.register_etp_rules(
 # Public API
 # ---------------------------------------------------------------------------
 
-def matmul(x, weight, bias=None, *, weight_fn=None, bias_fn=None):
+def matmul(
+    x: ArrayLike,
+    weight: ArrayLike,
+    bias: ArrayLike | None = None,
+    *,
+    weight_fn: WeightFn | None = None,
+    bias_fn: WeightFn | None = None,
+) -> ArrayLike:
     r"""ETP-aware matrix multiplication.
 
     Computes :math:`y = x \mathbin{@} \text{weight\_fn}(w) \; (+ \text{bias\_fn}(b))`.
@@ -469,7 +495,7 @@ def matmul(x, weight, bias=None, *, weight_fn=None, bias_fn=None):
         >>> print(y2.shape)
         (16, 4)
     """
-    p = etp_mm_p if x.ndim >= 2 else etp_mv_p
+    p = etp_mm_p if x.ndim >= 2 else etp_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)
     weight_v, weight_u = u.split_mantissa_unit(weight)
     unit = x_u * weight_u
