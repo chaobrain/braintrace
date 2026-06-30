@@ -161,6 +161,7 @@ module = [
     "braintrace._input_data",
     "braintrace._grad_exponential",
     "braintrace._misc",
+    "braintrace.nn._linear",
 ]
 disallow_untyped_defs = true
 
