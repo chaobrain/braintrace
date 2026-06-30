@@ -64,7 +64,7 @@ jobs:
         # Upload from a single matrix entry (latest JAX) to avoid duplicate
         # reports. Never fail CI on an upload hiccup / missing token.
         if: matrix.jax-version == ''
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage.xml
