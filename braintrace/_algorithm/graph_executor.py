@@ -35,6 +35,8 @@
 
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from typing import Dict, Any, Optional
 
 import brainstate
@@ -70,7 +72,7 @@ class ETraceGraphExecutor:
         self,
         model: brainstate.nn.Module,
         include_recurrent_mixing: bool = False,
-    ):
+    ) -> None:
         # The original model
         if not isinstance(model, brainstate.nn.Module):
             raise TypeError(
@@ -152,7 +154,7 @@ class ETraceGraphExecutor:
             self._state_id_to_path = {id(state): path for path, state in self.states.items()}
         return self._state_id_to_path
 
-    def compile_graph(self, *args) -> None:
+    def compile_graph(self, *args: Any) -> None:
         r"""
         Build the eligibility trace graph for the model based on the provided inputs.
 
@@ -217,7 +219,7 @@ class ETraceGraphExecutor:
 
     def solve_h2w_h2h_jacobian(
         self,
-        *args,
+        *args: Any,
     ) -> Any:
         r"""
         Compute the hidden-to-weight and hidden-to-hidden Jacobian matrices.
@@ -262,7 +264,7 @@ class ETraceGraphExecutor:
                                   'implemented in the subclass.')
 
     def solve_h2w_h2h_l2h_jacobian(
-        self, *args,
+        self, *args: Any,
     ) -> Any:
         r"""
         Compute the hidden-to-weight and hidden-to-hidden Jacobian matrices, along with the VJP transformed

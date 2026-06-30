@@ -30,6 +30,8 @@ The public surface mirrors the legacy module: every name previously
 exported from ``braintrace._op`` is also available here.
 """
 
+from __future__ import annotations
+
 from ._primitive import ETPPrimitive, register_primitive
 from ._registries import (
     BATCHED_PRIMITIVES,

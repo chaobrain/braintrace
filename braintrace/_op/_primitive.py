@@ -22,8 +22,10 @@ MLIR lowering, JVP, transpose, batching — are auto-derived from a single
 implementation function via :func:`register_primitive`.
 """
 
+from __future__ import annotations
+
 from functools import partial
-from typing import Callable
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -42,6 +44,7 @@ from ._registries import (
     ETP_TRAINABLE_INVARS_FNS,
     ETP_X_INVAR_INDICES,
     ETP_Y_OUTVAR_INDICES,
+    FastPathRules,
     GRADIENT_ENABLED_PRIMITIVES,
 )
 
@@ -79,7 +82,7 @@ class ETPPrimitive(Primitive):
         (2, 4)
     """
 
-    def register_yw_to_w(self, fn: Callable):
+    def register_yw_to_w(self, fn: Callable[..., Any]) -> None:
         """Install a D-RTRL trace propagation rule.
 
         Parameters
@@ -89,7 +92,7 @@ class ETPPrimitive(Primitive):
         """
         ETP_RULES_YW_TO_W[self] = fn
 
-    def register_xy_to_dw(self, fn: Callable):
+    def register_xy_to_dw(self, fn: Callable[..., Any]) -> None:
         """Install a weight-gradient rule.
 
         Parameters
@@ -99,7 +102,7 @@ class ETPPrimitive(Primitive):
         """
         ETP_RULES_XY_TO_DW[self] = fn
 
-    def register_init_drtrl(self, fn: Callable):
+    def register_init_drtrl(self, fn: Callable[..., Any]) -> None:
         """Install a D-RTRL trace initialiser.
 
         Parameters
@@ -110,7 +113,7 @@ class ETPPrimitive(Primitive):
         """
         ETP_RULES_INIT_DRTRL[self] = fn
 
-    def register_init_pp(self, fn: Callable):
+    def register_init_pp(self, fn: Callable[..., Any]) -> None:
         """Install a pp_prop (IO-dim) df trace initialiser.
 
         Parameters
@@ -124,12 +127,12 @@ class ETPPrimitive(Primitive):
     def register_etp_rules(
         self,
         *,
-        yw_to_w: Callable = None,
-        xy_to_dw: Callable = None,
-        init_drtrl: Callable = None,
-        init_pp: Callable = None,
-        fast_path=None,
-    ):
+        yw_to_w: Callable[..., Any] | None = None,
+        xy_to_dw: Callable[..., Any] | None = None,
+        init_drtrl: Callable[..., Any] | None = None,
+        init_pp: Callable[..., Any] | None = None,
+        fast_path: FastPathRules | None = None,
+    ) -> None:
         """Install multiple ETP rules in one call.
 
         Any argument left as ``None`` is skipped.
@@ -164,15 +167,15 @@ class ETPPrimitive(Primitive):
 
 
 def register_primitive(
-    name,
-    impl_fn,
+    name: str,
+    impl_fn: Callable[..., Any],
     *,
-    batched=False,
-    gradient_enabled=False,
-    trainable_invars_fn=None,
-    x_invar_index=0,
-    y_outvar_index=0,
-):
+    batched: bool = False,
+    gradient_enabled: bool = False,
+    trainable_invars_fn: Callable[..., dict[str, int]] | None = None,
+    x_invar_index: int | None = 0,
+    y_outvar_index: int = 0,
+) -> ETPPrimitive:
     """Create an :class:`ETPPrimitive` with all JAX rules auto-derived.
 
     Only the four ETP-specific rules need hand-writing — call the returned
@@ -234,7 +237,7 @@ def register_primitive(
     p.def_impl(impl_fn)
 
     @p.def_abstract_eval
-    def _abstract(*args, **params):
+    def _abstract(*args: Any, **params: Any) -> Any:
         shapes = tuple(ShapedArray(a.shape, a.dtype) for a in args)
         out = jax.eval_shape(partial(impl_fn, **params), *shapes)
         return ShapedArray(out.shape, out.dtype)
@@ -243,7 +246,7 @@ def register_primitive(
         p, mlir.lower_fun(impl_fn, multiple_results=False),
     )
 
-    def _jvp(primals, tangents, **params):
+    def _jvp(primals: Any, tangents: Any, **params: Any) -> Any:
         tans = tuple(
             jnp.zeros(pr.shape, pr.dtype) if isinstance(t, ad.Zero) else t
             for pr, t in zip(primals, tangents)
@@ -252,7 +255,7 @@ def register_primitive(
 
     ad.primitive_jvps[p] = _jvp
 
-    def _batching(args, dims, **params):
+    def _batching(args: Any, dims: Any, **params: Any) -> Any:
         return jax.vmap(partial(impl_fn, **params), in_axes=dims)(*args), 0
 
     batching.primitive_batchers[p] = _batching

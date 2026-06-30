@@ -79,12 +79,17 @@ path with diagonal einsums. Because those kernels return the bare ``df``
 path whenever ``weight_fn`` is present.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
 from ._registries import FastPathRules
+from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
     'etp_elemwise_p',
@@ -92,15 +97,16 @@ __all__ = [
 ]
 
 
-def _etp_elemwise_impl(w, weight_fn=None):
+def _etp_elemwise_impl(w: Any, weight_fn: WeightFn | None = None) -> Any:
     return w if weight_fn is None else weight_fn(w)
 
 
-def _elem_trainable_invars(params):
+def _elem_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return {'weight': 0}
 
 
-def _elemwise_yw_to_w(hidden_dim, trace, *, weight_fn=None):
+def _elemwise_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+                      weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Diagonal trace propagation for an identity-like op.
 
     **Role in D-RTRL.** Realises the :math:`y \to w` chain factor inside
@@ -125,7 +131,8 @@ def _elemwise_yw_to_w(hidden_dim, trace, *, weight_fn=None):
     return {'weight': trace['weight'] * hidden_dim}
 
 
-def _elemwise_xy_to_dw(x, hidden_dim, weights, *, weight_fn=None):
+def _elemwise_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                       weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Instantaneous Jacobian for the identity marker.
 
     **Role in D-RTRL / ES-D-RTRL.** For :math:`y = \text{weight\_fn}(w)`,
@@ -170,7 +177,8 @@ def _elemwise_xy_to_dw(x, hidden_dim, weights, *, weight_fn=None):
     return {'weight': hidden_dim * deriv}
 
 
-def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None):
+def _elemwise_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                         num_hidden_state: int, group: Any = None) -> dict[str, Any]:
     r"""Initialise the D-RTRL weight-shaped trace for an identity op.
 
     Weight-shape and output-shape coincide for the identity, so
@@ -207,7 +215,8 @@ def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None
     return {'weight': jnp.zeros((*leading, num_hidden_state))}
 
 
-def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state, group=None):
+def _elemwise_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                      num_hidden_state: int, group: Any = None) -> Any:
     r"""Initialise the pp-prop df trace for an identity op.
 
     .. math::
@@ -232,7 +241,7 @@ def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state, group=None):
 # Closed-form param-dim D-RTRL fast-path kernels (diagonal, no x, no bias)
 # ---------------------------------------------------------------------------
 
-def _elemwise_fast_instant(x, df, has_bias):
+def _elemwise_fast_instant(x: Any, df: ArrayLike, has_bias: bool) -> dict[str, Any]:
     r"""Instantaneous term for the diagonal identity op.
 
     Parameters
@@ -260,12 +269,12 @@ def _elemwise_fast_instant(x, df, has_bias):
     return {'weight': df}
 
 
-def _elemwise_fast_recurrent(diag, old_bwg, num_state):
+def _elemwise_fast_recurrent(diag: jax.Array, old_bwg: dict[str, Any], num_state: int) -> dict[str, Any]:
     r"""Recurrent term :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}` (diagonal).
 
     Parameters
     ----------
-    diag : ArrayLike
+    diag : jax.Array
         Hidden-to-hidden Jacobian, shape ``(..., num_state, num_state)``.
     old_bwg : dict
         Previous trace dict; ``'weight'`` shape ``(..., num_state)``.
@@ -289,7 +298,7 @@ def _elemwise_fast_recurrent(diag, old_bwg, num_state):
     return {'weight': jnp.einsum('...ab,...b->...a', diag, old_bwg['weight'])}
 
 
-def _elemwise_fast_solve(diag_like, etrace_data, *, fold_batch=False):
+def _elemwise_fast_solve(diag_like: ArrayLike, etrace_data: dict[str, Any], *, fold_batch: bool = False) -> dict[str, Any]:
     r"""Solve-time contraction of the learning signal with the trace (diagonal).
 
     Parameters
@@ -317,7 +326,7 @@ def _elemwise_fast_solve(diag_like, etrace_data, *, fold_batch=False):
     return {'weight': jnp.einsum(spec, diag_like, etrace_data['weight'])}
 
 
-def _elemwise_fast_applicable(eqn_params):
+def _elemwise_fast_applicable(eqn_params: dict[str, Any]) -> bool:
     r"""Gate: is the elemwise fast path valid for this equation?
 
     Parameters
@@ -362,7 +371,7 @@ etp_elemwise_p.register_etp_rules(
 )
 
 
-def element_wise(weight, *, weight_fn=None):
+def element_wise(weight: ArrayLike, *, weight_fn: WeightFn | None = None) -> ArrayLike:
     r"""ETP-aware element-wise operation.
 
     Applies ``weight_fn`` to ``weight`` *inside* the ETP primitive, so

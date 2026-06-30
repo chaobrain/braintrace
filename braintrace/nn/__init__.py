@@ -40,6 +40,10 @@ re-implemented here; accessing them through ``braintrace.nn`` emits a
 :mod:`brainstate.state`.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 from ._conv import Conv1d, Conv2d, Conv3d
 from ._linear import Linear, SignedWLinear, ScaledWSLinear, SparseLinear, LoRA
 from ._readout import LeakyRateReadout
@@ -58,7 +62,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     import warnings
     if name in ['IF', 'LIF', 'ALIF', 'Expon', 'Alpha', 'DualExpon', 'STP', 'STD']:
         warnings.warn(

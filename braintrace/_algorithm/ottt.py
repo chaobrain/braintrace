@@ -25,7 +25,9 @@ This yields constant training memory, independent of the number of time steps.
 See :class:`OTTT` for the mathematical formulation, references, and an example.
 """
 
-from typing import Dict, Optional
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
 
 import brainstate
 import jax.numpy as jnp
@@ -163,8 +165,8 @@ class OTTT(ETraceVjpAlgorithm):
         leak: float,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if mode not in ('A', 'O'):
             raise ValueError(f"mode must be 'A' or 'O'; got {mode!r}")
         if not (0.0 < float(leak) < 1.0):
@@ -174,7 +176,7 @@ class OTTT(ETraceVjpAlgorithm):
         self.leak = float(leak)
         self._pre_traces: Dict[int, PresynapticTrace] = {}
 
-    def init_etrace_state(self, *args, **kwargs):
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         self._pre_traces = {}
         for rel in self.graph.hidden_param_op_relations:
             for group in rel.hidden_groups:
@@ -191,28 +193,29 @@ class OTTT(ETraceVjpAlgorithm):
             rid = id(rel.x_var)
             if rid in self._pre_traces:
                 continue
+            assert rel.x_var is not None  # non-elemwise primitives always have an x_var
             shape = rel.x_var.aval.shape
             dtype = rel.x_var.aval.dtype
             self._pre_traces[rid] = PresynapticTrace(
                 jnp.zeros(shape, dtype=dtype), leak=self.leak
             )
 
-    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
+    def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
         self.running_index.value = 0
         for t in self._pre_traces.values():
             t.reset_state(batch_size=batch_size)
 
-    def _get_etrace_data(self):
+    def _get_etrace_data(self) -> Any:
         return {rid: t.value for rid, t in self._pre_traces.items()}
 
-    def _assign_etrace_data(self, vals):
+    def _assign_etrace_data(self, vals: Any) -> None:
         for rid, v in vals.items():
             self._pre_traces[rid].value = v
 
     def _update_etrace_data(
-        self, running_index, hist_vals,
-        hid2weight_jac, hid2hid_jac, weight_vals, input_is_multi_step,
-    ):
+        self, running_index: Any, hist_vals: Any,
+        hid2weight_jac: Any, hid2hid_jac: Any, weight_vals: Any, input_is_multi_step: Any,
+    ) -> Any:
         """``â ← λ·â + x_t`` (mode='A') or ``â := x_t`` (mode='O').
 
         Ignores ``hid2hid_jac`` — OTTT's core approximation.
@@ -231,9 +234,9 @@ class OTTT(ETraceVjpAlgorithm):
         return new_vals
 
     def _solve_weight_gradients(
-        self, running_index, etrace_at_t, dl_to_hidden_groups,
-        weight_vals, dl_to_nonetws_at_t, dl_to_etws_at_t,
-    ):
+        self, running_index: Any, etrace_at_t: Any, dl_to_hidden_groups: Any,
+        weight_vals: Any, dl_to_nonetws_at_t: Any, dl_to_etws_at_t: Any,
+    ) -> Any:
         """``ΔW = outer(â, L)`` where ``L`` is the (already σ'-propagated) signal."""
         dG = {path: None for path in self.param_states}
         for rel in self.graph.hidden_param_op_relations:

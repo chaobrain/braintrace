@@ -15,7 +15,9 @@
 
 # -*- coding: utf-8 -*-
 
-from typing import Dict, Sequence, Union, FrozenSet, List, Tuple, Any, TypeAlias
+from __future__ import annotations
+
+from typing import Callable, Dict, Sequence, Union, FrozenSet, List, Tuple, Any, TypeAlias
 
 import brainstate
 import jax
@@ -33,6 +35,10 @@ StateID: TypeAlias = int
 WeightID: TypeAlias = int
 Size: TypeAlias = brainstate.typing.Size
 Axis: TypeAlias = int
+
+# Elementwise, shape-preserving transform applied to a weight/bias/kernel
+# inside an ETP op (``weight_fn`` / ``bias_fn`` / ``kernel_fn`` / ``a_fn`` / ``b_fn``).
+WeightFn: TypeAlias = Callable[[ArrayLike], ArrayLike]
 
 
 def as_size_tuple(size: Size) -> Tuple[int, ...]:

@@ -91,11 +91,16 @@ These primitives have **no fast path** — they always use the generic rule
 path, which threads :math:`f'` correctly when a transform hook is present.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
     'etp_sp_mm_p',
@@ -104,11 +109,13 @@ __all__ = [
 ]
 
 
-def _etp_sp_matmul_impl(*args, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
+def _etp_sp_matmul_impl(*args: Any, sparse_mat: Any = None, has_bias: bool = False,
+                        weight_fn: WeightFn | None = None,
+                        bias_fn: WeightFn | None = None) -> Any:
     x, weight_data = args[0], args[1]
     if weight_fn is not None:
         weight_data = weight_fn(weight_data)
-    w = sparse_mat.with_data(weight_data)
+    w = sparse_mat.with_data(weight_data)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     y = x @ w
     if has_bias:
         b = args[2]
@@ -122,7 +129,7 @@ def _etp_sp_matmul_impl(*args, sparse_mat=None, has_bias=False, weight_fn=None, 
 # trainable_invars_fn — shared by both mm and mv
 # ---------------------------------------------------------------------------
 
-def _sp_trainable_invars(params):
+def _sp_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     """Return ``{key: invar_index}`` depending on ``has_bias``."""
     base = {'weight': 1}
     if params.get('has_bias', False):
@@ -134,7 +141,9 @@ def _sp_trainable_invars(params):
 # etp_sp_mm_p — batched
 # ---------------------------------------------------------------------------
 
-def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
+def _sp_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, sparse_mat: Any = None,
+                   has_bias: bool = False, weight_fn: WeightFn | None = None,
+                   bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Batched sparse ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through the nnz-shaped D-RTRL trace.
 
@@ -166,13 +175,15 @@ def _sp_mm_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False, weight
                       ``trace['bias']   : (batch, out)``.
         solve context: batch axis dropped by the outer vmap.
     """
-    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}
+    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
     return out
 
 
-def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
+def _sp_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *, sparse_mat: Any = None,
+                 has_bias: bool = False, weight_fn: WeightFn | None = None,
+                 bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Sparse instantaneous Jacobian :math:`\partial h / \partial w_{\text{data}}`,
     and :math:`\partial h / \partial b`.
 
@@ -203,11 +214,11 @@ def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False, wei
     dict-valued forward function.
     """
 
-    def _fwd(w_dict):
+    def _fwd(w_dict: dict[str, Any]) -> Any:
         wd = w_dict['weight']
         if weight_fn is not None:
             wd = weight_fn(wd)
-        y = x @ sparse_mat.with_data(wd)
+        y = x @ sparse_mat.with_data(wd)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
         if has_bias:
             b = w_dict['bias']
             if bias_fn is not None:
@@ -219,7 +230,8 @@ def _sp_xy_to_dw(x, hidden_dim, weights, *, sparse_mat=None, has_bias=False, wei
     return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _sp_mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _sp_mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                      num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise batched sparse D-RTRL trace.
 
     The memory advantage of sparse vs dense lives here:
@@ -242,7 +254,8 @@ def _sp_mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _sp_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _sp_mm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                   num_hidden_state: int) -> Any:
     r"""Initialise batched sparse pp-prop / ES-D-RTRL df trace.
 
     .. math::
@@ -259,7 +272,9 @@ def _sp_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
 # etp_sp_mv_p — unbatched
 # ---------------------------------------------------------------------------
 
-def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False, weight_fn=None, bias_fn=None):
+def _sp_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, sparse_mat: Any = None,
+                   has_bias: bool = False, weight_fn: WeightFn | None = None,
+                   bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Unbatched sparse ``yw_to_w`` — identical algebra to the batched case
     with no batch axis.
 
@@ -277,13 +292,14 @@ def _sp_mv_yw_to_w(hidden_dim, trace, *, sparse_mat=None, has_bias=False, weight
              ``trace['weight'] : (nnz,)``,
              ``trace['bias']   : (out,)``.
     """
-    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}
+    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
     return out
 
 
-def _sp_mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _sp_mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                      num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise unbatched sparse D-RTRL trace.
 
     .. math::
@@ -302,7 +318,8 @@ def _sp_mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _sp_mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _sp_mv_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                   num_hidden_state: int) -> Any:
     r"""Initialise unbatched sparse pp-prop / ES-D-RTRL df trace.
 
     .. math::
@@ -345,7 +362,15 @@ etp_sp_mv_p.register_etp_rules(
 )
 
 
-def sparse_matmul(x, weight, *, sparse_mat, bias=None, weight_fn=None, bias_fn=None):
+def sparse_matmul(
+    x: ArrayLike,
+    weight: ArrayLike,
+    *,
+    sparse_mat: Any,
+    bias: ArrayLike | None = None,
+    weight_fn: WeightFn | None = None,
+    bias_fn: WeightFn | None = None,
+) -> ArrayLike:
     r"""ETP-aware sparse matrix multiplication.
 
     Computes :math:`y = x \mathbin{@} \mathrm{sparse}(f(w)) \; (+ g(b))`, where
@@ -386,7 +411,7 @@ def sparse_matmul(x, weight, *, sparse_mat, bias=None, weight_fn=None, bias_fn=N
     ArrayLike
         Output array.
     """
-    p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p
+    p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)
     w_v, w_u = u.split_mantissa_unit(weight)
     unit = x_u * w_u

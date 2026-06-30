@@ -85,6 +85,8 @@ This primitive has **no fast path** — it always uses the generic rule path,
 which threads :math:`f'` correctly when a transform hook is present.
 """
 
+from __future__ import annotations
+
 from typing import Any, Optional, Sequence
 
 import jax
@@ -92,6 +94,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
     'etp_conv_p',
@@ -100,18 +103,18 @@ __all__ = [
 
 
 def _etp_conv_impl(
-    *args,
-    has_bias=False,
-    strides=(1,),
-    padding='SAME',
-    lhs_dilation=None,
-    rhs_dilation=None,
-    feature_group_count=1,
-    batch_group_count=1,
-    dimension_numbers=None,
-    kernel_fn=None,
-    bias_fn=None,
-):
+    *args: Any,
+    has_bias: bool = False,
+    strides: Sequence[int] = (1,),
+    padding: str = 'SAME',
+    lhs_dilation: Optional[Sequence[int]] = None,
+    rhs_dilation: Optional[Sequence[int]] = None,
+    feature_group_count: int = 1,
+    batch_group_count: int = 1,
+    dimension_numbers: Any = None,
+    kernel_fn: WeightFn | None = None,
+    bias_fn: WeightFn | None = None,
+) -> Any:
     x, kernel = args[0], args[1]
     if kernel_fn is not None:
         kernel = kernel_fn(kernel)
@@ -134,7 +137,7 @@ def _etp_conv_impl(
     return y
 
 
-def _conv_trainable_invars(params):
+def _conv_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     """Return ``{key: invar_index}`` depending on ``has_bias``."""
     base = {'weight': 1}
     if params.get('has_bias', False):
@@ -142,7 +145,7 @@ def _conv_trainable_invars(params):
     return base
 
 
-def _conv_layout(params):
+def _conv_layout(params: dict[str, Any]) -> tuple[int, int, int, int]:
     """Return ``(n_spatial, channel_axis, batch_axis, kernel_out_axis)``.
 
     ``n_spatial``:       spatial rank (1, 2, or 3).
@@ -199,7 +202,7 @@ def _conv_layout(params):
     return n_spatial, channel_axis, batch_axis, kernel_out_axis
 
 
-def _conv_yw_to_w(hidden_dim, trace, **params):
+def _conv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], **params: Any) -> dict[str, Any]:
     r"""Propagate :math:`\partial h / \partial y` through the conv trace.
 
     **Role in D-RTRL.** Implements the :math:`y \to (K, b)` chain factor
@@ -320,7 +323,7 @@ def _conv_yw_to_w(hidden_dim, trace, **params):
     return out
 
 
-def _conv_xy_to_dw(x, hidden_dim, weights, **params):
+def _conv_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], **params: Any) -> dict[str, Any]:
     r"""Instantaneous conv Jacobian :math:`\partial h / \partial (K, b)`.
 
     **Role in D-RTRL.** Produces the
@@ -391,7 +394,7 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
 
     # Kernel gradient via VJP (needs x); apply kernel_fn inside so jax.vjp
     # auto-composes f' for the kernel gradient.
-    def _fwd_w(w):
+    def _fwd_w(w: Any) -> Any:
         if kernel_fn is not None:
             w = kernel_fn(w)
         return u.get_mantissa(
@@ -422,7 +425,8 @@ def _conv_xy_to_dw(x, hidden_dim, weights, **params):
     return out
 
 
-def _conv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _conv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                     num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise conv D-RTRL weight-shaped trace.
 
     .. math::
@@ -454,7 +458,8 @@ def _conv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _conv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _conv_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                  num_hidden_state: int) -> Any:
     r"""Initialise conv pp-prop / ES-D-RTRL df trace.
 
     .. math::
@@ -485,9 +490,9 @@ etp_conv_p.register_etp_rules(
 
 
 def conv(
-    x,
-    kernel,
-    bias=None,
+    x: ArrayLike,
+    kernel: ArrayLike,
+    bias: ArrayLike | None = None,
     *,
     strides: Sequence[int] = (1,),
     padding: str = 'SAME',
@@ -496,9 +501,9 @@ def conv(
     feature_group_count: int = 1,
     batch_group_count: int = 1,
     dimension_numbers: Any = None,
-    kernel_fn=None,
-    bias_fn=None,
-):
+    kernel_fn: WeightFn | None = None,
+    bias_fn: WeightFn | None = None,
+) -> ArrayLike:
     r"""ETP-aware convolution.
 
     Computes :math:`y = \mathrm{conv}(x, kernel) \; (+ b)` by routing the

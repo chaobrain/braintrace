@@ -19,6 +19,8 @@
 
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from typing import Dict, Any, Optional
 
 import brainstate
@@ -89,7 +91,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         model: brainstate.nn.Module,
         graph_executor: ETraceGraphExecutor,
         name: Optional[str] = None,
-    ):
+    ) -> None:
         super().__init__(name=name)  # type: ignore[call-arg]  # brainstate hides Module.__init__ from type checkers
 
         # the model
@@ -210,7 +212,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         assert self._other_states is not None
         return self._other_states
 
-    def _split_state(self):
+    def _split_state(self) -> None:
         # --- the state separation --- #
         #
         # [NOTE]
@@ -228,7 +230,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
             self._other_states
         ) = self.graph.module_info.retrieved_model_states.split(brainstate.ParamState, brainstate.HiddenState, ...)
 
-    def compile_graph(self, *args) -> None:
+    def compile_graph(self, *args: Any) -> None:
         r"""
         Compile the eligibility trace graph of the relationship between etrace weights, states and operators.
 
@@ -318,7 +320,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         return self.graph_executor.show_graph(verbose=verbose, return_msg=return_msg)
 
-    def __call__(self, *args) -> Any:
+    def __call__(self, *args: Any) -> Any:
         """
         Update the model and the eligibility trace states.
 
@@ -334,7 +336,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         return self.update(*args)
 
-    def update(self, *args) -> Any:
+    def update(self, *args: Any) -> Any:
         """
         Update the model and the eligibility trace states.
 
@@ -355,7 +357,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         raise NotImplementedError
 
-    def init_etrace_state(self, *args, **kwargs) -> None:
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         """
         Initialize the eligibility trace states of the etrace algorithm.
 

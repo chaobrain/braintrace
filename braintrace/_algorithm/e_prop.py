@@ -29,7 +29,9 @@ that make the rule biologically plausible:
 See :class:`EProp` for the mathematical formulation, references, and an example.
 """
 
-from typing import Dict, Optional
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
 
 import brainstate
 import jax
@@ -158,8 +160,8 @@ class EProp(ParamDimVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if feedback not in ('symmetric', 'random'):
             raise ValueError(
                 f"feedback must be 'symmetric' or 'random'; got {feedback!r}"
@@ -181,7 +183,7 @@ class EProp(ParamDimVjpAlgorithm):
         self._kappa_filters: Dict[int, KappaFilter] = {}
         self._random_feedback: Dict[int, FixedRandomFeedback] = {}
 
-    def init_etrace_state(self, *args, **kwargs):
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         super().init_etrace_state(*args, **kwargs)
         self._kappa_filters = {}
         self._random_feedback = {}
@@ -197,6 +199,7 @@ class EProp(ParamDimVjpAlgorithm):
                     )
         if self.feedback == 'random':
             key = self._random_feedback_key
+            assert key is not None  # constructor enforces a key when feedback='random'
             for rel in self.graph.hidden_param_op_relations:
                 for group in rel.hidden_groups:
                     gid = group.index
@@ -209,17 +212,17 @@ class EProp(ParamDimVjpAlgorithm):
                         n_target=n_layer, n_layer=n_layer, key=sub, init_scale=0.1
                     )
 
-    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
+    def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
         super().reset_state(batch_size=batch_size, **kwargs)
         for flt in self._kappa_filters.values():
             flt.reset_state(batch_size=batch_size)
 
-    def _compute_learning_signal(self, dl_autodiff, args):
+    def _compute_learning_signal(self, dl_autodiff: Any, args: Any) -> Any:
         signals = list(dl_autodiff)
         if self.feedback == 'random' and self._random_feedback:
             # dl_autodiff[g].shape == (*varshape, num_state). Project over the
             # trailing n_layer axis (-2), preserving num_state on the tail.
-            def _project(B, s):
+            def _project(B: Any, s: Any) -> Any:
                 return jnp.einsum('...lj,lk->...kj', s, B)
 
             signals = [
@@ -231,7 +234,7 @@ class EProp(ParamDimVjpAlgorithm):
             # KappaFilter state carries varshape, but signal has an extra
             # trailing num_state axis. Collapse num_state for filter purposes;
             # broadcast the filtered value back.
-            def _filter(flt, s):
+            def _filter(flt: Any, s: Any) -> Any:
                 # collapse num_state tail: sum over last axis produces shape (*varshape,)
                 collapsed = s.sum(axis=-1)
                 filtered = flt.update(collapsed)
