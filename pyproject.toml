@@ -156,6 +156,8 @@ module = [
     "braintrace._op.lora",
     "braintrace._op._primitive",
     "braintrace._op",
+    "braintrace._compile",
+    "braintrace",
 ]
 disallow_untyped_defs = true
 

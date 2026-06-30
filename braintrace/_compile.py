@@ -13,7 +13,9 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Type, Union
+from __future__ import annotations
+
+from typing import Any, Type, Union
 
 import jax
 import brainstate
@@ -99,15 +101,15 @@ def _resolve_algorithm(
 
 
 def compile(
-    model,
-    algorithm,
-    *example_inputs,
-    batch_size=None,
-    seed=None,
-    verbose=0,
-    vmap=False,
-    **options,
-):
+    model: brainstate.nn.Module,
+    algorithm: Union[str, Type[ETraceAlgorithm]],
+    *example_inputs: Any,
+    batch_size: int | None = None,
+    seed: int | None = None,
+    verbose: int = 0,
+    vmap: bool = False,
+    **options: Any,
+) -> ETraceAlgorithm | brainstate.nn.Vmap:
     """Define an eligibility-trace online-learning model in one call.
 
     This is the unified entry point. It initializes the model's states, builds
@@ -259,7 +261,7 @@ def compile(
         unbatched = jax.tree.map(lambda a: a[0], example_inputs)
 
         @brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)
-        def _init():
+        def _init() -> None:
             brainstate.nn.init_all_states(model)
             learner.compile_graph(*unbatched)
 
@@ -268,7 +270,7 @@ def compile(
                 _init()
         else:
             _init()
-        result = brainstate.nn.Vmap(learner, vmap_states='new')
+        result: ETraceAlgorithm | brainstate.nn.Vmap = brainstate.nn.Vmap(learner, vmap_states='new')
     else:
         # --- state initialization (always) --- #
         if seed is not None:
