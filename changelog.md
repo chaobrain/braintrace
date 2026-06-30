@@ -1,6 +1,58 @@
 # Release Notes
 
 
+## Version 0.2.3
+
+This release adds optional, shape-preserving parameter-transform hooks to the
+eligibility-trace (ETP) operators, so a trainable weight (or bias) can be passed
+through an elementwise / standardizing function *before* it enters the operation
+while the eligibility trace and gradient remain with respect to the **raw**
+stored parameter. It also threads these hooks through the `braintrace.nn` linear
+layers. One public API is renamed (see Breaking changes).
+
+### Highlights
+
+#### New: parameter-transform hooks on ETP operators
+
+- Add transform hooks to the ETP ops, computing
+  `y = x @ weight_fn(w) (+ bias_fn(b))` (and per-op equivalents), with the
+  eligibility trace and gradient kept with respect to the **raw** parameter:
+  - **`braintrace.matmul`** / **`braintrace.sparse_matmul`** — `weight_fn`,
+    `bias_fn`.
+  - **`braintrace.conv`** — `kernel_fn`, `bias_fn`.
+  - **`braintrace.lora_matmul`** — `b_fn`, `a_fn`, `bias_fn`.
+  - **`braintrace.element_wise`** — `weight_fn` (see Breaking changes).
+
+  Each transform is applied *inside* the ETP primitive; the per-parameter
+  Jacobian is recovered exactly once (via `jax.vjp`) in the weight-gradient rule,
+  while the trace-propagation rule is unchanged — so the forward-mode eligibility
+  trace stays exact and is never double-counted. D-RTRL matches
+  backprop-through-time element-wise for non-identity transforms (verified with
+  `tanh`, `w**2`, and `abs`). Omitting a transform is bit-identical to the
+  previous behavior.
+
+#### New / Improved: `braintrace.nn` linear layers
+
+- **`braintrace.nn.Linear`** (with `w_mask`), **`braintrace.nn.SignedWLinear`**,
+  and **`braintrace.nn.ScaledWSLinear`** now route their weight masking / sign /
+  standardization through the new `matmul(weight_fn=...)` hook, so the masked /
+  signed / standardized weight participates in eligibility-trace learning with
+  the gradient kept w.r.t. the raw weight leaf. (For `ScaledWSLinear`, `gain` and
+  `bias` are applied as post-operations and are therefore non-temporal for the
+  online trace, though still recovered exactly by the multi-step VJP oracle.)
+- **Export `braintrace.nn.ScaledWSLinear`** (previously importable only by its
+  fully-qualified module path).
+
+### Breaking changes
+
+- **`braintrace.element_wise`**: the `fn` parameter is renamed to **`weight_fn`**
+  and is now **keyword-only**, and the transform is applied *inside* the ETP
+  primitive (previously it was applied to the weight outside the primitive).
+  Migrate `element_wise(w, fn=g)` to `element_wise(w, weight_fn=g)`. Forward
+  results are unchanged; only the call signature and the internal
+  trace-factorization point differ.
+
+
 ## Version 0.2.2
 
 This release introduces a unified `braintrace.compile` entry point for building
