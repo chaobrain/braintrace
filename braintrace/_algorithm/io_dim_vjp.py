@@ -24,6 +24,8 @@
 
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from functools import partial
 from typing import Callable, Dict, Tuple, Optional, Sequence, Any
 
@@ -69,7 +71,7 @@ __all__ = [
 ]
 
 
-def _format_decay_and_rank(decay_or_rank) -> Tuple[float, int]:
+def _format_decay_and_rank(decay_or_rank: Any) -> Tuple[float, int]:
     """
     Determines the decay factor and the number of approximation ranks based on the input.
 
@@ -104,7 +106,7 @@ def _format_decay_and_rank(decay_or_rank) -> Tuple[float, int]:
     return decay, num_rank
 
 
-def _expon_smooth(old, new, decay):
+def _expon_smooth(old: Any, new: Any, decay: Any) -> Any:
     """
     Apply exponential smoothing to update a value.
 
@@ -129,7 +131,7 @@ def _expon_smooth(old, new, decay):
     return decay * old + (1 - decay) * new
 
 
-def _low_pass_filter(old, new, alpha):
+def _low_pass_filter(old: Any, new: Any, alpha: Any) -> Any:
     """
     Apply a low-pass filter to smooth the transition between old and new values.
 
@@ -164,7 +166,7 @@ def _init_IO_dim_state(
     etrace_xs: Dict[ETraceX_Key, brainstate.State],
     etrace_dfs: Dict[ETraceDF_Key, brainstate.State],
     relation: HiddenParamOpRelation,
-):
+) -> None:
     """
     Initialize the eligibility trace states for input-output dimensions.
 
@@ -264,7 +266,7 @@ def _update_IO_dim_etrace_scan_fn(
     ],
     hid_weight_op_relations: Sequence[HiddenParamOpRelation],
     decay: float,
-):
+) -> Any:
     """
     Update the eligibility trace values for input-output dimensions.
 
@@ -394,7 +396,7 @@ def _solve_IO_dim_weight_gradients(
     running_index: int,
     decay: float,
     fast_solve: bool = True,
-):
+) -> None:
     """
     Compute and update the weight gradients for input-output dimensions using eligibility trace data.
 
@@ -456,7 +458,7 @@ def _solve_IO_dim_weight_gradients(
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
 
-        def _call(df_, w_, _rule=xy_to_dw_rule, _params=eqn_params, _x=x):
+        def _call(df_: Any, w_: Any, _rule: Any = xy_to_dw_rule, _params: Any = eqn_params, _x: Any = x) -> Any:
             return _rule(_x, df_, w_, **_params)
 
         group: HiddenGroup
@@ -625,13 +627,13 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
         self.fast_solve = fast_solve
 
-    def init_etrace_state(self, *args, **kwargs):
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the eligibility trace states of the etrace algorithm.
 
         This method is needed after compiling the etrace graph. See
@@ -642,11 +644,11 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         #   2. df
         self.etrace_xs = dict()
         self.etrace_dfs = dict()
+        relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
-            relation: HiddenParamOpRelation
             _init_IO_dim_state(self.etrace_xs, self.etrace_dfs, relation)
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.
 
         Parameters
@@ -738,7 +740,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             Dict[ETraceX_Key, jax.Array],
             Dict[ETraceDF_Key, jax.Array]
         ]
-    ):
+    ) -> None:
         """Assign the eligibility trace data to the states at the current time-step.
 
         .. note::
@@ -880,7 +882,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         weight_vals: Dict[Path, PyTree],
         dl_to_nonetws_at_t: Dict[Path, PyTree],
         dl_to_etws_at_t: Optional[Dict[Path, PyTree]],
-    ):
+    ) -> Any:
         """Compute weight gradients using eligibility trace data and loss gradients.
 
         This method implements the final stage of the eligibility trace algorithm, where

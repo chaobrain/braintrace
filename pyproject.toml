@@ -168,6 +168,10 @@ module = [
     "braintrace.nn",
     "braintrace._algorithm.base",
     "braintrace._algorithm.graph_executor",
+    "braintrace._algorithm.vjp_base",
+    "braintrace._algorithm.vjp_graph_executor",
+    "braintrace._algorithm.param_dim_vjp",
+    "braintrace._algorithm.io_dim_vjp",
 ]
 disallow_untyped_defs = true
 
