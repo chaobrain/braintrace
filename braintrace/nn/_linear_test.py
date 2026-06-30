@@ -28,9 +28,23 @@ import jax
 import jax.numpy as jnp
 import pytest
 import brainunit as u
+import brainevent
 from braintools import init
 
 import braintrace
+
+
+def _be_csr_from_coo(values, rows, cols, shape):
+    """Build a :class:`brainevent.CSR` from COO-style ``(values, rows, cols)``.
+
+    ``SparseLinear`` requires a :class:`brainevent.DataRepresentation` (the type
+    that provides the ``yw_to_w_transposed`` online-learning protocol). brainunit
+    ``COO`` does not qualify, so the connectivity is densified and re-encoded as a
+    brainevent CSR. These tests assert output shapes only, so duplicate-index
+    summation during densification is irrelevant.
+    """
+    dense = u.sparse.COO((values, rows, cols), shape=shape).todense()
+    return brainevent.CSR.fromdense(dense)
 
 
 def _flatten_grads(grads):
@@ -287,12 +301,12 @@ class TestSignedWLinear:
 class TestSparseLinear:
     """Test SparseLinear layer."""
 
-    def test_sparse_linear_basic_creation_coo(self):
-        """Test basic SparseLinear layer creation with COO sparse matrix."""
+    def test_sparse_linear_basic_creation_csr(self):
+        """Test basic SparseLinear layer creation with a brainevent CSR sparse matrix."""
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         assert hasattr(linear, 'out_size')
@@ -303,7 +317,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         x = brainstate.random.randn(8, 512)
@@ -315,7 +329,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         x = brainstate.random.randn(512)
@@ -327,7 +341,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat, b_init=init.Constant(0.1))
         x = brainstate.random.randn(8, 512)
@@ -339,7 +353,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat, b_init=None)
         x = brainstate.random.randn(8, 512)
@@ -351,7 +365,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat, in_size=512)
         assert hasattr(linear, 'in_size')
@@ -362,7 +376,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 100))  # Only 100 connections
         values = brainstate.random.randn(100)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         x = brainstate.random.randn(8, 512)
@@ -374,7 +388,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 50000))  # Many connections
         values = brainstate.random.randn(50000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         x = brainstate.random.randn(8, 512)
@@ -386,7 +400,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat, name="test_sparse")
         assert linear.name == "test_sparse"
@@ -396,7 +410,7 @@ class TestSparseLinear:
         brainstate.random.seed(42)
         rows, cols = brainstate.random.randint(0, 512, size=(2, 1000))
         values = brainstate.random.randn(1000)
-        sparse_mat = u.sparse.COO((values, rows, cols), shape=(512, 256))
+        sparse_mat = _be_csr_from_coo(values, rows, cols, (512, 256))
 
         linear = braintrace.nn.SparseLinear(sparse_mat)
         x = brainstate.random.randn(32, 512)
@@ -731,7 +745,7 @@ class TestLinearIntegration:
         row_indices = jnp.repeat(jnp.arange(64), 32)
         col_indices = jnp.tile(jnp.arange(32), 64)
         values = brainstate.random.randn(64 * 32)
-        sparse_mat = u.sparse.COO((values, row_indices, col_indices), shape=(64, 32))
+        sparse_mat = _be_csr_from_coo(values, row_indices, col_indices, (64, 32))
 
         sparse_linear = braintrace.nn.SparseLinear(sparse_mat, b_init=None)
 

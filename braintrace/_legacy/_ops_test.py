@@ -107,9 +107,9 @@ class TestOpsForward:
         assert y.shape == (1, 4, 4, 2)
 
     def test_sparse_op(self):
-        from brainunit import sparse as ss
+        import brainevent
         dense = jnp.eye(3) * 2.0
-        csr = ss.CSR.fromdense(dense)
+        csr = brainevent.CSR.fromdense(dense)
         op = SpMatMulOp(sparse_mat=csr)
         x = jnp.arange(3.0)
         w = {'weight': csr.data}
