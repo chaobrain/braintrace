@@ -153,6 +153,7 @@ module = [
     "braintrace._op.elemwise",
     "braintrace._op.conv",
     "braintrace._op.sparse",
+    "braintrace._op.lora",
 ]
 disallow_untyped_defs = true
 
