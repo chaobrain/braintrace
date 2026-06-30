@@ -26,7 +26,7 @@ with their :mod:`brainstate.nn` counterparts.
 The exported building blocks fall into four groups:
 
 - **Linear maps** — :class:`Linear`, :class:`SignedWLinear`,
-  :class:`SparseLinear`, :class:`LoRA`.
+  :class:`ScaledWSLinear`, :class:`SparseLinear`, :class:`LoRA`.
 - **Convolutions** — :class:`Conv1d`, :class:`Conv2d`, :class:`Conv3d`.
 - **Read-outs** — :class:`LeakyRateReadout`.
 - **Recurrent cells** — :class:`ValinaRNNCell`, :class:`GRUCell`,
@@ -41,7 +41,7 @@ re-implemented here; accessing them through ``braintrace.nn`` emits a
 """
 
 from ._conv import Conv1d, Conv2d, Conv3d
-from ._linear import Linear, SignedWLinear, SparseLinear, LoRA
+from ._linear import Linear, SignedWLinear, ScaledWSLinear, SparseLinear, LoRA
 from ._readout import LeakyRateReadout
 from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
 
@@ -49,7 +49,7 @@ __all__ = [
     # conv
     'Conv1d', 'Conv2d', 'Conv3d',
     # linear
-    'Linear', 'SignedWLinear', 'SparseLinear', 'LoRA',
+    'Linear', 'SignedWLinear', 'ScaledWSLinear', 'SparseLinear', 'LoRA',
     # readout
     'LeakyRateReadout',
     # rnn

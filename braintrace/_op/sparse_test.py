@@ -452,3 +452,111 @@ class TestPublicAPIRoundTrip:
 
     def test_public_alias(self):
         assert braintrace.sparse_matmul is sparse_matmul
+
+
+# ---------------------------------------------------------------------------
+# weight_fn / bias_fn transforms
+# ---------------------------------------------------------------------------
+
+class TestSparseWeightFnBiasFn:
+    """Tests for weight_fn / bias_fn support in sparse_matmul."""
+
+    def test_forward_applies_weight_fn(self):
+        """weight_fn=lambda w: w**2 should be applied to the nnz data before matmul."""
+        dense = jnp.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 0.0, 3.0],
+        ])
+        csr = _csr_from_dense(dense)
+        x = jnp.array([[1.0, 2.0, 3.0], [0.5, 0.5, 0.5]])
+        out = sparse_matmul(x, csr.data, sparse_mat=csr, weight_fn=lambda w: w ** 2)
+        # Reference: apply weight_fn to nnz data, reconstruct, and matmul
+        ref_dense = jnp.array([
+            [1.0, 0.0, 0.0],
+            [0.0, 4.0, 0.0],
+            [0.0, 0.0, 9.0],
+        ])
+        ref = x @ ref_dense
+        np.testing.assert_allclose(u.get_mantissa(out), u.get_mantissa(ref), atol=1e-4)
+
+    def test_forward_applies_bias_fn(self):
+        """bias_fn=lambda b: b*2 should be applied to the bias before adding."""
+        dense = jnp.eye(3) * 2.0
+        csr = _csr_from_dense(dense)
+        x = jnp.ones((2, 3))
+        b = jnp.arange(3.0)
+        out = sparse_matmul(x, csr.data, sparse_mat=csr, bias=b, bias_fn=lambda b: b * 2.0)
+        ref = x @ dense + b * 2.0
+        np.testing.assert_allclose(u.get_mantissa(out), u.get_mantissa(ref), atol=1e-4)
+
+    def test_forward_no_fns_unchanged(self):
+        """Passing weight_fn=None, bias_fn=None must be bit-identical to no-fn baseline."""
+        dense = jnp.eye(3) * 2.0
+        csr = _csr_from_dense(dense)
+        x = jnp.ones((2, 3))
+        b = jnp.arange(3.0)
+        out_with_none = sparse_matmul(x, csr.data, sparse_mat=csr, bias=b,
+                                      weight_fn=None, bias_fn=None)
+        out_baseline = sparse_matmul(x, csr.data, sparse_mat=csr, bias=b)
+        np.testing.assert_allclose(
+            u.get_mantissa(out_with_none),
+            u.get_mantissa(out_baseline),
+            atol=0,
+        )
+
+    def test_xy_to_dw_matches_vjp_through_weight_fn(self):
+        """xy_to_dw rule must match jax.vjp through weight_fn(w)**2."""
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_sp_mm_p
+        from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+
+        # Use the hashable stub so it can be a static primitive param
+        stub = _HashableStubMat(jnp.zeros((3, 4)))
+        x = jnp.ones((2, 3))
+        w_data = jnp.arange(1.0, 13.0)  # shape (12,)
+        hidden = brainstate.random.randn(2, 4)
+
+        rule = ETP_RULES_XY_TO_DW[etp_sp_mm_p]
+        params = {
+            'sparse_mat': stub,
+            'has_bias': False,
+            'weight_fn': lambda w: w ** 2,
+            'bias_fn': None,
+        }
+        weights = {'weight': w_data}
+
+        def impl(wd):
+            return x @ stub.with_data(wd['weight'] ** 2)
+
+        assert_xy_to_dw_matches_vjp(
+            rule=rule, impl=impl, x=x, hidden_dim=hidden,
+            weights=weights, params=params, atol=1e-4,
+        )
+
+    def test_xy_to_dw_matches_vjp_with_bias_fn(self):
+        """xy_to_dw rule must match jax.vjp through both weight_fn and bias_fn."""
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_sp_mm_p
+        from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+
+        stub = _HashableStubMat(jnp.zeros((3, 4)))
+        x = jnp.ones((2, 3))
+        w_data = jnp.arange(1.0, 13.0)
+        b_data = jnp.ones(4) * 0.5
+        hidden = brainstate.random.randn(2, 4)
+
+        rule = ETP_RULES_XY_TO_DW[etp_sp_mm_p]
+        params = {
+            'sparse_mat': stub,
+            'has_bias': True,
+            'weight_fn': lambda w: w ** 2,
+            'bias_fn': lambda b: b * 3.0,
+        }
+        weights = {'weight': w_data, 'bias': b_data}
+
+        def impl(wd):
+            return x @ stub.with_data(wd['weight'] ** 2) + wd['bias'] * 3.0
+
+        assert_xy_to_dw_matches_vjp(
+            rule=rule, impl=impl, x=x, hidden_dim=hidden,
+            weights=weights, params=params, atol=1e-4,
+        )

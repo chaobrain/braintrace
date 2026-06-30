@@ -524,3 +524,48 @@ class TestPublicAPIRoundTrip:
 
     def test_public_alias(self):
         assert braintrace.conv is conv
+
+
+class TestConvKernelFnBiasFn:
+
+    def test_forward_applies_kernel_fn(self):
+        x = brainstate.random.randn(8, 3, 16)
+        k = brainstate.random.randn(4, 3, 5)
+        out = braintrace.conv(x, k, strides=(1,), padding='SAME', kernel_fn=lambda w: w ** 2)
+        import jax
+        ref = jax.lax.conv_general_dilated(x, k ** 2, window_strides=(1,), padding='SAME')
+        np.testing.assert_allclose(out, ref, atol=1e-4)
+
+    def test_kernel_fn_xy_to_dw_matches_vjp(self):
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_conv_p
+        import jax
+        rule = ETP_RULES_XY_TO_DW[etp_conv_p]
+        x = brainstate.random.randn(2, 3, 10)
+        k = brainstate.random.randn(4, 3, 5)
+        hidden = brainstate.random.randn(2, 4, 10)
+        params = dict(has_bias=False, strides=(1,), padding='SAME', lhs_dilation=None,
+                      rhs_dilation=None, feature_group_count=1, batch_group_count=1,
+                      dimension_numbers=None, kernel_fn=lambda w: w ** 2, bias_fn=None)
+        dw = rule(x, hidden, {'weight': k}, **params)
+
+        def fwd(w):
+            return jax.lax.conv_general_dilated(x, w ** 2, window_strides=(1,), padding='SAME')
+
+        _, vjp = jax.vjp(fwd, k)
+        np.testing.assert_allclose(dw['weight'], vjp(hidden)[0], atol=1e-4)
+
+    def test_bias_fn_xy_to_dw_factor(self):
+        """Deferred bias trace carries bias_fn'(b) per channel (NCH: channel axis=1)."""
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_conv_p
+        rule = ETP_RULES_XY_TO_DW[etp_conv_p]
+        x = brainstate.random.randn(2, 3, 10)
+        k = brainstate.random.randn(4, 3, 5)
+        b = brainstate.random.randn(4)
+        hidden = brainstate.random.randn(2, 4, 10)
+        params = dict(has_bias=True, strides=(1,), padding='SAME', lhs_dilation=None,
+                      rhs_dilation=None, feature_group_count=1, batch_group_count=1,
+                      dimension_numbers=None, kernel_fn=None, bias_fn=lambda bb: bb ** 2)
+        out = rule(x, hidden, {'weight': k, 'bias': b}, **params)
+        # bias_fn'(b) = 2*b, broadcast along channel axis=1 of the (batch, ch, spatial) trace.
+        expected = hidden * (2.0 * b).reshape(1, 4, 1)
+        np.testing.assert_allclose(out['bias'], expected, atol=1e-4)

@@ -405,3 +405,38 @@ class TestLoRAOnlineLearning:
                             err_msg='D-RTRL d(lora_a) does not match BPTT')
         npt.assert_allclose(grad_p['bias'], bptt['bias'], atol=1e-5,
                             err_msg='D-RTRL d(bias) does not match BPTT (was it zero?)')
+
+
+# ---------------------------------------------------------------------------
+# Per-factor transform functions: b_fn / a_fn / bias_fn
+# ---------------------------------------------------------------------------
+
+class TestLoraFactorFns:
+
+    def test_forward_applies_factor_fns(self):
+        import brainstate
+        x = brainstate.random.randn(4, 8)
+        B = brainstate.random.randn(8, 2)
+        A = brainstate.random.randn(2, 4)
+        out = braintrace.lora_matmul(x, B, A, alpha=0.5,
+                                     b_fn=lambda b: b ** 2, a_fn=jnp.tanh)
+        ref = 0.5 * (x @ (B ** 2) @ jnp.tanh(A))
+        np.testing.assert_allclose(out, ref, atol=1e-4)
+
+    def test_xy_to_dw_matches_vjp_through_factor_fns(self):
+        import brainstate
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_lora_mm_p
+        from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+        rule = ETP_RULES_XY_TO_DW[etp_lora_mm_p]
+        x = brainstate.random.randn(4, 8)
+        weights = {'lora_b': brainstate.random.randn(8, 2),
+                   'lora_a': brainstate.random.randn(2, 4)}
+        hidden = brainstate.random.randn(4, 4)
+        params = {'alpha': 0.5, 'has_bias': False,
+                  'b_fn': lambda b: b ** 2, 'a_fn': jnp.tanh, 'bias_fn': None}
+
+        def impl(w):
+            return 0.5 * (x @ (w['lora_b'] ** 2) @ jnp.tanh(w['lora_a']))
+
+        assert_xy_to_dw_matches_vjp(rule=rule, impl=impl, x=x, hidden_dim=hidden,
+                                    weights=weights, params=params, atol=1e-4)

@@ -20,9 +20,9 @@ compiler must *evaluate* it when walking ``y -> h``. This module
 verifies:
 
 * The primitive is registered with the gradient-enabled flag.
-* ``element_wise(w)`` (default ``fn=identity``) round-trips ``w``.
-* ``element_wise(w, fn=lambda w: 2*w)`` applies ``fn`` *before* the bind
-  (the primitive itself is the identity).
+* ``element_wise(w)`` (default ``weight_fn=None``) round-trips ``w``.
+* ``element_wise(w, weight_fn=lambda w: 2*w)`` applies ``weight_fn`` *inside*
+  the primitive.
 * brainunit quantities pass through.
 * JAX rules — jit, vmap, grad, jvp.
 * Four ETP rules return the documented values / shapes.
@@ -37,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 import brainunit as u
 
+import brainstate
 import braintrace
 from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
@@ -70,12 +71,12 @@ class TestIdentityRoundTrip:
 
     def test_custom_fn_applied(self):
         w = jnp.array([1.0, 2.0, 3.0])
-        out = element_wise(w, fn=lambda x: x * 10.0)
+        out = element_wise(w, weight_fn=lambda x: x * 10.0)
         np.testing.assert_allclose(out, w * 10.0)
 
     def test_nonlinear_fn(self):
         w = jnp.array([0.0, 0.5, 1.0])
-        out = element_wise(w, fn=jnp.sin)
+        out = element_wise(w, weight_fn=jnp.sin)
         np.testing.assert_allclose(out, jnp.sin(w))
 
 
@@ -103,22 +104,16 @@ class TestPrimitiveInJaxpr:
         jaxpr = jax.make_jaxpr(lambda w: element_wise(w))(w)
         assert any(eqn.primitive is etp_elemwise_p for eqn in jaxpr.jaxpr.eqns)
 
-    def test_fn_evaluated_before_bind(self):
-        """The primitive itself is the identity; the user-supplied ``fn``
-        runs as ordinary JAX ops *before* the bind. So if ``fn`` produces
-        e.g. a ``mul`` op, that ``mul`` appears in the jaxpr alongside
-        the elemwise bind."""
+    def test_fn_carried_as_primitive_param(self):
+        """weight_fn is now a primitive param, not a traced JAX op.
+        The jaxpr contains exactly one etp_elemwise equation, and the
+        weight_fn callable is stored inside its params dict."""
         w = jnp.ones((3,))
-        jaxpr = jax.make_jaxpr(lambda w: element_wise(w, fn=lambda x: x * 2))(w)
-        # mul (or scalar broadcast + mul) appears.
-        assert any(
-            eqn.primitive is etp_elemwise_p for eqn in jaxpr.jaxpr.eqns
-        )
-        # And there must be a multiplication-bearing op too.
+        jaxpr = jax.make_jaxpr(lambda w: element_wise(w, weight_fn=lambda x: x * 2))(w)
         eqns = list(jaxpr.jaxpr.eqns)
-        # Either lax.mul_p or something equivalent.
-        has_mul = any('mul' in eqn.primitive.name for eqn in eqns)
-        assert has_mul
+        assert len(eqns) == 1
+        assert eqns[0].primitive is etp_elemwise_p
+        assert eqns[0].params.get('weight_fn') is not None
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +135,7 @@ class TestBrainunit:
 
     def test_custom_fn_with_units(self):
         w = jnp.array([1.0, 2.0]) * u.mV
-        out = element_wise(w, fn=lambda x: x * 2)
+        out = element_wise(w, weight_fn=lambda x: x * 2)
         np.testing.assert_allclose(u.get_mantissa(out), jnp.array([2.0, 4.0]))
 
 
@@ -167,7 +162,7 @@ class TestJAXRules:
 
     def test_grad_custom_fn(self):
         w = jnp.array([1.0, 2.0, 3.0])
-        g = jax.grad(lambda w_: element_wise(w_, fn=lambda x: x ** 2).sum())(w)
+        g = jax.grad(lambda w_: element_wise(w_, weight_fn=lambda x: x ** 2).sum())(w)
         np.testing.assert_allclose(g, 2.0 * w)
 
 
@@ -242,3 +237,82 @@ class TestElemwiseDictRules:
         assert out['weight'].shape == (3, 4)
         # 5 * 2 = 10
         assert float(out['weight'][0, 0]) == 10.0
+
+
+class TestElemwiseWeightFnInside:
+
+    def test_forward_applies_weight_fn(self):
+        import brainstate
+        w = brainstate.random.randn(5)
+        out = element_wise(w, weight_fn=lambda x: x * 10.0)
+        np.testing.assert_allclose(out, w * 10.0, atol=1e-5)
+
+    def test_default_is_identity(self):
+        import brainstate
+        w = brainstate.random.randn(5)
+        np.testing.assert_allclose(element_wise(w), w, atol=1e-6)
+
+    def test_xy_to_dw_applies_fn_derivative(self):
+        """xy_to_dw must return ∂h/∂w = vjp(weight_fn)(hidden) — NOT hidden itself."""
+        import brainstate
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_elemwise_p
+        rule = ETP_RULES_XY_TO_DW[etp_elemwise_p]
+        w = brainstate.random.randn(5)
+        hidden = brainstate.random.randn(5)
+        out = rule(None, hidden, {'weight': w}, weight_fn=lambda x: x ** 2)
+        _, vjp = jax.vjp(lambda x: x ** 2, w)
+        np.testing.assert_allclose(out['weight'], vjp(hidden)[0], atol=1e-5)
+
+    def test_xy_to_dw_identity_returns_hidden(self):
+        import brainstate
+        from braintrace._op import ETP_RULES_XY_TO_DW, etp_elemwise_p
+        rule = ETP_RULES_XY_TO_DW[etp_elemwise_p]
+        hidden = brainstate.random.randn(5)
+        out = rule(None, hidden, {'weight': brainstate.random.randn(5)}, weight_fn=None)
+        np.testing.assert_allclose(out['weight'], hidden, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Exactness gate: D_RTRL == BPTT when element_wise carries weight_fn=tanh
+# ---------------------------------------------------------------------------
+
+class TestElemwiseWeightFnExactness:
+    """element_wise's own weight gradient must include weight_fn' (D_RTRL==BPTT)."""
+
+    @staticmethod
+    def _factory(weight_fn):
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.nh = 4
+                self.W = brainstate.ParamState(brainstate.random.randn(2 + 4, 4) * 0.2)
+                self.alpha = brainstate.ParamState(brainstate.random.randn(4) * 0.5)
+
+            def init_state(self, batch_size=None, **kw):
+                size = (self.nh,) if batch_size is None else (batch_size, self.nh)
+                self.h = brainstate.HiddenState(jnp.zeros(size))
+
+            def update(self, x):
+                a = braintrace.element_wise(self.alpha.value, weight_fn=weight_fn)
+                xh = jnp.concatenate([x.reshape(1, -1), self.h.value], axis=-1)
+                self.h.value = jnp.tanh(a * braintrace.matmul(xh, self.W.value))
+                return self.h.value
+
+        def factory():
+            brainstate.random.seed(0)
+            return Cell()
+
+        return factory
+
+    def test_d_rtrl_matches_bptt_with_elemwise_weight_fn(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        factory = self._factory(weight_fn=jnp.tanh)
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)

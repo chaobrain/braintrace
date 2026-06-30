@@ -33,6 +33,23 @@ from braintools import init
 import braintrace
 
 
+def _flatten_grads(grads):
+    """Flatten nested dict grad values (e.g. from a dict-valued ParamState) to flat tuple keys.
+
+    For a grad dict whose values may themselves be dicts (e.g. ``{'weight': …, 'bias': …}``),
+    expands ``{k: {subk: v}}`` → ``{k + (subk,): v}`` so that ``assert_param_gradients_close``
+    can compare individual leaf arrays.
+    """
+    flat = {}
+    for k, v in grads.items():
+        if isinstance(v, dict):
+            for subk, subv in v.items():
+                flat[k + (subk,)] = subv
+        else:
+            flat[k] = v
+    return flat
+
+
 class TestLinear:
     """Test Linear layer."""
 
@@ -767,3 +784,184 @@ class TestLinearIntegration:
 
             assert y1.shape == (batch_size, 32)
             assert y2.shape == (batch_size, 32)
+
+
+class TestNnWeightFnExactness:
+    """Masked Linear and SignedWLinear gradients must match BPTT (now exact)."""
+
+    @staticmethod
+    def _rnn_factory(make_layer):
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.nh = 4
+                self.layer = make_layer()
+
+            def init_state(self, batch_size=None, **kw):
+                size = (self.nh,) if batch_size is None else (batch_size, self.nh)
+                self.h = brainstate.HiddenState(jnp.zeros(size))
+
+            def update(self, x):
+                xh = jnp.concatenate([x.reshape(1, -1), self.h.value], axis=-1)
+                self.h.value = jnp.tanh(self.layer(xh))
+                return self.h.value
+
+        def factory():
+            brainstate.random.seed(0)
+            return Cell()
+
+        return factory
+
+    def test_signed_w_linear_matches_bptt(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        factory = self._rnn_factory(lambda: braintrace.nn.SignedWLinear(2 + 4, 4))
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_masked_linear_matches_bptt(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        mask = ((jnp.arange(6)[:, None] + jnp.arange(4)[None, :]) % 3 != 0).astype(float)
+        factory = self._rnn_factory(lambda: braintrace.nn.Linear(2 + 4, 4, w_mask=mask))
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = _flatten_grads(bptt_param_gradients(factory, inputs))
+        online = _flatten_grads(online_param_gradients(
+            factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
+        ))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+
+class TestScaledWSLinearWeightFn:
+    """ScaledWSLinear's standardized 'weight' leaf gradient must match BPTT exactly.
+
+    ``ScaledWSLinear`` stores a single ``ParamState`` whose ``.value`` is a dict
+    with keys ``'weight'``, ``'bias'``, and ``'gain'``.  After flattening the
+    grad dict with ``_flatten_grads``, the leaf keys are
+    ``('layer', 'weight', 'weight')``, ``('layer', 'weight', 'bias')``, and
+    ``('layer', 'weight', 'gain')``.
+
+    Exactness is asserted ONLY on the ``'weight'`` leaf (last element ``== 'weight'``).
+    The ``gain`` leaf is intentionally excluded: ``gain`` is non-temporal — it
+    reaches the hidden state only *through* the standardized weight map and does
+    not participate directly in the eligibility trace.  Its online gradient will
+    therefore NOT match BPTT, and asserting on it would be incorrect.
+    """
+
+    @staticmethod
+    def _rnn_factory():
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.nh = 4
+                self.layer = braintrace.nn.ScaledWSLinear(2 + 4, 4)
+
+            def init_state(self, batch_size=None, **kw):
+                size = (self.nh,) if batch_size is None else (batch_size, self.nh)
+                self.h = brainstate.HiddenState(jnp.zeros(size))
+
+            def update(self, x):
+                # x is shape (2,); h.value is (1, 4) after init_all_states(batch_size=1)
+                xh = jnp.concatenate([x.reshape(1, -1), self.h.value], axis=-1)
+                self.h.value = jnp.tanh(self.layer(xh))
+                return self.h.value
+
+        def factory():
+            brainstate.random.seed(0)
+            return Cell()
+
+        return factory
+
+    def test_weight_leaf_gradient_matches_bptt(self):
+        """Standardized weight leaf (not gain) online gradient equals BPTT.
+
+        Routing weight-standardization through ``matmul``'s ``weight_fn``
+        recovers the standardization Jacobian in the eligibility trace.  The
+        exact comparison is restricted to the ``('layer', 'weight', 'weight')``
+        leaf.  The ``gain`` leaf is non-temporal (reaches the hidden state only
+        through the standardized weight, another trainable map) and is
+        intentionally excluded from the exactness assertion.
+        """
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
+        )
+        factory = self._rnn_factory()
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(6, 2)
+        bptt = _flatten_grads(bptt_param_gradients(factory, inputs))
+        online = _flatten_grads(online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'),
+        ))
+        # Select ONLY the standardized weight leaf by its last path element.
+        # After flattening, the three leaves are:
+        #   ('layer', 'weight', 'weight') — the standardized weight: ASSERT exact
+        #   ('layer', 'weight', 'bias')   — bias: not asserted here
+        #   ('layer', 'weight', 'gain')   — gain (non-temporal): EXCLUDED
+        weight_keys = [k for k in bptt if k[-1] == 'weight']
+        assert weight_keys, (
+            f"No 'weight' leaf found after flattening. Keys: {list(bptt.keys())}"
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4, keys=weight_keys)
+        # gain is differentiated exactly by the multi-step VJP oracle path (post-scale,
+        # standard autodiff) — distinct from its non-temporal online eligibility-trace gradient.
+        gain_keys = [k for k in bptt if k[-1] == 'gain']
+        assert gain_keys, list(bptt.keys())
+        assert_param_gradients_close(online, bptt, atol=1e-4, keys=gain_keys)
+
+
+class TestScaledWSLinearForwardBiasGain:
+    """Forward correctness regression: gain must NOT scale the bias.
+
+    The bug introduced in 0b2ccef passed ``bias`` into ``matmul`` and then
+    multiplied the whole result (including bias) by ``gain``, yielding
+    ``(x @ std(w)) * gain + bias * gain`` instead of the correct
+    ``(x @ std(w)) * gain + bias``.  This test sets a non-zero bias and a
+    non-unit gain and asserts the braintrace forward matches the brainstate
+    reference forward.
+    """
+
+    def test_bias_not_scaled_by_gain(self):
+        """Non-zero bias with non-unit gain: braintrace must match brainstate."""
+        brainstate.environ.set(precision=64)
+        brainstate.random.seed(7)
+
+        in_size, out_size = 6, 4
+
+        # Build braintrace layer (the one being fixed).
+        bt_layer = braintrace.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
+        # Build brainstate reference layer (uses the original correct forward).
+        bs_layer = brainstate.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
+
+        # Copy weight params from braintrace to brainstate so they are identical.
+        bt_params = bt_layer.weight.value
+        bs_layer.weight.value = dict(bt_params)
+
+        # Override bias and gain on BOTH layers with non-trivial values.
+        bias_val = jnp.array([1.0, 2.0, 3.0, 4.0])
+        gain_val = jnp.array([[2.0, 0.5, 3.0, 1.5]])  # shape (1, out_size)
+
+        new_params = dict(bt_params)
+        new_params['bias'] = bias_val
+        new_params['gain'] = gain_val
+        bt_layer.weight.value = new_params
+        bs_layer.weight.value = dict(new_params)
+
+        x = brainstate.random.randn(3, in_size)
+
+        bt_out = bt_layer.update(x)
+        bs_out = bs_layer.update(x)
+
+        maxabsdiff = float(jnp.max(jnp.abs(bt_out - bs_out)))
+        assert maxabsdiff < 1e-5, (
+            f"braintrace ScaledWSLinear forward differs from brainstate reference "
+            f"by {maxabsdiff:.6f} (max-abs-diff). Bias is being scaled by gain."
+        )

@@ -284,6 +284,48 @@ class _ElemwiseChainRNN(brainstate.nn.Module):
         return self.h.value
 
 
+class _ElemwiseChainWeightFnRNN(brainstate.nn.Module):
+    """``h = tanh(element_wise(w2, weight_fn=tanh) * matmul(w1, xh))`` — the
+    gradient-enabled elemwise tail exemption must still include W1 even when
+    the elemwise carries a non-identity transform. Both W1 and W2 register."""
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.w1 = brainstate.ParamState(brainstate.random.randn(n_in + n_out, n_out))
+        self.w2 = brainstate.ParamState(brainstate.random.randn(n_out))
+        self.h = brainstate.HiddenState(jnp.zeros(n_out))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        xh = jnp.concatenate([x, self.h.value])
+        y = braintrace.matmul(xh, self.w1.value)
+        s = braintrace.element_wise(self.w2.value, weight_fn=jnp.tanh)
+        self.h.value = jnp.tanh(s * y)
+        return self.h.value
+
+
+class TestElemwiseWeightFnTailExemption:
+
+    def test_weight_fn_elemwise_still_includes_upstream_matmul(self):
+        model = _ElemwiseChainWeightFnRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        # Exact relation set: both W1 (upstream matmul) and W2 (transformed
+        # elemwise) connect to h.
+        assert _relation_set(graph) == {
+            (('w1',), ('h',)),
+            (('w2',), ('h',)),
+        }
+        # Primitive identity (NOT name strings) — project principle.
+        assert _primitive_for(graph, ('w1',)) is etp_mv_p
+        assert _primitive_for(graph, ('w2',)) is etp_elemwise_p
+
+
 class _TwoMatmulInSeriesRNN(brainstate.nn.Module):
     """``h = tanh(matmul(w2, matmul(w1, xh)))`` — W1's output reaches h only
     via W2's matmul (another non-gradient-enabled ETP primitive). W1 must

@@ -157,7 +157,7 @@ def test_matmul_then_elementwise_grad_flows_through_both():
 
     def f(w_, scale_):
         y = braintrace.matmul(x, w_)                     # etp_mm_p
-        z = braintrace.element_wise(scale_, fn=lambda s: s) * y  # etp_elemwise_p marker
+        z = braintrace.element_wise(scale_, weight_fn=lambda s: s) * y  # etp_elemwise_p marker
         return (z ** 2).sum()
 
     def f_ref(w_, scale_):
