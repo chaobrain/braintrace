@@ -47,6 +47,7 @@ from braintrace._op import (
     GRADIENT_ENABLED_PRIMITIVES,
     element_wise,
     etp_elemwise_p,
+    get_fast_path_rules,
     is_etp_enable_gradient_primitive,
 )
 
@@ -338,3 +339,56 @@ class TestElemwiseWeightFnExactness:
             factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
         )
         assert_param_gradients_close(online, bptt, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Closed-form param-dim D-RTRL fast-path kernels (operator-layer bundle)
+# ---------------------------------------------------------------------------
+
+class TestElemwiseFastPath:
+    """The diagonal closed-form fast-path bundle registered on
+    ``etp_elemwise_p``.
+
+    The elemwise op is diagonal and carries no ``x`` input and no bias, so
+    its kernels operate on a single ``'weight'`` key only. The gate keys off
+    ``weight_fn`` alone (no ``bias_fn`` for this op).
+    """
+
+    def test_fast_path_registered_on_elemwise(self):
+        assert get_fast_path_rules(etp_elemwise_p) is not None
+
+    def test_fast_applicable_true_without_weight_fn(self):
+        rules = get_fast_path_rules(etp_elemwise_p)
+        assert rules.applicable({'weight_fn': None}) is True
+
+    def test_fast_applicable_false_with_weight_fn(self):
+        rules = get_fast_path_rules(etp_elemwise_p)
+        assert rules.applicable({'weight_fn': jnp.tanh}) is False
+
+    def test_fast_instant_returns_df(self):
+        rules = get_fast_path_rules(etp_elemwise_p)
+        df = brainstate.random.randn(4, 3)
+        out = rules.instant(None, df, False)
+        assert set(out.keys()) == {'weight'}
+        np.testing.assert_allclose(out['weight'], df)
+
+    def test_fast_recurrent_num_state_1_equals_general_einsum(self):
+        rules = get_fast_path_rules(etp_elemwise_p)
+        # diag (*var, 1, 1); trace (*var, 1).
+        var = 4
+        diag = brainstate.random.randn(var, 1, 1)
+        trace = {'weight': brainstate.random.randn(var, 1)}
+        fast = rules.recurrent(diag, trace, 1)
+        general = jnp.einsum('...ab,...b->...a', diag, trace['weight'])
+        np.testing.assert_allclose(fast['weight'], general, atol=1e-6)
+
+    def test_fast_solve_elemwise_fold_batch(self):
+        rules = get_fast_path_rules(etp_elemwise_p)
+        batch, var, n_state = 2, 4, 3
+        diag_like = brainstate.random.randn(batch, var, n_state)
+        etrace = {'weight': brainstate.random.randn(batch, var, n_state)}
+        folded = rules.solve(diag_like, etrace, fold_batch=True)
+        unfolded = rules.solve(diag_like, etrace, fold_batch=False)
+        np.testing.assert_allclose(
+            folded['weight'], unfolded['weight'].sum(axis=0), atol=1e-5
+        )

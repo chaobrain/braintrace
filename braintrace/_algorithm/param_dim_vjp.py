@@ -24,12 +24,11 @@ import brainunit as u
 from braintrace._compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._op import (
     etp_elemwise_p,
-    etp_mm_p,
-    etp_mv_p,
     ETP_RULES_YW_TO_W,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
+    get_fast_path_rules,
 )
 from braintrace._misc import etrace_df_key
 from braintrace._typing import (
@@ -57,30 +56,6 @@ from .vjp_base import ETraceVjpAlgorithm
 __all__ = [
     'ParamDimVjpAlgorithm',
 ]
-
-# Primitives with an elementwise ``yw_to_w`` rule, i.e. rules of the form
-# ``trace * hidden_dim_broadcast``. For these we can replace the nested
-# ``vmap(yw_to_w, -1, -1) + sum`` pattern with a single ``einsum`` contraction
-# over the hidden-state axis of ``diag`` and ``trace``. Conv / sparse / LoRA
-# primitives have non-elementwise rules and stay on the legacy path.
-_ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
-
-
-def _has_param_transform(eqn_params):
-    """Whether an ETP equation uses any ``*_fn`` parameter-transform hook.
-
-    The fast closed-form kernels compute the instantaneous trace as the bare
-    outer product ``x ⊗ df`` (i.e. ``∂h/∂V`` w.r.t. the *transformed* weight
-    ``V = f(W)``). When a transform hook (``weight_fn`` / ``bias_fn`` /
-    ``kernel_fn`` / ``a_fn`` / ``b_fn`` / ...) is present, the true eligibility
-    trace is ``∂h/∂W_raw = (x ⊗ df) ⊙ f'(W)``; the ``f'(W)`` factor is supplied
-    only by the rule path's ``xy_to_dw`` (via ``jax.vjp``). So a transform-bearing
-    relation must fall back to the rule path. Detection is generic over the
-    ``*_fn`` naming convention so no per-primitive knowledge leaks into the
-    algorithm layer.
-    """
-    return any(k.endswith('_fn') and v is not None for k, v in eqn_params.items())
-
 
 def _cast_to_dtype(tree, dtype):
     """Cast every array leaf of ``tree`` to ``dtype`` (unit-safe; ``None`` -> no-op).
@@ -131,72 +106,9 @@ def _init_param_dim_state(
                 f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
                 f'got {type(init_val).__name__}.'
             )
-        if relation.primitive in _ELEMENTWISE_YW_PRIMITIVES:
+        if get_fast_path_rules(relation.primitive) is not None:
             init_val = _cast_to_dtype(init_val, trace_dtype)
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
-
-
-def _fast_recurrent_term(primitive, diag, old_bwg, num_state):
-    """Closed-form ``D^t * eps^{t-1}`` for primitives with an elementwise
-    ``yw_to_w`` rule.
-
-    ``diag`` has shape ``(*varshape, num_state_alpha, num_state_beta)`` with
-    ``varshape == y_shape`` for mm/mv/elemwise. ``old_bwg`` is the per-key
-    trace dict. For mm/mv the weight trace has shape
-    ``(*y_shape, in_features, num_state)`` (batched mm has a leading batch
-    axis; mv/elemwise do not); the bias trace has shape
-    ``(*y_shape, num_state)`` when present.
-
-    The contraction is
-        new[b..., i, k, alpha] = sum_beta diag[b..., k, alpha, beta]
-                                       * trace[b..., i, k, beta]
-    which maps exactly to ``einsum('...kab,...ikb->...ika')``. For elemwise
-    the ``i`` axis disappears and it reduces to ``einsum('...ab,...b->...a')``.
-
-    When ``num_state == 1`` (the common single-state case) both state axes have
-    size 1, so the sum over ``beta`` collapses to a single term and the whole
-    contraction becomes a broadcast multiply — bit-identical to the einsum but
-    with no degenerate ``dot_general``. ``diag[..., 0, 0]`` indexes the hidden
-    (``k``) axis.
-    """
-    if num_state == 1:
-        if primitive is etp_elemwise_p:
-            # diag[..., 0, :] keeps the size-1 beta axis to align with trace.
-            return {'weight': diag[..., 0, :] * old_bwg['weight']}
-        d = diag[..., 0, 0]  # (*varshape) ending in the hidden ``k`` axis
-        out = {'weight': d[..., None, :, None] * old_bwg['weight']}
-        if 'bias' in old_bwg:
-            out['bias'] = d[..., None] * old_bwg['bias']
-        return out
-    if primitive is etp_elemwise_p:
-        return {
-            'weight': jnp.einsum('...ab,...b->...a', diag, old_bwg['weight']),
-        }
-    # mm / mv: trace['weight'] has an extra in-features axis before ``out``.
-    out = {
-        'weight': jnp.einsum('...kab,...ikb->...ika', diag, old_bwg['weight']),
-    }
-    if 'bias' in old_bwg:
-        out['bias'] = jnp.einsum('...kab,...kb->...ka', diag, old_bwg['bias'])
-    return out
-
-
-def _fast_instant_term(primitive, x, df, has_bias):
-    """Closed-form ``diag(D_f^t) ⊗ x^t`` for mm/mv/elemwise primitives.
-
-    For mm/mv the instantaneous gradient of ``y = x @ W + b`` w.r.t. ``W``
-    is the outer product ``x ⊗ df`` with a ``num_state`` axis tagged on.
-    For the elemwise identity op it is simply ``df`` (no ``x`` factor).
-    """
-    if primitive is etp_elemwise_p:
-        return {'weight': df}
-    if primitive is etp_mm_p:
-        out = {'weight': jnp.einsum('...i,...ka->...ika', x, df)}
-    else:  # etp_mv_p — no batch axis
-        out = {'weight': jnp.einsum('i,ka->ika', x, df)}
-    if has_bias:
-        out['bias'] = df
-    return out
 
 
 def _update_param_dim_etrace_scan_fn(
@@ -286,12 +198,9 @@ def _update_param_dim_etrace_scan_fn(
         has_bias = eqn_params.get('has_bias', False)
         # Fast path only applies to primitives with elementwise yw_to_w, and
         # only when no parameter-transform hook is present (the closed-form
-        # kernels drop the f'(W) factor — see ``_has_param_transform``).
-        use_fast = (
-            fast_solve
-            and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
-            and not _has_param_transform(eqn_params)
-        )
+        # kernels drop the f'(W) factor — gated by ``fp.applicable``).
+        fp = get_fast_path_rules(relation.primitive)
+        use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
 
         if is_elemwise:
             x = None
@@ -364,8 +273,7 @@ def _update_param_dim_etrace_scan_fn(
             # multiply-add runs in the trace precision and the new trace stays
             # there; Jacobians/learning-signal remain full precision elsewhere.
             if use_fast:
-                phg_to_pw = _fast_instant_term(
-                    relation.primitive,
+                phg_to_pw = fp.instant(
                     _cast_to_dtype(x, trace_dtype),
                     _cast_to_dtype(df, trace_dtype),
                     has_bias,
@@ -380,8 +288,7 @@ def _update_param_dim_etrace_scan_fn(
 
             # Recurrent term: D^t · ε^{t-1}.
             if use_fast:
-                new_bwg_pre = _fast_recurrent_term(
-                    relation.primitive,
+                new_bwg_pre = fp.recurrent(
                     _cast_to_dtype(diag, trace_dtype),
                     old_bwg,
                     group.num_state,
@@ -396,35 +303,6 @@ def _update_param_dim_etrace_scan_fn(
             new_etrace_bwg[w_key] = new_bwg
 
     return new_etrace_bwg, None
-
-
-def _fast_solve_contract(primitive, diag_like, etrace_data, fold_batch=False):
-    """Solve-time closed-form contraction for mm/mv/elemwise.
-
-    ``diag_like`` is the dl/dh group gradient with shape ``(*y_shape, num_state)``;
-    ``etrace_data`` is the weight-shaped trace dict. The solver computes
-    ``sum_alpha diag_like[..., alpha] * yw_to_w(etrace[..., alpha])``, which
-    for elementwise ``yw_to_w`` is an einsum along the ``num_state`` axis.
-
-    When ``fold_batch`` is True the leading batch axis ``b`` is contracted inside
-    the einsum, so the result is the already batch-summed gradient. This avoids
-    materializing a ``(B, I, O)`` intermediate and a follow-up ``sum(axis=0)``.
-    It assumes exactly one leading batch axis (the same assumption the trailing
-    ``sum(axis=0)`` already makes).
-    """
-    if primitive is etp_elemwise_p:
-        spec = 'b...a,b...a->...' if fold_batch else '...a,...a->...'
-        return {
-            'weight': jnp.einsum(spec, diag_like, etrace_data['weight']),
-        }
-    w_spec = 'bka,bika->ik' if fold_batch else '...ka,...ika->...ik'
-    out = {
-        'weight': jnp.einsum(w_spec, diag_like, etrace_data['weight']),
-    }
-    if 'bias' in etrace_data:
-        b_spec = 'bka,bka->k' if fold_batch else '...ka,...ka->...k'
-        out['bias'] = jnp.einsum(b_spec, diag_like, etrace_data['bias'])
-    return out
 
 
 def _solve_param_dim_weight_gradients(
@@ -475,12 +353,9 @@ def _solve_param_dim_weight_gradients(
         if batched:
             batched_paths.update(relation.trainable_paths.values())
         # Fast path only for elementwise-yw primitives with no transform hook
-        # (the closed-form solve drops f'(W) — see ``_has_param_transform``).
-        use_fast = (
-            fast_solve
-            and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
-            and not _has_param_transform(eqn_params)
-        )
+        # (the closed-form solve drops f'(W) — gated by ``fp.applicable``).
+        fp = get_fast_path_rules(relation.primitive)
+        use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
 
         def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
             return _rule(d, trace_, **_params)
@@ -531,8 +406,8 @@ def _solve_param_dim_weight_gradients(
                 # batched primitive, fold the batch reduction into the einsum so
                 # no (B, I, O) intermediate is materialized; record the routed
                 # paths so the trailing batch-sum skips them (already reduced).
-                dg_weight_dict = _fast_solve_contract(
-                    relation.primitive, dg_hidden_unitless, etrace_for_solve,
+                dg_weight_dict = fp.solve(
+                    dg_hidden_unitless, etrace_for_solve,
                     fold_batch=batched,
                 )
                 if batched:

@@ -34,9 +34,15 @@ weight / ``x`` / ``y`` variables on an equation. They are populated by
 :func:`register_primitive` and queried through the accessor helpers
 :func:`get_trainable_invars`, :func:`get_x_invar_index` and
 :func:`get_y_outvar_index`.
+
+One further metadata dictionary — :data:`ETP_FAST_PATH_RULES` — holds the
+optional per-primitive closed-form param-dim D-RTRL "fast-path" kernel
+bundle (:class:`FastPathRules`). Only primitives with an elementwise
+``yw_to_w`` rule register one; it is queried through
+:func:`get_fast_path_rules`.
 """
 
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, NamedTuple, Optional
 
 from braintrace._compatible_imports import Primitive
 
@@ -57,6 +63,9 @@ __all__ = [
     'get_trainable_invars',
     'get_x_invar_index',
     'get_y_outvar_index',
+    'FastPathRules',
+    'ETP_FAST_PATH_RULES',
+    'get_fast_path_rules',
 ]
 
 ETP_PRIMITIVES: set = set()
@@ -134,3 +143,64 @@ def get_x_invar_index(primitive) -> Optional[int]:
 def get_y_outvar_index(primitive) -> int:
     """Return the index of ``y`` in ``eqn.outvars``."""
     return ETP_Y_OUTVAR_INDICES.get(primitive, 0)
+
+
+class FastPathRules(NamedTuple):
+    """Per-primitive closed-form param-dim D-RTRL fast-path kernels + gate.
+
+    Bundles the three closed-form einsum kernels that replace the generic
+    nested-``vmap`` trace path for primitives with an *elementwise*
+    ``yw_to_w`` rule (currently ``etp_mm_p`` / ``etp_mv_p`` / ``etp_elemwise_p``),
+    together with a gate predicate that decides whether the fast path is
+    valid for a given equation.
+
+    Parameters
+    ----------
+    instant : Callable
+        Instantaneous term ``diag(D_f^t) ⊗ x^t``. Signature
+        ``(x, df, has_bias) -> {'weight': ..., ['bias': ...]}``.
+    recurrent : Callable
+        Recurrent term ``D^t · ε^{t-1}``. Signature
+        ``(diag, old_bwg, num_state) -> dict``.
+    solve : Callable
+        Solve-time contraction ``Σ_alpha diag_like[..., alpha] · yw_to_w(ε[..., alpha])``.
+        Signature ``(diag_like, etrace_data, *, fold_batch) -> dict``.
+    applicable : Callable
+        Gate predicate ``(eqn_params) -> bool`` — ``True`` iff the closed-form
+        kernels are valid for this equation. The kernels drop the ``f'(W)``
+        transform factor, so a primitive carrying an active transform hook
+        (``weight_fn`` / ``bias_fn``) must report ``False`` and fall back to
+        the rule path.
+    """
+
+    instant: Callable
+    recurrent: Callable
+    solve: Callable
+    applicable: Callable
+
+
+ETP_FAST_PATH_RULES: Dict[Primitive, FastPathRules] = {}
+r"""Closed-form param-dim D-RTRL fast-path bundle per primitive.
+
+Populated by :meth:`ETPPrimitive.register_etp_rules` (via its ``fast_path``
+keyword). Only primitives with an elementwise ``yw_to_w`` rule register one;
+conv / sparse / LoRA primitives are absent (they have no closed-form fast
+path). Queried through :func:`get_fast_path_rules`.
+"""
+
+
+def get_fast_path_rules(primitive) -> Optional[FastPathRules]:
+    """Return the :class:`FastPathRules` bundle for *primitive*, or ``None``.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The ETP primitive to look up.
+
+    Returns
+    -------
+    FastPathRules or None
+        The registered fast-path bundle, or ``None`` if *primitive* has no
+        fast path (e.g. conv / sparse / LoRA).
+    """
+    return ETP_FAST_PATH_RULES.get(primitive)

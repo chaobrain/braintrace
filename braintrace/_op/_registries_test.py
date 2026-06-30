@@ -40,6 +40,7 @@ from braintrace._op import (
     etp_mv_p,
     etp_sp_mm_p,
     etp_sp_mv_p,
+    get_fast_path_rules,
     is_batched_primitive,
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
@@ -163,3 +164,14 @@ class TestRegistriesAreSharedAcrossImports:
         from braintrace import _op as legacy
         assert legacy.GRADIENT_ENABLED_PRIMITIVES is GRADIENT_ENABLED_PRIMITIVES
         assert legacy.BATCHED_PRIMITIVES is BATCHED_PRIMITIVES
+
+
+def test_get_fast_path_rules_none_for_sparse_conv_lora():
+    """Primitives without a closed-form fast path return ``None``.
+
+    Only the elementwise-``yw_to_w`` primitives (mm / mv / elemwise) register
+    a :class:`FastPathRules` bundle. Conv / sparse / LoRA primitives have
+    non-elementwise rules and so must not appear in the fast-path registry.
+    """
+    for prim in (etp_sp_mm_p, etp_sp_mv_p, etp_conv_p, etp_lora_mm_p, etp_lora_mv_p):
+        assert get_fast_path_rules(prim) is None, prim.name

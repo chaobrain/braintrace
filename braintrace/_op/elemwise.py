@@ -60,6 +60,23 @@ primitive when composing Jacobians).
 
 * ``init_pp`` — pp-prop df trace, same shape as ``init_drtrl`` since for
   an identity op the weight-shape coincides with the output-shape.
+
+**Transform hooks**
+
+The primitive accepts a single optional elementwise transform hook,
+``weight_fn``, in its ``eqn.params`` (computing ``y = weight_fn(w)``; there
+is no ``x`` input and no bias for this op). The eligibility trace and
+gradient are taken w.r.t. the **raw** weight, so the transform Jacobian
+:math:`f'` enters *only* through :func:`_elemwise_xy_to_dw` via
+:func:`jax.vjp`; the ``yw_to_w`` rule does **not** apply :math:`f'`.
+
+**Fast path**
+
+A closed-form param-dim D-RTRL kernel bundle (:class:`FastPathRules`,
+registered on ``etp_elemwise_p``) replaces the generic nested-``vmap`` trace
+path with diagonal einsums. Because those kernels return the bare ``df``
+(dropping :math:`f'`), the bundle's ``applicable`` gate disables the fast
+path whenever ``weight_fn`` is present.
 """
 
 import jax
@@ -67,6 +84,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from ._registries import FastPathRules
 
 __all__ = [
     'etp_elemwise_p',
@@ -210,6 +228,118 @@ def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state, group=None):
     return jnp.zeros((*leading, num_hidden_state), dtype=y_var.aval.dtype)
 
 
+# ---------------------------------------------------------------------------
+# Closed-form param-dim D-RTRL fast-path kernels (diagonal, no x, no bias)
+# ---------------------------------------------------------------------------
+
+def _elemwise_fast_instant(x, df, has_bias):
+    r"""Instantaneous term for the diagonal identity op.
+
+    Parameters
+    ----------
+    x : Any
+        Unused (the elemwise op has no ``x`` input). Accepted for a uniform
+        kernel signature.
+    df : ArrayLike
+        State-to-output Jacobian :math:`\mathbf{D}_f^t`, shape
+        ``(..., num_state)``.
+    has_bias : bool
+        Unused (the elemwise op has no bias).
+
+    Returns
+    -------
+    dict
+        ``{'weight': df}``.
+
+    Notes
+    -----
+    With no input factor and an identity ``y = w``, the instantaneous
+    Jacobian :math:`\operatorname{diag}(\mathbf{D}_f^t) \otimes 1` reduces
+    to ``df`` itself.
+    """
+    return {'weight': df}
+
+
+def _elemwise_fast_recurrent(diag, old_bwg, num_state):
+    r"""Recurrent term :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}` (diagonal).
+
+    Parameters
+    ----------
+    diag : ArrayLike
+        Hidden-to-hidden Jacobian, shape ``(..., num_state, num_state)``.
+    old_bwg : dict
+        Previous trace dict; ``'weight'`` shape ``(..., num_state)``.
+    num_state : int
+        Number of hidden states per group.
+
+    Returns
+    -------
+    dict
+        ``{'weight': D^t · ε^{t-1}}``.
+
+    Notes
+    -----
+    The contraction is ``einsum('...ab,...b->...a')`` over the ``num_state``
+    axis. When ``num_state == 1`` the sum collapses to a broadcast multiply
+    by ``diag[..., 0, :]`` (the size-1 ``beta`` axis is kept to align with
+    the trace) — bit-identical to the einsum.
+    """
+    if num_state == 1:
+        return {'weight': diag[..., 0, :] * old_bwg['weight']}
+    return {'weight': jnp.einsum('...ab,...b->...a', diag, old_bwg['weight'])}
+
+
+def _elemwise_fast_solve(diag_like, etrace_data, *, fold_batch=False):
+    r"""Solve-time contraction of the learning signal with the trace (diagonal).
+
+    Parameters
+    ----------
+    diag_like : ArrayLike
+        The :math:`\partial \mathcal{L}/\partial \mathbf{h}` group gradient,
+        shape ``(..., num_state)`` (``(B, ..., num_state)`` when batched).
+    etrace_data : dict
+        Trace dict; ``'weight'`` shape matches ``diag_like``.
+    fold_batch : bool, optional
+        When ``True``, contract the leading batch axis ``b`` inside the
+        einsum so the result is already batch-summed. Default ``False``.
+
+    Returns
+    -------
+    dict
+        ``{'weight': dW}``.
+
+    Notes
+    -----
+    Contracts every shared axis to a scalar-per-weight via
+    ``'...a,...a->...'`` (and ``'b...a,b...a->...'`` under ``fold_batch``).
+    """
+    spec = 'b...a,b...a->...' if fold_batch else '...a,...a->...'
+    return {'weight': jnp.einsum(spec, diag_like, etrace_data['weight'])}
+
+
+def _elemwise_fast_applicable(eqn_params):
+    r"""Gate: is the elemwise fast path valid for this equation?
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The ETP equation's ``params`` dict.
+
+    Returns
+    -------
+    bool
+        ``True`` iff ``weight_fn`` is absent / ``None``.
+
+    Notes
+    -----
+    The closed-form kernels return the bare ``df`` (dropping the ``f'(w)``
+    transform factor), so any active ``weight_fn`` must fall back to the rule
+    path (which applies ``f'`` via :func:`jax.vjp`). The op has no
+    ``bias_fn``.
+    """
+    return eqn_params.get('weight_fn') is None
+
+
 etp_elemwise_p = register_primitive(
     'etp_elemwise',
     _etp_elemwise_impl,
@@ -223,6 +353,12 @@ etp_elemwise_p.register_etp_rules(
     xy_to_dw=_elemwise_xy_to_dw,
     init_drtrl=_elemwise_init_drtrl,
     init_pp=_elemwise_init_pp,
+    fast_path=FastPathRules(
+        _elemwise_fast_instant,
+        _elemwise_fast_recurrent,
+        _elemwise_fast_solve,
+        _elemwise_fast_applicable,
+    ),
 )
 
 

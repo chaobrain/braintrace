@@ -92,6 +92,7 @@ See also the ecosystem
    :caption: Tutorial
 
    tutorials/etp_primitives.ipynb
+   tutorials/customizing_primitive_transforms.ipynb
    tutorials/hidden_states.ipynb
    tutorials/graph_visualization.ipynb
    tutorials/batching.ipynb

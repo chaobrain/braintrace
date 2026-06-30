@@ -78,6 +78,24 @@ Both primitives declare ``trainable_invars_fn``, which returns
 ``{'lora_b': 1, 'lora_a': 2, 'bias': 3}`` when ``has_bias=True``.
 Keys ``'lora_b'`` / ``'lora_a'`` match the pytree leaf names in
 ``braintrace.nn.LoRALinear``'s merged ``ParamState``.
+
+**Transform hooks**
+
+Both primitives accept three optional elementwise transform hooks in their
+``eqn.params``: ``b_fn`` and ``a_fn`` (per-factor, computing
+``y = alpha * x @ b_fn(B) @ a_fn(A)``) and ``bias_fn`` (adds ``bias_fn(b)``).
+Note the per-factor names ``b_fn`` / ``a_fn`` rather than a single
+``weight_fn``. The forward impl and :func:`_lora_xy_to_dw` apply them; the
+eligibility trace and gradient are always taken w.r.t. the **raw** factors /
+bias, so each transform Jacobian :math:`f'` enters *only* through
+``xy_to_dw`` via :func:`jax.vjp` (the single fused VJP threads ``b_fn'``,
+``a_fn'`` and ``bias_fn'`` simultaneously). The ``yw_to_w`` rule and the
+trace initialisers are transform-free and stay exact (they operate on the
+raw-factor Jacobians).
+
+These primitives have **no fast path** — they always use the generic rule
+path, which threads each :math:`f'` correctly when a transform hook is
+present.
 """
 
 import brainunit as u

@@ -25,7 +25,6 @@ from braintrace._algorithm.d_rtrl import D_RTRL
 from braintrace._algorithm.param_dim_vjp import (
     ParamDimVjpAlgorithm,
     _remove_units,
-    _fast_solve_contract,
 )
 from braintrace._etrace_model_test import (
     IF_Delta_Dense_Layer,
@@ -39,7 +38,7 @@ from braintrace._etrace_model_test import (
     ALIF_STDExpCu_Dense_Layer,
     ALIF_STPExpCu_Dense_Layer,
 )
-from braintrace._op import etp_mm_p
+from braintrace._op import etp_mm_p, get_fast_path_rules
 
 
 # ---------------------------------------------------------------------------
@@ -931,7 +930,8 @@ class TestTraceDtypeKnob:
 
 def _alif(n_in=4, n_rec=5):
     """Adaptive-LIF dense layer -> coupled (V, adaptation) hidden group with
-    num_state==2, exercising the S>1 einsum branch of _fast_recurrent_term."""
+    num_state==2, exercising the S>1 einsum branch of the dense fast-path
+    recurrent rule (``FastPathRules.recurrent``)."""
     model = ALIF_Delta_Dense_Layer(n_in, n_rec)
     brainstate.nn.init_all_states(model)
     return model
@@ -984,11 +984,12 @@ class TestSolveBatchFold:
             'bias': brainstate.random.randn(B, O, S),
         }
         # reference: current per-batch contraction, then explicit batch sum
-        ref = _fast_solve_contract(etp_mm_p, diag_like, etrace)
+        solve = get_fast_path_rules(etp_mm_p).solve
+        ref = solve(diag_like, etrace, fold_batch=False)
         ref_w = ref['weight'].sum(axis=0)   # (I, O)
         ref_b = ref['bias'].sum(axis=0)     # (O,)
         # new: fold the batch axis inside the einsum
-        folded = _fast_solve_contract(etp_mm_p, diag_like, etrace, fold_batch=True)
+        folded = solve(diag_like, etrace, fold_batch=True)
         assert folded['weight'].shape == (I, O)
         assert folded['bias'].shape == (O,)
         npt.assert_allclose(folded['weight'], ref_w, atol=1e-6)

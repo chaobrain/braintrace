@@ -33,6 +33,7 @@ from jax.interpreters import ad, batching, mlir
 from braintrace._compatible_imports import Primitive
 from ._registries import (
     BATCHED_PRIMITIVES,
+    ETP_FAST_PATH_RULES,
     ETP_PRIMITIVES,
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
@@ -127,6 +128,7 @@ class ETPPrimitive(Primitive):
         xy_to_dw: Callable = None,
         init_drtrl: Callable = None,
         init_pp: Callable = None,
+        fast_path=None,
     ):
         """Install multiple ETP rules in one call.
 
@@ -142,6 +144,12 @@ class ETPPrimitive(Primitive):
             D-RTRL trace initialiser. Default ``None``.
         init_pp : Callable, optional
             pp_prop (IO-dim) df trace initialiser. Default ``None``.
+        fast_path : FastPathRules, optional
+            Closed-form param-dim D-RTRL fast-path kernel bundle (instant /
+            recurrent / solve kernels plus the ``applicable`` gate). Registered
+            into :data:`ETP_FAST_PATH_RULES`. Supplied only by primitives with
+            an elementwise ``yw_to_w`` rule (mm / mv / elemwise); ``None``
+            leaves the primitive without a fast path. Default ``None``.
         """
         if yw_to_w is not None:
             ETP_RULES_YW_TO_W[self] = yw_to_w
@@ -151,6 +159,8 @@ class ETPPrimitive(Primitive):
             ETP_RULES_INIT_DRTRL[self] = init_drtrl
         if init_pp is not None:
             ETP_RULES_INIT_PP[self] = init_pp
+        if fast_path is not None:
+            ETP_FAST_PATH_RULES[self] = fast_path
 
 
 def register_primitive(
