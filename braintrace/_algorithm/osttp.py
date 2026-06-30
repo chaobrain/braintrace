@@ -25,12 +25,15 @@ weight-transport requirement and the backward pass, so learning is forward-only.
 See :class:`OSTTP` for the mathematical formulation, references, and an example.
 """
 
-from typing import Optional, Sequence
+from __future__ import annotations
+
+from typing import Any, Optional, Sequence
 
 import brainstate
 import jax
 import jax.numpy as jnp
 
+from braintrace._typing import ArrayLike
 from .param_dim_vjp import ParamDimVjpAlgorithm
 
 __all__ = ['OSTTP']
@@ -143,8 +146,8 @@ class OSTTP(ParamDimVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if target_timing not in ('per-step', 'sequence-end'):
             raise ValueError(
                 f"target_timing must be 'per-step' or 'sequence-end'; got {target_timing!r}"
@@ -154,9 +157,9 @@ class OSTTP(ParamDimVjpAlgorithm):
         )
         self._B_list = tuple(jax.lax.stop_gradient(B) for B in B_list)
         self.target_timing = target_timing
-        self._current_y_target: Optional[jax.Array] = None
+        self._current_y_target: Optional[ArrayLike] = None
 
-    def compile_graph(self, *args) -> None:
+    def compile_graph(self, *args: Any) -> None:
         super().compile_graph(*args)
         n_groups = len(self.graph.hidden_groups)
         if len(self._B_list) != n_groups:
@@ -172,7 +175,7 @@ class OSTTP(ParamDimVjpAlgorithm):
                     f'{group.index} has n_l={n_l}.'
                 )
 
-    def update(self, x, y_target=None):
+    def update(self, x: ArrayLike, y_target: ArrayLike | None = None) -> Any:
         """Call ``super().update(x)`` after stashing ``y_target`` for the hook."""
         if self.target_timing == 'per-step' and y_target is None:
             raise ValueError(
@@ -184,7 +187,7 @@ class OSTTP(ParamDimVjpAlgorithm):
         finally:
             self._current_y_target = None
 
-    def _compute_learning_signal(self, dl_autodiff, args):
+    def _compute_learning_signal(self, dl_autodiff: Any, args: Any) -> Any:
         """Replace reverse-AD ``dL/dh`` with ``B_l @ y_target`` per HiddenGroup."""
         y_target = self._current_y_target
         if y_target is None:

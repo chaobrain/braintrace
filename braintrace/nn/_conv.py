@@ -15,14 +15,19 @@
 
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
+from typing import Any
+
 import brainstate
 
 from braintrace._op import conv as etp_conv
+from braintrace._typing import ArrayLike
 
 __all__ = ['Conv1d', 'Conv2d', 'Conv3d']
 
 
-def _etp_conv_op(self, x, params):
+def _etp_conv_op(self: Any, x: ArrayLike, params: dict[str, Any]) -> ArrayLike:
     """Route a convolution through the ETP ``conv`` primitive.
 
     Shared ``_conv_op`` override installed on :class:`Conv1d`, :class:`Conv2d`

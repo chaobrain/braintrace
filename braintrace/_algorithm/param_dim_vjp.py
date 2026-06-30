@@ -13,6 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
+from __future__ import annotations
+
 from functools import partial
 from typing import Callable, Dict, Tuple, Optional, Sequence, Any
 
@@ -66,7 +68,7 @@ __all__ = [
 _ELEMENTWISE_YW_PRIMITIVES = (etp_mm_p, etp_mv_p, etp_elemwise_p)
 
 
-def _cast_to_dtype(tree, dtype):
+def _cast_to_dtype(tree: Any, dtype: Any) -> Any:
     """Cast every array leaf of ``tree`` to ``dtype`` (unit-safe; ``None`` -> no-op).
 
     Used to store the eligibility trace — and the inputs to its update — at a
@@ -83,7 +85,7 @@ def _init_param_dim_state(
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State],
     relation: HiddenParamOpRelation,
     trace_dtype: Optional[DTypeLike] = None,
-):
+) -> None:
     """
     Initialize the eligibility trace states for parameter dimensions.
 
@@ -120,7 +122,7 @@ def _init_param_dim_state(
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
 
-def _fast_recurrent_term(primitive, diag, old_bwg, num_state):
+def _fast_recurrent_term(primitive: Any, diag: Any, old_bwg: Any, num_state: Any) -> Any:
     """Closed-form ``D^t * eps^{t-1}`` for primitives with an elementwise
     ``yw_to_w`` rule.
 
@@ -165,7 +167,7 @@ def _fast_recurrent_term(primitive, diag, old_bwg, num_state):
     return out
 
 
-def _fast_instant_term(primitive, x, df, has_bias):
+def _fast_instant_term(primitive: Any, x: Any, df: Any, has_bias: Any) -> Any:
     """Closed-form ``diag(D_f^t) ⊗ x^t`` for mm/mv/elemwise primitives.
 
     For mm/mv the instantaneous gradient of ``y = x @ W + b`` w.r.t. ``W``
@@ -191,10 +193,10 @@ def _update_param_dim_etrace_scan_fn(
         Sequence[jax.Array],  # the hidden group Jacobians
     ],
     weight_path_to_vals: Dict[Path, PyTree],
-    hidden_param_op_relations,
+    hidden_param_op_relations: Any,
     fast_solve: bool = True,
     trace_dtype: Optional[DTypeLike] = None,
-):
+) -> Any:
     """
     Update the eligibility trace values for parameter dimensions.
 
@@ -276,20 +278,20 @@ def _update_param_dim_etrace_scan_fn(
         else:
             x = etrace_xs_at_t[id(relation.x_var)]
 
-        def _call_xy_to_dw_dict(x_, df_, weights_, _rule=xy_to_dw_rule, _params=eqn_params):
+        def _call_xy_to_dw_dict(x_: Any, df_: Any, weights_: Any, _rule: Any = xy_to_dw_rule, _params: Any = eqn_params) -> Any:
             return _rule(x_, df_, weights_, **_params)
 
-        def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
+        def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
             return _rule(d, trace_, **_params)
 
-        def comp_dw_with_x(x_, df_, _wdict=weights_dict):
+        def comp_dw_with_x(x_: Any, df_: Any, _wdict: Any = weights_dict) -> Any:
             return _call_xy_to_dw_dict(x_, df_, _wdict)
 
-        def _comp_instant_legacy(df_all):
+        def _comp_instant_legacy(df_all: Any) -> Any:
             """Legacy nested-vmap path: vmap xy_to_dw over num_state (and batch)."""
 
             @partial(jax.vmap, in_axes=-1, out_axes=-1)
-            def _inner(df_slice):
+            def _inner(df_slice: Any) -> Any:
                 if batched:
                     df_b = df_slice
                     # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-
@@ -305,7 +307,7 @@ def _update_param_dim_etrace_scan_fn(
 
             return _inner(df_all)
 
-        def _comp_recurrent_legacy(diag_, old_bwg_, num_state_):
+        def _comp_recurrent_legacy(diag_: Any, old_bwg_: Any, num_state_: Any) -> Any:
             """Legacy nested-vmap yw_to_w + sum path."""
 
             # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-state
@@ -318,7 +320,7 @@ def _update_param_dim_etrace_scan_fn(
             if batched and x is not None and diag_.ndim == x.ndim + 1:
                 diag_ = diag_[None]
 
-            def fn_bwg_pre(d, _old=old_bwg_):
+            def fn_bwg_pre(d: Any, _old: Any = old_bwg_) -> Any:
                 return jax.tree.map(
                     lambda arr: _sum_dim(arr, axis=-1),
                     jax.vmap(_call_yw_to_w_dict, in_axes=-1, out_axes=-1)(d, _old),
@@ -376,7 +378,7 @@ def _update_param_dim_etrace_scan_fn(
     return new_etrace_bwg, None
 
 
-def _fast_solve_contract(primitive, diag_like, etrace_data, fold_batch=False):
+def _fast_solve_contract(primitive: Any, diag_like: Any, etrace_data: Any, fold_batch: Any = False) -> Any:
     """Solve-time closed-form contraction for mm/mv/elemwise.
 
     ``diag_like`` is the dl/dh group gradient with shape ``(*y_shape, num_state)``;
@@ -412,7 +414,7 @@ def _solve_param_dim_weight_gradients(
     weight_hidden_relations: Sequence[HiddenParamOpRelation],
     weight_vals: Dict[Path, PyTree],  # current ParamState pytree values for structure
     fast_solve: bool = True,
-):
+) -> None:
     """
     Compute and update the weight gradients for parameter dimensions using eligibility trace data.
 
@@ -454,7 +456,7 @@ def _solve_param_dim_weight_gradients(
             batched_paths.update(relation.trainable_paths.values())
         use_fast = fast_solve and (relation.primitive in _ELEMENTWISE_YW_PRIMITIVES)
 
-        def _call_yw_to_w_dict(d, trace_, _rule=yw_to_w_rule, _params=eqn_params):
+        def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
             return _rule(d, trace_, **_params)
 
         yw_to_w = (
@@ -568,7 +570,7 @@ def _solve_param_dim_weight_gradients(
         _update_dict(dG_weights, key, val)
 
 
-def _remove_units(xs_maybe_quantity: PyTree):
+def _remove_units(xs_maybe_quantity: PyTree) -> Any:
     """
     Removes units from a PyTree of quantities, returning a unitless PyTree and a function to restore the units.
 
@@ -591,7 +593,7 @@ def _remove_units(xs_maybe_quantity: PyTree):
         new_leaves.append(leaf)
         units.append(unit)
 
-    def restore_units(xs_unitless: PyTree):
+    def restore_units(xs_unitless: PyTree) -> Any:
         leaves, treedef2 = jax.tree.flatten(xs_unitless)
         # jax's PyTreeDef stubs omit __eq__; the comparison is valid at runtime.
         assert treedef == treedef2, 'The tree structure should be the same. '  # type: ignore[operator]
@@ -713,8 +715,8 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         trace_dtype: Optional[DTypeLike] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method)
         # ``fast_solve=True`` enables closed-form einsum kernels for
         # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
@@ -725,7 +727,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # the mm/mv/elemwise fast path honors it.
         self.trace_dtype = trace_dtype
 
-    def init_etrace_state(self, *args, **kwargs):
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the eligibility trace states of the etrace algorithm.
 
         This method is needed after compiling the etrace graph. See
@@ -736,7 +738,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         for relation in self.graph.hidden_param_op_relations:
             _init_param_dim_state(self.etrace_bwg, relation, self.trace_dtype)
 
-    def reset_state(self, batch_size: int = None, **kwargs):
+    def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.
 
         Parameters
@@ -930,7 +932,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         weight_vals: Dict[Path, PyTree],
         dl_to_nonetws_at_t: Dict[Path, PyTree],
         dl_to_etws_at_t: Optional[Dict[Path, PyTree]],
-    ):
+    ) -> Any:
         """Compute weight gradients using parameter dimension eligibility traces.
 
         This method implements the parameter dimension D-RTRL algorithm's weight gradient

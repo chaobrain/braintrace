@@ -14,6 +14,8 @@
 # ==============================================================================
 
 
+from __future__ import annotations
+
 import warnings
 from enum import Enum
 from typing import Sequence, Callable, Any
@@ -31,7 +33,7 @@ __all__ = [
 ]
 
 
-def _remove_quantity(tree):
+def _remove_quantity(tree: Any) -> Any:
     """
     Remove the quantity from the tree.
 
@@ -42,7 +44,7 @@ def _remove_quantity(tree):
       The tree without the quantity.
     """
 
-    def fn(x):
+    def fn(x: Any) -> Any:
         if isinstance(x, u.Quantity):
             return x.magnitude
         return x
@@ -53,7 +55,7 @@ def _remove_quantity(tree):
 def check_dict_keys(
     d1: dict,
     d2: dict,
-):
+) -> None:
     """
     Check the keys of two dictionaries.
 
@@ -150,14 +152,14 @@ def unknown_state_path(i: int) -> Path:
     return (f'_unknown_path_{i}',)
 
 
-def _dimensionless(x):
+def _dimensionless(x: Any) -> Any:
     if isinstance(x, u.Quantity):
         return x.mantissa
     else:
         return x
 
 
-def remove_units(xs):
+def remove_units(xs: Any) -> Any:
     """
     Remove units from a tree structure of quantities.
 
@@ -185,7 +187,7 @@ def remove_units(xs):
 git_issue_addr = 'https://github.com/chaobrain/braintrace/issues'
 
 
-def deprecation_getattr(module, deprecations):
+def deprecation_getattr(module: str, deprecations: dict) -> Callable[..., Any]:
     """
     Create a custom getattr function to handle deprecated attributes.
 
@@ -208,7 +210,7 @@ def deprecation_getattr(module, deprecations):
         A custom getattr function that handles deprecated attributes.
     """
 
-    def getattr(name):
+    def getattr(name: str) -> Any:
         if name in deprecations:
             message, fn = deprecations[name]
             if fn is None:  # Is the deprecation accelerated?
@@ -240,7 +242,7 @@ class CompilationError(Exception):
     __module__ = 'braintrace'
 
 
-def state_traceback(states: Sequence[brainstate.State]):
+def state_traceback(states: Sequence[brainstate.State]) -> str:
     """
     Generate a traceback string for a sequence of brain model states.
 
@@ -272,7 +274,7 @@ def state_traceback(states: Sequence[brainstate.State]):
     return '\n'.join(state_info)
 
 
-def set_module_as(module: str = 'braintrace'):
+def set_module_as(module: str = 'braintrace') -> Callable[..., Any]:
     """
     Decorator to set the module attribute of a function.
 
@@ -308,7 +310,7 @@ class BaseEnum(Enum):
     """
 
     @classmethod
-    def get_by_name(cls, name: str):
+    def get_by_name(cls, name: str) -> BaseEnum:
         """
         Retrieve an enumeration member by its name.
 
@@ -338,7 +340,7 @@ class BaseEnum(Enum):
         raise ValueError(f'Cannot find the {cls.__name__} type {name}. Only support {all_names}.')
 
     @classmethod
-    def get(cls, item: str | Enum):
+    def get(cls, item: str | Enum) -> BaseEnum:
         """
         Retrieve an enumeration member by its name or directly if it is an Enum.
 

@@ -13,6 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
+from __future__ import annotations
+
 from .param_dim_vjp import ParamDimVjpAlgorithm
 
 __all__ = [

@@ -14,6 +14,8 @@
 # ==============================================================================
 
 
+from __future__ import annotations
+
 import brainstate
 import jax.tree
 import brainunit as u
@@ -73,7 +75,7 @@ class GradExpon(brainstate.nn.Module):
         self,
         grad_shape: PyTree,
         tau_or_decay: u.Quantity | float,
-    ):
+    ) -> None:
         super().__init__()
 
         # gradients (stored as LongTermState for proper JAX transform tracking)
@@ -92,7 +94,7 @@ class GradExpon(brainstate.nn.Module):
             raise TypeError(f"tau_or_decay must be a Quantity or a float, but got {tau_or_decay}")
         self.decay = decay
 
-    def update(self, grads: PyTree):
+    def update(self, grads: PyTree) -> None:
         r"""Update the accumulated gradients with the exponential decay rule.
 
         Applies :math:`g_{t+1} = \mathrm{decay} \cdot g_t + \mathrm{grads}`,

@@ -13,6 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
+from __future__ import annotations
+
 from .io_dim_vjp import IODimVjpAlgorithm
 
 __all__ = [

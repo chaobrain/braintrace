@@ -66,7 +66,9 @@ Examples
 """
 
 
-from typing import TYPE_CHECKING
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 from . import nn
 from ._compile import compile
@@ -244,7 +246,7 @@ _DEPRECATED_LEGACY = {
 }
 
 
-def __getattr__(name):
+def __getattr__(name: str) -> Any:
     if name in _DEPRECATED_LEGACY:
         import warnings
         warnings.warn(
@@ -258,5 +260,5 @@ def __getattr__(name):
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
-def __dir__():
+def __dir__() -> list[str]:
     return sorted(list(__all__) + list(_DEPRECATED_LEGACY))

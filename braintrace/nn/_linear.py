@@ -15,6 +15,8 @@
 
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 import brainstate
 import brainunit as u
 
@@ -34,7 +36,7 @@ class Linear(brainstate.nn.Linear):
     __module__ = 'braintrace.nn'
     __doc__ = (brainstate.nn.Linear.__doc__ or '').replace('brainstate', 'braintrace')
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         """Apply the linear transform through the ETP ``matmul`` primitive.
 
         Routing the matrix multiplication through :func:`braintrace.matmul`
@@ -63,7 +65,7 @@ class SignedWLinear(brainstate.nn.SignedWLinear):
     __module__ = 'braintrace.nn'
     __doc__ = (brainstate.nn.SignedWLinear.__doc__ or '').replace('brainstate', 'braintrace')
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         """Apply the sign-constrained linear transform through ETP ``matmul``.
 
         The stored weight magnitudes are made non-negative and then given a
@@ -91,7 +93,7 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
     __module__ = 'braintrace.nn'
     __doc__ = (brainstate.nn.ScaledWSLinear.__doc__ or '').replace('brainstate', 'braintrace')
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         """Apply the weight-standardized linear transform through ETP ``matmul``.
 
         Weight standardization (and the optional mask) are applied inside
@@ -135,7 +137,7 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
         #   x @ (std(w) * gain) == (x @ std(w)) * gain
         # when gain has shape (1, out_size), and the ETP trace's hidden_dim
         # already carries the gain factor through the hidden-to-output Jacobian.
-        def _wfn(ww):
+        def _wfn(ww: ArrayLike) -> ArrayLike:
             w = brainstate.nn.weight_standardization(ww, eps, None)
             if mask is not None:
                 w = w * mask
@@ -156,7 +158,7 @@ class SparseLinear(brainstate.nn.SparseLinear):
     __module__ = 'braintrace.nn'
     __doc__ = (brainstate.nn.SparseLinear.__doc__ or '').replace('brainstate', 'braintrace')
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> ArrayLike:
         """Apply the sparse linear transform through the ETP ``sparse_matmul``.
 
         The dense data of the sparse weight is routed through
@@ -258,7 +260,7 @@ class LoRA(brainstate.nn.LoRA):
     """
     __module__ = 'braintrace.nn'
 
-    def update(self, x: ArrayLike):
+    def update(self, x: ArrayLike) -> ArrayLike:
         r"""Apply the low-rank adaptation through the ETP ``lora_matmul``.
 
         Computes :math:`y = \frac{1}{r}\, x\, \mathbf{A}\, \mathbf{B}` via
@@ -290,7 +292,7 @@ class LoRA(brainstate.nn.LoRA):
             out += self.base_module(x)
         return out
 
-    def __call__(self, x: ArrayLike):
+    def __call__(self, x: ArrayLike) -> ArrayLike:
         """Route the forward pass through the ETP-aware :meth:`update`.
 
         The upstream :class:`brainstate.nn.LoRA` defines its own ``__call__``
