@@ -67,6 +67,22 @@ output element). The conv primitive implements:
 * ``init_pp`` — allocates the pp-prop output-shaped df trace; the
   :math:`\boldsymbol{\epsilon}_x` factor in ES-D-RTRL is the full
   batched input tensor held by the executor.
+
+**Transform hooks**
+
+The primitive accepts two optional transform hooks in its ``eqn.params``:
+``kernel_fn`` (computes ``y = conv(x, kernel_fn(kernel))`` — note the
+kernel-facing name, not ``weight_fn``) and ``bias_fn`` (adds
+``bias_fn(b)``). The forward impl and :func:`_conv_xy_to_dw` apply them; the
+eligibility trace and gradient are always taken w.r.t. the **raw** kernel /
+bias, so the transform Jacobian :math:`f'` enters *only* through
+``xy_to_dw`` via :func:`jax.vjp` (``kernel_fn`` through a full kernel VJP,
+``bias_fn`` as an elementwise per-channel diagonal factor). The ``yw_to_w``
+rule and the trace initialisers are transform-free and stay exact (they
+operate on :math:`\partial h / \partial K_{\text{raw}}`).
+
+This primitive has **no fast path** — it always uses the generic rule path,
+which threads :math:`f'` correctly when a transform hook is present.
 """
 
 from __future__ import annotations

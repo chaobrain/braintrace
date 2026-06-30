@@ -44,6 +44,7 @@ from braintrace._op import (
     ETP_RULES_YW_TO_W,
     etp_mm_p,
     etp_mv_p,
+    get_fast_path_rules,
     matmul,
 )
 
@@ -664,3 +665,97 @@ class TestMatmulWeightFnExactness:
             factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step')
         )
         assert_param_gradients_close(online, bptt, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Closed-form param-dim D-RTRL fast-path kernels (operator-layer bundle)
+# ---------------------------------------------------------------------------
+
+class TestDenseFastPath:
+    """The dense closed-form fast-path bundle registered on ``etp_mm_p`` /
+    ``etp_mv_p``.
+
+    Both dense primitives share the *same* :class:`FastPathRules` object: the
+    instant/recurrent/solve einsums are rank-polymorphic (``...`` absorbs
+    mv's missing batch axis), and the ``applicable`` gate keys off the
+    transform hooks present in ``eqn.params``.
+    """
+
+    def test_fast_path_registered_on_mm_and_mv(self):
+        mm_rules = get_fast_path_rules(etp_mm_p)
+        mv_rules = get_fast_path_rules(etp_mv_p)
+        assert mm_rules is not None
+        assert mv_rules is not None
+        # Shared bundle — mm and mv register the *same* object.
+        assert mm_rules is mv_rules
+
+    def test_fast_applicable_true_without_transforms(self):
+        rules = get_fast_path_rules(etp_mm_p)
+        assert rules.applicable(
+            {'weight_fn': None, 'bias_fn': None, 'has_bias': False}
+        ) is True
+
+    def test_fast_applicable_false_with_weight_fn(self):
+        rules = get_fast_path_rules(etp_mm_p)
+        assert rules.applicable(
+            {'weight_fn': lambda w: w ** 2, 'bias_fn': None, 'has_bias': False}
+        ) is False
+
+    def test_fast_applicable_false_with_bias_fn(self):
+        # bias_fn set, weight_fn None -> still False (locks the AND-both rule:
+        # any transform hook disables the fast path, even a bias-only one).
+        rules = get_fast_path_rules(etp_mm_p)
+        assert rules.applicable(
+            {'weight_fn': None, 'bias_fn': u.math.abs, 'has_bias': True}
+        ) is False
+
+    def test_fast_instant_matches_outer_product(self):
+        rules = get_fast_path_rules(etp_mm_p)
+        # mm-shaped: x (B, in), df (B, out, S)
+        x_mm = brainstate.random.randn(2, 3)
+        df_mm = brainstate.random.randn(2, 4, 5)
+        out_mm = rules.instant(x_mm, df_mm, False)
+        np.testing.assert_allclose(
+            out_mm['weight'], jnp.einsum('...i,...ka->...ika', x_mm, df_mm)
+        )
+        assert 'bias' not in out_mm
+
+        # mv-shaped: x (in,), df (out, S)
+        x_mv = brainstate.random.randn(3)
+        df_mv = brainstate.random.randn(4, 5)
+        out_mv = rules.instant(x_mv, df_mv, False)
+        np.testing.assert_allclose(
+            out_mv['weight'], jnp.einsum('...i,...ka->...ika', x_mv, df_mv)
+        )
+
+        # has_bias=True -> 'bias' entry equals df.
+        out_bias = rules.instant(x_mm, df_mm, True)
+        np.testing.assert_allclose(out_bias['bias'], df_mm)
+
+    def test_fast_recurrent_num_state_1_equals_general_einsum(self):
+        rules = get_fast_path_rules(etp_mm_p)
+        # num_state == 1: diag (B, out, 1, 1); weight trace (B, in, out, 1).
+        batch, in_dim, out_dim = 2, 3, 4
+        diag = brainstate.random.randn(batch, out_dim, 1, 1)
+        trace = {'weight': brainstate.random.randn(batch, in_dim, out_dim, 1)}
+        fast = rules.recurrent(diag, trace, 1)
+        # General einsum for the same contraction.
+        general = jnp.einsum('...kab,...ikb->...ika', diag, trace['weight'])
+        np.testing.assert_allclose(fast['weight'], general, atol=1e-6)
+
+    def test_fast_solve_fold_batch_equals_sum_of_unfolded(self):
+        rules = get_fast_path_rules(etp_mm_p)
+        batch, in_dim, out_dim, n_state = 2, 3, 4, 5
+        diag_like = brainstate.random.randn(batch, out_dim, n_state)
+        etrace = {
+            'weight': brainstate.random.randn(batch, in_dim, out_dim, n_state),
+            'bias': brainstate.random.randn(batch, out_dim, n_state),
+        }
+        folded = rules.solve(diag_like, etrace, fold_batch=True)
+        unfolded = rules.solve(diag_like, etrace, fold_batch=False)
+        np.testing.assert_allclose(
+            folded['weight'], unfolded['weight'].sum(axis=0), atol=1e-5
+        )
+        np.testing.assert_allclose(
+            folded['bias'], unfolded['bias'].sum(axis=0), atol=1e-5
+        )

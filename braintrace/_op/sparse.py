@@ -75,6 +75,20 @@ gradients to *both* weight and bias ``ParamState`` objects in one pass.
 
 When ``has_bias=False`` the ``'bias'`` key is simply absent from every
 dict, so the legacy (no-bias) code path is unchanged in behaviour.
+
+**Transform hooks**
+
+Both primitives accept two optional elementwise transform hooks in their
+``eqn.params``: ``weight_fn`` (computes ``y = x @ sparse(weight_fn(w_data))``)
+and ``bias_fn`` (adds ``bias_fn(b)``). The forward impl and
+:func:`_sp_xy_to_dw` apply them; the eligibility trace and gradient are
+always taken w.r.t. the **raw** weight data / bias, so the transform
+Jacobian :math:`f'` enters *only* through ``xy_to_dw`` via :func:`jax.vjp`.
+The ``yw_to_w`` rule and the trace initialisers are transform-free and stay
+exact (they operate on :math:`\partial h / \partial w_{\text{raw}}`).
+
+These primitives have **no fast path** — they always use the generic rule
+path, which threads :math:`f'` correctly when a transform hook is present.
 """
 
 from __future__ import annotations

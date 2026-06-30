@@ -35,6 +35,7 @@ from __future__ import annotations
 from ._primitive import ETPPrimitive, register_primitive
 from ._registries import (
     BATCHED_PRIMITIVES,
+    ETP_FAST_PATH_RULES,
     ETP_PRIMITIVES,
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
@@ -43,7 +44,9 @@ from ._registries import (
     ETP_TRAINABLE_INVARS_FNS,
     ETP_X_INVAR_INDICES,
     ETP_Y_OUTVAR_INDICES,
+    FastPathRules,
     GRADIENT_ENABLED_PRIMITIVES,
+    get_fast_path_rules,
     get_trainable_invars,
     get_x_invar_index,
     get_y_outvar_index,
@@ -80,6 +83,9 @@ __all__ = [
     'get_trainable_invars',
     'get_x_invar_index',
     'get_y_outvar_index',
+    'FastPathRules',
+    'ETP_FAST_PATH_RULES',
+    'get_fast_path_rules',
 
     # primitives
     'etp_mm_p',

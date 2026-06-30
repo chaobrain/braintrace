@@ -73,6 +73,25 @@ gradients to *both* weight and bias ``ParamState`` objects in one pass.
 
 When ``has_bias=False`` the ``'bias'`` key is simply absent from every
 dict, so the legacy (no-bias) code path is unchanged in behaviour.
+
+**Transform hooks**
+
+Both primitives accept two optional elementwise transform hooks in their
+``eqn.params``: ``weight_fn`` (computes ``y = x @ weight_fn(w)``) and
+``bias_fn`` (adds ``bias_fn(b)``). The forward and :func:`_mm_xy_to_dw` /
+:func:`_mv_xy_to_dw` rules apply them; the eligibility trace and gradient
+are always taken w.r.t. the **raw** weight/bias, so the transform Jacobian
+:math:`f'` enters *only* through ``xy_to_dw`` via :func:`jax.vjp`. The
+``yw_to_w`` rule does **not** apply :math:`f'`.
+
+**Fast path**
+
+A closed-form param-dim D-RTRL kernel bundle (:class:`FastPathRules`,
+defined as ``_DENSE_FAST_PATH`` and registered on *both* primitives) replaces
+the generic nested-``vmap`` trace path with direct einsums. Because those
+kernels emit the bare outer product ``x ⊗ df`` (i.e. the gradient w.r.t. the
+*transformed* weight, dropping :math:`f'`), the bundle's ``applicable`` gate
+disables the fast path whenever ``weight_fn`` *or* ``bias_fn`` is present.
 """
 
 from __future__ import annotations
@@ -84,6 +103,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from ._registries import FastPathRules
 from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
@@ -270,6 +290,151 @@ def _mm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
+# ---------------------------------------------------------------------------
+# Closed-form param-dim D-RTRL fast-path kernels (shared by mm and mv)
+# ---------------------------------------------------------------------------
+
+def _dense_fast_instant(x: ArrayLike, df: ArrayLike, has_bias: bool) -> dict[str, Any]:
+    r"""Instantaneous term :math:`\operatorname{diag}(\mathbf{D}_f^t) \otimes \mathbf{x}^t`.
+
+    Parameters
+    ----------
+    x : ArrayLike
+        Presynaptic input. Shape ``(..., in)`` (``(B, in)`` for mm,
+        ``(in,)`` for mv).
+    df : ArrayLike
+        State-to-output Jacobian :math:`\mathbf{D}_f^t`, shape
+        ``(..., out, num_state)``.
+    has_bias : bool
+        Whether to emit a ``'bias'`` entry (equal to ``df``).
+
+    Returns
+    -------
+    dict
+        ``{'weight': x ⊗ df}`` (plus ``'bias': df`` when ``has_bias``).
+
+    Notes
+    -----
+    The single spec ``'...i,...ka->...ika'`` covers both mm and mv: the
+    ``...`` block absorbs mm's leading batch axis and matches the empty
+    leading block of mv, so the outer product ``x_i ⊗ df_{ka}`` is computed
+    identically in both ranks (verified numerically equal to mv's bespoke
+    ``'i,ka->ika'``).
+    """
+    out: dict[str, Any] = {'weight': jnp.einsum('...i,...ka->...ika', x, df)}
+    if has_bias:
+        out['bias'] = df
+    return out
+
+
+def _dense_fast_recurrent(diag: jax.Array, old_bwg: dict[str, Any], num_state: int) -> dict[str, Any]:
+    r"""Recurrent term :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}`.
+
+    Parameters
+    ----------
+    diag : jax.Array
+        Hidden-to-hidden Jacobian, shape ``(..., out, num_state, num_state)``.
+    old_bwg : dict
+        Previous weight-shaped trace dict; ``'weight'`` has shape
+        ``(..., in, out, num_state)`` and optional ``'bias'`` has shape
+        ``(..., out, num_state)``.
+    num_state : int
+        Number of hidden states per group.
+
+    Returns
+    -------
+    dict
+        The contracted trace dict for the current step.
+
+    Notes
+    -----
+    The contraction is ``new[...,i,k,a] = Σ_b diag[...,k,a,b] · trace[...,i,k,b]``,
+    i.e. ``einsum('...kab,...ikb->...ika')`` (bias: ``'...kab,...kb->...ka'``).
+    When ``num_state == 1`` both state axes are size 1, so the sum over
+    ``b`` collapses to a broadcast multiply by ``diag[..., 0, 0]`` —
+    bit-identical to the einsum but without a degenerate ``dot_general``.
+    """
+    if num_state == 1:
+        d = diag[..., 0, 0]  # (..., out) — the hidden ``k`` axis
+        out = {'weight': d[..., None, :, None] * old_bwg['weight']}
+        if 'bias' in old_bwg:
+            out['bias'] = d[..., None] * old_bwg['bias']
+        return out
+    out = {'weight': jnp.einsum('...kab,...ikb->...ika', diag, old_bwg['weight'])}
+    if 'bias' in old_bwg:
+        out['bias'] = jnp.einsum('...kab,...kb->...ka', diag, old_bwg['bias'])
+    return out
+
+
+def _dense_fast_solve(diag_like: ArrayLike, etrace_data: dict[str, Any], *, fold_batch: bool = False) -> dict[str, Any]:
+    r"""Solve-time contraction of the learning signal with the trace.
+
+    Parameters
+    ----------
+    diag_like : ArrayLike
+        The :math:`\partial \mathcal{L}/\partial \mathbf{h}` group gradient,
+        shape ``(..., out, num_state)`` (``(B, out, num_state)`` when batched).
+    etrace_data : dict
+        Weight-shaped trace dict; ``'weight'`` shape
+        ``(..., in, out, num_state)`` and optional ``'bias'`` shape
+        ``(..., out, num_state)``.
+    fold_batch : bool, optional
+        When ``True``, contract a leading batch axis ``b`` inside the einsum
+        so the result is already batch-summed (avoids a ``(B, I, O)``
+        intermediate). Default ``False``.
+
+    Returns
+    -------
+    dict
+        ``{'weight': dW}`` (plus ``'bias': db`` when present).
+
+    Notes
+    -----
+    Contracts the ``num_state`` axis (``a``): ``'...ka,...ika->...ik'`` for
+    the weight and ``'...ka,...ka->...k'`` for the bias. With ``fold_batch``
+    the leading ``b`` axis is added to the contraction
+    (``'bka,bika->ik'`` / ``'bka,bka->k'``), assuming exactly one batch axis.
+    """
+    w_spec = 'bka,bika->ik' if fold_batch else '...ka,...ika->...ik'
+    out = {'weight': jnp.einsum(w_spec, diag_like, etrace_data['weight'])}
+    if 'bias' in etrace_data:
+        b_spec = 'bka,bka->k' if fold_batch else '...ka,...ka->...k'
+        out['bias'] = jnp.einsum(b_spec, diag_like, etrace_data['bias'])
+    return out
+
+
+def _dense_fast_applicable(eqn_params: dict[str, Any]) -> bool:
+    r"""Gate: is the dense fast path valid for this equation?
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The ETP equation's ``params`` dict.
+
+    Returns
+    -------
+    bool
+        ``True`` iff neither ``weight_fn`` nor ``bias_fn`` is active.
+
+    Notes
+    -----
+    The closed-form kernels emit the bare outer product ``x ⊗ df`` — the
+    gradient w.r.t. the *transformed* weight, dropping the ``f'(W)`` factor.
+    Both keys are always present in ``eqn.params`` for mm / mv, so the
+    AND-both test also disables the fast path for a ``bias_fn``-only
+    transform (the kernels cannot supply ``f'``).
+    """
+    return eqn_params.get('weight_fn') is None and eqn_params.get('bias_fn') is None
+
+
+_DENSE_FAST_PATH = FastPathRules(
+    _dense_fast_instant,
+    _dense_fast_recurrent,
+    _dense_fast_solve,
+    _dense_fast_applicable,
+)
+
+
 etp_mm_p = register_primitive(
     'etp_mm',
     _etp_matmul_impl,
@@ -282,6 +447,7 @@ etp_mm_p.register_etp_rules(
     xy_to_dw=_mm_xy_to_dw,
     init_drtrl=_mm_init_drtrl,
     init_pp=_mm_init_pp,
+    fast_path=_DENSE_FAST_PATH,
 )
 
 
@@ -416,6 +582,7 @@ etp_mv_p.register_etp_rules(
     xy_to_dw=_mv_xy_to_dw,
     init_drtrl=_mv_init_drtrl,
     init_pp=_mv_init_pp,
+    fast_path=_DENSE_FAST_PATH,
 )
 
 
