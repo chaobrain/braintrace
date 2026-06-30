@@ -14,6 +14,8 @@
 # ==============================================================================
 
 
+from __future__ import annotations
+
 from typing import Any
 
 import jax
@@ -28,7 +30,7 @@ __all__ = [
 class ETraceInputData:
     __module__ = 'braintrace'
 
-    def __init__(self, data: Any):
+    def __init__(self, data: Any) -> None:
         """
         Initializes an instance of ETraceInputData.
 
@@ -37,7 +39,7 @@ class ETraceInputData:
         """
         self.data = data
 
-    def tree_flatten(self):
+    def tree_flatten(self) -> tuple[tuple[Any], tuple[()]]:
         """
         Flattens the data for processing with JAX's tree utilities.
 
@@ -47,7 +49,7 @@ class ETraceInputData:
         return (self.data,), ()
 
     @classmethod
-    def tree_unflatten(cls, aux, data):
+    def tree_unflatten(cls, aux: Any, data: Any) -> ETraceInputData:
         """
         Reconstructs an instance of ETraceInputData from flattened data.
 
@@ -125,11 +127,11 @@ class MultiStepData(ETraceInputData):
     __module__ = 'braintrace'
 
 
-def is_input(x):
+def is_input(x: Any) -> bool:
     return isinstance(x, (SingleStepData, MultiStepData))
 
 
-def split_input_data_types(*args) -> tuple[dict[int, SingleStepData], dict[int, MultiStepData], dict]:
+def split_input_data_types(*args: Any) -> tuple[dict[int, SingleStepData], dict[int, MultiStepData], dict]:
     """
     Splits input data into dictionaries based on their type, distinguishing between
     SingleStepData and MultiStepData instances.
@@ -158,7 +160,7 @@ def split_input_data_types(*args) -> tuple[dict[int, SingleStepData], dict[int, 
     return data_at_single_step, data_at_multi_step, tree_def
 
 
-def merge_data(tree_def, *args):
+def merge_data(tree_def: Any, *args: dict[int, Any]) -> Any:
     """
     Merges multiple dictionaries of data into a single structure based on a JAX tree definition.
 
@@ -181,7 +183,7 @@ def merge_data(tree_def, *args):
     return jax.tree.unflatten(tree_def, tuple(data[i] for i in range(len(data))))
 
 
-def get_single_step_data(*args):
+def get_single_step_data(*args: Any) -> Any:
     """
     Extracts and returns data corresponding to a single time step from the provided input data.
 
@@ -209,7 +211,7 @@ def get_single_step_data(*args):
     return args
 
 
-def has_multistep_data(*args):
+def has_multistep_data(*args: Any) -> bool:
     """
     Determines if any of the provided input data contains MultiStepData instances.
 

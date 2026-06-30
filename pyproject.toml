@@ -158,6 +158,9 @@ module = [
     "braintrace._op",
     "braintrace._compile",
     "braintrace",
+    "braintrace._input_data",
+    "braintrace._grad_exponential",
+    "braintrace._misc",
 ]
 disallow_untyped_defs = true
 
