@@ -154,6 +154,8 @@ module = [
     "braintrace._op.conv",
     "braintrace._op.sparse",
     "braintrace._op.lora",
+    "braintrace._op._primitive",
+    "braintrace._op",
 ]
 disallow_untyped_defs = true
 
