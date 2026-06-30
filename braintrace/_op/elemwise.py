@@ -62,11 +62,16 @@ primitive when composing Jacobians).
   an identity op the weight-shape coincides with the output-shape.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
     'etp_elemwise_p',
@@ -74,15 +79,16 @@ __all__ = [
 ]
 
 
-def _etp_elemwise_impl(w, weight_fn=None):
+def _etp_elemwise_impl(w: Any, weight_fn: WeightFn | None = None) -> Any:
     return w if weight_fn is None else weight_fn(w)
 
 
-def _elem_trainable_invars(params):
+def _elem_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return {'weight': 0}
 
 
-def _elemwise_yw_to_w(hidden_dim, trace, *, weight_fn=None):
+def _elemwise_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+                      weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Diagonal trace propagation for an identity-like op.
 
     **Role in D-RTRL.** Realises the :math:`y \to w` chain factor inside
@@ -107,7 +113,8 @@ def _elemwise_yw_to_w(hidden_dim, trace, *, weight_fn=None):
     return {'weight': trace['weight'] * hidden_dim}
 
 
-def _elemwise_xy_to_dw(x, hidden_dim, weights, *, weight_fn=None):
+def _elemwise_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                       weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Instantaneous Jacobian for the identity marker.
 
     **Role in D-RTRL / ES-D-RTRL.** For :math:`y = \text{weight\_fn}(w)`,
@@ -138,7 +145,8 @@ def _elemwise_xy_to_dw(x, hidden_dim, weights, *, weight_fn=None):
     return {'weight': u.get_mantissa(vjp_fn(hidden_dim)[0])}
 
 
-def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None):
+def _elemwise_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                         num_hidden_state: int, group: Any = None) -> dict[str, Any]:
     r"""Initialise the D-RTRL weight-shaped trace for an identity op.
 
     Weight-shape and output-shape coincide for the identity, so
@@ -175,7 +183,8 @@ def _elemwise_init_drtrl(x_var, y_var, weight_vars, num_hidden_state, group=None
     return {'weight': jnp.zeros((*leading, num_hidden_state))}
 
 
-def _elemwise_init_pp(x_var, y_var, weight_vars, num_hidden_state, group=None):
+def _elemwise_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                      num_hidden_state: int, group: Any = None) -> Any:
     r"""Initialise the pp-prop df trace for an identity op.
 
     .. math::
@@ -212,7 +221,7 @@ etp_elemwise_p.register_etp_rules(
 )
 
 
-def element_wise(weight, *, weight_fn=None):
+def element_wise(weight: ArrayLike, *, weight_fn: WeightFn | None = None) -> ArrayLike:
     r"""ETP-aware element-wise operation.
 
     Applies ``weight_fn`` to ``weight`` *inside* the ETP primitive, so

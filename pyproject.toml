@@ -150,6 +150,7 @@ ignore_missing_imports = true
 module = [
     "braintrace._typing",
     "braintrace._op.dense",
+    "braintrace._op.elemwise",
 ]
 disallow_untyped_defs = true
 
