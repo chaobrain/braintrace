@@ -15,6 +15,8 @@
 
 """Shared helpers for the SNN online-learning algorithms."""
 
+from __future__ import annotations
+
 from functools import partial
 from typing import Any, Dict, Optional
 
@@ -23,7 +25,7 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._typing import PyTree
+from braintrace._typing import ArrayLike, PyTree
 
 __all__ = [
     'PresynapticTrace',
@@ -42,12 +44,12 @@ class _ZeroResetState(brainstate.ShortTermState):
     for ``batch_size`` (or prepended for scalar-shaped states).
     """
 
-    def __init__(self, init_value):
+    def __init__(self, init_value: Any) -> None:
         super().__init__(init_value)
         self._init_shape = jnp.shape(init_value)
         self._init_dtype = init_value.dtype
 
-    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
+    def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
         """Re-zero the state at its original shape.
 
         Parameters
@@ -105,13 +107,13 @@ class PresynapticTrace(_ZeroResetState):
 
     __module__ = 'braintrace'
 
-    def __init__(self, init_value, leak: float):
+    def __init__(self, init_value: Any, leak: float) -> None:
         super().__init__(init_value)
         if not (0.0 < leak < 1.0):
             raise ValueError(f'leak must be in (0, 1); got {leak}')
         self.leak = float(leak)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> Any:
         r"""Apply one accumulation step :math:`\hat{a} \leftarrow \lambda \cdot \hat{a} + x`.
 
         Parameters
@@ -163,13 +165,13 @@ class KappaFilter(_ZeroResetState):
 
     __module__ = 'braintrace'
 
-    def __init__(self, init_value, kappa: float):
+    def __init__(self, init_value: Any, kappa: float) -> None:
         super().__init__(init_value)
         if not (0.0 <= kappa < 1.0):
             raise ValueError(f'kappa must be in [0, 1); got {kappa}')
         self.kappa = float(kappa)
 
-    def update(self, x):
+    def update(self, x: ArrayLike) -> Any:
         r"""Apply one low-pass step :math:`x_{\mathrm{filt}} \leftarrow (1-\kappa) x + \kappa\, x_{\mathrm{filt}}`.
 
         Parameters
@@ -230,14 +232,14 @@ class FixedRandomFeedback:
 
     __module__ = 'braintrace'
 
-    def __init__(self, n_target: int, n_layer: int, key, init_scale: float = 0.1):
+    def __init__(self, n_target: int, n_layer: int, key: Any, init_scale: float = 0.1) -> None:
         self.B = jax.lax.stop_gradient(
             init_scale * jax.random.normal(key, (n_target, n_layer))
         )
         self.n_target = int(n_target)
         self.n_layer = int(n_layer)
 
-    def project(self, y_target):
+    def project(self, y_target: Any) -> Any:
         """Project the target onto the frozen feedback matrix.
 
         Parameters
@@ -267,7 +269,7 @@ def extract_y_target(args: tuple, *, index: int = -1) -> Optional[jax.Array]:
 def _reset_state_in_a_dict(
     state_dict: Dict[Any, brainstate.State],
     batch_size: Optional[int],
-):
+) -> None:
     """
     Reset the values in a dictionary of states to zero.
 
@@ -293,7 +295,7 @@ def _reset_state_in_a_dict(
 def _zeros_like_batch_or_not(
     batch_size: Optional[int],
     x: jax.Array
-):
+) -> Any:
     """
     Create a zeros array with the same shape and type as the input array,
     optionally including a batch dimension.
@@ -325,7 +327,7 @@ def _batched_zeros_like(
     batch_size: Optional[int],
     num_state: int,  # the number of hidden states
     x: jax.Array  # the input array
-):
+) -> Any:
     """
     Create a batched zeros array with the same shape as the input array,
     extended by the number of hidden states.
@@ -354,7 +356,7 @@ def _batched_zeros_like(
         return u.math.zeros((batch_size, *x.shape, num_state), x.dtype)
 
 
-def _sum_dim(xs: jax.Array, axis: int = -1):
+def _sum_dim(xs: jax.Array, axis: int = -1) -> Any:
     """
     Sums the elements along the last dimension of each array in a PyTree.
 
@@ -373,7 +375,7 @@ def _sum_dim(xs: jax.Array, axis: int = -1):
     return jax.tree.map(lambda x: u.math.sum(x, axis=axis), xs)
 
 
-def _unit_safe_add(a, b):
+def _unit_safe_add(a: Any, b: Any) -> Any:
     """Add two leaves, stripping units only when one side has units and the other does not.
 
     Gradient contributions for the same weight may come from paths that
@@ -390,7 +392,7 @@ def _unit_safe_add(a, b):
     return u.math.add(a, b)
 
 
-def _extract_leaf(pytree_val: PyTree, leaf_idx: int):
+def _extract_leaf(pytree_val: PyTree, leaf_idx: int) -> Any:
     """Return the leaf at ``leaf_idx`` in ``jax.tree.leaves(pytree_val)``.
 
     Bare arrays (treedef with a single leaf) return the array unchanged.
@@ -409,7 +411,7 @@ def _extract_leaf(pytree_val: PyTree, leaf_idx: int):
 def _wrap_leaves_as_pytree(
     reference_pytree: PyTree,
     leaf_grads: Dict[int, jax.Array],
-):
+) -> Any:
     """Build a pytree matching ``reference_pytree`` with ``leaf_grads``
     inserted at the given leaf indices; any other leaf is zero-filled.
 
@@ -441,7 +443,7 @@ def _wrap_leaves_as_pytree(
 
 
 def _route_grads_by_path(
-    relation,
+    relation: Any,
     per_key_grads: Dict[str, jax.Array],
     weight_vals: Dict[Any, PyTree],
     target_dict: Dict[Any, PyTree],
@@ -478,7 +480,7 @@ def _update_dict(
     key: Any,
     value: PyTree,
     error_when_no_key: Optional[bool] = False
-):
+) -> None:
     """Update the dictionary.
 
     If the key exists, then add the value to the existing value.

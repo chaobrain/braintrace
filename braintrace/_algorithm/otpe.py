@@ -26,8 +26,10 @@ invariant.
 See :class:`OTPE` for the mathematical formulation, references, and an example.
 """
 
+from __future__ import annotations
+
 import warnings
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import brainstate
 import jax.numpy as jnp
@@ -198,8 +200,8 @@ class OTPE(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         trace_clip_abs: Optional[float] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if mode not in ('full', 'approx'):
             raise ValueError(f"mode must be 'full' or 'approx'; got {mode!r}")
         if not (0.0 < float(leak) < 1.0):
@@ -212,7 +214,7 @@ class OTPE(ETraceVjpAlgorithm):
         self._R_hat_x: Dict[int, brainstate.ShortTermState] = {}
         self._R_hat_g: Dict[int, brainstate.ShortTermState] = {}
 
-    def compile_graph(self, *args) -> None:
+    def compile_graph(self, *args: Any) -> None:
         super().compile_graph(*args)
         if self.mode == 'approx':
             n_groups = len(self.graph.hidden_groups)
@@ -245,12 +247,13 @@ class OTPE(ETraceVjpAlgorithm):
                     f'are outside the regime where OTPE is derived.'
                 )
 
-    def init_etrace_state(self, *args, **kwargs):
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         self._R_hat = {}
         self._R_hat_x = {}
         self._R_hat_g = {}
         for rel in self.graph.hidden_param_op_relations:
             rid = id(rel.y_var)
+            assert rel.x_var is not None  # non-elemwise primitives always have an x_var
             in_shape = rel.x_var.aval.shape
             out_shape = rel.y_var.aval.shape
             if self.mode == 'full':
@@ -272,10 +275,10 @@ class OTPE(ETraceVjpAlgorithm):
                     jnp.zeros(out_shape, dtype=jnp.float32)
                 )
 
-    def reset_state(self, batch_size: Optional[int] = None, **kwargs):
+    def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
         self.running_index.value = 0
 
-        def _rezero(state):
+        def _rezero(state: Any) -> None:
             shape = state.value.shape
             new_shape = (batch_size, *shape[1:]) if batch_size is not None else shape
             state.value = jnp.zeros(new_shape, dtype=state.value.dtype)
@@ -284,7 +287,7 @@ class OTPE(ETraceVjpAlgorithm):
             for r in store.values():
                 _rezero(r)
 
-    def _get_etrace_data(self):
+    def _get_etrace_data(self) -> Any:
         if self.mode == 'full':
             return {rid: r.value for rid, r in self._R_hat.items()}
         return (
@@ -292,7 +295,7 @@ class OTPE(ETraceVjpAlgorithm):
             {rid: r.value for rid, r in self._R_hat_g.items()},
         )
 
-    def _assign_etrace_data(self, vals):
+    def _assign_etrace_data(self, vals: Any) -> None:
         if self.mode == 'full':
             for rid, v in vals.items():
                 self._R_hat[rid].value = v
@@ -304,9 +307,9 @@ class OTPE(ETraceVjpAlgorithm):
                 self._R_hat_g[rid].value = v
 
     def _update_etrace_data(
-        self, running_index, hist_vals,
-        hid2weight_jac, hid2hid_jac, weight_vals, input_is_multi_step,
-    ):
+        self, running_index: Any, hist_vals: Any,
+        hid2weight_jac: Any, hid2hid_jac: Any, weight_vals: Any, input_is_multi_step: Any,
+    ) -> Any:
         """``R_hat ← λ·R_hat + ∂s/∂θ_local``. Ignores ``hid2hid_jac``."""
         if input_is_multi_step:
             raise NotImplementedError('OTPE v1 supports single-step only')
@@ -346,9 +349,9 @@ class OTPE(ETraceVjpAlgorithm):
             return (new_Rx, new_Rg)
 
     def _solve_weight_gradients(
-        self, running_index, etrace_at_t, dl_to_hidden_groups,
-        weight_vals, dl_to_nonetws_at_t, dl_to_etws_at_t,
-    ):
+        self, running_index: Any, etrace_at_t: Any, dl_to_hidden_groups: Any,
+        weight_vals: Any, dl_to_nonetws_at_t: Any, dl_to_etws_at_t: Any,
+    ) -> Any:
         dG = {path: None for path in self.param_states}
         if self.mode == 'full':
             for rel in self.graph.hidden_param_op_relations:

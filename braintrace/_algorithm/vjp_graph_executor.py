@@ -37,6 +37,8 @@
 
 # -*- coding: utf-8 -*-
 
+from __future__ import annotations
+
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import brainstate
@@ -104,24 +106,24 @@ class VjpResiduals:
 
     def __init__(
         self,
-        jaxpr,
-        in_tree,
-        out_tree,
-        consts
-    ):
+        jaxpr: Any,
+        in_tree: Any,
+        out_tree: Any,
+        consts: Any,
+    ) -> None:
         self.jaxpr = jaxpr
         self.in_tree = in_tree
         self.out_tree = out_tree
         self.consts = consts
 
-    def __iter__(self):
+    def __iter__(self) -> Any:
         return iter((self.jaxpr, self.in_tree, self.out_tree, self.consts))
 
-    def tree_flatten(self):
+    def tree_flatten(self) -> tuple[Any, Any]:
         return self.consts, (self.jaxpr, self.in_tree, self.out_tree)
 
     @classmethod
-    def tree_unflatten(cls, aux, consts):
+    def tree_unflatten(cls, aux: Any, consts: Any) -> Any:
         jaxpr, in_tree, out_tree = aux
         return cls(jaxpr, in_tree, out_tree, consts)
 
@@ -193,7 +195,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         """
         return self.vjp_method == 'multi-step'
 
-    def compile_graph(self, *args) -> None:
+    def compile_graph(self, *args: Any) -> None:
         r"""
         Building the eligibility trace graph for the model according to the given inputs.
 
@@ -270,7 +272,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             # ``rsqrt(var+eps)`` factor amplify into an overflow. Build norm layers
             # feeding an etrace op with ``use_fast_variance=False``.
             #
-            def _y_to_hidden(y_val, _rel=relation):
+            def _y_to_hidden(y_val: Any, _rel: Any = relation) -> Any:
                 return _rel.y_to_hidden_groups(
                     y_val, intermediate_values, concat_hidden_vals=True,
                 )
@@ -315,7 +317,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
     def solve_h2w_h2h_jacobian(
         self,
-        *args,
+        *args: Any,
         etrace_stepper: Optional[Callable] = None,
         init_etrace: Any = None,
     ) -> Tuple[
@@ -391,7 +393,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
         # --- call the model --- #
 
-        def scan_fn(carray, single_step_of_multistep_arg):
+        def scan_fn(carray: Any, single_step_of_multistep_arg: Any) -> Any:
             args_ = merge_data(tree_def, single_step_of_multistep_arg, args_single_step)
 
             _etrace_state_vals, _oth_state_vals, _etrace_carry = carray
@@ -476,7 +478,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
     def solve_h2w_h2h_l2h_jacobian(
         self,
-        *args,
+        *args: Any,
         etrace_stepper: Optional[Callable] = None,
         init_etrace: Any = None,
     ) -> Tuple[
@@ -576,13 +578,13 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         other_state_vals = {path: st.value for path, st in other_states.items()}
 
         def fun_for_vjp(
-            inputs,  # functional inputs, original inputs
-            etrace_hidden_vals_,  # etrace hidden states
-            non_etrace_param_vals_,  # non-etrace weights
-            etrace_param_vals_,  # etrace weights
-            oth_state_vals_,  # other states
-            perturb_vals_  # hidden perturbations, useful when computing \partial L / \partial h
-        ):
+            inputs: Any,  # functional inputs, original inputs
+            etrace_hidden_vals_: Any,  # etrace hidden states
+            non_etrace_param_vals_: Any,  # non-etrace weights
+            etrace_param_vals_: Any,  # etrace weights
+            oth_state_vals_: Any,  # other states
+            perturb_vals_: Any  # hidden perturbations, useful when computing \partial L / \partial h
+        ) -> Any:
             # assign state values
             if len(etrace_param_vals_) > 0:
                 assign_dict_state_values(etrace_param_states, etrace_param_vals_, write=False)
@@ -635,12 +637,12 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
         def scan_over_multiple_steps(
             inputs_single_or_multi: Dict,  # the inputs for single/multiple time steps
-            hidden_vals_ss,  # the initial hidden states
-            non_etrace_weight_vals_ss,  # the non-etrace weights
-            etrace_weight_vals_ss,  # the etrace weights
-            other_vals_ss,  # the initial other states
-            hidden_perturbs_ss  # the hidden perturbations, only used when is_single_step_vjp is True
-        ):
+            hidden_vals_ss: Any,  # the initial hidden states
+            non_etrace_weight_vals_ss: Any,  # the non-etrace weights
+            etrace_weight_vals_ss: Any,  # the etrace weights
+            other_vals_ss: Any,  # the initial other states
+            hidden_perturbs_ss: Any  # the hidden perturbations, only used when is_single_step_vjp is True
+        ) -> Any:
 
             # processing the inputs information
             args_single_step, args_multi_steps, tree_def = split_input_data_types(*inputs_single_or_multi)
@@ -652,7 +654,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                 raise ValueError(f'The sequence size should be the same for all inputs. But we got {args_dim}.')
 
             # scan function
-            def scan_fn(carray, x_ss: Dict):
+            def scan_fn(carray: Any, x_ss: Dict) -> Any:
                 args_ss = merge_data(tree_def, x_ss, args_single_step)
 
                 hidden_vals_iter, other_vals_iter, etrace_carry_iter = carray
@@ -713,12 +715,12 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
         def call_over_single_step(
             inputs_single_or_multi: Dict,  # the inputs for single/multiple time steps
-            hidden_vals_ss,  # the initial hidden states
-            non_etrace_weight_vals_ss,  # the non-etrace weights
-            etrace_weight_vals_ss,  # the etrace weights
-            other_vals_ss,  # the initial other states
-            hidden_perturbs_ss  # the hidden perturbations, only used when is_single_step_vjp is True
-        ):
+            hidden_vals_ss: Any,  # the initial hidden states
+            non_etrace_weight_vals_ss: Any,  # the non-etrace weights
+            etrace_weight_vals_ss: Any,  # the etrace weights
+            other_vals_ss: Any,  # the initial other states
+            hidden_perturbs_ss: Any  # the hidden perturbations, only used when is_single_step_vjp is True
+        ) -> Any:
             (
                 out,
                 hidden_vals_iter,

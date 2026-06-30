@@ -80,11 +80,16 @@ Keys ``'lora_b'`` / ``'lora_a'`` match the pytree leaf names in
 ``braintrace.nn.LoRALinear``'s merged ``ParamState``.
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
     'etp_lora_mm_p',
@@ -93,7 +98,9 @@ __all__ = [
 ]
 
 
-def _etp_lora_impl(*args, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _etp_lora_impl(*args: Any, alpha: float = 1.0, has_bias: bool = False,
+                   b_fn: WeightFn | None = None, a_fn: WeightFn | None = None,
+                   bias_fn: WeightFn | None = None) -> Any:
     x, B, A = args[0], args[1], args[2]
     if b_fn is not None:
         B = b_fn(B)
@@ -108,7 +115,7 @@ def _etp_lora_impl(*args, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_
     return y
 
 
-def _lora_trainable_invars(params):
+def _lora_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     """Return ``{key: invar_index}`` for LoRA's trainable inputs."""
     base = {'lora_b': 1, 'lora_a': 2}
     if params.get('has_bias', False):
@@ -116,7 +123,9 @@ def _lora_trainable_invars(params):
     return base
 
 
-def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _lora_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1.0,
+                     has_bias: bool = False, b_fn: WeightFn | None = None,
+                     a_fn: WeightFn | None = None, bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Batched LoRA ``yw_to_w`` — propagate :math:`\partial h / \partial y`
     through the :math:`y \to A` link.
 
@@ -168,7 +177,9 @@ def _lora_mm_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None,
     return out
 
 
-def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _lora_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1.0,
+                     has_bias: bool = False, b_fn: WeightFn | None = None,
+                     a_fn: WeightFn | None = None, bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Unbatched LoRA ``yw_to_w`` — identical algebra with no batch axis.
 
     Trace shapes:
@@ -189,7 +200,9 @@ def _lora_mv_yw_to_w(hidden_dim, trace, *, alpha=1.0, has_bias=False, b_fn=None,
     return out
 
 
-def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False, b_fn=None, a_fn=None, bias_fn=None):
+def _lora_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *, alpha: float = 1.0,
+                   has_bias: bool = False, b_fn: WeightFn | None = None,
+                   a_fn: WeightFn | None = None, bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Instantaneous LoRA Jacobian via fused VJP.
 
     **Role in D-RTRL / ES-D-RTRL.** Produces the full instantaneous
@@ -229,7 +242,7 @@ def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False, b_fn=No
     :math:`\boldsymbol{\epsilon}_x^t` into the weight gradient.
     """
 
-    def _fwd(w):
+    def _fwd(w: dict[str, Any]) -> Any:
         B = w['lora_b']
         A = w['lora_a']
         if b_fn is not None:
@@ -248,7 +261,8 @@ def _lora_xy_to_dw(x, hidden_dim, weights, *, alpha=1.0, has_bias=False, b_fn=No
     return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
 
 
-def _lora_mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _lora_mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                        num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise batched LoRA D-RTRL trace.
 
     Each LoRA factor gets its own trace leaf:
@@ -277,7 +291,8 @@ def _lora_mm_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _lora_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _lora_mm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                     num_hidden_state: int) -> Any:
     r"""Initialise batched LoRA pp-prop / ES-D-RTRL df trace.
 
     .. math::
@@ -292,7 +307,8 @@ def _lora_mm_init_pp(x_var, y_var, weight_vars, num_hidden_state):
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
-def _lora_mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
+def _lora_mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                        num_hidden_state: int) -> dict[str, Any]:
     r"""Initialise unbatched LoRA D-RTRL trace.
 
     .. math::
@@ -316,7 +332,8 @@ def _lora_mv_init_drtrl(x_var, y_var, weight_vars, num_hidden_state):
     return out
 
 
-def _lora_mv_init_pp(x_var, y_var, weight_vars, num_hidden_state):
+def _lora_mv_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                     num_hidden_state: int) -> Any:
     r"""Initialise unbatched LoRA pp-prop / ES-D-RTRL df trace.
 
     .. math::
@@ -355,7 +372,17 @@ etp_lora_mv_p.register_etp_rules(
 )
 
 
-def lora_matmul(x, B, A, *, alpha=1.0, bias=None, b_fn=None, a_fn=None, bias_fn=None):
+def lora_matmul(
+    x: ArrayLike,
+    B: ArrayLike,
+    A: ArrayLike,
+    *,
+    alpha: float = 1.0,
+    bias: ArrayLike | None = None,
+    b_fn: WeightFn | None = None,
+    a_fn: WeightFn | None = None,
+    bias_fn: WeightFn | None = None,
+) -> ArrayLike:
     r"""ETP-aware LoRA (Low-Rank Adaptation) matrix multiplication.
 
     Computes :math:`y = \alpha \cdot x \mathbin{@} b\_fn(B) \mathbin{@} a\_fn(A) \; (+ bias\_fn(b))`,
@@ -415,7 +442,7 @@ def lora_matmul(x, B, A, *, alpha=1.0, bias=None, b_fn=None, a_fn=None, bias_fn=
         >>> print(y.shape)
         (16, 4)
     """
-    p = etp_lora_mm_p if x.ndim >= 2 else etp_lora_mv_p
+    p = etp_lora_mm_p if x.ndim >= 2 else etp_lora_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)
     B_v, B_u = u.split_mantissa_unit(B)
     A_v, A_u = u.split_mantissa_unit(A)

@@ -14,6 +14,8 @@
 # ==============================================================================
 
 
+from __future__ import annotations
+
 from typing import Callable, Dict, Tuple, Any, List, Optional, Sequence
 
 import brainstate
@@ -140,11 +142,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             bwd=self._update_fn_bwd
         )
 
-    def _assert_compiled(self):
+    def _assert_compiled(self) -> None:
         if not self.is_compiled:
             raise ValueError('The etrace algorithm has not been compiled. Please call `compile_graph()` first. ')
 
-    def update(self, *args) -> Any:
+    def update(self, *args: Any) -> Any:
         r"""
         Update the model states and the eligibility trace.
 
@@ -302,12 +304,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
     def _update_fn(
         self,
-        args,
+        args: Any,
         weight_vals: WeightVals,
         hidden_vals: HiddenVals,
         oth_state_vals: StateVals,
         etrace_vals: ETraceVals,
-        running_index,
+        running_index: Any,
     ) -> Tuple[Outputs, HiddenVals, StateVals, ETraceVals]:
         """
         The main function to update the [model] and the [eligibility trace] states.
@@ -378,7 +380,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
     def _update_fn_fwd(
         self,
-        args,
+        args: Any,
         weight_vals: WeightVals,
         hidden_vals: HiddenVals,
         othstate_vals: StateVals,
@@ -477,8 +479,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
     def _update_fn_bwd(
         self,
-        fwd_res,
-        grads,
+        fwd_res: Any,
+        grads: Any,
     ) -> Tuple[dG_Inputs, dG_Weight, dG_Hidden, dG_State, None, None]:
         """
         The backward function to compute the VJP gradients when the learning signal is arrived at
@@ -666,7 +668,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         weight_vals: Any,
         dl_to_nonetws_at_t: Dict[Path, PyTree],
         dl_to_etws_at_t: Optional[Dict[Path, PyTree]],
-    ):
+    ) -> Any:
         r"""
         The method to solve the weight gradients, i.e., :math:`\partial L / \partial W`.
 
