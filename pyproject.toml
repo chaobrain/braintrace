@@ -55,6 +55,7 @@ classifiers = [
 dependencies = [
     "brainstate>=0.5.2",
     "brainunit",
+    "brainevent",
     "brainpy.state",
     "braintools",
 ]

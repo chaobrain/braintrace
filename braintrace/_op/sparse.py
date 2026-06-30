@@ -18,9 +18,10 @@ r"""Sparse-matmul ETP primitives.
 ``etp_sp_mm_p`` (batched) and ``etp_sp_mv_p`` (unbatched). The sparse
 structure is supplied as a static parameter (``sparse_mat``); only the
 non-zero values flow through the primitive as the ``weight_data`` invar.
-The structure object must implement ``with_data`` (substitute new data
-into the structure) and ``yw_to_w_transposed`` (apply the transposed
-sparse pattern to a trace).
+The structure object must be a :class:`brainevent.DataRepresentation`,
+which provides the ETP online-learning protocol: ``with_data`` (substitute
+new data into the structure), ``yw_to_w_transposed`` (apply the transposed
+sparse pattern to a trace) and ``yw_to_w`` (the non-transposed counterpart).
 
 **Forward operation**
 
@@ -98,6 +99,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import brainunit as u
+import brainevent
 
 from ._primitive import register_primitive
 from braintrace._typing import ArrayLike, WeightFn
@@ -109,7 +111,8 @@ __all__ = [
 ]
 
 
-def _etp_sp_matmul_impl(*args: Any, sparse_mat: Any = None, has_bias: bool = False,
+def _etp_sp_matmul_impl(*args: Any, sparse_mat: brainevent.DataRepresentation | None = None,
+                        has_bias: bool = False,
                         weight_fn: WeightFn | None = None,
                         bias_fn: WeightFn | None = None) -> Any:
     x, weight_data = args[0], args[1]
@@ -141,7 +144,8 @@ def _sp_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
 # etp_sp_mm_p — batched
 # ---------------------------------------------------------------------------
 
-def _sp_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, sparse_mat: Any = None,
+def _sp_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+                   sparse_mat: brainevent.DataRepresentation | None = None,
                    has_bias: bool = False, weight_fn: WeightFn | None = None,
                    bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Batched sparse ``yw_to_w`` — propagate :math:`\partial h / \partial y`
@@ -181,7 +185,8 @@ def _sp_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, sparse_mat: Any = 
     return out
 
 
-def _sp_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *, sparse_mat: Any = None,
+def _sp_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                 sparse_mat: brainevent.DataRepresentation | None = None,
                  has_bias: bool = False, weight_fn: WeightFn | None = None,
                  bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Sparse instantaneous Jacobian :math:`\partial h / \partial w_{\text{data}}`,
@@ -272,7 +277,8 @@ def _sp_mm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
 # etp_sp_mv_p — unbatched
 # ---------------------------------------------------------------------------
 
-def _sp_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, sparse_mat: Any = None,
+def _sp_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+                   sparse_mat: brainevent.DataRepresentation | None = None,
                    has_bias: bool = False, weight_fn: WeightFn | None = None,
                    bias_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Unbatched sparse ``yw_to_w`` — identical algebra to the batched case
@@ -366,7 +372,7 @@ def sparse_matmul(
     x: ArrayLike,
     weight: ArrayLike,
     *,
-    sparse_mat: Any,
+    sparse_mat: brainevent.DataRepresentation,
     bias: ArrayLike | None = None,
     weight_fn: WeightFn | None = None,
     bias_fn: WeightFn | None = None,
@@ -384,11 +390,13 @@ def sparse_matmul(
         Input array.
     weight : ArrayLike
         Sparse-matrix data, i.e. the non-zero values, shape ``(nnz,)``.
-    sparse_mat : object
-        Sparse-matrix structure (e.g. a ``brainunit.sparse`` matrix object).
-        Must expose ``with_data`` (substitute new data into the structure)
-        and ``yw_to_w_transposed`` (apply the transposed sparse pattern to
-        a trace).
+    sparse_mat : brainevent.DataRepresentation
+        Sparse-matrix structure (e.g. a :class:`brainevent.CSR`). Must be a
+        :class:`brainevent.DataRepresentation`, which implements the ETP
+        online-learning protocol: ``with_data`` (substitute new data into the
+        structure), ``yw_to_w_transposed`` (apply the transposed sparse
+        pattern to a trace) and ``yw_to_w`` (its non-transposed counterpart).
+        Passing any other object raises :class:`TypeError`.
     bias : ArrayLike or None, optional
         Bias vector. Default ``None``.
     weight_fn : callable or None, optional
@@ -410,7 +418,18 @@ def sparse_matmul(
     -------
     ArrayLike
         Output array.
+
+    Raises
+    ------
+    TypeError
+        If ``sparse_mat`` is not a :class:`brainevent.DataRepresentation`.
     """
+    if not isinstance(sparse_mat, brainevent.DataRepresentation):
+        raise TypeError(
+            'sparse_mat must be a brainevent.DataRepresentation providing the '
+            'with_data, yw_to_w_transposed and yw_to_w online-learning protocol '
+            f'methods, got {type(sparse_mat).__name__!r}.'
+        )
     p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)
     w_v, w_u = u.split_mantissa_unit(weight)

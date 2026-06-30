@@ -16,16 +16,20 @@
 """Tests for the sparse-matmul ETP primitives and the :func:`sparse_matmul` API.
 
 The sparse structure is supplied by the user as a static parameter
-(``sparse_mat``) and must implement two methods used by the ETP rules:
+(``sparse_mat``), which must be a :class:`brainevent.DataRepresentation`
+implementing the methods used by the ETP rules:
 
 * ``with_data(weight_data)`` — substitute new non-zero values into the
   structure, returning a sparse-matmul-able object.
 * ``yw_to_w_transposed(hidden_dim, trace)`` — apply the transposed
   pattern when propagating the trace.
+* ``yw_to_w(hidden_dim, trace)`` — the non-transposed counterpart.
 
-For end-to-end forward correctness a real ``brainunit.sparse.CSR`` works.
-For rule-level tests a tiny stub class fits the contract exactly so the
-test does not depend on the upstream sparse-matrix surface area.
+For end-to-end forward correctness a real :class:`brainevent.CSR` works.
+For rule-level and compile/gradient tests a tiny stub *subclassing*
+:class:`brainevent.DataRepresentation` fits the contract exactly (and is
+hashable, so it can be a static primitive parameter under ``jit``) without
+depending on the upstream sparse-matrix surface area.
 """
 
 
@@ -36,8 +40,9 @@ import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import brainunit as u
-from brainunit import sparse as ss
+import brainevent
 
 import braintrace
 from braintrace._op import (
@@ -58,8 +63,12 @@ def _fake_var(shape, dtype=jnp.float32):
     return _FakeVar(aval=_FakeAval(shape=shape, dtype=dtype))
 
 
-class _StubSparseMat:
-    """Minimal sparse-matrix stub satisfying the rule contract.
+class _StubSparseMat(brainevent.DataRepresentation):
+    """Minimal :class:`brainevent.DataRepresentation` stub for the rule contract.
+
+    Subclasses :class:`brainevent.DataRepresentation` so it passes the
+    ``sparse_matmul`` runtime type check, while staying tiny and independent of
+    the upstream sparse-matrix surface area.
 
     Backed by a dense matrix internally; ``with_data`` rebuilds the dense
     form by reshaping the flat data vector into the original shape.
@@ -79,15 +88,11 @@ class _StubSparseMat:
     """
 
     def __init__(self, dense_template: jnp.ndarray):
-        self._shape = dense_template.shape
         self._template = dense_template
-
-    @property
-    def shape(self):
-        return self._shape
+        super().__init__((dense_template,), shape=dense_template.shape)
 
     def with_data(self, data: jnp.ndarray) -> jnp.ndarray:
-        return data.reshape(self._shape)
+        return data.reshape(self._template.shape)
 
     def yw_to_w_transposed(self, hidden_dim, trace):
         if trace.ndim == 1:
@@ -103,9 +108,14 @@ class _StubSparseMat:
         # pass trace in the old full-matrix form.
         return trace * jnp.expand_dims(hidden_dim, axis=0)
 
+    def yw_to_w(self, hidden_dim, trace):
+        # Non-transposed counterpart; the diagonal stub is symmetric so it
+        # delegates. Present to complete the DataRepresentation protocol.
+        return self.yw_to_w_transposed(hidden_dim, trace)
+
 
 def _csr_from_dense(dense: jnp.ndarray):
-    return ss.CSR.fromdense(dense)
+    return brainevent.CSR.fromdense(dense)
 
 
 # ---------------------------------------------------------------------------
@@ -355,8 +365,11 @@ class TestSparseMMBiasGradient:
         cols = jnp.array([0, 1, 2, 3])
         dense_template = jnp.eye(dim)  # shape (dim, dim)
 
-        class _HashableStub:
-            """Minimal stub satisfying the ETP sparse-mat contract."""
+        class _HashableStub(brainevent.DataRepresentation):
+            """Minimal hashable DataRepresentation satisfying the ETP contract."""
+
+            def __init__(self):
+                super().__init__((dense_template,), shape=dense_template.shape)
 
             def __hash__(self):
                 return id(self)
@@ -376,6 +389,9 @@ class TestSparseMMBiasGradient:
                     return trace * hidden_dim
                 n = trace.shape[0]
                 return trace * hidden_dim[:n]
+
+            def yw_to_w(self, hidden_dim, trace):
+                return self.yw_to_w_transposed(hidden_dim, trace)
 
         sparse_mat = _HashableStub()
         nnz = dim
@@ -452,6 +468,46 @@ class TestPublicAPIRoundTrip:
 
     def test_public_alias(self):
         assert braintrace.sparse_matmul is sparse_matmul
+
+
+# ---------------------------------------------------------------------------
+# Runtime type check — sparse_mat must be a brainevent.DataRepresentation
+# ---------------------------------------------------------------------------
+
+class TestRuntimeTypeCheck:
+    """``sparse_matmul`` rejects anything that is not a brainevent.DataRepresentation."""
+
+    def test_accepts_brainevent_csr(self):
+        csr = _csr_from_dense(jnp.eye(3) * 2.0)
+        out = sparse_matmul(jnp.ones(3), csr.data, sparse_mat=csr)
+        np.testing.assert_allclose(out, jnp.ones(3) @ (jnp.eye(3) * 2.0))
+
+    def test_rejects_brainunit_sparse(self):
+        """A brainunit (saiunit) sparse matrix lacks ``yw_to_w_transposed`` and is rejected."""
+        bu_csr = u.sparse.CSR.fromdense(jnp.eye(3))
+        assert not isinstance(bu_csr, brainevent.DataRepresentation)
+        with pytest.raises(TypeError, match='brainevent.DataRepresentation'):
+            sparse_matmul(jnp.ones(3), bu_csr.data, sparse_mat=bu_csr)
+
+    def test_rejects_plain_array(self):
+        with pytest.raises(TypeError, match='yw_to_w_transposed'):
+            sparse_matmul(jnp.ones(3), jnp.ones(3), sparse_mat=jnp.eye(3))
+
+    def test_rejects_duck_typed_non_subclass(self):
+        """An object with the right methods but not a DataRepresentation is still rejected."""
+
+        class _DuckMat:
+            def with_data(self, data):
+                return data
+
+            def yw_to_w_transposed(self, hidden_dim, trace):
+                return trace
+
+            def yw_to_w(self, hidden_dim, trace):
+                return trace
+
+        with pytest.raises(TypeError, match='brainevent.DataRepresentation'):
+            sparse_matmul(jnp.ones(3), jnp.ones(3), sparse_mat=_DuckMat())
 
 
 # ---------------------------------------------------------------------------
