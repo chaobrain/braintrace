@@ -21,6 +21,8 @@ and paper-faithful SNN algorithms (EProp, OSTLRecurrent, OSTLFeedforward, OTPE,
 OTTT, OSTTP).
 """
 
+from __future__ import annotations
+
 from ._common import FixedRandomFeedback, KappaFilter, PresynapticTrace
 from .base import ETraceAlgorithm, EligibilityTrace
 from .d_rtrl import D_RTRL

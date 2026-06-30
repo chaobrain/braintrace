@@ -172,6 +172,15 @@ module = [
     "braintrace._algorithm.vjp_graph_executor",
     "braintrace._algorithm.param_dim_vjp",
     "braintrace._algorithm.io_dim_vjp",
+    "braintrace._algorithm.d_rtrl",
+    "braintrace._algorithm.pp_prop",
+    "braintrace._algorithm.e_prop",
+    "braintrace._algorithm.ostl",
+    "braintrace._algorithm.otpe",
+    "braintrace._algorithm.ottt",
+    "braintrace._algorithm.osttp",
+    "braintrace._algorithm._common",
+    "braintrace._algorithm",
 ]
 disallow_untyped_defs = true
 

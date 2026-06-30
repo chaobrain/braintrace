@@ -34,7 +34,9 @@ Networks and Learning Systems*, 34(11), 8894-8908.
 https://doi.org/10.1109/TNNLS.2022.3153985 (arXiv:2007.12723)
 """
 
-from typing import Optional
+from __future__ import annotations
+
+from typing import Any, Optional
 
 import brainstate
 
@@ -185,6 +187,6 @@ class OSTLFeedforward(pp_prop):
         model: brainstate.nn.Module,
         decay_or_rank: float | int = 1e-6,
         name: Optional[str] = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(model, decay_or_rank=decay_or_rank, name=name, **kwargs)
