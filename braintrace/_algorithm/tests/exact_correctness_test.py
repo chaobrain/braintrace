@@ -35,6 +35,7 @@ from braintrace._algorithm.oracle_models import (
     leaky_linear,
     stacked_tanh_rnn,
     tanh_rnn,
+    tied_weight_rnn,
 )
 
 ATOL_BPTT = 1e-4
@@ -92,9 +93,14 @@ _EXACT_MULTISTEP_ALGOS = {
 # (model_name, algo_name) pairs verified exact by the P4 spikes.
 # cond_gate exercises the Phase 1 cond -> select_n canonicalization: ETP
 # matmuls inside `lax.cond` branches must stay BPTT-exact after conversion.
+# tied_weight locks the multi-eqn-per-weight invariant (one ParamState, two
+# relations): trace state keyed per relation instance + per-path gradient
+# accumulation. Scan unrolling (Phase 2) multiplies relations per weight and
+# depends on it.
 _EXACT_CASES = (
     [('tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('stacked_tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
+    + [('tied_weight', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('leaky_linear', 'D_RTRL')]
     + [('cond_gate', 'D_RTRL')]
 )
@@ -109,7 +115,30 @@ def _model_spec(name):
         return leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
     if name == 'cond_gate':
         return cond_gate_rnn(n_in=3, n_rec=4, leak=0.9, seed=0)
+    if name == 'tied_weight':
+        return tied_weight_rnn(n_rec=3, seed=0)
     raise KeyError(name)
+
+
+def test_tied_weight_traces_keyed_per_relation_instance():
+    """One ParamState through two ETP call sites must yield two relations and
+    two distinct D-RTRL trace states keyed by ``(id(y_var), group index)`` —
+    not one shared per-weight entry."""
+    spec = tied_weight_rnn(n_rec=3, seed=0)
+    model = spec.factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    algo = braintrace.D_RTRL(model, vjp_method='multi-step')
+    algo.compile_graph(_inputs(1, 3)[0])
+    algo.init_etrace_state()
+
+    rels = algo.graph.hidden_param_op_relations
+    assert len(rels) == 2
+    assert all(r.trainable_paths['weight'] == ('w',) for r in rels)
+    assert rels[0].y_var is not rels[1].y_var
+    assert len(algo.etrace_bwg) == 2
+    assert set(algo.etrace_bwg) == {
+        (id(r.y_var), g.index) for r in rels for g in r.hidden_groups
+    }
 
 
 @pytest.mark.parametrize('model_name,algo_name', _EXACT_CASES,

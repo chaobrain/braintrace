@@ -195,6 +195,39 @@ def batched_tanh_rnn(n_in: int = 3, n_rec: int = 4, batch: int = 4, seed: int = 
     return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
 
 
+def tied_weight_rnn(n_rec: int = 4, seed: int = 0) -> ModelSpec:
+    """Tanh RNN whose single weight is consumed by TWO ETP matmuls.
+
+    ``h = tanh(matmul(x, w) + matmul(h, w))`` — one ParamState, two call
+    sites, so the compiler registers two relations sharing one weight path.
+    Locks the multi-eqn-per-weight invariant the scan-unrolling pass depends
+    on: trace state is keyed per relation instance (``id(y_var)``, group) and
+    per-path gradient contributions accumulate across relations. Exact
+    algorithms must match BPTT element-wise (verified bit-exact at adoption).
+    Requires ``x`` with ``n_rec`` features (square weight applied to both).
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_rec, n_rec)
+                    )
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                a = braintrace.matmul(x.reshape(1, -1), self.w.value)
+                b = braintrace.matmul(self.h.value, self.w.value)
+                self.h.value = jax.nn.tanh(a + b)
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
+
+
 def cond_gate_rnn(n_in: int = 3, n_rec: int = 4, leak: float = 0.9, seed: int = 0) -> ModelSpec:
     """Leaky integrator whose drive is a ``lax.cond`` between two ETP matmuls.
 
