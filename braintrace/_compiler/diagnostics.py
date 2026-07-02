@@ -97,6 +97,10 @@ class DiagnosticKind(str, Enum):
     # Trainable invar did not trace back to any ParamState (e.g. a constant bias)
     TRAINABLE_INVAR_NOT_PARAMSTATE = 'trainable_invar_not_paramstate'
 
+    # Control-flow canonicalization (see _compiler/canonicalize.py)
+    COND_IF_CONVERTED = 'cond_if_converted'
+    COND_CONVERSION_SKIPPED = 'cond_conversion_skipped'
+
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
     PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'
