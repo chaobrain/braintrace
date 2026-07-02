@@ -30,6 +30,7 @@ Linear Layers
    :template: classtemplate.rst
 
    Linear
+   GroupedLinear
    SignedWLinear
    SparseLinear
    LoRA
