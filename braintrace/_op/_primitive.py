@@ -254,9 +254,17 @@ def register_primitive(
     )
 
     def _jvp(primals: Any, tangents: Any, **params: Any) -> Any:
+        # ``ad.Zero`` carries the mathematically-correct tangent aval on
+        # ``t.aval``: for inexact (float/complex) primals that's the
+        # primal's own shape/dtype, but for int/bool primals JAX's tangent
+        # space is the zero-sized ``float0`` dtype. Materializing zeros as
+        # ``jnp.zeros(pr.shape, pr.dtype)`` (the primal's dtype) is wrong for
+        # int/bool primals and raises inside ``jax.jvp``. Delegate to JAX's
+        # own ``instantiate_zeros``, which reads ``t.aval`` and is therefore
+        # correct for both cases.
         tans = tuple(
-            jnp.zeros(pr.shape, pr.dtype) if isinstance(t, ad.Zero) else t
-            for pr, t in zip(primals, tangents)
+            ad.instantiate_zeros(t) if isinstance(t, ad.Zero) else t
+            for t in tangents
         )
         return jax.jvp(partial(impl_fn, **params), primals, tans)
 

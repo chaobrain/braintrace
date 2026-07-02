@@ -560,6 +560,15 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     hidden-to-hidden Jacobian, :math:`\mathbf{D}_f^t` the state-to-output
     Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
 
+    :math:`\mathbf{D}_f^t` is read off by
+    :meth:`~braintrace._algorithm.vjp_graph_executor.ETraceVjpGraphExecutor._compute_hid2weight_jacobian`
+    from a single all-ones-tangent ``jax.jvp`` of the ``y -> hidden`` map; see
+    that method's docstring for when this is exact (elementwise maps) versus
+    an approximation (non-elementwise maps, e.g. a normalization layer
+    between the weight op and the neuron) — the same approximation is shared
+    with :class:`~braintrace._algorithm.param_dim_vjp.ParamDimVjpAlgorithm`
+    (``D_RTRL``).
+
     The full per-parameter D-RTRL trace
     :math:`\boldsymbol{\epsilon}^t \in \mathbb{R}^{I\times O}` is approximated by
     the outer product of two exponentially-smoothed *vectors* — one over the

@@ -25,12 +25,17 @@ import brainunit as u
 
 from braintrace._compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._op import (
+    etp_conv_p,
     etp_elemwise_p,
     ETP_RULES_YW_TO_W,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
     get_fast_path_rules,
+)
+from braintrace._op._registries import (
+    get_instant_drtrl_rule,
+    get_solve_drtrl_rule,
 )
 from braintrace._misc import etrace_df_key
 from braintrace._typing import (
@@ -76,14 +81,21 @@ def _init_param_dim_state(
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State],
     relation: HiddenParamOpRelation,
     trace_dtype: Optional[DTypeLike] = None,
+    fast_solve: bool = True,
 ) -> None:
     """
     Initialize the eligibility trace states for parameter dimensions.
 
     Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
-    trainable-input names (dict-based rule API). When ``trace_dtype`` is set and
-    the primitive uses the elementwise fast path (mm/mv/elemwise), the trace is
-    allocated at that reduced precision; conv/sparse/LoRA keep native precision.
+    trainable-input names (dict-based rule API). When ``trace_dtype`` is set,
+    the trace is only allocated at that reduced precision when the runtime
+    update will actually take the fast path for this relation — i.e. the same
+    predicate used by :func:`_update_param_dim_etrace_scan_fn` /
+    :func:`_solve_param_dim_weight_gradients`: ``fast_solve and fp is not None
+    and fp.applicable(relation.eqn_params)``. Otherwise the trace stays at
+    native precision, because the legacy (non-fast) update always emits
+    native-precision arrays and a mismatched scan-carry dtype would raise at
+    trace time.
     """
     group: HiddenGroup
     for group in relation.hidden_groups:
@@ -93,9 +105,15 @@ def _init_param_dim_state(
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
         # ``etp_elemwise`` has no x/y batch carrier (its output is the weight),
         # so it needs the hidden group to size the trace's leading (position /
-        # batch) axes. Only that primitive accepts ``group``; others are
-        # unchanged.
-        init_kw = {'group': group} if relation.primitive is etp_elemwise_p else {}
+        # batch) axes. ``etp_conv``'s per-position trace shape depends on the
+        # equation's layout (``dimension_numbers`` / ``strides``) and grouped
+        # convolutions must be rejected at init, so it receives the eqn
+        # params. Other primitives are unchanged.
+        init_kw: dict = {}
+        if relation.primitive is etp_elemwise_p:
+            init_kw['group'] = group
+        elif relation.primitive is etp_conv_p:
+            init_kw['eqn_params'] = relation.eqn_params
         init_val = init_fn(
             relation.x_var,
             relation.y_var,
@@ -108,7 +126,9 @@ def _init_param_dim_state(
                 f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
                 f'got {type(init_val).__name__}.'
             )
-        if get_fast_path_rules(relation.primitive) is not None:
+        fp = get_fast_path_rules(relation.primitive)
+        use_fast = fast_solve and fp is not None and fp.applicable(relation.eqn_params)
+        if use_fast:
             init_val = _cast_to_dtype(init_val, trace_dtype)
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
@@ -192,7 +212,14 @@ def _update_param_dim_etrace_scan_fn(
             for key in relation.trainable_vars
         }
 
-        xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
+        # Instantaneous-term rule: a primitive whose trace structure differs
+        # from its parameter structure registers a dedicated ``instant_drtrl``
+        # rule (same call signature as ``xy_to_dw``); everyone else falls back
+        # to ``xy_to_dw`` — the historical, byte-identical default.
+        xy_to_dw_rule = (
+            get_instant_drtrl_rule(relation.primitive)
+            or ETP_RULES_XY_TO_DW[relation.primitive]
+        )
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
@@ -352,6 +379,7 @@ def _solve_param_dim_weight_gradients(
     batched_paths: set = set()
     for relation in weight_hidden_relations:
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
+        solve_drtrl_rule = get_solve_drtrl_rule(relation.primitive)
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
         if batched:
@@ -361,13 +389,39 @@ def _solve_param_dim_weight_gradients(
         fp = get_fast_path_rules(relation.primitive)
         use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
 
-        def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
-            return _rule(d, trace_, **_params)
+        _call_rule_dict: Callable[..., Any]
+        if solve_drtrl_rule is not None:
+            # Dedicated solve rule (trace structure != parameter structure,
+            # e.g. LoRA's effective-weight trace): chain the learning signal
+            # through the current weights. The rule sees batch-free,
+            # num_state-free slices — the vmap scaffolding below is shared
+            # with the legacy ``yw_to_w`` path.
+            weights_dict = {
+                key: _extract_leaf(
+                    weight_vals[relation.trainable_paths[key]],
+                    relation.trainable_leaf_indices[key],
+                )
+                for key in relation.trainable_vars
+            }
+
+            def _call_solve_drtrl_dict(
+                d: Any, trace_: Any,
+                _rule: Any = solve_drtrl_rule, _params: Any = eqn_params,
+                _weights: Any = weights_dict,
+            ) -> Any:
+                return _rule(d, trace_, _weights, **_params)
+
+            _call_rule_dict = _call_solve_drtrl_dict
+        else:
+            def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
+                return _rule(d, trace_, **_params)
+
+            _call_rule_dict = _call_yw_to_w_dict
 
         yw_to_w = (
-            jax.vmap(_call_yw_to_w_dict)
+            jax.vmap(_call_rule_dict)
             if batched
-            else _call_yw_to_w_dict
+            else _call_rule_dict
         )
 
         group: HiddenGroup
@@ -555,6 +609,14 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     :math:`\partial \mathcal{L}^{t'}/\partial \mathbf{h}^{t'}` the learning
     signal back-propagated from the loss at each step.
 
+    :math:`\mathbf{D}_f^t` is read off by
+    :meth:`~braintrace._algorithm.vjp_graph_executor.ETraceVjpGraphExecutor._compute_hid2weight_jacobian`
+    from a single all-ones-tangent ``jax.jvp`` of the ``y -> hidden`` map; see
+    that method's docstring for when this is exact (elementwise maps) versus
+    an approximation (non-elementwise maps, e.g. a normalization layer
+    between the weight op and the neuron) — the same approximation is shared
+    with :class:`~braintrace._algorithm.io_dim_vjp.IODimVjpAlgorithm`.
+
     Real-Time Recurrent Learning (RTRL) propagates the full sensitivity
     :math:`\partial \mathbf{h}^t/\partial \boldsymbol{\theta}` forward in time,
     which costs :math:`O(|\theta| \cdot H)` memory. D-RTRL keeps only the
@@ -567,13 +629,21 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     and is sensitive to the context/mode of the computation. In particular, it is
     sensitive to ``brainstate.mixin.Batching`` behavior.
 
-    This algorithm has :math:`O(B\theta)` memory complexity, where
-    :math:`\theta` is the number of parameters and :math:`B` the batch size.
-    For a convolutional layer, the weight gradients are computed with
-    :math:`O(B\theta)` memory complexity, where :math:`\theta` is the dimension
-    of the convolutional kernel. For a linear transformation layer, the weight
-    gradients are computed with :math:`O(BIO)` computational complexity, where
-    :math:`I` and :math:`O` are the number of input and output dimensions.
+    For dense (linear) transformation layers this algorithm has
+    :math:`O(B\theta)` memory complexity, where :math:`\theta` is the number
+    of parameters and :math:`B` the batch size — the weight gradients are
+    computed with :math:`O(BIO)` complexity, where :math:`I` and :math:`O`
+    are the number of input and output dimensions.
+
+    For a convolutional layer the exact eligibility trace must keep one
+    kernel-shaped slot **per spatial output position** — the kernel is
+    spatially shared while the diagonal discount acts per output element,
+    so a spatially pre-summed (kernel-shaped) trace cannot follow the
+    recurrence. The conv trace therefore costs :math:`O(B S \theta)` memory,
+    where :math:`S` is the number of spatial output positions and
+    :math:`\theta` the kernel parameter count. For large convolutions prefer
+    the IO-dim algorithm (``pp_prop`` / :class:`IODimVjpAlgorithm`), whose
+    conv trace stays output-shaped.
 
     For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
 
@@ -629,7 +699,14 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         self.fast_solve = fast_solve
         # Optional reduced-precision storage for the eligibility trace (e.g.
         # ``jnp.bfloat16`` / ``jnp.float16``); ``None`` keeps native fp32. Only
-        # the mm/mv/elemwise fast path honors it.
+        # applies on the fast path: a relation's trace is cast to
+        # ``trace_dtype`` iff ``fast_solve`` is ``True`` *and* the relation's
+        # primitive has a registered fast-path bundle whose ``applicable``
+        # gate accepts its ``eqn_params`` (false, e.g., when a ``weight_fn`` /
+        # ``bias_fn`` transform is active). When that predicate is false the
+        # trace stays at native precision, since the legacy update always
+        # produces native-precision arrays and a mismatched scan-carry dtype
+        # would raise at trace time.
         self.trace_dtype = trace_dtype
 
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
@@ -641,7 +718,9 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # The states of batched weight gradients
         self.etrace_bwg = dict()
         for relation in self.graph.hidden_param_op_relations:
-            _init_param_dim_state(self.etrace_bwg, relation, self.trace_dtype)
+            _init_param_dim_state(
+                self.etrace_bwg, relation, self.trace_dtype, self.fast_solve,
+            )
 
     def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.

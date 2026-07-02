@@ -241,16 +241,22 @@ def test_multistep_method_is_the_exact_path():
 
 def test_ottt_otpe_reject_multistep_oracle_F19():
     """F-19: OTTT/OTPE are single-step only, so the multi-step BPTT oracle path is
-    structurally unavailable. We pin that the multi-step call raises 'single-step
-    only', which (with F-SINGLESTEP blocking the naive single-step accumulation)
-    is why their multi-step temporal correctness is deferred, not asserted."""
+    structurally unavailable. N6 moved this rejection from a lazy failure deep
+    inside the multi-step VJP machinery to an eager `ValueError` raised by the
+    constructor itself (`algo_factory(model)`, the first thing
+    `online_param_gradients` does); we pin that both algorithms still reject
+    `vjp_method='multi-step'`, which (with F-SINGLESTEP blocking the naive
+    single-step accumulation) is why their multi-step temporal correctness is
+    deferred, not asserted."""
     spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
     inputs = _inputs(6, 3)
-    for algo_factory in (
-        lambda m: braintrace.OTTT(m, mode='A', leak=0.9, vjp_method='multi-step'),
-        lambda m: braintrace.OTPE(m, mode='full', leak=0.9, vjp_method='multi-step'),
+    for algo_factory, match in (
+        (lambda m: braintrace.OTTT(m, mode='A', leak=0.9, vjp_method='multi-step'),
+         r"OTTT v1 only supports vjp_method='single-step'"),
+        (lambda m: braintrace.OTPE(m, mode='full', leak=0.9, vjp_method='multi-step'),
+         r"OTPE v1 only supports vjp_method='single-step'"),
     ):
-        with pytest.raises(NotImplementedError, match='single-step only'):
+        with pytest.raises(ValueError, match=match):
             online_param_gradients(spec.factory, inputs, algo_factory=algo_factory)
 
 

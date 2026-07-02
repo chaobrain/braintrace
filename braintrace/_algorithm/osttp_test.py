@@ -115,6 +115,49 @@ class TestOSTTPTargetProjection(unittest.TestCase):
         assert not jnp.allclose(g_osttp, g_drtrl, atol=1e-4)
 
 
+class TestOSTTPLearningSignalNonzero(unittest.TestCase):
+    """Regression test for the zero-learning-signal bug (C4).
+
+    OSTTP used to stash ``y_target`` on the instance during the forward
+    ``update()`` and clear it in a ``finally`` block before returning. The
+    learning-signal hook (``_compute_learning_signal``) only runs later,
+    inside the ``jax.custom_vjp`` backward pass -- by then the stash was
+    already ``None``, so the target-projected learning signal, and hence the
+    weight gradient, was identically zero regardless of ``y_target``.
+    """
+
+    def _grad_for_target(self, y_target: jnp.ndarray, B: jnp.ndarray) -> jnp.ndarray:
+        net = _osttp_net()
+        algo = OSTTP(net, B_list=[B])
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        def loss(x_):
+            out = algo.update(x_, y_target=y_target)
+            return (out ** 2).sum()
+
+        grads, _ = brainstate.transform.grad(
+            loss, algo.param_states, return_value=True
+        )(x)
+        return grads[next(iter(grads))]
+
+    def test_gradients_depend_on_target(self):
+        B = 0.1 * jax.random.normal(jax.random.PRNGKey(11), (4, 3))
+        y1 = jnp.ones((1, 4))
+        y2 = -5.0 * jnp.ones((1, 4))
+
+        g1 = self._grad_for_target(y1, B)
+        g2 = self._grad_for_target(y2, B)
+
+        # Different targets must yield different weight gradients -- if the
+        # learning signal were identically zero (the bug), g1 == g2 (both
+        # all-zero).
+        assert not jnp.allclose(g1, g2, atol=1e-6)
+        assert not jnp.allclose(g1, jnp.zeros_like(g1), atol=1e-8)
+        assert not jnp.allclose(g2, jnp.zeros_like(g2), atol=1e-8)
+
+
 class FakeLIF(brainstate.HiddenState):
     def __init__(self, iv, leak):
         super().__init__(iv)

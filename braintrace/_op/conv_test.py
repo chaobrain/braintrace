@@ -36,6 +36,7 @@ import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import brainunit as u
 
 import braintrace
@@ -204,55 +205,62 @@ class TestConvEtpRules:
 
     def test_yw_to_w_broadcasts_hidden_no_bias(self):
         rule = ETP_RULES_YW_TO_W[etp_conv_p]
-        # Simulate the scan/etrace-update call (batch prefix retained).
+        # Simulate the scan/etrace-update (recurrence) call — batch retained.
         # 1-D NHC-HIO conv: kernel (H_k=3, in_ch=4, out_ch=4), output (N, H_out=6, C=4).
-        # In the update path hidden_dim has the full batched output shape
-        # (batch, H_out, out_ch) before spatial reduction.
-        # trace['weight'] = (batch, H_k, in_ch, out_ch) — batch prefix present.
-        # dimension_numbers and strides must be supplied so _conv_layout can derive
-        # the spatial rank and kernel out-channel axis.
+        # hidden_dim (the per-position D^t factor) has the full batched output
+        # shape (batch, H_out, out_ch); the per-position kernel trace is
+        # (batch, H_out, H_k, in_ch, out_ch). No spatial sums anywhere.
         batch = 1
         out_ch = 4
         H_out = 6
-        # hidden_dim has full batched-output shape: (batch, H_out, out_ch)
-        hidden = jnp.ones((batch, H_out, out_ch)) * jnp.arange(1, 5)  # (1, 6, 4)
-        w_trace = jnp.ones((batch, 3, 4, out_ch))  # (1, H_k, in_ch, out_ch)
+        brainstate.random.seed(0)
+        hidden = brainstate.random.randn(batch, H_out, out_ch)
+        w_trace = brainstate.random.randn(batch, H_out, 3, 4, out_ch)
         trace = {'weight': w_trace}
         params = dict(has_bias=False, strides=(1,), dimension_numbers=('NHC', 'HIO', 'NHC'))
         out = rule(hidden, trace, **params)
-        assert out['weight'].shape == (1, 3, 4, 4)
+        assert out['weight'].shape == (1, H_out, 3, 4, out_ch)
         assert 'bias' not in out
-        # For NHC/HIO: has_batch_prefix=True (ndim=3 == n_spatial+2=3).
-        # Spatial is summed: hd_reduced = hidden.sum(axis=1) → (1, 4).
-        # w_out_axis = kernel_out_axis + 1 = 2+1 = 3 (O is at index 2 in HIO, +1 for batch).
-        # target_shape = [1, 1, 1, 4] broadcast against (1, 3, 4, 4).
-        hd_reduced = hidden.sum(axis=1)  # (1, 4) — sum over H_out
-        expected = w_trace * hd_reduced[:, None, None, :]  # (1, 3, 4, 4)
+        # Per-position multiply: hd[b, s, k] broadcast over (H_k, in_ch).
+        expected = w_trace * hidden[:, :, None, None, :]
         np.testing.assert_allclose(out['weight'], expected)
 
     def test_yw_to_w_broadcasts_hidden_with_bias(self):
         rule = ETP_RULES_YW_TO_W[etp_conv_p]
-        # Simulate post-n_state-vmap shapes for 1-D conv NHC-HIO with spatial output.
-        # hidden_dim = (batch=1, H_out=6, out_ch=4) — spatial output retained.
-        # trace['weight'] = (batch=1, H_k=3, in_ch=4, out_ch=4).
-        # trace['bias']   = (batch=1, H_out=6, out_ch=4)  ← same as y output (per-position).
-        # dimension_numbers and strides must be supplied so _conv_layout can derive
-        # the spatial rank and channel-axis position.
+        # Recurrence context for 1-D conv NHC-HIO.
+        # hidden_dim = (batch=1, H_out=6, out_ch=4).
+        # trace['weight'] = (batch=1, H_out=6, H_k=3, in_ch=4, out_ch=4).
+        # trace['bias']   = (batch=1, H_out=6, out_ch=4)  ← y-shaped (per-position).
         batch = 1
-        hidden = jnp.ones((batch, 6, 4))  # (1, H_out, out_ch)
-        w_trace = jnp.ones((batch, 3, 4, 4))  # (1, H_k, in_ch, out_ch)
-        b_trace = jnp.ones((batch, 6, 4)) * 2.0  # (1, H_out, out_ch) — per-position trace
+        brainstate.random.seed(1)
+        hidden = brainstate.random.randn(batch, 6, 4)
+        w_trace = brainstate.random.randn(batch, 6, 3, 4, 4)
+        b_trace = brainstate.random.randn(batch, 6, 4)
         trace = {'weight': w_trace, 'bias': b_trace}
         params = dict(has_bias=True, strides=(1,), dimension_numbers=('NHC', 'HIO', 'NHC'))
         out = rule(hidden, trace, **params)
         assert 'weight' in out
         assert 'bias' in out
-        assert out['weight'].shape == (1, 3, 4, 4)
-        # bias result: sum over H_out of (b_trace * hidden) → (1, out_ch)
-        assert out['bias'].shape == (1, 4)
-        # bias update: elementwise product then sum over spatial (axis 1)
-        expected_bias = jnp.sum(b_trace * hidden, axis=1)  # sum over H_out → (1, 4)
-        np.testing.assert_allclose(out['bias'], expected_bias)
+        assert out['weight'].shape == (1, 6, 3, 4, 4)
+        # Bias recurrence is a pure per-position multiply — NO spatial sum
+        # (the old spatially-summed multiplier corrupted the recurrence for
+        # T >= 2; the sum now lives in the solve rule).
+        assert out['bias'].shape == (1, 6, 4)
+        np.testing.assert_allclose(out['bias'], b_trace * hidden)
+
+    def test_yw_to_w_default_nch_layout(self):
+        """Default (NCH/OIH) layout: hd must be transposed to (batch, s, k)
+        and its channel aligned to the kernel's out-channel axis (0 in OIH)."""
+        rule = ETP_RULES_YW_TO_W[etp_conv_p]
+        batch, c_out, length = 1, 3, 8
+        brainstate.random.seed(2)
+        hidden = brainstate.random.randn(batch, c_out, length)      # NCH
+        w_trace = brainstate.random.randn(batch, length, c_out, 2, 3)  # (b, s, O, I, H)
+        params = dict(has_bias=False, strides=(1,), dimension_numbers=None)
+        out = rule(hidden, {'weight': w_trace}, **params)
+        hd = jnp.transpose(hidden, (0, 2, 1))  # (b, s, k)
+        expected = w_trace * hd[:, :, :, None, None]
+        np.testing.assert_allclose(out['weight'], expected)
 
     def test_xy_to_dw_matches_jax_vjp(self):
         """The rule forwards its kwargs straight to
@@ -296,10 +304,14 @@ class TestConvEtpRules:
     def test_init_drtrl_shape_no_bias(self):
         rule = ETP_RULES_INIT_DRTRL[etp_conv_p]
         x_var = _fake_var((1, 3, 8))
-        y_var = _fake_var((1, 4, 8))
+        y_var = _fake_var((1, 4, 8))  # NCH: spatial_out = (8,)
         weight_vars = {'weight': _fake_var((4, 3, 3))}
-        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
-        assert out['weight'].shape == (1, 4, 3, 3, 2)
+        eqn_params = dict(strides=(1,), dimension_numbers=None,
+                          feature_group_count=1, batch_group_count=1)
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2,
+                   eqn_params=eqn_params)
+        # Per-position kernel trace: (batch, *spatial_out, *kernel, n_state).
+        assert out['weight'].shape == (1, 8, 4, 3, 3, 2)
         assert 'bias' not in out
 
     def test_init_drtrl_shape_with_bias(self):
@@ -308,10 +320,35 @@ class TestConvEtpRules:
         y_var = _fake_var((1, 4, 8))
         # bias has shape (4,) but the trace stores per-position ∂h/∂b
         weight_vars = {'weight': _fake_var((4, 3, 3)), 'bias': _fake_var((4,))}
-        out = rule(x_var, y_var, weight_vars, num_hidden_state=2)
-        assert out['weight'].shape == (1, 4, 3, 3, 2)
+        eqn_params = dict(strides=(1,), dimension_numbers=None,
+                          feature_group_count=1, batch_group_count=1)
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2,
+                   eqn_params=eqn_params)
+        assert out['weight'].shape == (1, 8, 4, 3, 3, 2)
         # bias trace: (batch, *y_shape[1:], n_state) = (1, 4, 8, 2)
         assert out['bias'].shape == (1, 4, 8, 2)
+
+    def test_init_drtrl_shape_channel_last(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_conv_p]
+        x_var = _fake_var((1, 8, 3))   # NWC
+        y_var = _fake_var((1, 8, 4))   # NWC: spatial_out = (8,)
+        weight_vars = {'weight': _fake_var((3, 3, 4))}  # WIO
+        eqn_params = dict(strides=(1,), dimension_numbers=('NWC', 'WIO', 'NWC'),
+                          feature_group_count=1, batch_group_count=1)
+        out = rule(x_var, y_var, weight_vars, num_hidden_state=2,
+                   eqn_params=eqn_params)
+        assert out['weight'].shape == (1, 8, 3, 3, 4, 2)
+
+    def test_init_drtrl_rejects_grouped_conv(self):
+        rule = ETP_RULES_INIT_DRTRL[etp_conv_p]
+        x_var = _fake_var((1, 4, 8))
+        y_var = _fake_var((1, 4, 8))
+        weight_vars = {'weight': _fake_var((4, 2, 3))}
+        eqn_params = dict(strides=(1,), dimension_numbers=None,
+                          feature_group_count=2, batch_group_count=1)
+        with pytest.raises(NotImplementedError, match='pp_prop'):
+            rule(x_var, y_var, weight_vars, num_hidden_state=1,
+                 eqn_params=eqn_params)
 
     def test_init_pp_shape(self):
         rule = ETP_RULES_INIT_PP[etp_conv_p]
@@ -526,6 +563,85 @@ class TestPublicAPIRoundTrip:
         assert braintrace.conv is conv
 
 
+# ---------------------------------------------------------------------------
+# Bias broadcasts along the layout's channel axis (H3)
+# ---------------------------------------------------------------------------
+
+class TestConvBiasChannelAxis:
+    """A ``(out_channels,)`` bias must broadcast along the layout's channel
+    axis, not just whatever axis happens to be trailing. The default
+    (``dimension_numbers=None``) layout is NCH-style, so the channel axis is
+    at position 1 -- not the trailing spatial axis.
+    """
+
+    def test_default_layout_bias_broadcasts_channel_axis(self):
+        # x: (batch=2, C_in=2, L=8); kernel: (C_out=4, C_in=2, kw=3); bias: (C_out=4,)
+        x = jnp.arange(2 * 2 * 8, dtype=jnp.float32).reshape(2, 2, 8)
+        k = jnp.arange(4 * 2 * 3, dtype=jnp.float32).reshape(4, 2, 3)
+        b = jnp.arange(4.0)
+        out = conv(x, k, b, strides=(1,), padding='SAME')
+        ref = _ref_conv(x, k, **_BASE_CONV_KW) + b.reshape(1, -1, 1)
+        np.testing.assert_allclose(out, ref)
+
+    def test_default_layout_bias_hazard_when_spatial_equals_out_channels(self):
+        """Regression guard for the silent-corruption hazard: spatial length
+        ``L`` happens to equal ``C_out``. Before the fix this shape
+        coincidence let the buggy trailing-axis broadcast succeed silently
+        (no ``ValueError``) while producing the wrong numbers.
+        """
+        # L == C_out == 4
+        x = jnp.arange(2 * 2 * 4, dtype=jnp.float32).reshape(2, 2, 4)
+        k = jnp.arange(4 * 2 * 3, dtype=jnp.float32).reshape(4, 2, 3)
+        b = jnp.arange(1.0, 5.0)
+        out = conv(x, k, b, strides=(1,), padding='SAME')
+        ref = _ref_conv(x, k, **_BASE_CONV_KW) + b.reshape(1, -1, 1)
+        np.testing.assert_allclose(out, ref)
+        # Must differ from the old (buggy) trailing-axis broadcast -- proves
+        # this test actually discriminates correct vs. silently-corrupted output.
+        buggy = _ref_conv(x, k, **_BASE_CONV_KW) + b.reshape(1, 1, -1)
+        assert not np.allclose(out, buggy)
+
+    def test_channel_last_layout_bias_still_works(self):
+        """Channel-last (`NWC`/`WIO`/`NWC`) layout regression guard -- the
+        channel axis is already trailing here, so this must keep working.
+        """
+        x = jnp.arange(2 * 8 * 2, dtype=jnp.float32).reshape(2, 8, 2)  # (N, W, C_in)
+        k = jnp.arange(3 * 2 * 4, dtype=jnp.float32).reshape(3, 2, 4)  # (W, I, O)
+        b = jnp.arange(4.0)
+        dn = ('NWC', 'WIO', 'NWC')
+        out = conv(x, k, b, strides=(1,), padding='SAME', dimension_numbers=dn)
+        ref = _ref_conv(
+            x, k, window_strides=(1,), padding='SAME', dimension_numbers=dn
+        ) + b.reshape(1, 1, -1)
+        np.testing.assert_allclose(out, ref)
+
+    def test_grad_through_biased_default_layout_conv(self):
+        """``jax.grad`` through a biased default-layout (NCH) conv must work.
+
+        All standard rules (JVP / transpose) are auto-derived from
+        ``_etp_conv_impl`` (see ``register_primitive``), so the channel-axis
+        reshape added to fix the bias broadcast must itself be
+        differentiable -- verify kernel and bias gradients match a
+        hand-written reference that performs the same reshape.
+        """
+        x = jnp.ones((2, 2, 8))
+        k = jnp.ones((4, 2, 3)) * 0.1
+        b = jnp.arange(4.0)
+
+        def loss(k_, b_):
+            return conv(x, k_, b_, strides=(1,), padding='SAME').sum()
+
+        gk, gb = jax.grad(loss, argnums=(0, 1))(k, b)
+
+        def ref_loss(k_, b_):
+            y = _ref_conv(x, k_, **_BASE_CONV_KW)
+            return (y + b_.reshape(1, -1, 1)).sum()
+
+        gk_ref, gb_ref = jax.grad(ref_loss, argnums=(0, 1))(k, b)
+        np.testing.assert_allclose(gk, gk_ref)
+        np.testing.assert_allclose(gb, gb_ref)
+
+
 class TestConvKernelFnBiasFn:
 
     def test_forward_applies_kernel_fn(self):
@@ -569,3 +685,358 @@ class TestConvKernelFnBiasFn:
         # bias_fn'(b) = 2*b, broadcast along channel axis=1 of the (batch, ch, spatial) trace.
         expected = hidden * (2.0 * b).reshape(1, 4, 1)
         np.testing.assert_allclose(out['bias'], expected, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Patch-extraction ground truth (conv == einsum over extracted patches)
+# ---------------------------------------------------------------------------
+
+class TestConvPatchExtraction:
+    """Pin the ``conv_general_dilated_patches`` channel-ordering convention.
+
+    The per-position D-RTRL kernel trace relies on
+    ``_conv_extract_patches`` returning patches laid out as
+    ``(batch, *spatial_out, c_in, *kernel_spatial)`` such that
+
+    .. math::  y_{b,\\mathbf{s},k} = \\sum_{\\mathbf{u},c}
+               \\mathrm{patch}_{b,\\mathbf{s},c,\\mathbf{u}}\\, K_{...}
+
+    reproduces ``jax.lax.conv_general_dilated`` exactly. This is verified
+    *numerically* (not trusted from the docs) for the default NCH/OIH
+    layout, a strided conv, VALID padding and a channel-last layout.
+    """
+
+    def _patches(self, x, kernel_shape, **params):
+        from braintrace._op.conv import _conv_extract_patches
+        return _conv_extract_patches(x, kernel_shape, params)
+
+    def test_patches_match_conv_default_layout(self):
+        brainstate.random.seed(0)
+        x = brainstate.random.randn(2, 3, 8)        # NCH
+        k = brainstate.random.randn(4, 3, 3)        # OIH
+        params = dict(strides=(1,), padding='SAME', dimension_numbers=None)
+        patches = self._patches(x, k.shape, **params)
+        assert patches.shape == (2, 8, 3, 3)        # (b, s, c_in, u)
+        y = jnp.einsum('bscu,kcu->bks', patches, k)  # back to NCH
+        ref = jax.lax.conv_general_dilated(x, k, window_strides=(1,), padding='SAME')
+        np.testing.assert_allclose(y, ref, atol=1e-5)
+
+    def test_patches_match_conv_strided(self):
+        brainstate.random.seed(1)
+        x = brainstate.random.randn(2, 3, 8)
+        k = brainstate.random.randn(4, 3, 3)
+        params = dict(strides=(2,), padding='SAME', dimension_numbers=None)
+        patches = self._patches(x, k.shape, **params)
+        y = jnp.einsum('bscu,kcu->bks', patches, k)
+        ref = jax.lax.conv_general_dilated(x, k, window_strides=(2,), padding='SAME')
+        np.testing.assert_allclose(y, ref, atol=1e-5)
+
+    def test_patches_match_conv_valid_padding(self):
+        brainstate.random.seed(2)
+        x = brainstate.random.randn(2, 3, 8)
+        k = brainstate.random.randn(4, 3, 3)
+        params = dict(strides=(1,), padding='VALID', dimension_numbers=None)
+        patches = self._patches(x, k.shape, **params)
+        assert patches.shape == (2, 6, 3, 3)        # L_out = 8 - 3 + 1
+        y = jnp.einsum('bscu,kcu->bks', patches, k)
+        ref = jax.lax.conv_general_dilated(x, k, window_strides=(1,), padding='VALID')
+        np.testing.assert_allclose(y, ref, atol=1e-5)
+
+    def test_patches_match_conv_channel_last(self):
+        brainstate.random.seed(3)
+        x = brainstate.random.randn(2, 8, 3)        # NWC
+        k = brainstate.random.randn(3, 3, 4)        # WIO
+        dn = ('NWC', 'WIO', 'NWC')
+        params = dict(strides=(1,), padding='SAME', dimension_numbers=dn)
+        patches = self._patches(x, k.shape, **params)
+        assert patches.shape == (2, 8, 3, 3)        # (b, s, c_in, u)
+        y = jnp.einsum('bscu,uco->bso', patches, k)  # back to NWC
+        ref = jax.lax.conv_general_dilated(
+            x, k, window_strides=(1,), padding='SAME', dimension_numbers=dn
+        )
+        np.testing.assert_allclose(y, ref, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Exact-gradient oracle: param-dim D-RTRL vs BPTT (per-position kernel trace)
+# ---------------------------------------------------------------------------
+
+class TestConvOnlineLearningExact:
+    """Single-step D-RTRL must reproduce BPTT exactly for conv kernel + bias.
+
+    The models are exactly diagonal (leaky-integrator dynamics
+    ``h <- leak * h + drive``), so D-RTRL's diagonal approximation is exact
+    and every parameter gradient must match a BPTT oracle element-wise
+    (``rel < 1e-10`` in float64). This covers the audit finding that the
+    kernel-shaped (spatially pre-summed) trace multiplied a sum by a sum
+    where a sum of products is required — kernel gradients were wrong even
+    at T=1 (measured rel err 1.0–47.8) and the bias recurrence used the
+    spatially-summed multiplier (exact at T=1, rel err ~6 at T=3).
+    """
+
+    LEAK = 0.5
+    TOL = 1e-10
+
+    @staticmethod
+    def _rel_err(a, b):
+        a = jnp.asarray(a)
+        b = jnp.asarray(b)
+        denom = jnp.maximum(jnp.abs(a).max(), 1e-12)
+        return float(jnp.abs(a - b).max() / denom)
+
+    def _assert_exact(self, factory, xs):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        g_bptt = bptt_param_gradients(factory, xs)
+        g_online = online_param_gradients_singlestep_naive(
+            factory, xs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='single-step'),
+        )
+        for key in g_bptt:
+            rel = self._rel_err(g_bptt[key], g_online[key])
+            assert rel < self.TOL, (
+                f'D-RTRL diverges from BPTT for {key} at T={xs.shape[0]}: '
+                f'max_rel_err={rel:.3e}'
+            )
+
+    def test_default_layout_kernel_exact(self):
+        """NCH/OIH default layout: kernel gradient exact at T=1 and T=4."""
+        c_in, c_out, length = 2, 3, 8
+        leak = self.LEAK
+        with brainstate.environ.context(precision=64):
+            brainstate.random.seed(0)
+            k0 = 0.1 * brainstate.random.randn(c_out, c_in, 3)  # OIH
+
+            def factory():
+                class Net(brainstate.nn.Module):
+                    def __init__(self):
+                        super().__init__()
+                        self.k = brainstate.ParamState(k0)
+                        self.h = brainstate.HiddenState(jnp.zeros((1, c_out, length)))  # NCH
+
+                    def update(self, x):
+                        drive = braintrace.conv(
+                            x, self.k.value, strides=(1,), padding='SAME'
+                        )
+                        self.h.value = leak * self.h.value + drive
+                        return self.h.value
+
+                return Net()
+
+            for T in (1, 4):
+                brainstate.random.seed(42)
+                xs = 0.3 * brainstate.random.randn(T, 1, c_in, length)
+                self._assert_exact(factory, xs)
+
+    def test_channel_last_with_bias_exact(self):
+        """NWC/WIO/NWC layout with a bias: kernel *and* bias exact at T=3.
+
+        Pins the bias-recurrence fix — with the old spatially-summed
+        recurrence multiplier the bias gradient failed at T >= 2 (rel err ~6).
+        """
+        c_in, c_out, width = 2, 3, 8
+        leak = self.LEAK
+        dn = ('NWC', 'WIO', 'NWC')
+        with brainstate.environ.context(precision=64):
+            brainstate.random.seed(1)
+            k0 = 0.1 * brainstate.random.randn(3, c_in, c_out)  # WIO
+            b0 = 0.05 * brainstate.random.randn(c_out)
+
+            def factory():
+                class Net(brainstate.nn.Module):
+                    def __init__(self):
+                        super().__init__()
+                        self.k = brainstate.ParamState(k0)
+                        self.b = brainstate.ParamState(b0)
+                        self.h = brainstate.HiddenState(jnp.zeros((1, width, c_out)))  # NWC
+
+                    def update(self, x):
+                        drive = braintrace.conv(
+                            x, self.k.value, self.b.value,
+                            strides=(1,), padding='SAME', dimension_numbers=dn,
+                        )
+                        self.h.value = leak * self.h.value + drive
+                        return self.h.value
+
+                return Net()
+
+            brainstate.random.seed(43)
+            xs = 0.3 * brainstate.random.randn(3, 1, width, c_in)
+            self._assert_exact(factory, xs)
+
+
+# ---------------------------------------------------------------------------
+# Grouped-conv rejection under param-dim D-RTRL
+# ---------------------------------------------------------------------------
+
+class TestGroupedConvDrtrlRejection:
+    """``feature_group_count != 1`` has no per-position patch extraction under
+    the exact param-dim D-RTRL kernel trace; trace init must reject it with a
+    pointer to the IO-dim alternative (``pp_prop``)."""
+
+    def test_feature_group_count_rejected_with_pp_prop_pointer(self):
+        c_in, c_out, length = 4, 4, 8
+        with brainstate.environ.context(precision=64):
+            brainstate.random.seed(0)
+            k0 = 0.1 * brainstate.random.randn(c_out, c_in // 2, 3)  # OIH, groups=2
+
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.k = brainstate.ParamState(k0)
+                    self.h = brainstate.HiddenState(jnp.zeros((1, c_out, length)))
+
+                def update(self, x):
+                    drive = braintrace.conv(
+                        x, self.k.value, strides=(1,), padding='SAME',
+                        feature_group_count=2,
+                    )
+                    self.h.value = 0.5 * self.h.value + drive
+                    return self.h.value
+
+            net = Net()
+            brainstate.nn.init_all_states(net, batch_size=1)
+            algo = braintrace.D_RTRL(net, vjp_method='single-step')
+            # ``compile_graph`` initialises the trace states, which is where
+            # the per-position trace allocation rejects grouped convs.
+            with pytest.raises(NotImplementedError, match='pp_prop'):
+                algo.compile_graph(jnp.zeros((1, c_in, length)))
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``instant_drtrl`` / ``solve_drtrl``
+# from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
+    """Derive ``_conv_instant_drtrl`` / ``_conv_solve_drtrl`` from
+    ``jax.jacobian`` of the primitive's own forward, on tiny shapes, default
+    (OIH kernel / NCH data) layout, unbatched.
+
+    ``instant_drtrl``'s documented formula is
+    ``(dh/dK)_{s,u,c,k} = D_f^t_{s,k} * patch_{s,u,c}``, i.e. the per-position
+    (spatial index ``s`` never summed) contraction of the cotangent against
+    the raw conv Jacobian ``dy_{k,s}/dK_{k2,c,u} = delta(k,k2) * patch_{s,u,c}``.
+    This test builds the full Jacobian via ``jax.jacobian`` (never via the
+    rule's own patch-extraction helper), verifies its diagonal-in-out-channel
+    structure against an independently hand-built "SAME"-padding patch
+    (plain zero-padding + indexing, not :func:`_conv_extract_patches`), then
+    contracts the raw Jacobian with a random cotangent via a *repeated*-index
+    ``einsum`` (the spatial axis ``s`` appears in both operands and the
+    output, so it is kept rather than summed) and compares against the
+    rule's actual output.
+
+    ``solve_drtrl`` is checked separately: it performs a plain spatial-sum
+    contraction between a random loss cotangent and a random trace (no
+    forward model to differentiate), reimplemented here independently of
+    the rule's own axis bookkeeping.
+    """
+
+    def test_instant_drtrl_weight_matches_jacobian_repeated_index_contraction(self):
+        brainstate.random.seed(701)
+        in_ch, out_ch, kw, L = 2, 4, 3, 6  # odd kernel width: symmetric SAME pad
+        x = brainstate.random.randn(in_ch, L)  # unbatched, default NCH-style
+        K0 = brainstate.random.randn(out_ch, in_ch, kw)  # default OIH kernel
+
+        def fwd(K):
+            y = jax.lax.conv_general_dilated(
+                x[None], K, window_strides=(1,), padding='SAME',
+            )
+            return y[0]  # (out_ch, L)
+
+        J = jax.jacobian(fwd)(K0)  # (k, s, k2, c, u)
+
+        pad = (kw - 1) // 2
+        x_padded = jnp.pad(x, ((0, 0), (pad, pad)))
+
+        def manual_patch(s, u, c):
+            return x_padded[c, s + u]
+
+        for k in range(out_ch):
+            for s in range(L):
+                for k2 in range(out_ch):
+                    for c in range(in_ch):
+                        for u in range(kw):
+                            expected = float(manual_patch(s, u, c)) if k == k2 else 0.0
+                            np.testing.assert_allclose(
+                                J[k, s, k2, c, u], expected, atol=1e-6,
+                                err_msg=f'Jacobian mismatch at k={k},s={s},k2={k2},c={c},u={u}',
+                            )
+
+        g = brainstate.random.randn(out_ch, L)  # hidden_dim, (k, s) layout
+
+        # Repeated-index einsum: 's' appears in both operands and the output
+        # so it is NOT summed -- only the y-channel index (labelled 'k' on
+        # the cotangent, 'm' on the Jacobian's differentiation side) is
+        # contracted, matching the plan's "g-contraction ... per position".
+        ref_inst = jnp.einsum('ks,ksmcu->smcu', g, J)
+
+        from braintrace._op.conv import _conv_instant_drtrl
+        out = _conv_instant_drtrl(
+            x, g, {'weight': K0}, strides=(1,), padding='SAME', has_bias=False,
+        )
+        np.testing.assert_allclose(out['weight'], ref_inst, atol=1e-6)
+
+    def test_instant_drtrl_matches_jacobian_with_kernel_fn_and_bias_fn(self):
+        brainstate.random.seed(702)
+        in_ch, out_ch, kw, L = 2, 4, 3, 6
+        x = brainstate.random.randn(in_ch, L)
+        K0 = brainstate.random.randn(out_ch, in_ch, kw)
+        b0 = brainstate.random.randn(out_ch)
+
+        kernel_fn = lambda K: 1.5 * K + 0.1 * K ** 2
+        bias_fn = lambda b: jnp.tanh(b)
+
+        def fwd(K):
+            y = jax.lax.conv_general_dilated(
+                x[None], kernel_fn(K), window_strides=(1,), padding='SAME',
+            )
+            return y[0]
+
+        J = jax.jacobian(fwd)(K0)  # w.r.t. the RAW kernel; kernel_fn is inside fwd
+        g = brainstate.random.randn(out_ch, L)
+        ref_inst = jnp.einsum('ks,ksmcu->smcu', g, J)
+
+        from braintrace._op.conv import _conv_instant_drtrl
+        out = _conv_instant_drtrl(
+            x, g, {'weight': K0}, strides=(1,), padding='SAME', has_bias=False,
+            kernel_fn=kernel_fn,
+        )
+        np.testing.assert_allclose(out['weight'], ref_inst, atol=1e-5)
+
+        # Bias: jacobian of bias_fn itself (diagonal), never assumed.
+        J_b = jax.jacobian(bias_fn)(b0)
+        db = jnp.diagonal(J_b)
+        ref_bias = g * db[:, None]  # channel axis is axis 0 in (k, s) layout
+
+        out_b = _conv_instant_drtrl(
+            x, g, {'weight': K0, 'bias': b0}, strides=(1,), padding='SAME',
+            has_bias=True, bias_fn=bias_fn,
+        )
+        np.testing.assert_allclose(out_b['bias'], ref_bias, atol=1e-6)
+
+    def test_solve_drtrl_matches_independent_spatial_sum_reference(self):
+        from braintrace._op.conv import _conv_solve_drtrl
+        brainstate.random.seed(703)
+        in_ch, out_ch, kw, L = 2, 4, 3, 6
+        K0 = brainstate.random.randn(out_ch, in_ch, kw)
+
+        trace_w = brainstate.random.randn(L, out_ch, in_ch, kw)  # (*spatial_out, *kernel)
+        trace_b = brainstate.random.randn(out_ch, L)  # (*y_layout)
+        dg_hidden = brainstate.random.randn(out_ch, L)  # (*y_layout)
+
+        # Independent reimplementation of the documented spatial-sum
+        # contraction, built without reusing `_conv_layout` or any of the
+        # rule's own axis-alignment code.
+        dg_t = jnp.transpose(dg_hidden, (1, 0))  # (s, k)
+        ref_w = jnp.einsum('sk,skcu->kcu', dg_t, trace_w)
+        ref_b = jnp.sum(trace_b * dg_hidden, axis=1)
+
+        out = _conv_solve_drtrl(
+            dg_hidden, {'weight': trace_w, 'bias': trace_b}, {'weight': K0},
+            strides=(1,), padding='SAME', has_bias=True,
+        )
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-6)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-6)
