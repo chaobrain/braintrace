@@ -29,11 +29,13 @@ APIs.
 
 
 
+import brainstate
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+import braintrace
 from braintrace._compatible_imports import Primitive
 from braintrace._op import (
     BATCHED_PRIMITIVES,
@@ -181,14 +183,19 @@ class TestVmap:
             _fresh_name('vmap'), lambda x: x * 2.0, batched=True,
         )
 
-        out = jax.vmap(lambda x: p.bind(x))(jnp.arange(5.0))
+        # No batched counterpart is registered for `p` itself, so the
+        # identity-preserving batching rule falls back to decomposition
+        # and warns (see `register_primitive`'s batching rule).
+        with pytest.warns(UserWarning, match='decomposed'):
+            out = jax.vmap(lambda x: p.bind(x))(jnp.arange(5.0))
         np.testing.assert_allclose(out, jnp.arange(5.0) * 2.0)
 
     def test_vmap_two_args(self):
         p = register_primitive(_fresh_name('vmap2'), lambda x, y: x + y)
         x = jnp.arange(4.0)
         y = jnp.arange(4.0) * 10
-        out = jax.vmap(lambda a, b: p.bind(a, b))(x, y)
+        with pytest.warns(UserWarning, match='decomposed'):
+            out = jax.vmap(lambda a, b: p.bind(a, b))(x, y)
         np.testing.assert_allclose(out, x + y)
 
 
@@ -283,3 +290,66 @@ class TestUnknownKwargRejected:
             register_primitive(
                 _fresh_name('bad'), lambda x: x, unknown=True,
             )
+
+
+def _prim_names(fn, *args):
+    return [e.primitive.name for e in jax.make_jaxpr(fn)(*args).jaxpr.eqns]
+
+
+class TestVmapIdentityPreservation:
+    """vmap over an unbatched ETP op must promote to the batched primitive."""
+
+    def test_vmap_matmul_promotes_to_etp_mm(self):
+        x = jnp.ones((4, 3))
+        w = jnp.ones((3, 5))
+        fn = jax.vmap(lambda xi: braintrace.matmul(xi, w))
+        names = _prim_names(fn, x)
+        assert 'etp_mm' in names
+        assert 'dot_general' not in names
+
+    def test_promoted_values_match_reference(self):
+        x = jnp.asarray(brainstate.random.randn(4, 3))
+        w = jnp.asarray(brainstate.random.randn(3, 5))
+        out = jax.vmap(lambda xi: braintrace.matmul(xi, w))(x)
+        assert jnp.allclose(out, x @ w, atol=1e-6)
+
+    def test_promoted_with_bias(self):
+        x = jnp.asarray(brainstate.random.randn(4, 3))
+        w = jnp.asarray(brainstate.random.randn(3, 5))
+        b = jnp.asarray(brainstate.random.randn(5))
+        fn = jax.vmap(lambda xi: braintrace.matmul(xi, w, bias=b))
+        assert 'etp_mm' in _prim_names(fn, x)
+        assert jnp.allclose(fn(x), x @ w + b, atol=1e-6)
+
+    def test_promoted_params_pass_through_weight_fn(self):
+        x = jnp.asarray(brainstate.random.randn(4, 3))
+        w = jnp.asarray(brainstate.random.randn(3, 5))
+        wfn = lambda ww: ww ** 2
+        fn = jax.vmap(lambda xi: braintrace.matmul(xi, w, weight_fn=wfn))
+        jaxpr = jax.make_jaxpr(fn)(x)
+        mm_eqns = [e for e in jaxpr.jaxpr.eqns if e.primitive.name == 'etp_mm']
+        assert len(mm_eqns) == 1
+        assert mm_eqns[0].params['weight_fn'] is wfn
+        assert jnp.allclose(fn(x), x @ (w ** 2), atol=1e-6)
+
+    def test_promotion_from_nonzero_batch_axis(self):
+        xt = jnp.asarray(brainstate.random.randn(3, 4))  # batch on axis 1
+        w = jnp.asarray(brainstate.random.randn(3, 5))
+        fn = jax.vmap(lambda xi: braintrace.matmul(xi, w), in_axes=1)
+        assert 'etp_mm' in _prim_names(fn, xt)
+        assert jnp.allclose(fn(xt), xt.T @ w, atol=1e-6)
+
+    def test_gradient_through_promoted_path(self):
+        x = jnp.asarray(brainstate.random.randn(4, 3))
+        w = jnp.asarray(brainstate.random.randn(3, 5))
+        g = jax.grad(lambda ww: jax.vmap(lambda xi: braintrace.matmul(xi, ww))(x).sum())(w)
+        g_ref = jax.grad(lambda ww: (x @ ww).sum())(w)
+        assert jnp.allclose(g, g_ref, atol=1e-6)
+
+    def test_batched_weight_falls_back_with_warning(self):
+        x = jnp.asarray(brainstate.random.randn(3))
+        ws = jnp.asarray(brainstate.random.randn(4, 3, 5))  # per-lane weights
+        fn = jax.vmap(lambda wi: braintrace.matmul(x, wi))
+        with pytest.warns(UserWarning, match='decomposed'):
+            out = fn(ws)
+        assert jnp.allclose(out, jnp.einsum('i,bij->bj', x, ws), atol=1e-6)

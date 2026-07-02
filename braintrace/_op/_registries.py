@@ -54,12 +54,15 @@ __all__ = [
     'ETP_RULES_INIT_PP',
     'GRADIENT_ENABLED_PRIMITIVES',
     'BATCHED_PRIMITIVES',
+    'BATCHED_COUNTERPARTS',
     'ETP_TRAINABLE_INVARS_FNS',
     'ETP_X_INVAR_INDICES',
     'ETP_Y_OUTVAR_INDICES',
     'is_etp_primitive',
     'is_etp_enable_gradient_primitive',
     'is_batched_primitive',
+    'register_batched_counterpart',
+    'get_batched_counterpart',
     'get_trainable_invars',
     'get_x_invar_index',
     'get_y_outvar_index',
@@ -84,6 +87,17 @@ r"""pp_prop df trace init: ``(x_var, y_var, weight_var, num_hidden_state) -> zer
 
 GRADIENT_ENABLED_PRIMITIVES: set = set()
 BATCHED_PRIMITIVES: set = set()
+
+BATCHED_COUNTERPARTS: Dict[Primitive, Primitive] = {}
+r"""Batched counterpart per unbatched ETP primitive.
+
+Maps an unbatched primitive (e.g. ``etp_mv_p``) to the batched primitive
+implementing the same operation with a leading batch axis on ``x``
+(e.g. ``etp_mm_p``). Consulted by the auto-derived batching rule in
+:func:`~braintrace._op._primitive.register_primitive` to keep ETP
+primitive identity intact under ``jax.vmap`` (identity-preserving
+promotion). Populated via :func:`register_batched_counterpart`.
+"""
 
 ETP_TRAINABLE_INVARS_FNS: Dict[Primitive, Callable] = {}
 r"""Trainable-input layout: ``eqn.params -> {key: invar_index}``.
@@ -121,6 +135,58 @@ def is_etp_enable_gradient_primitive(primitive) -> bool:
 def is_batched_primitive(primitive) -> bool:
     """Return True iff *primitive* was registered with ``batched=True``."""
     return primitive in BATCHED_PRIMITIVES
+
+
+def register_batched_counterpart(unbatched_p, batched_p) -> None:
+    """Declare *batched_p* as the batched form of *unbatched_p* under vmap.
+
+    Parameters
+    ----------
+    unbatched_p : Primitive
+        An ETP primitive registered with ``batched=False``.
+    batched_p : Primitive
+        The ETP primitive registered with ``batched=True`` that computes the
+        same operation with the batch axis leading on ``x``.
+
+    Raises
+    ------
+    ValueError
+        If either primitive is not an ETP primitive, if *unbatched_p* is
+        registered as batched, or if *batched_p* is not registered as batched.
+    """
+    if unbatched_p not in ETP_PRIMITIVES or batched_p not in ETP_PRIMITIVES:
+        raise ValueError(
+            f'Both primitives must be ETP primitives; got '
+            f'{unbatched_p} and {batched_p}.'
+        )
+    if unbatched_p in BATCHED_PRIMITIVES:
+        raise ValueError(
+            f'{unbatched_p} must be an unbatched primitive to receive a '
+            f'batched counterpart.'
+        )
+    if batched_p not in BATCHED_PRIMITIVES:
+        raise ValueError(
+            f'{batched_p} must be registered with batched=True to serve as '
+            f'a batched counterpart.'
+        )
+    BATCHED_COUNTERPARTS[unbatched_p] = batched_p
+
+
+def get_batched_counterpart(primitive):
+    """Return the batched counterpart of *primitive*, or ``None``.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The (unbatched) ETP primitive to look up.
+
+    Returns
+    -------
+    Primitive or None
+        The batched counterpart registered via
+        :func:`register_batched_counterpart`, or ``None``.
+    """
+    return BATCHED_COUNTERPARTS.get(primitive)
 
 
 def get_trainable_invars(primitive, eqn_params: dict) -> Dict[str, int]:
