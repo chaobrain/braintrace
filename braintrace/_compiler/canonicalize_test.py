@@ -1057,5 +1057,134 @@ class TestCanonicalizeControlFlow:
         assert 'cond' in names
 
 
+class _InnerLoopCell(brainstate.nn.Module):
+    """Cell whose one-step update runs an inner ``for_loop`` of ``loops``
+    sub-steps, each applying two ETP matmuls to the hidden state."""
+
+    def __init__(self, n_rec: int, loops: int = 3):
+        super().__init__()
+        self.loops = loops
+        self.w = brainstate.ParamState(0.1 * brainstate.random.randn(n_rec, n_rec))
+        self.h = brainstate.HiddenState(jnp.zeros(n_rec))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        def step(i):
+            self.h.value = jnp.tanh(
+                braintrace.matmul(x, self.w.value)
+                + braintrace.matmul(self.h.value, self.w.value)
+            )
+            return self.h.value
+
+        outs = brainstate.transform.for_loop(step, jnp.arange(self.loops))
+        return outs[-1]
+
+
+class _UnrolledLoopCell(brainstate.nn.Module):
+    """Hand-flattened twin of :class:`_InnerLoopCell`: the same ``loops``
+    sub-steps written out at trace time (no runtime loop)."""
+
+    def __init__(self, n_rec: int, loops: int = 3):
+        super().__init__()
+        self.loops = loops
+        self.w = brainstate.ParamState(0.1 * brainstate.random.randn(n_rec, n_rec))
+        self.h = brainstate.HiddenState(jnp.zeros(n_rec))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        for _ in range(self.loops):
+            self.h.value = jnp.tanh(
+                braintrace.matmul(x, self.w.value)
+                + braintrace.matmul(self.h.value, self.w.value)
+            )
+        return self.h.value
+
+
+class TestScanModelCompilation:
+    """A model with ETP ops inside a `for_loop`/`scan` body must compile
+    identically to the hand-unrolled twin (spec Phase 2)."""
+
+    N_REC, LOOPS = 4, 3
+
+    def _graph_for(self, cell_cls, **compile_kwargs):
+        with brainstate.random.seed_context(42):
+            cell = cell_cls(self.N_REC, self.LOOPS)
+        brainstate.nn.init_all_states(cell)
+        x = jnp.ones(self.N_REC)
+        return braintrace.compile_etrace_graph(cell, x, **compile_kwargs)
+
+    def test_scan_model_compiles_without_scan_eqn(self):
+        graph = self._graph_for(_InnerLoopCell)
+        names = [eqn.primitive.name for eqn in graph.module_info.jaxpr.eqns]
+        assert 'scan' not in names
+        assert names.count('etp_mv') == 2 * self.LOOPS
+
+    def test_relation_parity_with_unrolled_model(self):
+        # Only the LAST sub-step's two ETP calls become relations: earlier
+        # sub-steps reach the hidden outvar exclusively through later ETP
+        # ops (the weight -> weight -> hidden invariant excludes them). The
+        # hand-flattened twin proves 2 is the canonical count.
+        g_scan = self._graph_for(_InnerLoopCell)
+        g_flat = self._graph_for(_UnrolledLoopCell)
+        assert len(g_scan.hidden_param_op_relations) == 2
+        assert len(g_flat.hidden_param_op_relations) == 2
+        assert all(
+            r.trainable_paths['weight'] == ('w',)
+            for r in g_scan.hidden_param_op_relations
+        )
+        scan_prims = sorted(
+            r.primitive.name for r in g_scan.hidden_param_op_relations
+        )
+        flat_prims = sorted(
+            r.primitive.name for r in g_flat.hidden_param_op_relations
+        )
+        assert scan_prims == flat_prims
+
+    def test_unroll_diagnostic_recorded(self):
+        graph = self._graph_for(_InnerLoopCell)
+        records = graph.explain(kind=DiagnosticKind.SCAN_UNROLLED)
+        assert len(records) == 1
+
+    def test_limit_zero_policy_keeps_existing_error(self):
+        with pytest.raises(NotImplementedError, match='scan'):
+            with pytest.warns(UserWarning):
+                self._graph_for(
+                    _InnerLoopCell,
+                    control_flow=ControlFlowPolicy(scan_unroll_limit=0),
+                )
+
+    def test_drtrl_gradient_parity_with_unrolled_model(self):
+        def build_and_grads(cell_cls):
+            with brainstate.random.seed_context(42):
+                model = cell_cls(self.N_REC, self.LOOPS)
+            learner = braintrace.compile(model, braintrace.D_RTRL, jnp.zeros(self.N_REC))
+            weights = model.states(brainstate.ParamState)
+            with brainstate.random.seed_context(7):
+                xs = brainstate.random.randn(6, self.N_REC)
+
+            def total_loss(xs):
+                def step(carry, x):
+                    out = learner(x)
+                    return carry, jnp.mean(jnp.asarray(out) ** 2)
+
+                _, ls = brainstate.transform.scan(step, None, xs)
+                return jnp.sum(ls)
+
+            return brainstate.transform.grad(total_loss, weights)(xs)
+
+        g_scan = build_and_grads(_InnerLoopCell)
+        g_flat = build_and_grads(_UnrolledLoopCell)
+        leaves_scan = jax.tree.leaves(g_scan)
+        leaves_flat = jax.tree.leaves(g_flat)
+        assert leaves_scan and len(leaves_scan) == len(leaves_flat)
+        for a, b in zip(leaves_scan, leaves_flat):
+            assert jnp.allclose(a, b, atol=1e-6), (a - b)
+        assert any(jnp.any(jnp.abs(leaf) > 0) for leaf in leaves_scan)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

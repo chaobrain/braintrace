@@ -692,9 +692,34 @@ def _unroll_scans_once(
         carry_atoms: List[Any] = list(init_atoms)
         ys_atoms: List[List[Any]] = [[None] * length for _ in range(num_ys)]
 
+        # For the final processing iteration, produce each ORIGINAL carry
+        # outvar directly from the cloned body equation instead of a fresh
+        # var + identity copy. This matters beyond economy: a body that
+        # returns its new carry as a y output (the for_loop shape) aliases
+        # the two by VALUE, and downstream consumers of the stacked ys must
+        # flow through the hidden outvar for perturbation-based learning
+        # signals (dL/dh) to see them. Positions whose body outvar is a
+        # passthrough invar, a Literal, or a duplicate of an already-mapped
+        # carry fall back to the identity-copy path below.
+        body_produced: Set[Var] = set()
+        for body_eqn in body.eqns:
+            body_produced.update(
+                v for v in body_eqn.outvars if isinstance(v, Var)
+            )
+        final_carry_map: Dict[Var, Var] = {}
+        for bv, ov in zip(body.outvars[:num_carry], eqn.outvars[:num_carry]):
+            if (
+                ov in consumed
+                and isinstance(bv, Var)
+                and bv in body_produced
+                and bv not in final_carry_map
+            ):
+                final_carry_map[bv] = ov
+
         # reverse=True threads the carry from the LAST xs slice to the
         # first, but the y computed for slice t still lands at ys[t].
         order = range(length - 1, -1, -1) if reverse else range(length)
+        final_t = order[-1] if length else None
         for t in order:
             subst: Dict[Var, Any] = dict(const_subst)
             for iv, atom in zip(body.invars[:num_consts], const_atoms):
@@ -738,9 +763,16 @@ def _unroll_scans_once(
                     return subst.get(atom, atom)
                 return atom
 
-            # Clone the body equations with fresh outvars.
+            # Clone the body equations with fresh outvars; on the final
+            # processing iteration, eligible carry outputs write the
+            # original scan outvars directly.
+            outvar_map = final_carry_map if t == final_t else {}
             for body_eqn in body.eqns:
-                fresh_outvars = [fresh_like(v) for v in body_eqn.outvars]
+                fresh_outvars = [
+                    outvar_map.get(v) if isinstance(v, Var) and v in outvar_map
+                    else fresh_like(v)
+                    for v in body_eqn.outvars
+                ]
                 for ov, fresh in zip(body_eqn.outvars, fresh_outvars):
                     subst[ov] = fresh
                 new_eqns.append(body_eqn.replace(
@@ -754,9 +786,10 @@ def _unroll_scans_once(
                 ys_atoms[j][t] = y_atom
 
         # Re-emit the original scan outvars. Dead outputs (never consumed —
-        # including DropVars) get no producing equation, which is legal.
+        # including DropVars) get no producing equation, which is legal;
+        # direct-mapped carries were already written by the final clone.
         for ov, final_atom in zip(eqn.outvars[:num_carry], carry_atoms):
-            if ov not in consumed:
+            if ov not in consumed or final_atom is ov:
                 continue
             shape = tuple(ov.aval.shape)
             new_eqns.append(new_jaxpr_eqn(

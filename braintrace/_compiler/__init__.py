@@ -22,7 +22,9 @@ from braintrace._compiler.base import (
 from braintrace._compiler.canonicalize import (
     ControlFlowPolicy,
     DEFAULT_CONTROL_FLOW_POLICY,
+    canonicalize_control_flow,
     if_convert_conds,
+    unroll_inner_scans,
 )
 from braintrace._compiler.diagnostics import (
     CompilationRecord,
