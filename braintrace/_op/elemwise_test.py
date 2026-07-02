@@ -35,6 +35,7 @@ from collections import namedtuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import brainunit as u
 
 import brainstate
@@ -153,7 +154,12 @@ class TestJAXRules:
 
     def test_vmap(self):
         w = jnp.arange(12.0).reshape(4, 3)
-        out = jax.vmap(element_wise)(w)
+        # `etp_elemwise` has no registered batched counterpart, so this
+        # falls back to the identity-preserving batching rule's
+        # decomposition path and warns (see `register_primitive`'s
+        # batching rule in `braintrace/_op/_primitive.py`).
+        with pytest.warns(UserWarning, match='decomposed'):
+            out = jax.vmap(element_wise)(w)
         np.testing.assert_allclose(out, w)
 
     def test_grad_default_fn(self):

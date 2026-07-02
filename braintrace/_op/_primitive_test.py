@@ -183,14 +183,19 @@ class TestVmap:
             _fresh_name('vmap'), lambda x: x * 2.0, batched=True,
         )
 
-        out = jax.vmap(lambda x: p.bind(x))(jnp.arange(5.0))
+        # No batched counterpart is registered for `p` itself, so the
+        # identity-preserving batching rule falls back to decomposition
+        # and warns (see `register_primitive`'s batching rule).
+        with pytest.warns(UserWarning, match='decomposed'):
+            out = jax.vmap(lambda x: p.bind(x))(jnp.arange(5.0))
         np.testing.assert_allclose(out, jnp.arange(5.0) * 2.0)
 
     def test_vmap_two_args(self):
         p = register_primitive(_fresh_name('vmap2'), lambda x, y: x + y)
         x = jnp.arange(4.0)
         y = jnp.arange(4.0) * 10
-        out = jax.vmap(lambda a, b: p.bind(a, b))(x, y)
+        with pytest.warns(UserWarning, match='decomposed'):
+            out = jax.vmap(lambda a, b: p.bind(a, b))(x, y)
         np.testing.assert_allclose(out, x + y)
 
 
