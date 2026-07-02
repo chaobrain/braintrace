@@ -543,8 +543,15 @@ def conv(
         Input tensor with a leading batch dimension.
     kernel : ArrayLike
         Convolution kernel, with layout governed by ``dimension_numbers``.
-    bias : ArrayLike or None, optional
-        Per-output-channel bias. Default ``None``.
+    bias : Array, optional
+        Bias added to the convolution output. A 1-D array of shape
+        ``(out_channels,)`` is automatically reshaped to broadcast along the
+        output's channel axis as determined by ``dimension_numbers`` (so it is
+        correct for channel-first layouts such as the default NCH/NCHW as well
+        as channel-last ones). An array of rank > 1 is added as-is and must
+        already be broadcast-compatible with the layout-dependent output shape
+        (this is how ``braintrace.nn.Conv1d/2d/3d`` pass their pre-shaped
+        bias). Default ``None``.
     strides : Sequence[int], optional
         Window strides. Default ``(1,)``.
     padding : str, optional
