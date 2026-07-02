@@ -233,3 +233,40 @@ class TestGmmEtpRules:
         )
         assert out.shape == (self.B, self.G, self.N, self.A)
         assert out.dtype == jnp.bfloat16
+
+
+class TestGmvEtpRules:
+    G, K, N, A = 2, 3, 4, 2
+
+    def test_yw_to_w(self):
+        brainstate.random.seed(20)
+        hd = brainstate.random.randn(self.G, self.N)
+        tr = {'weight': brainstate.random.randn(self.G, self.K, self.N),
+              'bias': brainstate.random.randn(self.G, self.N)}
+        out = ETP_RULES_YW_TO_W[etp_gmv_p](hd, tr, has_bias=True)
+        np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, None, :], atol=1e-6)
+        np.testing.assert_allclose(out['bias'], tr['bias'] * hd, atol=1e-6)
+
+    def test_xy_to_dw_matches_vjp(self):
+        brainstate.random.seed(21)
+        x = brainstate.random.randn(self.G, self.K)
+        hd = brainstate.random.randn(self.G, self.N)
+        weights = {'weight': brainstate.random.randn(self.G, self.K, self.N)}
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_gmv_p],
+            impl=lambda wd: jnp.einsum('gk,gkn->gn', x, wd['weight']),
+            x=x, hidden_dim=hd, weights=weights, params={'has_bias': False},
+        )
+
+    def test_init_shapes_and_dtypes(self):
+        drtrl = ETP_RULES_INIT_DRTRL[etp_gmv_p](
+            _fake_var((self.G, self.K), jnp.float16),
+            _fake_var((self.G, self.N), jnp.float16),
+            {'weight': _fake_var((self.G, self.K, self.N), jnp.float16)}, self.A)
+        assert drtrl['weight'].shape == (self.G, self.K, self.N, self.A)
+        assert drtrl['weight'].dtype == jnp.float16
+        pp = ETP_RULES_INIT_PP[etp_gmv_p](
+            _fake_var((self.G, self.K)), _fake_var((self.G, self.N), jnp.float16),
+            {'weight': _fake_var((self.G, self.K, self.N))}, self.A)
+        assert pp.shape == (self.G, self.N, self.A)
+        assert pp.dtype == jnp.float16
