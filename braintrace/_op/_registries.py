@@ -83,6 +83,8 @@ __all__ = [
     'ETP_RULES_SOLVE_DRTRL',
     'get_instant_drtrl_rule',
     'get_solve_drtrl_rule',
+    'ETP_RULES_PP_X_REPR',
+    'get_pp_x_repr',
 ]
 
 ETP_PRIMITIVES: set = set()
@@ -350,3 +352,40 @@ def get_solve_drtrl_rule(primitive) -> Optional[Callable]:
         uses ``yw_to_w``).
     """
     return ETP_RULES_SOLVE_DRTRL.get(primitive)
+
+
+ETP_RULES_PP_X_REPR: Dict[Primitive, Callable] = {}
+r"""Optional IO-dim (pp_prop / ES-D-RTRL) x-trace representation rule.
+
+``(x, weight_avals: dict) -> x_repr`` — maps a primitive's per-step raw
+``x`` value into the representation the IO-dim input trace low-pass
+filters. Register it when the raw ``x`` is not the operand the op is
+linear in: ``etp_emb_p``'s ``x`` is integer token indices, while the
+lookup is linear in their **one-hot encoding**, so the input trace must
+filter the one-hot (a float array) — filtered raw indices would be
+meaningless, and their integer dtype would clash with the float trace
+carry under ``jax.lax.scan``. ``weight_avals`` carries the abstract values
+of the primitive's trainable inputs keyed by trainable name (the embedding
+rule reads the number of classes and the trace dtype from
+``weight_avals['weight']``). Unregistered primitives filter the raw ``x``
+unchanged. The filtered representation is what
+:data:`ETP_RULES_XY_TO_DW` receives as its ``x`` on the IO-dim solve path.
+"""
+
+
+def get_pp_x_repr(primitive) -> Optional[Callable]:
+    """Return the IO-dim x-trace representation rule, or ``None``.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The ETP primitive to look up.
+
+    Returns
+    -------
+    Callable or None
+        Rule ``(x, weight_avals) -> x_repr`` producing the representation
+        the IO-dim input trace filters, or ``None`` if the primitive did
+        not register one (the trace then filters the raw ``x``).
+    """
+    return ETP_RULES_PP_X_REPR.get(primitive)

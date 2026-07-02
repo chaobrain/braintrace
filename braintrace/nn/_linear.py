@@ -17,14 +17,18 @@
 
 from __future__ import annotations
 
+from typing import Callable, Optional, Union
+
 import brainstate
+import braintools
 import brainunit as u
 
-from braintrace._op import matmul, sparse_matmul, lora_matmul
+from braintrace._op import grouped_matmul, matmul, sparse_matmul, lora_matmul
 from braintrace._typing import ArrayLike
 
 __all__ = [
     'Linear',
+    'GroupedLinear',
     'SignedWLinear',
     'ScaledWSLinear',
     'SparseLinear',
@@ -349,3 +353,97 @@ class LoRA(brainstate.nn.LoRA):
         update : The ETP-routed forward pass; documents parameters and returns.
         """
         return self.update(x)
+
+
+class GroupedLinear(brainstate.nn.Module):
+    r"""Block-diagonal (grouped) linear layer backed by ETP :func:`braintrace.grouped_matmul`.
+
+    Applies ``num_groups`` independent ``in_features → out_features`` linear
+    maps — equivalent to one dense layer with a block-diagonal weight matrix,
+    but with a ``num_groups×`` smaller D-RTRL eligibility trace.
+
+    Parameters
+    ----------
+    num_groups : int
+        Number of independent blocks ``G``.
+    in_features : int
+        Input features per block ``K``.
+    out_features : int
+        Output features per block ``N``.
+    w_init : Callable or ArrayLike, optional
+        Weight initializer for the ``(G, K, N)`` block weights.
+    b_init : Callable or ArrayLike or None, optional
+        Bias initializer for the ``(G, N)`` per-block bias; ``None`` disables
+        the bias.
+    name : str, optional
+        Module name.
+    param_type : type, optional
+        The ParamState subclass holding the parameter dict.
+
+    Notes
+    -----
+    The underlying op is rank-guarded to ``x.ndim ∈ {2, 3}``; this layer
+    bridges the documented ``(..., G, K)`` contract by folding extra leading
+    axes into a single batch axis and unfolding the output.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import jax.numpy as jnp
+        >>> import braintrace
+        >>> layer = braintrace.nn.GroupedLinear(4, 8, 8)
+        >>> y = layer(jnp.ones((16, 4, 8)))
+        >>> print(y.shape)
+        (16, 4, 8)
+    """
+    __module__ = 'braintrace.nn'
+
+    def __init__(
+        self,
+        num_groups: int,
+        in_features: int,
+        out_features: int,
+        w_init: Union[ArrayLike, Callable] = braintools.init.KaimingNormal(),
+        b_init: Optional[Union[ArrayLike, Callable]] = braintools.init.ZeroInit(),
+        name: str | None = None,
+        param_type: type = brainstate.ParamState,
+    ) -> None:
+        super().__init__(name=name)  # type: ignore[call-arg]  # brainstate hides Module.__init__ from type checkers
+        self.num_groups = num_groups
+        self.in_features = in_features
+        self.out_features = out_features
+        self.in_size = (num_groups, in_features)
+        self.out_size = (num_groups, out_features)
+        params = {
+            'weight': braintools.init.param(
+                w_init, (num_groups, in_features, out_features), allow_none=False)
+        }
+        if b_init is not None:
+            params['bias'] = braintools.init.param(
+                b_init, (num_groups, out_features), allow_none=False)
+        self.weight = param_type(params)
+
+    def update(self, x: ArrayLike) -> ArrayLike:
+        """Apply the grouped linear transform through ETP ``grouped_matmul``.
+
+        Parameters
+        ----------
+        x : ArrayLike
+            Input array, of shape ``(..., num_groups, in_features)``.
+
+        Returns
+        -------
+        ArrayLike
+            The transformed output, of shape ``(..., num_groups, out_features)``.
+        """
+        params = self.weight.value
+        if x.ndim <= 3:  # type: ignore[union-attr]  # callers feed (..., G, K)
+            return grouped_matmul(x, params['weight'], params.get('bias'))
+        # the rank-guarded op accepts only (G, K) / (batch, G, K); fold extra
+        # leading axes into one batch axis, unfold on the output (reshape via
+        # brainunit so quantities keep their units)
+        lead_shape = x.shape[:-2]  # type: ignore[union-attr]
+        x2 = u.math.reshape(x, (-1, *x.shape[-2:]))  # type: ignore[union-attr]
+        y = grouped_matmul(x2, params['weight'], params.get('bias'))
+        return u.math.reshape(y, (*lead_shape, *y.shape[-2:]))  # type: ignore[union-attr]

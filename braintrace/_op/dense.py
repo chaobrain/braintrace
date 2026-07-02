@@ -643,7 +643,8 @@ def matmul(
     x : ArrayLike
         Input array, shape ``(batch, in_features)`` or ``(in_features,)``.
         Higher-rank ``x`` (``x.ndim > 2``) is rejected with a ``ValueError``:
-        every ETP trace rule assumes one of these two layouts.
+        every ETP trace rule assumes one of these two layouts. For genuine
+        tensor contractions use :func:`braintrace.einsum`.
     weight : ArrayLike
         Weight matrix, shape ``(in_features, out_features)``.
     bias : ArrayLike or None, optional
@@ -707,7 +708,8 @@ def matmul(
             f'(shape={x.shape}). Every ETP trace rule for etp_mm_p / etp_mv_p '
             f'assumes one of those two layouts, so higher-rank inputs (e.g. '
             f'`(batch, time, in_features)`) are not supported -- reshape/vmap '
-            f'over the extra axes before calling matmul().'
+            f'over the extra axes before calling matmul(), or use '
+            f'braintrace.einsum for genuine tensor contractions.'
         )
     p = etp_mm_p if x.ndim >= 2 else etp_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)

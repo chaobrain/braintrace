@@ -26,6 +26,7 @@ Tests cover:
 import brainstate
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 import brainunit as u
 import brainevent
@@ -979,3 +980,46 @@ class TestScaledWSLinearForwardBiasGain:
             f"braintrace ScaledWSLinear forward differs from brainstate reference "
             f"by {maxabsdiff:.6f} (max-abs-diff). Bias is being scaled by gain."
         )
+
+
+class TestGroupedLinear:
+
+    def test_construction_and_shapes(self):
+        layer = braintrace.nn.GroupedLinear(2, 3, 4)
+        params = layer.weight.value
+        assert params['weight'].shape == (2, 3, 4)
+        assert params['bias'].shape == (2, 4)
+        y = layer(jnp.ones((5, 2, 3)))
+        assert y.shape == (5, 2, 4)
+
+    def test_no_bias(self):
+        layer = braintrace.nn.GroupedLinear(2, 3, 4, b_init=None)
+        assert 'bias' not in layer.weight.value
+        assert layer(jnp.ones((2, 3))).shape == (2, 4)
+
+    def test_forward_equals_grouped_matmul(self):
+        layer = braintrace.nn.GroupedLinear(2, 3, 4)
+        x = jnp.ones((5, 2, 3))
+        params = layer.weight.value
+        want = braintrace.grouped_matmul(x, params['weight'], params['bias'])
+        np.testing.assert_allclose(layer(x), want, atol=1e-6)
+
+    def test_folds_extra_leading_axes(self):
+        layer = braintrace.nn.GroupedLinear(2, 3, 4)
+        x = jnp.ones((6, 5, 2, 3))
+        y = layer(x)
+        assert y.shape == (6, 5, 2, 4)
+        np.testing.assert_allclose(
+            y.reshape(30, 2, 4), layer(x.reshape(30, 2, 3)), atol=1e-6)
+
+    def test_uses_etp_primitive(self):
+        layer = braintrace.nn.GroupedLinear(2, 3, 4)
+        # batched input -> etp_gmm
+        jp = jax.make_jaxpr(lambda z: layer(z))(jnp.ones((5, 2, 3)))
+        prims = {str(e.primitive) for e in jp.jaxpr.eqns}
+        assert 'etp_gmm' in prims, prims
+        assert 'dot_general' not in prims, prims
+        # unbatched input -> etp_gmv
+        jp1 = jax.make_jaxpr(lambda z: layer(z))(jnp.ones((2, 3)))
+        prims1 = {str(e.primitive) for e in jp1.jaxpr.eqns}
+        assert 'etp_gmv' in prims1, prims1

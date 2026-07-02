@@ -39,6 +39,7 @@ from braintrace._op import (
     etp_elemwise_p,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_PP,
+    get_pp_x_repr,
     is_batched_primitive,
 )
 from braintrace._misc import (
@@ -201,8 +202,21 @@ def _init_IO_dim_state(
         assert relation.x_var is not None  # non-elemwise primitives always have an x_var
         x_key = id(relation.x_var)
         if x_key not in etrace_xs:
-            shape = relation.x_var.aval.shape
-            dtype = relation.x_var.aval.dtype
+            x_repr_fn = get_pp_x_repr(relation.primitive)
+            if x_repr_fn is None:
+                shape = relation.x_var.aval.shape
+                dtype = relation.x_var.aval.dtype
+            else:
+                # the trace filters the primitive's x *representation*
+                # (e.g. embedding: the one-hot encoding of its integer
+                # indices), so size the zero state from the transformed aval.
+                weight_avals = {k: v.aval for k, v in relation.trainable_vars.items()}
+                x_aval = jax.eval_shape(
+                    lambda x_, _fn=x_repr_fn, _w=weight_avals: _fn(x_, _w),
+                    jax.ShapeDtypeStruct(
+                        relation.x_var.aval.shape, relation.x_var.aval.dtype),
+                )
+                shape, dtype = x_aval.shape, x_aval.dtype
             etrace_xs[x_key] = EligibilityTrace(u.math.zeros(shape, dtype))
 
     y_shape = relation.y_var.aval.shape
@@ -340,11 +354,28 @@ def _update_IO_dim_etrace_scan_fn(
     #   update the weight x using the equation:
     #           x^t = α * x^t-1 + x^t, where α is the decay factor.
     #
+    # A primitive may register an IO-dim x representation (e.g. embedding
+    # filters the one-hot encoding of its integer indices, which is what the
+    # lookup is linear in); apply it to the raw per-step x before filtering.
+    x_repr_fns: Dict[ETraceX_Key, Any] = {}
+    relation: HiddenParamOpRelation
+    for relation in hid_weight_op_relations:
+        if relation.x_var is None:
+            continue
+        x_repr_fn = get_pp_x_repr(relation.primitive)
+        if x_repr_fn is not None:
+            x_repr_fns[etrace_x_key(relation.x_var)] = (
+                x_repr_fn,
+                {k: v.aval for k, v in relation.trainable_vars.items()},
+            )
     check_dict_keys(hist_xs, xs)
     for xkey in hist_xs.keys():
-        new_etrace_xs[xkey] = _low_pass_filter(hist_xs[xkey], xs[xkey], decay)
+        x_t = xs[xkey]
+        if xkey in x_repr_fns:
+            x_repr_fn, weight_avals = x_repr_fns[xkey]
+            x_t = x_repr_fn(x_t, weight_avals)
+        new_etrace_xs[xkey] = _low_pass_filter(hist_xs[xkey], x_t, decay)
 
-    relation: HiddenParamOpRelation
     for relation in hid_weight_op_relations:
 
         group: HiddenGroup
