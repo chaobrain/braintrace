@@ -278,12 +278,49 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         xs = {}
         for relation in self.graph.hidden_param_op_relations:
             if relation.x_var is not None:
+                ctx = relation.control_flow_context
                 x = etrace_x_key(relation.x_var)
-                xs[x] = intermediate_values[relation.x_var]
+                if ctx is not None:
+                    # descended relation: ``x_var`` is body-scoped; its
+                    # runtime value is the stacked ys output (leading substep
+                    # axis L) hoisted by the scan-descent pass.
+                    xs[x] = intermediate_values[
+                        ctx.scan.stacked_var_map[relation.x_var]]
+                else:
+                    xs[x] = intermediate_values[relation.x_var]
 
         # the weight df
         dfs = {}
         for relation in self.graph.hidden_param_op_relations:
+            ctx = relation.control_flow_context
+            if ctx is not None:
+                # Descended relation (structured scan descent, Phase 4): the
+                # ``y -> hidden group`` map and its constvars are body-scoped
+                # per-substep values; read them through the stacked ys
+                # (leading axis L) and vmap the same all-ones-tangent jvp the
+                # flat path uses over the substep axis. Downstream, the
+                # algorithm's substep fold consumes the extra leading axis.
+                m = ctx.scan.stacked_var_map
+                y_stack = intermediate_values[m[relation.y_var]]
+                cvars = list(dict.fromkeys(
+                    v for j in relation.y_to_hidden_group_jaxprs
+                    for v in j.constvars))
+                c_stacks = tuple(intermediate_values[m[v]] for v in cvars)
+
+                def _one_substep(y_t, c_ts, _rel=relation, _cvars=cvars):
+                    env = dict(zip(_cvars, c_ts))
+
+                    def _y2h(y_val):
+                        return _rel.y_to_hidden_groups(
+                            y_val, env, concat_hidden_vals=True)
+
+                    _, tans = jax.jvp(_y2h, (y_t,), (u.math.ones_like(y_t),))
+                    return tuple(tans)
+
+                tangents = jax.vmap(_one_substep)(y_stack, c_stacks)
+                for tangent, group in zip(tangents, relation.hidden_groups):
+                    dfs[etrace_df_key(relation.y_var, group.index)] = tangent
+                continue
             y = intermediate_values[relation.y_var]
 
             #
@@ -342,6 +379,27 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         hid2hid_jacobian = []
         group: HiddenGroup
         for group in self.graph.hidden_groups:
+
+            if group.descent is not None:
+                # Descended group (structured scan descent, Phase 4): the
+                # transition jaxpr is body-scoped (one substep); its inputs
+                # are the stacked substep-entry hidden values and transition
+                # constants (leading axis L). vmap the per-substep diagonal
+                # Jacobian; result carries a leading substep axis consumed by
+                # the algorithm's fold.
+                m = group.descent.scan.stacked_var_map
+                h_stacks = tuple(
+                    intermediate_values[m[v]]
+                    for v in group.descent.body_hidden_invars)
+                c_stacks = tuple(
+                    intermediate_values[m[v]]
+                    for v in group.transition_jaxpr_constvars)
+
+                def _one_substep(h_ts, c_ts, _g=group):
+                    return _g.diagonal_jacobian(list(h_ts), list(c_ts))
+
+                hid2hid_jacobian.append(jax.vmap(_one_substep)(h_stacks, c_stacks))
+                continue
 
             # data for jacobian computation
             hidden_vals = [intermediate_values[v] for v in group.hidden_invars]
