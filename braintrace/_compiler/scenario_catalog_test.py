@@ -1173,3 +1173,98 @@ class TestCategoryQ_AnyTrainableKeyGating:
 
         assert len(graph.hidden_param_op_relations) == 0
         assert len(graph.explain(kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Category R — Complex module graphs (shared submodule, residual, deep nesting)
+# ---------------------------------------------------------------------------
+
+from braintrace._compiler.scenario_catalog import (
+    SharedSubmoduleTwiceRNN,
+    ResidualSkipRNN,
+    DeepNestedModuleRNN,
+)
+
+
+class TestCategoryR_ComplexModuleGraphs:
+
+    def test_shared_submodule_two_call_sites(self):
+        # One Linear module (one ParamState) applied at two call sites per
+        # step: two distinct relations, both pointing at the shared weight
+        # path — the module-sharing analogue of the tied-weight scenario.
+        model = SharedSubmoduleTwiceRNN(4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 2
+        for r in rels:
+            assert r.path == ('proj', 'weight')
+            assert r.connected_hidden_paths == [('h',)]
+        assert rels[0].y_var is not rels[1].y_var
+
+    def test_residual_skip_does_not_change_relation(self):
+        # The elementwise residual add sits on the non-parametric tail: the
+        # relation for ``w`` is unchanged and the skip path creates nothing.
+        model = ResidualSkipRNN(4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {(('w',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+        assert rel.path_classification == {('h',): PathClassification.ALL_DIRECT}
+
+    def test_residual_transition_includes_skip_add(self):
+        # dh/dy must run through the residual add: perturbing y shifts h by
+        # tanh'(y + x) — structurally, the transition jaxpr executes and
+        # produces the group-shaped output.
+        model = ResidualSkipRNN(4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+        _, _, _, temps = graph.module_info.jaxpr_call(inp)
+        rel = graph.hidden_param_op_relations[0]
+        vals = rel.y_to_hidden_groups(temps[rel.y_var], temps, concat_hidden_vals=True)
+        assert len(vals) == 1
+        assert vals[0].shape[:len(rel.hidden_groups[0].varshape)] == tuple(
+            rel.hidden_groups[0].varshape
+        )
+
+    def test_deep_nested_module_paths(self):
+        # Four levels of module nesting: relation and hidden paths carry the
+        # full nested module path.
+        model = DeepNestedModuleRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        deep = ('l1', 'inner', 'inner', 'inner')
+        assert _relation_set(graph) == {(deep + ('w',), deep + ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+        assert len(rel.hidden_groups) == 1
+        assert rel.hidden_groups[0].hidden_paths == [deep + ('h',)]
+
+    def test_complex_graphs_deterministic(self):
+        for factory, n_inp in [
+            (lambda: SharedSubmoduleTwiceRNN(4), 4),
+            (lambda: ResidualSkipRNN(4), 4),
+            (lambda: DeepNestedModuleRNN(3, 4), 3),
+        ]:
+            def build():
+                m = factory()
+                brainstate.nn.init_all_states(m)
+                g = _compile(m, brainstate.random.rand(n_inp))
+                return [
+                    (r.path, tuple(r.connected_hidden_paths))
+                    for r in g.hidden_param_op_relations
+                ]
+
+            assert build() == build()
