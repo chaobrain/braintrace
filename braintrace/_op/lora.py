@@ -133,6 +133,7 @@ import brainunit as u
 
 from ._primitive import register_primitive
 from ._registries import ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL
+from ._registries import register_batched_counterpart
 from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
@@ -565,6 +566,7 @@ etp_lora_mv_p.register_etp_rules(
 )
 ETP_RULES_INSTANT_DRTRL[etp_lora_mv_p] = _lora_instant_drtrl
 ETP_RULES_SOLVE_DRTRL[etp_lora_mv_p] = _lora_solve_drtrl
+register_batched_counterpart(etp_lora_mv_p, etp_lora_mm_p)
 
 
 def lora_matmul(

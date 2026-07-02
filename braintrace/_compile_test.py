@@ -385,6 +385,17 @@ _BOTH_MODE_CASES = [
 @pytest.mark.parametrize('name,builder,algo,kw,feat', _BOTH_MODE_CASES,
                          ids=[c[0] for c in _BOTH_MODE_CASES])
 @pytest.mark.parametrize('vmap', [False, True], ids=['no_vmap', 'vmap'])
+# `conv1d_minigru_d_rtrl` (etp_conv) has no registered batched counterpart,
+# so under `vmap=True` compilation it hits the identity-preserving batching
+# rule's decomposition fallback and warns (see `braintrace/_op/_primitive.py`).
+# This test asserts gradient finiteness/non-zero-ness, not the
+# vmap-decomposition warning (covered by
+# `braintrace/_op/_primitive_test.py`), so the expected warning is filtered
+# narrowly by message rather than left uncaptured. `lora_d_rtrl` (etp_lora_mv)
+# now has a registered batched counterpart (`etp_lora_mm`) and is promoted
+# instead of decomposed, so no filter is needed for it.
+@pytest.mark.filterwarnings(
+    "ignore:ETP primitive 'etp_conv' was decomposed:UserWarning")
 def test_compile_both_modes_finite_nonzero_grad(name, builder, algo, kw, feat, vmap):
     B, T = 4, 5
     xs = brainstate.random.randn(T, B, *feat)

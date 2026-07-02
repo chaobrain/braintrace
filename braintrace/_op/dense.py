@@ -113,7 +113,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
-from ._registries import FastPathRules
+from ._registries import FastPathRules, register_batched_counterpart
 from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
@@ -612,6 +612,7 @@ etp_mv_p.register_etp_rules(
     init_pp=_mv_init_pp,
     fast_path=_DENSE_FAST_PATH,
 )
+register_batched_counterpart(etp_mv_p, etp_mm_p)
 
 
 # ---------------------------------------------------------------------------

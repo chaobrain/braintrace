@@ -31,6 +31,7 @@ from braintrace._algorithm.oracle import (
     online_param_gradients,
 )
 from braintrace._algorithm.oracle_models import (
+    cond_gate_rnn,
     leaky_linear,
     stacked_tanh_rnn,
     tanh_rnn,
@@ -89,10 +90,13 @@ _EXACT_MULTISTEP_ALGOS = {
 }
 
 # (model_name, algo_name) pairs verified exact by the P4 spikes.
+# cond_gate exercises the Phase 1 cond -> select_n canonicalization: ETP
+# matmuls inside `lax.cond` branches must stay BPTT-exact after conversion.
 _EXACT_CASES = (
     [('tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('stacked_tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('leaky_linear', 'D_RTRL')]
+    + [('cond_gate', 'D_RTRL')]
 )
 
 
@@ -103,6 +107,8 @@ def _model_spec(name):
         return stacked_tanh_rnn(n_in=3, n_rec=4, seed=0)
     if name == 'leaky_linear':
         return leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
+    if name == 'cond_gate':
+        return cond_gate_rnn(n_in=3, n_rec=4, leak=0.9, seed=0)
     raise KeyError(name)
 
 

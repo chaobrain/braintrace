@@ -1,6 +1,57 @@
 # Release Notes
 
 
+## UNRELEASED
+
+### Highlights
+
+#### New: `cond` if-conversion (compiler canonicalization, Phase 1)
+
+- **ETP operations inside `lax.cond` branches now participate in online
+  learning.** A new canonicalization pass (`_compiler/canonicalize.py`)
+  runs at extraction time (after user-`jit` inlining) and rewrites every
+  ETP-relevant `cond` equation into the inlined bodies of *all* branches
+  followed by one `select_n` per output. `select_n`'s index semantics and
+  JVP match `cond` exactly, so for finite branches values and Jacobians —
+  and therefore exact algorithms such as D-RTRL — are unchanged. Weights used inside `cond`
+  branches previously raised `NotImplementedError` (or were silently
+  excluded when only ETP primitives appeared inside).
+- **Semantics note**: on the canonicalized graph **both branches execute
+  every step** and the dead branch's value is discarded by `select_n`.
+  Values and forward-mode derivatives are unaffected by dead-branch
+  NaN/Inf. **Reverse-mode gradients are not**: if the dead branch's local
+  Jacobian is NaN/Inf (e.g. a `cond` protecting a `sqrt` domain), its VJP
+  multiplies the exact-zero cotangent by that Jacobian (`0 * nan = nan`)
+  and contaminates gradients of shared inputs — the classic single-`where`
+  pitfall. Keep such domain-guard conds opaque
+  (`ControlFlowPolicy(cond='opaque')`) or guard the operand inside the
+  branch.
+- **Gates**: conds that touch no ETP primitive, weight, or hidden state
+  stay opaque at zero cost. Conds with effects or containing `while`/`scan`
+  in a branch are never converted; an ETP-relevant one that is skipped this
+  way emits a `COND_CONVERSION_SKIPPED` warning and keeps today's behavior.
+  Conversions are recorded as `COND_IF_CONVERTED` INFO diagnostics on
+  `ETraceGraph.diagnostics`.
+- **Opt-out**: `braintrace.ControlFlowPolicy(cond='opaque')` via the new
+  `control_flow` keyword on `compile_etrace_graph` / `extract_module_info`
+  restores the previous behavior.
+
+#### New: vmap identity preservation (operator layer)
+
+- **vmap identity preservation (operator layer)**: `jax.vmap` over an
+  unbatched ETP op (`matmul`, `lora_matmul`, `sparse_matmul` with vector
+  input) now re-binds the batched ETP primitive (`etp_mm` / `etp_lora_mm` /
+  `etp_sp_mm`) instead of decomposing into standard JAX ops. Models that
+  vmap per-sample ETP operations inside `update()` now compile with full
+  eligibility-trace relations. When promotion is impossible (batched
+  weights, `etp_conv`, nested vmap), the op decomposes as before but emits
+  a `UserWarning` instead of silently dropping the parameter from online
+  learning. Note: when this warning appears from a `compile(..., vmap=True)`
+  learner's execution trace (e.g. conv models), it is expected and benign —
+  the eligibility-trace graph was already compiled per-sample before the
+  learner was vmapped, so no parameter is dropped.
+
+
 ## Version 0.2.3
 
 This release adds optional, shape-preserving parameter-transform hooks to the

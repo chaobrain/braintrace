@@ -37,6 +37,7 @@ from braintrace._compatible_imports import (
     JaxprEqn,
     Var,
     is_jit_primitive,
+    new_var,
 )
 
 __all__ = [
@@ -138,7 +139,12 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
 
     The pass is recursive (``jit`` inside ``jit`` is flattened), lifts inner
     closure constants into the outer ``constvars``/``consts``, and rewires
-    pass-through outputs by substitution. Control-flow bodies
+    pass-through outputs by substitution. Every spliced body has its internal
+    variables freshened *per call site*: JAX's trace cache hands every call
+    of the same jitted function the same inner jaxpr object, so splicing it
+    verbatim more than once would define its variables twice and silently
+    alias the calls' results. Top-level equations that are not jit calls keep
+    their original ``Var`` objects. Control-flow bodies
     (``scan``/``while``/``cond``) and custom-derivative call primitives are
     left untouched: control flow is diagnosed separately, and
     ``custom_jvp_call``/``custom_vjp_call`` carry derivative semantics that
@@ -160,51 +166,77 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
     if not _contains_jit_eqn(jaxpr):
         return closed_jaxpr
 
-    subst: Dict[Var, Any] = {}  # Var -> Var | Literal
+    # Substitution at the top level only maps a jit call's outer outvars to
+    # their replacement atoms; every other top-level equation keeps its
+    # original Var objects, so downstream Var-identity tables built from the
+    # result see the same vars for untouched equations.
+    top_subst: Dict[Var, Any] = {}  # Var -> Var | Literal
 
-    def resolve(atom):
-        while isinstance(atom, Var) and atom in subst:
-            atom = subst[atom]
+    def resolve_top(atom):
+        if isinstance(atom, Var):
+            return top_subst.get(atom, atom)
         return atom
 
     extra_constvars: List[Var] = []
     extra_consts: List[Any] = []
     new_eqns: List[JaxprEqn] = []
 
-    def process(eqns) -> None:
-        for eqn in eqns:
+    def splice(inner_closed, call_arg_atoms) -> List[Any]:
+        """Inline one jit body with every internal var freshened; return the
+        body's (resolved) output atoms.
+
+        Freshening is per call site: JAX's trace cache hands every call of
+        the same jitted function the SAME inner ``ClosedJaxpr`` object, so
+        splicing it verbatim twice would define its vars twice (an SSA
+        violation that silently aliases the two calls' results).
+        """
+        inner = getattr(inner_closed, 'jaxpr', inner_closed)
+        inner_consts = getattr(inner_closed, 'consts', [])
+        local: Dict[Var, Any] = {}
+        for cv, cval in zip(inner.constvars, inner_consts):
+            fresh = new_var('', cv.aval)
+            local[cv] = fresh
+            extra_constvars.append(fresh)
+            extra_consts.append(cval)
+        for iv, arg in zip(inner.invars, call_arg_atoms):
+            local[iv] = arg
+
+        def res(atom):
+            if isinstance(atom, Var):
+                return local.get(atom, atom)
+            return atom
+
+        for eqn in inner.eqns:
             if is_jit_primitive(eqn) and 'jaxpr' in eqn.params:
-                inner_closed = eqn.params['jaxpr']
-                inner = getattr(inner_closed, 'jaxpr', inner_closed)
-                inner_consts = getattr(inner_closed, 'consts', [])
-                # Inner constvars are fresh Var objects: adopt them directly
-                # as outer constvars, carrying their values.
-                extra_constvars.extend(inner.constvars)
-                extra_consts.extend(inner_consts)
-                # Wire the inner parameters to the (resolved) call arguments.
-                for iv, arg in zip(inner.invars, eqn.invars):
-                    subst[iv] = resolve(arg)
-                # Splice the body (recursively inlining nested jit).
-                process(inner.eqns)
-                # Wire the call results to the inner outputs.
-                for outer_ov, inner_ov in zip(eqn.outvars, inner.outvars):
-                    subst[outer_ov] = resolve(inner_ov)
+                outs = splice(eqn.params['jaxpr'], [res(v) for v in eqn.invars])
+                for ov, out_atom in zip(eqn.outvars, outs):
+                    local[ov] = out_atom
             else:
-                new_invars = [
-                    resolve(v) if isinstance(v, Var) else v
-                    for v in eqn.invars
-                ]
-                if all(a is b for a, b in zip(new_invars, eqn.invars)):
-                    new_eqns.append(eqn)
-                else:
-                    new_eqns.append(eqn.replace(invars=new_invars))
+                fresh_outvars = [new_var('', v.aval) for v in eqn.outvars]
+                for ov, fresh in zip(eqn.outvars, fresh_outvars):
+                    local[ov] = fresh
+                new_eqns.append(eqn.replace(
+                    invars=[res(v) for v in eqn.invars],
+                    outvars=fresh_outvars,
+                ))
+        return [res(v) for v in inner.outvars]
 
-    process(jaxpr.eqns)
+    for eqn in jaxpr.eqns:
+        if is_jit_primitive(eqn) and 'jaxpr' in eqn.params:
+            outs = splice(
+                eqn.params['jaxpr'],
+                [resolve_top(v) for v in eqn.invars],
+            )
+            for outer_ov, out_atom in zip(eqn.outvars, outs):
+                top_subst[outer_ov] = out_atom
+        else:
+            new_invars = [resolve_top(v) for v in eqn.invars]
+            if all(a is b for a, b in zip(new_invars, eqn.invars)):
+                new_eqns.append(eqn)
+            else:
+                new_eqns.append(eqn.replace(invars=new_invars))
 
-    new_outvars = [
-        resolve(v) if isinstance(v, Var) else v
-        for v in jaxpr.outvars
-    ]
+    new_outvars = [resolve_top(v) for v in jaxpr.outvars]
     new_jaxpr = Jaxpr(
         constvars=list(jaxpr.constvars) + extra_constvars,
         invars=list(jaxpr.invars),

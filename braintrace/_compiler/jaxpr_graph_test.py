@@ -192,3 +192,43 @@ class TestInlineJitCalls:
         closed = jax.make_jaxpr(f)(x)
         inlined = inline_jit_calls(closed)
         np.testing.assert_allclose(_eval_closed(inlined, x)[0], f(x))
+
+    def test_same_jit_called_twice_is_freshened_per_site(self):
+        # JAX's trace cache gives both call eqns the SAME inner ClosedJaxpr
+        # object; splicing it twice without freshening defines the same Vars
+        # twice and silently aliases the two call results.
+        @jax.jit
+        def g(a, b):
+            return a * b
+
+        def f(x):
+            return g(x, 2.0) + g(x, 3.0)  # = 5 x
+
+        x = jnp.arange(1.0, 4.0)
+        closed = jax.make_jaxpr(f)(x)
+        inlined = inline_jit_calls(closed)
+        assert not _has_jit_eqn(inlined.jaxpr)
+        # SSA: every var is defined at most once.
+        seen = set()
+        for eqn in inlined.jaxpr.eqns:
+            for ov in eqn.outvars:
+                assert id(ov) not in seen, 'duplicate var definition'
+                seen.add(id(ov))
+        np.testing.assert_allclose(_eval_closed(inlined, x)[0], f(x))
+
+    def test_same_jit_called_twice_gradients(self):
+        @jax.jit
+        def g(a, w):
+            return (a * w).sum()
+
+        def f(x):
+            return g(x, jnp.full(3, 2.0)) + g(x, jnp.full(3, 3.0))
+
+        x = jnp.arange(1.0, 4.0)
+        closed = jax.make_jaxpr(f)(x)
+        inlined = inline_jit_calls(closed)
+
+        def f_inlined(xi):
+            return _eval_closed(inlined, xi)[0]
+
+        np.testing.assert_allclose(jax.grad(f_inlined)(x), jax.grad(f)(x))

@@ -41,6 +41,7 @@ from braintrace._typing import (
     StateVals,
     TempData,
 )
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY, if_convert_conds
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .jaxpr_graph import inline_jit_calls
 
@@ -482,6 +483,7 @@ ModuleInfo.__module__ = 'braintrace'
 def extract_module_info(
     model: brainstate.nn.Module,
     *model_args,
+    control_flow: Optional[ControlFlowPolicy] = None,
     **model_kwargs
 ) -> ModuleInfo:
     """Extract the model information for the ETrace compiler.
@@ -492,6 +494,12 @@ def extract_module_info(
         The model from which to extract the information.
     *model_args
         The positional arguments of the model.
+    control_flow : ControlFlowPolicy or None, optional
+        Policy governing control-flow canonicalization (currently ``cond``
+        if-conversion; see
+        :func:`~braintrace._compiler.canonicalize.if_convert_conds`).
+        ``None`` (default) uses the default policy, which converts every
+        ETP-relevant ``cond``.
     **model_kwargs
         The keyword arguments of the model.
 
@@ -632,6 +640,18 @@ def extract_module_info(
     hidden_outvar_to_invar = brainstate.util.PrettyDict(hidden_outvar_to_invar)
 
     weight_invars = brainstate.util.PrettyList(dict.fromkeys(v for vs in weight_path_to_invars.values() for v in vs))
+
+    # Canonicalize ETP-relevant control flow (Phase 1: cond -> select_n).
+    # The pass reuses each converted equation's original outvars and never
+    # touches the jaxpr's invars/outvars, so every Var-identity table built
+    # above stays valid; only the equation list (and consts) change.
+    closed_jaxpr = if_convert_conds(
+        closed_jaxpr,
+        weight_invars=set(weight_invars),
+        hidden_invars=set(hidden_path_to_invar.values()),
+        hidden_outvars=set(hidden_path_to_outvar.values()),
+        policy=control_flow if control_flow is not None else DEFAULT_CONTROL_FLOW_POLICY,
+    )
 
     return ModuleInfo(
         # stateful model

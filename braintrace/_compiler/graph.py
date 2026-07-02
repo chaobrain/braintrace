@@ -25,6 +25,7 @@ from braintrace._typing import (
     Inputs,
     Path,
 )
+from .canonicalize import ControlFlowPolicy
 from .diagnostics import (
     CompilationRecord,
     DiagnosticKind,
@@ -282,6 +283,7 @@ def compile_etrace_graph(
     *model_args: Tuple,
     include_hidden_perturb: bool = True,
     include_recurrent_mixing: bool = False,
+    control_flow: Optional[ControlFlowPolicy] = None,
 ) -> ETraceGraph:
     """Construct the eligibility-trace graph for a given model and inputs.
 
@@ -311,6 +313,14 @@ def compile_etrace_graph(
         recurrence becomes coupled, and the true per-position block-diagonal
         Jacobian is extracted (RTRL-exact temporal credit, e.g. for
         :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`).
+    control_flow : ControlFlowPolicy or None, optional
+        Policy governing control-flow canonicalization, forwarded to
+        :func:`~braintrace.extract_module_info`. ``None`` (default) uses the
+        default policy, which if-converts every ETP-relevant ``cond`` into
+        inlined branches + ``select_n`` (both branches then execute every
+        step). Pass ``ControlFlowPolicy(cond='opaque')`` to restore the
+        previous behavior (weights inside ``cond`` raise
+        ``NotImplementedError``).
 
     Returns
     -------
@@ -345,7 +355,7 @@ def compile_etrace_graph(
     with compiler_context('compile_graph'), diagnostic_context() as reporter:
 
         assert isinstance(model_args, tuple)
-        minfo = extract_module_info(model, *model_args)
+        minfo = extract_module_info(model, *model_args, control_flow=control_flow)
 
         # ---       evaluating the relationship for hidden-to-hidden        --- #
         hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(

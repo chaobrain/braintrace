@@ -722,3 +722,20 @@ class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
         np.testing.assert_allclose(out['lora_b'], ref_lora_b, atol=1e-8)
         np.testing.assert_allclose(out['lora_a'], ref_lora_a, atol=1e-10)
         np.testing.assert_allclose(out['bias'], ref_bias, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# vmap identity-preserving promotion (etp_lora_mv -> etp_lora_mm)
+# ---------------------------------------------------------------------------
+
+class TestLoraVmapPromotion:
+    def test_vmap_lora_matmul_promotes_to_etp_lora_mm(self):
+        import brainstate
+        x = brainstate.random.randn(4, 3)
+        B = brainstate.random.randn(3, 2)
+        A = brainstate.random.randn(2, 5)
+        fn = jax.vmap(lambda xi: braintrace.lora_matmul(xi, B, A))
+        names = [e.primitive.name for e in jax.make_jaxpr(fn)(x).jaxpr.eqns]
+        assert 'etp_lora_mm' in names
+        assert 'dot_general' not in names
+        assert jnp.allclose(fn(x), x @ B @ A, atol=1e-6)

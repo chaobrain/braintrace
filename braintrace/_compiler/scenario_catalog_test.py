@@ -710,6 +710,7 @@ from braintrace._compiler.scenario_catalog import (
     MixedBatchedRNN,
     PartialPathRNN,
     NestedJitRNN,
+    CondBranchRNN,
     make_scan_body_etp_jaxpr,
     make_cond_branches_etp_jaxpr,
     make_while_body_etp_jaxpr,
@@ -938,7 +939,24 @@ class TestCategoryN_ControlFlow:
     ``PRIMITIVE_INSIDE_CONTROL_FLOW``. They are *not* lifted into the
     top-level relation set (carry-variable lineage is not yet supported);
     skipping them is the safe behavior, and the structured diagnostic
-    surfaces the location for the user."""
+    surfaces the location for the user.
+
+    These tests exercise the *raw scanner* on unprocessed jaxprs. In the
+    full pipeline, ``cond`` never reaches the scanner: ETP-relevant conds
+    are if-converted into inlined branches + ``select_n`` at extraction
+    time (``_compiler/canonicalize.py``), so their weights DO participate
+    as relations — see ``test_cond_branches_full_pipeline_converts``."""
+
+    def test_cond_branches_full_pipeline_converts(self):
+        model = CondBranchRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        graph = compile_etrace_graph(model, jnp.ones(3))
+        names = [eqn.primitive.name for eqn in graph.module_info.jaxpr.eqns]
+        assert 'cond' not in names
+        assert 'select_n' in names
+        assert len(graph.hidden_param_op_relations) == 2
+        kinds = [r.kind for r in graph.diagnostics]
+        assert DiagnosticKind.COND_IF_CONVERTED in kinds
 
     def test_scan_body_etp_emits_diagnostic(self):
         jaxpr = make_scan_body_etp_jaxpr(3, 4)
