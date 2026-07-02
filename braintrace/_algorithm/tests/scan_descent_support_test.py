@@ -30,7 +30,13 @@ DESCEND = lambda: ControlFlowPolicy(scan_unroll_limit=4, scan_descent='auto')
 UNROLL = lambda: ControlFlowPolicy(scan_unroll_limit=16, scan_descent='off')
 
 
-def make_snn_scan_net(loops, n_rec=4, decay=0.9, seed=0):
+def make_snn_scan_net(loops, n_rec=4, decay=0.9, seed=0, carry_readout=False):
+    """``carry_readout=True`` returns ``self.h.value`` after the loop (the
+    scan's carry outvar) instead of the stacked ys slice ``outs[-1]``. The
+    two are numerically identical, but in single-step (perturbation) mode
+    only the carry readout routes the same-step loss through the per-step
+    hidden perturbation of a *descended* scan — see
+    ``test_single_step_ys_readout_drops_same_step_signal``."""
     class Net(brainstate.nn.Module):
         def __init__(self):
             super().__init__()
@@ -47,7 +53,8 @@ def make_snn_scan_net(loops, n_rec=4, decay=0.9, seed=0):
                     braintrace.matmul(x_row, self.w.value))
                 return self.h.value
 
-            return brainstate.transform.for_loop(substep, jnp.arange(loops))[-1]
+            outs = brainstate.transform.for_loop(substep, jnp.arange(loops))
+            return self.h.value if carry_readout else outs[-1]
 
     net = Net()
     brainstate.nn.init_all_states(net, batch_size=1)
@@ -131,3 +138,141 @@ class TestSubstepFold:
                                   control_flow=DESCEND())
         with pytest.raises(NotImplementedError, match='scan descent'):
             algo.compile_graph(jnp.ones((4,), dtype='float32'))
+
+
+from braintrace._algorithm.oracle import (
+    assert_param_gradients_close,
+    bptt_param_gradients,
+    chunked_online_param_gradients,
+    online_param_gradients,
+)
+from braintrace._algorithm.oracle_models import (
+    scan_body_rnn,
+    snn_scan_rnn,
+    snn_scan_two_state_rnn,
+)
+
+ATOL_BPTT = 1e-4
+# float32 accumulation-order noise between the folded (inner-scan) and the
+# unrolled (flat-relation) trace paths; the design probes measured <=2e-5.
+ATOL_EQUIV = 3e-5
+
+
+def _inputs(T, n, seed=42):
+    return jnp.asarray(np.random.RandomState(seed).randn(T, n).astype('float32'))
+
+
+def _drtrl_descend(m):
+    return braintrace.D_RTRL(m, vjp_method='multi-step', control_flow=DESCEND())
+
+
+def _drtrl_unroll(m):
+    return braintrace.D_RTRL(m, vjp_method='multi-step', control_flow=UNROLL())
+
+
+class TestDescentCorrectness:
+    def test_wholeseq_descended_matches_bptt_diagonal_body(self):
+        spec = snn_scan_rnn(n_rec=4, loops=8, seed=0)
+        inputs = _inputs(6, 4)
+        g_bptt = bptt_param_gradients(spec.factory, inputs)
+        g_onl = online_param_gradients(spec.factory, inputs,
+                                       algo_factory=_drtrl_descend)
+        assert_param_gradients_close(g_onl, g_bptt, atol=ATOL_BPTT)
+
+    @pytest.mark.parametrize('chunk_size', [3, 1])
+    def test_chunked_descended_matches_bptt(self, chunk_size):
+        """THE trace oracle: chunk boundaries make the gradient depend on the
+        folded eligibility trace (boundary term dL/dh0 . eps0)."""
+        spec = snn_scan_rnn(n_rec=4, loops=8, seed=0)
+        inputs = _inputs(6, 4)
+        g_bptt = bptt_param_gradients(spec.factory, inputs)
+        g_chunk = chunked_online_param_gradients(
+            spec.factory, inputs, algo_factory=_drtrl_descend,
+            chunk_size=chunk_size)
+        assert_param_gradients_close(g_chunk, g_bptt, atol=ATOL_BPTT)
+
+    def test_descended_equals_unrolled_gradients(self):
+        spec = snn_scan_rnn(n_rec=4, loops=8, seed=0)
+        inputs = _inputs(6, 4)
+        g_d = chunked_online_param_gradients(
+            spec.factory, inputs, algo_factory=_drtrl_descend, chunk_size=3)
+        g_u = chunked_online_param_gradients(
+            spec.factory, inputs, algo_factory=_drtrl_unroll, chunk_size=3)
+        assert_param_gradients_close(g_d, g_u, atol=ATOL_EQUIV)
+
+    def test_two_state_group_descended_chunked_matches_bptt(self):
+        """num_state == 2 through the fold (SNN learning-signal axis pin)."""
+        spec = snn_scan_two_state_rnn(n_rec=3, loops=8, seed=0)
+        inputs = _inputs(6, 3)
+        g_bptt = bptt_param_gradients(spec.factory, inputs)
+        g_chunk = chunked_online_param_gradients(
+            spec.factory, inputs, algo_factory=_drtrl_descend, chunk_size=3)
+        assert_param_gradients_close(g_chunk, g_bptt, atol=ATOL_BPTT)
+
+    def test_long_scan_L100_compiles_lean_and_matches_bptt_wholeseq(self):
+        spec = snn_scan_rnn(n_rec=4, loops=100, seed=0)
+        inputs = _inputs(4, 4)
+        g_bptt = bptt_param_gradients(spec.factory, inputs)
+        # default-limit policy: L=100 must descend, not unroll
+        policy = ControlFlowPolicy(scan_descent='auto')
+        algo_factory = lambda m: braintrace.D_RTRL(
+            m, vjp_method='multi-step', control_flow=policy)
+        g = online_param_gradients(spec.factory, inputs,
+                                   algo_factory=algo_factory)
+        assert_param_gradients_close(g, g_bptt, atol=ATOL_BPTT)
+        # no unroll blowup
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = algo_factory(model)
+        algo.compile_graph(inputs[0])
+        assert len(algo.graph.module_info.jaxpr.eqns) < 60
+
+    def test_mixing_body_descended_wholeseq_matches_bptt(self):
+        """scan_body_rnn's body mixes h through an ETP matmul: whole-sequence
+        multi-step is trace-independent, so descent must still be
+        BPTT-exact. Chunked equality is NOT asserted (both compile paths
+        approximate cross-substep credit there; documented divergence)."""
+        spec = scan_body_rnn(n_rec=3, loops=8, seed=0)
+        inputs = _inputs(6, 3)
+        g_bptt = bptt_param_gradients(spec.factory, inputs)
+        g = online_param_gradients(spec.factory, inputs,
+                                   algo_factory=_drtrl_descend)
+        assert_param_gradients_close(g, g_bptt, atol=ATOL_BPTT)
+
+    @staticmethod
+    def _one_step_grads(policy, carry_readout):
+        x = jnp.ones((4,), dtype='float32')
+        net = make_snn_scan_net(loops=8, seed=0, carry_readout=carry_readout)
+        algo = braintrace.D_RTRL(net, vjp_method='single-step',
+                                 control_flow=policy)
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        params = net.states(brainstate.ParamState)
+        return brainstate.transform.grad(
+            lambda x_: (algo(x_) ** 2).sum(), params)(x)
+
+    def test_single_step_vjp_descended_equals_unrolled_one_step(self):
+        """Perturbation path through the descended compile (single-step mode
+        reverse-differentiates THROUGH the scan; weights detached). The model
+        must read the hidden state from the carry (``self.h.value`` after the
+        loop) for the same-step learning signal to cross the perturbation —
+        see the limitation pin below."""
+        g_d = self._one_step_grads(DESCEND(), carry_readout=True)
+        g_u = self._one_step_grads(UNROLL(), carry_readout=True)
+        assert_param_gradients_close(g_d, g_u, atol=ATOL_EQUIV)
+
+    def test_single_step_ys_readout_drops_same_step_signal(self):
+        """v1 limitation pin: when the loss reads the hidden state through
+        the descended scan's stacked ys output (``for_loop(...)[-1]``)
+        instead of the carry, the same-step loss path bypasses the per-step
+        hidden perturbation (which is added to the scan's *carry* outvar),
+        so the single-step learning signal — and hence the one-step ETP
+        gradient — is zero. This parallels the documented Phase-3
+        while-hidden same-step limitation. Multi-step vjp is unaffected
+        (``test_wholeseq_descended_matches_bptt_diagonal_body`` uses the ys
+        readout). Fix at the model level: return ``self.h.value`` after the
+        loop."""
+        g_ys = self._one_step_grads(DESCEND(), carry_readout=False)
+        np.testing.assert_allclose(np.asarray(g_ys[('w',)]), 0.0, atol=0.0)
+        g_carry = self._one_step_grads(DESCEND(), carry_readout=True)
+        assert float(np.linalg.norm(np.asarray(g_carry[('w',)]))) > 1.0

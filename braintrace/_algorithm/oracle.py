@@ -113,6 +113,60 @@ def online_param_gradients(
     )(inputs)
 
 
+def chunked_online_param_gradients(
+    model_factory: Callable[[], brainstate.nn.Module],
+    inputs,
+    *,
+    algo_factory: Callable[[brainstate.nn.Module], braintrace.ETraceAlgorithm],
+    chunk_size: int,
+):
+    """Total sequence gradient accumulated over multi-step chunks.
+
+    Splits ``inputs`` into consecutive chunks of ``chunk_size`` steps, calls
+    the algorithm once per chunk (hidden and eligibility-trace state persist
+    across calls), and sums the per-chunk parameter gradients. Unlike
+    :func:`online_param_gradients` (one whole-sequence call, where the
+    within-call gradient is exact reverse-mode and the trace only enters at
+    the sequence boundary), chunking makes the total depend on the
+    eligibility trace at every chunk boundary — this is the oracle that
+    actually validates trace correctness.
+
+    Parameters
+    ----------
+    model_factory : Callable[[], brainstate.nn.Module]
+        Zero-arg factory returning an uninitialized model.
+    inputs : jax.Array
+        ``(T, ...)`` input sequence.
+    algo_factory : Callable[[brainstate.nn.Module], braintrace.ETraceAlgorithm]
+        Builds the online algorithm; must accept ``MultiStepData``.
+    chunk_size : int
+        Steps per chunk; the last chunk may be shorter.
+
+    Returns
+    -------
+    dict
+        Path-keyed total gradients for every ``ParamState``.
+    """
+    model = model_factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    algo = algo_factory(model)
+    algo.compile_graph(inputs[0])
+    algo.init_etrace_state()
+    params = model.states(brainstate.ParamState)
+
+    total = None
+    # test-support chunk loop (few iterations), not a model step driver
+    for start in range(0, inputs.shape[0], chunk_size):
+        chunk = inputs[start:start + chunk_size]
+        g = brainstate.transform.grad(
+            lambda seq: (algo(braintrace.MultiStepData(seq)) ** 2).sum(),
+            params,
+        )(chunk)
+        total = g if total is None else jax.tree.map(
+            lambda a, b: a + b, total, g)
+    return total
+
+
 def online_param_gradients_singlestep_naive(
     model_factory: Callable[[], brainstate.nn.Module],
     inputs,

@@ -310,6 +310,89 @@ def scan_body_rnn(n_rec: int = 4, loops: int = 3, seed: int = 0) -> ModelSpec:
     return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
 
 
+def snn_scan_rnn(n_rec: int = 4, loops: int = 40, decay: float = 0.9,
+                 seed: int = 0) -> ModelSpec:
+    """Leaky unit whose per-step update runs ``loops`` inner sub-steps
+    ``h <- decay * h + tanh(matmul(x, w))`` in a ``for_loop``.
+
+    The body's hidden-to-hidden path is the plain elementwise leak, so the
+    per-substep Jacobian is exactly ``decay * I`` and structured scan
+    descent (Phase 4) is exact: descended == unrolled == BPTT, including
+    under chunked (online) gradient accumulation. This is the flagship
+    diagonal-recurrence model for the descent oracle; with the default
+    ``scan_unroll_limit`` a ``loops=40`` instance descends while ``loops=8``
+    can be unrolled, so one factory serves both compile paths.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_rec, n_rec))
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    self.h.value = decay * self.h.value + jax.nn.tanh(
+                        braintrace.matmul(x_row, self.w.value))
+                    return self.h.value
+
+                outs = brainstate.transform.for_loop(
+                    substep, jnp.arange(loops))
+                return outs[-1]
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),),
+                     plain_param_keys=())
+
+
+def snn_scan_two_state_rnn(n_rec: int = 3, loops: int = 40,
+                           seed: int = 0) -> ModelSpec:
+    """Two coupled hidden states (v, a) updated inside a ``for_loop`` —
+    the descended analogue of :func:`two_state_rnn`.
+
+    ``v <- 0.9 v + matmul(x, w) - 0.1 a``; ``a <- 0.95 a + v`` per sub-step.
+    The compiler groups (v, a) into ONE descended HiddenGroup with
+    ``num_state == 2``; the per-substep Jacobian is a per-position 2x2
+    block, exercising the trailing learning-signal axis through the
+    substep fold. Diagonal-recurrence class: D_RTRL descent is exact.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_rec, n_rec))
+                self.v = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+                self.a = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    v, a = self.v.value, self.a.value
+                    self.v.value = 0.9 * v + braintrace.matmul(
+                        x_row, self.w.value) - 0.1 * a
+                    self.a.value = 0.95 * a + v
+                    return self.v.value
+
+                outs = brainstate.transform.for_loop(
+                    substep, jnp.arange(loops))
+                return outs[-1]
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),),
+                     plain_param_keys=())
+
+
 def while_settle_rnn(
     n_in: int = 3, n_rec: int = 4, k: int = 3, decay: float = 0.8, seed: int = 0
 ) -> ModelSpec:
