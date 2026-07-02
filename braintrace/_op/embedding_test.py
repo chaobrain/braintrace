@@ -209,6 +209,69 @@ class TestEmbEtpRules:
         assert drtrl['weight'].dtype == jnp.float16
 
 
+from braintrace._op import get_pp_x_repr
+
+
+class TestPPXRepr:
+    """The IO-dim (pp_prop) x-trace filters the one-hot encoding of the
+    indices — not the raw integer values, whose filtered average is
+    meaningless and whose int dtype would clash with the float trace carry."""
+
+    def test_registered_for_both_primitives(self):
+        assert get_pp_x_repr(etp_emb_p) is not None
+        assert get_pp_x_repr(etp_emb_v_p) is not None
+
+    def test_one_hot_representation(self):
+        fn = get_pp_x_repr(etp_emb_p)
+        idx = jnp.array([0, 2], dtype=jnp.int32)
+        avals = {'weight': _fake_var((5, 3), jnp.bfloat16).aval}
+        rep = fn(idx, avals)
+        assert rep.shape == (2, 5)
+        assert rep.dtype == jnp.bfloat16
+        np.testing.assert_allclose(
+            rep.astype(jnp.float32), jax.nn.one_hot(idx, 5), atol=1e-6)
+
+    def test_one_hot_representation_scalar(self):
+        fn = get_pp_x_repr(etp_emb_v_p)
+        rep = fn(jnp.int32(3), {'weight': _fake_var((5, 3)).aval})
+        assert rep.shape == (5,)
+        np.testing.assert_allclose(rep, jax.nn.one_hot(3, 5), atol=1e-6)
+
+    def test_xy_to_dw_float_x_matches_onehot_matmul_vjp(self):
+        brainstate.random.seed(45)
+        xf = brainstate.random.randn(3, 5)  # a filtered one-hot: dense float
+        hd = brainstate.random.randn(3, 4)
+        weights = {'weight': brainstate.random.randn(5, 4)}
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_emb_p],
+            impl=lambda wd: xf @ wd['weight'],
+            x=xf, hidden_dim=hd, weights=weights,
+        )
+
+    def test_xy_to_dw_float_x_with_weight_fn(self):
+        brainstate.random.seed(46)
+        xf = brainstate.random.randn(2, 5)
+        hd = brainstate.random.randn(2, 4)
+        weights = {'weight': brainstate.random.randn(5, 4)}
+        fn = lambda w: jnp.tanh(w)
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_emb_p],
+            impl=lambda wd: xf @ fn(wd['weight']),
+            x=xf, hidden_dim=hd, weights=weights, params={'weight_fn': fn},
+        )
+
+    def test_xy_to_dw_float_x_unbatched(self):
+        brainstate.random.seed(47)
+        xf = brainstate.random.randn(5)
+        hd = brainstate.random.randn(4)
+        weights = {'weight': brainstate.random.randn(5, 4)}
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_emb_v_p],
+            impl=lambda wd: xf @ wd['weight'],
+            x=xf, hidden_dim=hd, weights=weights,
+        )
+
+
 class TestPublicExports:
 
     def test_top_level_exports(self):
@@ -219,3 +282,98 @@ class TestPublicExports:
         import braintrace._op as op
         for name in ('etp_emb_p', 'etp_emb_v_p', 'embedding'):
             assert name in op.__all__
+
+
+from braintrace._algorithm.oracle import (
+    assert_direction_aligned,
+    assert_param_gradients_close,
+    bptt_param_gradients,
+    online_param_gradients,
+)
+
+
+def _leaky_embedding_factory(V=5, D=4, leak=0.9, seed=0):
+    """h_t = leak * h_{t-1} + table[token_t] — hidden-to-hidden Jacobian is
+    exactly ``leak * I``; the table reaches every future hidden state through
+    the carry, so it is a genuine ETP relation (mirrors oracle_models.leaky_linear)."""
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.table = brainstate.ParamState(
+                    0.1 * jax.random.normal(jax.random.PRNGKey(seed), (V, D)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, D)))
+
+            def update(self, token):
+                drive = braintrace.embedding(token.reshape(1), self.table.value)
+                self.h.value = leak * self.h.value + drive
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+def _tanh_embedding_rnn_factory(V=5, D=4, seed=0):
+    """h_t = tanh(matmul(h, w_rec) + table[token_t]) — two ETP relations
+    (dense recurrent + embedding input) in one cell."""
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                k = jax.random.PRNGKey
+                self.table = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed), (V, D)))
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed + 1), (D, D)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, D)))
+
+            def update(self, token):
+                drive = braintrace.embedding(token.reshape(1), self.table.value)
+                rec = braintrace.matmul(self.h.value, self.w.value)
+                self.h.value = jax.nn.tanh(rec + drive)
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+def _token_seq(T=6, V=5, seed=7):
+    brainstate.random.seed(seed)
+    return brainstate.random.randint(0, V, (T,), dtype=jnp.int32)
+
+
+class TestEmbeddingOracle:
+
+    def test_d_rtrl_multistep_matches_bptt_leaky(self):
+        factory = _leaky_embedding_factory()
+        tokens = _token_seq()
+        bptt = bptt_param_gradients(factory, tokens)
+        online = online_param_gradients(
+            factory, tokens,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_d_rtrl_multistep_matches_bptt_tanh_two_relations(self):
+        factory = _tanh_embedding_rnn_factory()
+        tokens = _token_seq(seed=8)
+        bptt = bptt_param_gradients(factory, tokens)
+        online = online_param_gradients(
+            factory, tokens,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_pp_prop_direction_aligned(self):
+        factory = _tanh_embedding_rnn_factory()
+        tokens = _token_seq(seed=9)
+        bptt = bptt_param_gradients(factory, tokens)
+        approx = online_param_gradients(
+            factory, tokens,
+            algo_factory=lambda m: braintrace.pp_prop(
+                m, decay_or_rank=0.9, vjp_method='multi-step'))
+        assert_direction_aligned(
+            approx, bptt, min_cosine=0.9, min_sign_agreement=0.8,
+            keys=[('table',), ('w',)])

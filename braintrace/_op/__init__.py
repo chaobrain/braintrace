@@ -41,6 +41,7 @@ from ._registries import (
     ETP_PRIMITIVES,
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
+    ETP_RULES_PP_X_REPR,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_YW_TO_W,
     ETP_TRAINABLE_INVARS_FNS,
@@ -49,6 +50,7 @@ from ._registries import (
     FastPathRules,
     GRADIENT_ENABLED_PRIMITIVES,
     get_fast_path_rules,
+    get_pp_x_repr,
     get_trainable_invars,
     get_x_invar_index,
     get_y_outvar_index,
@@ -90,6 +92,8 @@ __all__ = [
     'FastPathRules',
     'ETP_FAST_PATH_RULES',
     'get_fast_path_rules',
+    'ETP_RULES_PP_X_REPR',
+    'get_pp_x_repr',
 
     # primitives
     'etp_mm_p',

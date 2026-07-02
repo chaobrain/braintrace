@@ -86,18 +86,43 @@ def _emb_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
 
 def _emb_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
                   weight_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Instantaneous ``∂h/∂T`` — scatter-add VJP of the gather; the
-    ``weight_fn`` Jacobian is auto-composed and the gradient is w.r.t. the
-    **raw** table. ``x`` (the indices) is a closed-over constant."""
+    r"""Instantaneous ``∂h/∂T`` — VJP w.r.t. the **raw** table; the
+    ``weight_fn`` Jacobian is auto-composed. ``x`` is a closed-over
+    constant, never differentiated.
+
+    Two ``x`` representations arrive here, distinguished by dtype:
+
+    - **integer** ``x`` — the raw indices (param-dim D-RTRL instantaneous
+      term): the VJP of the gather, a scatter-add into ``(V, D)``.
+    - **float** ``x`` — the low-pass-filtered one-hot representation from
+      the IO-dim input trace (see :func:`_emb_pp_x_repr`): the VJP of the
+      equivalent ``x @ table`` contraction, mirroring the dense-matmul rule.
+    """
+    x_is_indices = jnp.issubdtype(jnp.asarray(x).dtype, jnp.integer)
 
     def _fwd(w_dict: dict[str, Any]) -> Any:
         w = w_dict['weight']
         if weight_fn is not None:
             w = weight_fn(w)
-        return u.get_mantissa(jnp.take(w, x, axis=0))
+        if x_is_indices:
+            return u.get_mantissa(jnp.take(w, x, axis=0))
+        return u.get_mantissa(x @ w)
 
     _, vjp_fn = jax.vjp(_fwd, weights)
     return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
+
+
+def _emb_pp_x_repr(x: Any, weight_avals: dict[str, Any]) -> Any:
+    r"""IO-dim x-trace representation: the one-hot encoding of the indices.
+
+    The lookup is linear in ``onehot(indices)`` (``y = onehot(idx) @ T``),
+    so the pp input trace low-pass filters the one-hot. Filtering the raw
+    integer indices instead would be meaningless (a decayed average of
+    token IDs) and dtype-inconsistent with the float trace carry. The
+    number of classes and the trace dtype are read from the table's aval.
+    """
+    table = weight_avals['weight']
+    return jax.nn.one_hot(x, table.shape[0], dtype=table.dtype)
 
 
 def _emb_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
@@ -156,12 +181,14 @@ etp_emb_p.register_etp_rules(
     xy_to_dw=_emb_xy_to_dw,
     init_drtrl=_emb_init_drtrl,
     init_pp=_emb_init_pp,
+    pp_x_repr=_emb_pp_x_repr,
 )
 etp_emb_v_p.register_etp_rules(
     yw_to_w=_emb_yw_to_w,
     xy_to_dw=_emb_xy_to_dw,
     init_drtrl=_emb_v_init_drtrl,
     init_pp=_emb_init_pp,
+    pp_x_repr=_emb_pp_x_repr,
 )
 
 

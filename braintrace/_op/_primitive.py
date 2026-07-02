@@ -40,6 +40,7 @@ from ._registries import (
     ETP_PRIMITIVES,
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
+    ETP_RULES_PP_X_REPR,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_YW_TO_W,
     ETP_TRAINABLE_INVARS_FNS,
@@ -134,6 +135,7 @@ class ETPPrimitive(Primitive):
         init_drtrl: Callable[..., Any] | None = None,
         init_pp: Callable[..., Any] | None = None,
         fast_path: FastPathRules | None = None,
+        pp_x_repr: Callable[..., Any] | None = None,
     ) -> None:
         """Install multiple ETP rules in one call.
 
@@ -155,6 +157,13 @@ class ETPPrimitive(Primitive):
             into :data:`ETP_FAST_PATH_RULES`. Supplied only by primitives with
             an elementwise ``yw_to_w`` rule (mm / mv / elemwise); ``None``
             leaves the primitive without a fast path. Default ``None``.
+        pp_x_repr : Callable, optional
+            IO-dim x-trace representation rule
+            ``(x, weight_avals) -> x_repr``. Registered into
+            :data:`ETP_RULES_PP_X_REPR`. Supply it when the raw ``x`` is not
+            the operand the op is linear in (e.g. ``etp_emb_p`` filters the
+            one-hot encoding of its integer indices); ``None`` leaves the
+            IO-dim trace filtering the raw ``x``. Default ``None``.
         """
         if yw_to_w is not None:
             ETP_RULES_YW_TO_W[self] = yw_to_w
@@ -166,6 +175,8 @@ class ETPPrimitive(Primitive):
             ETP_RULES_INIT_PP[self] = init_pp
         if fast_path is not None:
             ETP_FAST_PATH_RULES[self] = fast_path
+        if pp_x_repr is not None:
+            ETP_RULES_PP_X_REPR[self] = pp_x_repr
 
 
 def register_primitive(
