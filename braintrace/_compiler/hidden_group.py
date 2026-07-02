@@ -557,6 +557,14 @@ def _same_recurrence_layer(path1: Path, path2: Path) -> bool:
     ('layers', 1, ...)) indicate different sequential layers and should
     be in separate groups. Paths that diverge at string keys (e.g.,
     ('neu', 'V') vs ('neu', 'a')) are within the same layer.
+
+    This is a *path heuristic*, not a graph-structural test: sibling layers
+    keyed by strings (``self.cell0`` / ``self.cell1``, dicts of modules) are
+    NOT separated by it. Their separation instead relies on the recurrent-
+    mixing boundary skips in ``_eval_eqn`` — any matmul/conv between layers
+    cuts the trace — which holds for every realistic layered model. Two
+    purely-elementwise-coupled sibling string-keyed layers would merge into
+    one group; a graph-structural replacement is future work.
     """
     min_len = min(len(path1), len(path2))
     for i in range(min_len):
@@ -806,7 +814,12 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 raise ValueError(
                     f'Currently, we only support one hidden state in a single equation. \n'
                     f'{eqn}\n'
-                    f'{hidden_paths}'
+                    f'The hidden states consumed by this equation are: \n'
+                    f'{hidden_paths}\n'
+                    f'If these states form one multi-component neuron, stack '
+                    f'them into a single array held by a '
+                    f'brainstate.HiddenGroupState (or HiddenTreeState) so the '
+                    f'equation consumes one hidden variable.'
                 )
             hidden_var = hidden_invars[0]
             hidden_outvars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar in self.hidden_outvars)

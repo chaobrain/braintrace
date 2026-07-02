@@ -169,6 +169,14 @@ class HiddenParamOpRelation(NamedTuple):
         Per-key dict mapping each key to the backward-trace processing chain
         (primitives traversed from the trainable invar back to the originating
         ``ParamState`` invar).
+
+    Notes
+    -----
+    The dict-typed fields default to class-level empty dicts that are SHARED
+    across instances (the usual ``NamedTuple`` default semantics). The
+    compiler always passes freshly-built dicts and no consumer mutates a
+    relation, so this never bites in the pipeline — but when hand-constructing
+    relations in tests, pass explicit dicts instead of mutating the defaults.
     """
     primitive: Primitive
     x_var: Optional[Var]
@@ -305,6 +313,13 @@ def _trace_var_to_param(
     deduplicated, insertion-ordered tuple of intermediate primitive types
     traversed (mask multiplication, weight_fn, etc.). When the var is the
     raw ParamState invar, the chain is empty.
+
+    Known limitation: the backward BFS stops at the FIRST ParamState invar it
+    reaches. A trainable invar computed from *two* ParamStates (e.g.
+    ``w1 + w2``) is attributed to whichever the search reaches first; the
+    other's gradient is silently dropped. No library op produces such a
+    joint-parametric trainable input today — route each ParamState through
+    its own ETP op if you need both trained online.
     """
     if cache is not None and var in cache:
         cached = cache[var]
@@ -420,11 +435,12 @@ def _bfs_forward(
     of them are directly fed) while still excluding downstream layers that
     are reachable only *through* another hidden state.
     """
+    direct_groups: Optional[Set[int]] = None
     if outvar_to_group_index is not None:
         # --- Phase 1: directly-fed group discovery ------------------------
         # Do not expand through hidden outvars: a group reachable only via
         # another hidden state is a downstream layer, not a direct target.
-        direct_groups: Set[int] = set()
+        direct_groups = set()
         frontier: deque = deque([start_var])
         visited: Set[Var] = set()
         while frontier:
@@ -453,8 +469,6 @@ def _bfs_forward(
                 for ov in eqn.outvars:
                     if ov not in visited:
                         frontier.append(ov)
-    else:
-        direct_groups = None  # type: ignore[assignment]
 
     # --- Phase 2: full collection, filtered to the directly-fed groups ----
     reachable: Dict[Var, None] = {}
@@ -468,7 +482,7 @@ def _bfs_forward(
             continue
         visited.add(v)
         if v in hidden_outvar_set:
-            if direct_groups is not None:
+            if direct_groups is not None and outvar_to_group_index is not None:
                 g = outvar_to_group_index.get(v)
                 if g is None:
                     raise ValueError(

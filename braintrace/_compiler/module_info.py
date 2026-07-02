@@ -504,6 +504,14 @@ def extract_module_info(
     --------
     ModuleInfo : The returned data structure.
 
+    Notes
+    -----
+    Prefer positional arguments. ``**model_kwargs`` is accepted here for
+    tracing, but ``ModuleInfo.jaxpr_call`` and the downstream
+    ``compile_etrace_graph`` pipeline rebuild inputs from positional
+    arguments only — bind static keyword arguments with
+    ``functools.partial`` before compiling.
+
     Examples
     --------
     .. code-block:: python
