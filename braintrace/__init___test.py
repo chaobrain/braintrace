@@ -153,7 +153,9 @@ def test_weight_used_inside_scan_raises_not_implemented():
     Since Phase 2 canonicalization, statically short scans are unrolled at
     extraction time instead of erroring, so this uses a length above
     ``ControlFlowPolicy.scan_unroll_limit`` to reach the unsupported-op path
-    (after a SCAN_UNROLL_SKIPPED warning)."""
+    (after a SCAN_UNROLL_SKIPPED warning). Since Phase 4, structured scan
+    descent handles over-limit ETP scans by default, so this pins the
+    opt-out path via ``ControlFlowPolicy(scan_descent='off')``."""
 
     class ScanModel(brainstate.nn.Module):
         def __init__(self):
@@ -171,7 +173,8 @@ def test_weight_used_inside_scan_raises_not_implemented():
 
     model = ScanModel()
     brainstate.nn.init_all_states(model, batch_size=1)
-    algo = braintrace.D_RTRL(model)
+    algo = braintrace.D_RTRL(
+        model, control_flow=braintrace.ControlFlowPolicy(scan_descent='off'))
     with pytest.raises(NotImplementedError):
         with pytest.warns(UserWarning, match='NOT unrolled'):
             algo.compile_graph(jnp.ones((1, 4), dtype='float32'))

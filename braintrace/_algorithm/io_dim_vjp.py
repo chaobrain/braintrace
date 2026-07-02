@@ -34,7 +34,7 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._compiler import HiddenGroup, HiddenParamOpRelation
+from braintrace._compiler import ControlFlowPolicy, HiddenGroup, HiddenParamOpRelation
 from braintrace._op import (
     etp_elemwise_p,
     ETP_RULES_XY_TO_DW,
@@ -567,6 +567,11 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
           the data input.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization (cond if-conversion,
+        scan unrolling, structured scan descent, ...) during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
     name : str, optional
         The name of the etrace algorithm.
     mode : braintrace.mixin.Mode, optional
@@ -667,8 +672,10 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
+        control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
-        super().__init__(model, name=name, vjp_method=vjp_method)
+        super().__init__(model, name=name, vjp_method=vjp_method,
+                         control_flow=control_flow)
         self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
         self.fast_solve = fast_solve
 

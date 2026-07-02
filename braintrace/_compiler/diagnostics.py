@@ -104,6 +104,22 @@ class DiagnosticKind(str, Enum):
     SCAN_UNROLL_SKIPPED = 'scan_unroll_skipped'
     RELATION_EXCLUDED_SLICED_WEIGHT = 'relation_excluded_sliced_weight'
 
+    # Structured scan descent (Phase 4; see _compiler/scan_descent.py)
+    #
+    # ``SCAN_DESCENT_APPLIED``: an ETP-relevant scan too long to unroll was
+    # rewritten for structured descent — relations/hidden groups discovered
+    # inside its body, stacked per-substep values emitted as extra ys (INFO).
+    # ``SCAN_DESCENT_SKIPPED``: descent was requested (policy ``'auto'``) but
+    # a v1 restriction blocked it; the existing control-flow restrictions
+    # apply (WARNING).
+    # ``SCAN_DESCENT_NO_RELATIONS``: a descended scan consumes weight
+    # state(s) that produce no ETP relation (plain-op usage inside the
+    # body), so those weights do not learn online. Pre-descent this scan
+    # was a hard error, so the exclusion is surfaced loudly (WARNING).
+    SCAN_DESCENT_APPLIED = 'scan_descent_applied'
+    SCAN_DESCENT_SKIPPED = 'scan_descent_skipped'
+    SCAN_DESCENT_NO_RELATIONS = 'scan_descent_no_relations'
+
     # Opaque control flow touching weights / hidden states (Phase 3)
     #
     # ``WEIGHT_IN_WHILE``: a tracked weight invar is consumed by a ``while``

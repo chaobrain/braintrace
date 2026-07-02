@@ -41,7 +41,7 @@ from typing import Dict, Any, Optional
 
 import brainstate
 
-from braintrace._compiler import ETraceGraph, compile_etrace_graph
+from braintrace._compiler import ControlFlowPolicy, ETraceGraph, compile_etrace_graph
 from .._input_data import get_single_step_data
 from .._typing import Path
 
@@ -65,6 +65,14 @@ class ETraceGraphExecutor:
     ----------
     model: brainstate.nn.Module
         The model to build the eligibility trace graph. The models should only define the one-step behavior.
+    include_recurrent_mixing: bool, optional
+        Hidden-group grouping mode for the hidden-to-hidden transition; see
+        ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
+    control_flow: ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization (cond if-conversion,
+        scan unrolling, structured scan descent, ...) during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
     """
     __module__ = 'braintrace'
 
@@ -72,6 +80,7 @@ class ETraceGraphExecutor:
         self,
         model: brainstate.nn.Module,
         include_recurrent_mixing: bool = False,
+        control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
         # The original model
         if not isinstance(model, brainstate.nn.Module):
@@ -85,6 +94,9 @@ class ETraceGraphExecutor:
         # hidden-group grouping mode for the hidden-to-hidden transition; see
         # ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
         self.include_recurrent_mixing = include_recurrent_mixing
+
+        # control-flow canonicalization policy; None -> compiler default
+        self.control_flow = control_flow
 
         # the compiled graph
         self._compiled_graph: Optional[ETraceGraph] = None
@@ -185,6 +197,7 @@ class ETraceGraphExecutor:
         self._compiled_graph = compile_etrace_graph(
             self.model, *args,
             include_recurrent_mixing=self.include_recurrent_mixing,
+            control_flow=self.control_flow,
         )
 
     def show_graph(

@@ -14,7 +14,7 @@
 # ==============================================================================
 
 
-from typing import Dict, Set, Sequence, NamedTuple, Any
+from typing import Dict, FrozenSet, Set, Sequence, NamedTuple, Any
 
 import brainstate
 import jax.core
@@ -227,6 +227,9 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
         control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
             opaque control-flow handling.
+        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten
+            by structured scan descent (Phase 4); exempt from the
+            unsupported-op checks.
 
     Returns:
         The revised closed jaxpr with the perturbations.
@@ -259,9 +262,18 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         outvar_to_hidden_path: Dict[Var, Path],
         path_to_state: Dict[Path, brainstate.HiddenState],
         control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+        descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     ):
         # necessary data structures
         self.closed_jaxpr = closed_jaxpr
+
+        # Structured scan descent (Phase 4): scan equations rewritten by
+        # ``scan_descent.apply_scan_descent`` (keyed by ``id(eqn)``) bypass
+        # ``check_unsupported_op`` — their weight usage is legal by
+        # construction, and ``_eval_eqn`` perturbs their hidden carry output
+        # exactly like any other producing equation (one perturbation per
+        # outer step; scans are reverse-differentiable, so no detach).
+        self.descended_scan_eqn_ids = descended_scan_eqn_ids
 
         # initialize the super class
         # Use dict.fromkeys to deduplicate while preserving insertion order
@@ -496,6 +508,7 @@ def add_hidden_perturbation_in_jaxpr(
     outvar_to_hidden_path: Dict[Var, Path],
     path_to_state: Dict[Path, brainstate.HiddenState],
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
 ) -> HiddenPerturbation:
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
@@ -512,6 +525,9 @@ def add_hidden_perturbation_in_jaxpr(
             hidden-producing ``while`` is kept and its inputs are detached
             in the perturbed jaxpr (see
             :class:`JaxprEvalForHiddenPerturbation`).
+        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten
+            by structured scan descent (Phase 4); exempt from the
+            unsupported-op checks.
 
     Returns:
         The revised closed jaxpr with the perturbations.
@@ -524,11 +540,13 @@ def add_hidden_perturbation_in_jaxpr(
         outvar_to_hidden_path=outvar_to_hidden_path,
         path_to_state=path_to_state,
         control_flow=control_flow,
+        descended_scan_eqn_ids=descended_scan_eqn_ids,
     ).compile()
 
 
 def add_hidden_perturbation_from_minfo(
     minfo: ModuleInfo,
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
 ) -> HiddenPerturbation:
     """Add hidden-state perturbations from a ``ModuleInfo``.
 
@@ -539,6 +557,9 @@ def add_hidden_perturbation_from_minfo(
     ----------
     minfo : ModuleInfo
         The model information.
+    descended_scan_eqn_ids : frozenset of int, default ``frozenset()``
+        ``id()`` values of scan equations rewritten by structured scan
+        descent (Phase 4); exempt from the unsupported-op checks.
 
     Returns
     -------
@@ -557,6 +578,7 @@ def add_hidden_perturbation_from_minfo(
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         path_to_state=minfo.retrieved_model_states,
         control_flow=minfo.control_flow,
+        descended_scan_eqn_ids=descended_scan_eqn_ids,
     )
 
 

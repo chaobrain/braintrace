@@ -30,6 +30,7 @@ from braintrace._compiler.canonicalize import (
 )
 from braintrace._compiler.diagnostics import (
     DiagnosticKind,
+    DiagnosticLevel,
     diagnostic_context,
 )
 
@@ -76,6 +77,16 @@ class TestControlFlowPolicy:
         closed = jax.make_jaxpr(lambda x: x * 2.)(jnp.ones(3))
         with pytest.raises(ValueError, match='cond'):
             _convert(closed, policy=ControlFlowPolicy(cond='bogus'))
+
+    def test_scan_descent_default_auto(self):
+        assert DEFAULT_CONTROL_FLOW_POLICY.scan_descent == 'auto'
+
+    def test_scan_descent_accepts_auto(self):
+        assert ControlFlowPolicy(scan_descent='auto').scan_descent == 'auto'
+
+    def test_scan_descent_rejects_unknown_value(self):
+        with pytest.raises(ValueError, match='scan_descent'):
+            ControlFlowPolicy(scan_descent='yes-please')
 
 
 class TestIfConvertConds:
@@ -782,17 +793,41 @@ class TestUnrollInnerScans:
         assert out is closed
 
     def test_skip_length_exceeds_limit(self):
+        # scan_descent='off' pins the pre-Phase-4 WARNING; under the default
+        # ('auto') an over-limit skip is INFO (descent handles the scan).
         f, closed, w, h0, xs = self._etp_scan_jaxpr()
         with diagnostic_context() as reporter:
             with pytest.warns(UserWarning, match='NOT unrolled'):
                 conv = _unroll(
                     closed,
                     weights=[closed.jaxpr.invars[0]],
-                    policy=ControlFlowPolicy(scan_unroll_limit=self.L - 1),
+                    policy=ControlFlowPolicy(scan_unroll_limit=self.L - 1,
+                                             scan_descent='off'),
                 )
         assert 'scan' in _primitive_names(conv)
         kinds = [r.kind for r in reporter.records()]
         assert kinds.count(DiagnosticKind.SCAN_UNROLL_SKIPPED) == 1
+
+    def test_skip_length_exceeds_limit_info_under_descent_auto(self):
+        # Phase 4: with scan_descent='auto' an over-limit scan is no longer a
+        # dead end, so the skip record downgrades to INFO (no UserWarning)
+        # and points at the descent path.
+        f, closed, w, h0, xs = self._etp_scan_jaxpr()
+        with diagnostic_context() as reporter:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error')
+                conv = _unroll(
+                    closed,
+                    weights=[closed.jaxpr.invars[0]],
+                    policy=ControlFlowPolicy(scan_unroll_limit=self.L - 1,
+                                             scan_descent='auto'),
+                )
+        assert 'scan' in _primitive_names(conv)
+        recs = [r for r in reporter.records()
+                if r.kind is DiagnosticKind.SCAN_UNROLL_SKIPPED]
+        assert len(recs) == 1
+        assert recs[0].level is DiagnosticLevel.INFO
+        assert 'descent' in recs[0].message
 
     def test_skip_effects_in_body(self):
         def f(w, h0, xs):
@@ -936,7 +971,8 @@ class TestUnrollInnerScans:
                 conv = _unroll(
                     closed,
                     weights=[closed.jaxpr.invars[0]],
-                    policy=ControlFlowPolicy(scan_unroll_limit=3),
+                    policy=ControlFlowPolicy(scan_unroll_limit=3,
+                                             scan_descent='off'),
                 )
         names = _primitive_names(conv)
         assert names.count('scan') == 1
@@ -1154,11 +1190,15 @@ class TestScanModelCompilation:
         assert len(records) == 1
 
     def test_limit_zero_policy_keeps_existing_error(self):
+        # scan_descent='off' pins the pre-Phase-4 dead end; with the default
+        # ('auto') a limit-0 policy no longer errors — descent picks the
+        # scan up instead.
         with pytest.raises(NotImplementedError, match='scan'):
             with pytest.warns(UserWarning):
                 self._graph_for(
                     _InnerLoopCell,
-                    control_flow=ControlFlowPolicy(scan_unroll_limit=0),
+                    control_flow=ControlFlowPolicy(scan_unroll_limit=0,
+                                                   scan_descent='off'),
                 )
 
     def test_while_body_model_keeps_existing_error(self):

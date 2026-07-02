@@ -124,6 +124,13 @@ def check_unsupported_op(
     """
     policy = getattr(self, 'control_flow', DEFAULT_CONTROL_FLOW_POLICY)
 
+    # Structured scan descent (Phase 4): a scan equation rewritten by
+    # ``scan_descent.apply_scan_descent`` is exempt from both checks — its
+    # body relations and hidden groups were registered separately, so the
+    # weight usage and hidden-state production inside it are accounted for.
+    if op_name == 'scan' and id(eqn) in getattr(self, 'descended_scan_eqn_ids', ()):
+        return
+
     # checking whether the weight variables are used in the equation
     # Note: user ``jax.jit`` boundaries are inlined at extraction time
     # (see ``jaxpr_graph.inline_jit_calls``), so reaching this check means

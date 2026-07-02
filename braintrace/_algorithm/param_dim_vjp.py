@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._compiler import HiddenParamOpRelation, HiddenGroup
+from braintrace._compiler import ControlFlowPolicy, HiddenParamOpRelation, HiddenGroup
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -37,7 +37,7 @@ from braintrace._op._registries import (
     get_instant_drtrl_rule,
     get_solve_drtrl_rule,
 )
-from braintrace._misc import etrace_df_key
+from braintrace._misc import etrace_df_key, etrace_x_key
 from braintrace._typing import (
     PyTree,
     WeightID,
@@ -195,13 +195,106 @@ def _update_param_dim_etrace_scan_fn(
     #
     hid_group_jacobians: Sequence[jax.Array] = jacobians[2]
 
+    # --- partition: flat relations vs descended relations (by owning scan) --- #
+    #
+    # Descended relations (structured scan descent, Phase 4) carry stacked
+    # per-substep Jacobians with a leading axis ``L``; their trace update is
+    # folded over that axis with an inner ``jax.lax.scan``. Flat relations
+    # take the historical single-application path unchanged.
+    regular = [r for r in hidden_param_op_relations
+               if r.control_flow_context is None]
+    by_scan: Dict[int, list] = {}
+    for r in hidden_param_op_relations:
+        if r.control_flow_context is not None:
+            by_scan.setdefault(id(r.control_flow_context.scan), []).append(r)
+
     # The etrace weight gradients at the current time step.
     # i.e., The "hist_etrace_vals" at the next time step
     #
-    new_etrace_bwg = dict()
+    new_etrace_bwg = dict(hist_etrace_vals)
+
+    if regular:
+        new_etrace_bwg.update(_apply_relation_step(
+            hist_etrace_vals, etrace_xs_at_t, etrace_ys_at_t,
+            hid_group_jacobians, regular, weight_path_to_vals,
+            fast_solve, trace_dtype,
+        ))
+
+    for rels in by_scan.values():
+        trace_keys = [(id(r.y_var), g.index)
+                      for r in rels for g in r.hidden_groups]
+        x_keys = [etrace_x_key(r.x_var) for r in rels if r.x_var is not None]
+        df_keys = [etrace_df_key(r.y_var, g.index)
+                   for r in rels for g in r.hidden_groups]
+        g_idx = sorted({g.index for r in rels for g in r.hidden_groups})
+
+        sub_carry = {k: hist_etrace_vals[k] for k in trace_keys}
+        sub_xs = (
+            {k: etrace_xs_at_t[k] for k in x_keys},      # (L, ...)
+            {k: etrace_ys_at_t[k] for k in df_keys},     # (L, ...)
+            {i: hid_group_jacobians[i] for i in g_idx},  # (L, ...)
+        )
+
+        def _substep(carry, sliced, _rels=rels):
+            xs_t, dfs_t, diags_t = sliced
+            carry = {**carry, **_apply_relation_step(
+                carry, xs_t, dfs_t, diags_t, _rels,
+                weight_path_to_vals, fast_solve, trace_dtype)}
+            return carry, None
+
+        sub_carry, _ = jax.lax.scan(_substep, sub_carry, sub_xs)
+        new_etrace_bwg.update(sub_carry)
+
+    return new_etrace_bwg, None
+
+
+def _apply_relation_step(
+    hist_etrace_vals: Dict[ETraceWG_Key, jax.Array],
+    etrace_xs_at_t: Dict[ETraceX_Key, jax.Array],
+    etrace_ys_at_t: Dict[ETraceDF_Key, jax.Array],
+    hid_group_jacobians: Any,
+    relations: Any,
+    weight_path_to_vals: Dict[Path, PyTree],
+    fast_solve: bool = True,
+    trace_dtype: Optional[DTypeLike] = None,
+) -> Dict[ETraceWG_Key, jax.Array]:
+    """One trace-update application over ``relations`` (a subset is fine).
+
+    The body of the historical per-relation loop of
+    :func:`_update_param_dim_etrace_scan_fn`, extracted verbatim so the
+    descended-scan substep fold can reuse it per substep.
+
+    Parameters
+    ----------
+    hist_etrace_vals : dict
+        Previous trace values; only the keys touched by ``relations`` are
+        read.
+    etrace_xs_at_t : dict
+        Weight-x values keyed by :func:`~braintrace._misc.etrace_x_key`.
+    etrace_ys_at_t : dict
+        Weight-df values keyed by :func:`~braintrace._misc.etrace_df_key`.
+    hid_group_jacobians : sequence or dict
+        The hidden-group Jacobians; may be the executor's list (indexed by
+        ``group.index``) or an int-keyed dict holding only the indices these
+        relations touch — both support ``[group.index]``.
+    relations : sequence of HiddenParamOpRelation
+        The relations to apply (a subset of the graph's relations is fine).
+    weight_path_to_vals : dict
+        Mapping from weight paths to their PyTree values.
+    fast_solve : bool, default True
+        Whether closed-form fast-path kernels may be used.
+    trace_dtype : dtype-like, optional
+        Reduced trace precision (fast path only).
+
+    Returns
+    -------
+    dict
+        ONLY the updated trace keys (``(id(y_var), group.index)``).
+    """
+    new_etrace_bwg: Dict[ETraceWG_Key, jax.Array] = dict()
 
     relation: HiddenParamOpRelation
-    for relation in hidden_param_op_relations:
+    for relation in relations:
 
         # Build the weights dict the rules consume.
         weights_dict = {
@@ -333,7 +426,7 @@ def _update_param_dim_etrace_scan_fn(
             )
             new_etrace_bwg[w_key] = new_bwg
 
-    return new_etrace_bwg, None
+    return new_etrace_bwg
 
 
 def _solve_param_dim_weight_gradients(
@@ -587,6 +680,11 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
           the data input.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization (cond if-conversion,
+        scan unrolling, structured scan descent, ...) during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
     name : str, optional
         The name of the etrace algorithm.
     mode : braintrace.mixin.Mode, optional
@@ -684,6 +782,11 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     # batch of weight gradients
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State]
 
+    _supports_scan_descent = True
+    """Structured scan descent (Phase 4): the param-dim trace update folds
+    per-substep injections with an inner scan; see
+    ``braintrace._compiler.scan_descent``."""
+
     def __init__(
         self,
         model: brainstate.nn.Module,
@@ -691,8 +794,10 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         trace_dtype: Optional[DTypeLike] = None,
+        control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
-        super().__init__(model, name=name, vjp_method=vjp_method)
+        super().__init__(model, name=name, vjp_method=vjp_method,
+                         control_flow=control_flow)
         # ``fast_solve=True`` enables closed-form einsum kernels for
         # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
         # Conv / sparse / LoRA primitives always use the legacy path.
