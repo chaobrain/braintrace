@@ -526,6 +526,85 @@ class TestPublicAPIRoundTrip:
         assert braintrace.conv is conv
 
 
+# ---------------------------------------------------------------------------
+# Bias broadcasts along the layout's channel axis (H3)
+# ---------------------------------------------------------------------------
+
+class TestConvBiasChannelAxis:
+    """A ``(out_channels,)`` bias must broadcast along the layout's channel
+    axis, not just whatever axis happens to be trailing. The default
+    (``dimension_numbers=None``) layout is NCH-style, so the channel axis is
+    at position 1 -- not the trailing spatial axis.
+    """
+
+    def test_default_layout_bias_broadcasts_channel_axis(self):
+        # x: (batch=2, C_in=2, L=8); kernel: (C_out=4, C_in=2, kw=3); bias: (C_out=4,)
+        x = jnp.arange(2 * 2 * 8, dtype=jnp.float32).reshape(2, 2, 8)
+        k = jnp.arange(4 * 2 * 3, dtype=jnp.float32).reshape(4, 2, 3)
+        b = jnp.arange(4.0)
+        out = conv(x, k, b, strides=(1,), padding='SAME')
+        ref = _ref_conv(x, k, **_BASE_CONV_KW) + b.reshape(1, -1, 1)
+        np.testing.assert_allclose(out, ref)
+
+    def test_default_layout_bias_hazard_when_spatial_equals_out_channels(self):
+        """Regression guard for the silent-corruption hazard: spatial length
+        ``L`` happens to equal ``C_out``. Before the fix this shape
+        coincidence let the buggy trailing-axis broadcast succeed silently
+        (no ``ValueError``) while producing the wrong numbers.
+        """
+        # L == C_out == 4
+        x = jnp.arange(2 * 2 * 4, dtype=jnp.float32).reshape(2, 2, 4)
+        k = jnp.arange(4 * 2 * 3, dtype=jnp.float32).reshape(4, 2, 3)
+        b = jnp.arange(1.0, 5.0)
+        out = conv(x, k, b, strides=(1,), padding='SAME')
+        ref = _ref_conv(x, k, **_BASE_CONV_KW) + b.reshape(1, -1, 1)
+        np.testing.assert_allclose(out, ref)
+        # Must differ from the old (buggy) trailing-axis broadcast -- proves
+        # this test actually discriminates correct vs. silently-corrupted output.
+        buggy = _ref_conv(x, k, **_BASE_CONV_KW) + b.reshape(1, 1, -1)
+        assert not np.allclose(out, buggy)
+
+    def test_channel_last_layout_bias_still_works(self):
+        """Channel-last (`NWC`/`WIO`/`NWC`) layout regression guard -- the
+        channel axis is already trailing here, so this must keep working.
+        """
+        x = jnp.arange(2 * 8 * 2, dtype=jnp.float32).reshape(2, 8, 2)  # (N, W, C_in)
+        k = jnp.arange(3 * 2 * 4, dtype=jnp.float32).reshape(3, 2, 4)  # (W, I, O)
+        b = jnp.arange(4.0)
+        dn = ('NWC', 'WIO', 'NWC')
+        out = conv(x, k, b, strides=(1,), padding='SAME', dimension_numbers=dn)
+        ref = _ref_conv(
+            x, k, window_strides=(1,), padding='SAME', dimension_numbers=dn
+        ) + b.reshape(1, 1, -1)
+        np.testing.assert_allclose(out, ref)
+
+    def test_grad_through_biased_default_layout_conv(self):
+        """``jax.grad`` through a biased default-layout (NCH) conv must work.
+
+        All standard rules (JVP / transpose) are auto-derived from
+        ``_etp_conv_impl`` (see ``register_primitive``), so the channel-axis
+        reshape added to fix the bias broadcast must itself be
+        differentiable -- verify kernel and bias gradients match a
+        hand-written reference that performs the same reshape.
+        """
+        x = jnp.ones((2, 2, 8))
+        k = jnp.ones((4, 2, 3)) * 0.1
+        b = jnp.arange(4.0)
+
+        def loss(k_, b_):
+            return conv(x, k_, b_, strides=(1,), padding='SAME').sum()
+
+        gk, gb = jax.grad(loss, argnums=(0, 1))(k, b)
+
+        def ref_loss(k_, b_):
+            y = _ref_conv(x, k_, **_BASE_CONV_KW)
+            return (y + b_.reshape(1, -1, 1)).sum()
+
+        gk_ref, gb_ref = jax.grad(ref_loss, argnums=(0, 1))(k, b)
+        np.testing.assert_allclose(gk, gk_ref)
+        np.testing.assert_allclose(gb, gb_ref)
+
+
 class TestConvKernelFnBiasFn:
 
     def test_forward_applies_kernel_fn(self):

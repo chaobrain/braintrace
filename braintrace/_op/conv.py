@@ -133,6 +133,22 @@ def _etp_conv_impl(
         b = args[2]
         if bias_fn is not None:
             b = bias_fn(b)
+        if b.ndim == 1:
+            # Canonical per-output-channel bias vector: broadcast it along
+            # the layout's channel axis. The channel axis is NOT always
+            # trailing -- the default (``dimension_numbers=None``) layout is
+            # NCH-style, with the channel axis at position 1, so a naive
+            # ``y + b`` broadcasts against the trailing spatial axis instead
+            # (raising when sizes differ, silently corrupting the output
+            # when a spatial size happens to equal ``out_channels``).
+            # Bias arrays with rank > 1 are assumed to already be pre-shaped
+            # by the caller for direct broadcasting and are left untouched.
+            _, channel_axis, _, _ = _conv_layout(
+                {'strides': strides, 'dimension_numbers': dimension_numbers}
+            )
+            shape = [1] * y.ndim
+            shape[channel_axis] = b.shape[0]
+            b = b.reshape(shape)
         y = y + b
     return y
 
@@ -527,8 +543,15 @@ def conv(
         Input tensor with a leading batch dimension.
     kernel : ArrayLike
         Convolution kernel, with layout governed by ``dimension_numbers``.
-    bias : ArrayLike or None, optional
-        Per-output-channel bias. Default ``None``.
+    bias : Array, optional
+        Bias added to the convolution output. A 1-D array of shape
+        ``(out_channels,)`` is automatically reshaped to broadcast along the
+        output's channel axis as determined by ``dimension_numbers`` (so it is
+        correct for channel-first layouts such as the default NCH/NCHW as well
+        as channel-last ones). An array of rank > 1 is added as-is and must
+        already be broadcast-compatible with the layout-dependent output shape
+        (this is how ``braintrace.nn.Conv1d/2d/3d`` pass their pre-shaped
+        bias). Default ``None``.
     strides : Sequence[int], optional
         Window strides. Default ``(1,)``.
     padding : str, optional
