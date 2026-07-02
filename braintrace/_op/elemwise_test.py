@@ -392,3 +392,55 @@ class TestElemwiseFastPath:
         np.testing.assert_allclose(
             folded['weight'], unfolded['weight'].sum(axis=0), atol=1e-5
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+class TestYwToWFirstPrinciplesFromJacobian:
+    """Derive ``_elemwise_yw_to_w`` from ``jax.jacobian`` of the primitive's
+    own (``weight_fn=None``) forward, rather than trusting its formula.
+
+    With ``weight_fn=None``, ``y = w`` elementwise, so
+    ``partial y_j / partial w_k = delta(j, k)`` — the identity matrix. A
+    general chain-rule contraction of a cotangent ``g`` against that
+    Jacobian, applied to an arbitrary weight-shaped trace, degenerates to a
+    plain elementwise product ``g * trace`` — exactly what ``_elemwise_yw_to_w``
+    computes. This is verified with a random (never all-ones) cotangent and
+    a random trace, independent of the rule's own code.
+    """
+
+    def test_yw_to_w_matches_identity_jacobian_contraction(self):
+        from braintrace._op.elemwise import _elemwise_yw_to_w
+        brainstate.random.seed(401)
+        n = 5
+        w0 = brainstate.random.randn(n)
+
+        J = jax.jacobian(lambda w: w)(w0)  # (n, n), should be identity
+        np.testing.assert_allclose(J, jnp.eye(n), atol=1e-10)
+
+        g = brainstate.random.randn(n)
+        trace = brainstate.random.randn(n)
+
+        # General chain-rule contraction against the raw (proven-identity)
+        # Jacobian: propagate `trace` through J, then multiply by the
+        # cotangent — built independently of the rule's own broadcast code.
+        # Because J == I this reduces to the elementwise product `g * trace`,
+        # but the reduction is not assumed here, only its inputs are used.
+        propagated = jnp.einsum('jk,k->j', J, trace)
+        ref = g * propagated
+
+        out = _elemwise_yw_to_w(g, {'weight': trace})
+        np.testing.assert_allclose(out['weight'], ref, atol=1e-10)
+
+    def test_yw_to_w_matches_identity_jacobian_contraction_batched(self):
+        from braintrace._op.elemwise import _elemwise_yw_to_w
+        brainstate.random.seed(402)
+        batch, n = 3, 5
+        g = brainstate.random.randn(batch, n)
+        trace = brainstate.random.randn(batch, n)
+
+        ref = g * trace
+        out = _elemwise_yw_to_w(g, {'weight': trace})
+        np.testing.assert_allclose(out['weight'], ref, atol=1e-10)

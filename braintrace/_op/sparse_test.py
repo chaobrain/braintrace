@@ -724,3 +724,135 @@ class TestBatchedSparseDRTRLOracle:
                 denom = max(float(jnp.abs(a).max()), 1e-12)
                 rel = float(jnp.abs(a - b).max() / denom)
                 assert rel < 1e-10, f'{key}: max_rel_err={rel:.3e}'
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+def _sparse_row_col_of_nnz(csr):
+    """Derive per-nnz (row, col) indices directly from CSR structure.
+
+    Built independently of ``yw_to_w_transposed`` so it can serve as ground
+    truth: ``csr.indices`` already *is* the per-nnz column index (standard
+    CSR layout), and the per-nnz row index is recovered from ``indptr`` by
+    repeating each row index by its nnz count.
+    """
+    indptr = np.asarray(csr.indptr)
+    row_of_nnz = np.repeat(np.arange(indptr.shape[0] - 1), np.diff(indptr))
+    col_of_nnz = np.asarray(csr.indices)
+    return row_of_nnz, col_of_nnz
+
+
+def _random_masked_csr(mask: np.ndarray, seed: int):
+    brainstate.random.seed(seed)
+    values = brainstate.random.randn(*mask.shape)
+    dense = jnp.where(jnp.asarray(mask), values, 0.0)
+    return brainevent.CSR.fromdense(dense)
+
+
+class TestYwToWFirstPrinciplesFromJacobian:
+    """Derive ``_sp_mv_yw_to_w`` / ``_sp_mm_yw_to_w`` from ``jax.jacobian`` of
+    the primitive's own forward on a real, non-diagonal :class:`brainevent.CSR`.
+
+    For ``y = x @ W`` with ``W`` sparse, ``partial y_o / partial data_k`` is
+    nonzero only for the nnz entries ``k`` whose column equals ``o``, in
+    which case it equals ``x`` at that entry's row — a structural fact
+    confirmed here numerically against ``row_of_nnz`` / ``col_of_nnz``
+    derived directly from the CSR's own ``indptr`` / ``indices`` (never from
+    ``yw_to_w_transposed``). Because the Jacobian is "diagonal" in this
+    per-nnz-column sense, the general contraction of a cotangent against it
+    reduces to indexing the cotangent by each nnz's column and multiplying
+    into the trace — exactly what the production rule computes. Checked
+    with random (never all-ones) cotangents and traces.
+    """
+
+    @staticmethod
+    def _mask():
+        return np.array([
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [1, 1, 0, 0],
+        ], dtype=bool)  # (in=3, out=4), deliberately non-diagonal/non-square
+
+    def test_mv_yw_to_w_matches_jacobian_contraction(self):
+        from braintrace._op.sparse import _sp_mv_yw_to_w
+        csr = self._random_masked_csr_mv()
+        n_in, n_out = csr.shape
+        row_of_nnz, col_of_nnz = _sparse_row_col_of_nnz(csr)
+        nnz = csr.data.shape[0]
+
+        brainstate.random.seed(511)
+        x0 = brainstate.random.randn(n_in)
+
+        def fwd(w):
+            return x0 @ csr.with_data(w)
+
+        J = jax.jacobian(fwd)(csr.data)  # (out, nnz)
+        for o in range(n_out):
+            for k in range(nnz):
+                expected = x0[row_of_nnz[k]] if col_of_nnz[k] == o else 0.0
+                np.testing.assert_allclose(
+                    J[o, k], expected, atol=1e-10,
+                    err_msg=f'Jacobian mismatch at o={o}, k={k}',
+                )
+
+        g = brainstate.random.randn(n_out)
+        trace_w = brainstate.random.randn(nnz)
+        trace_b = brainstate.random.randn(n_out)
+
+        # General contraction, specialized by the proven per-column-diagonal
+        # structure: each nnz only "sees" the cotangent component at its own
+        # column. Built from `col_of_nnz` (raw CSR structure), never from
+        # the rule's own `yw_to_w_transposed` call.
+        ref_w = trace_w * g[col_of_nnz]
+        ref_b = trace_b * g
+
+        out = _sp_mv_yw_to_w(
+            g, {'weight': trace_w, 'bias': trace_b}, sparse_mat=csr, has_bias=True,
+        )
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
+
+    def test_mm_yw_to_w_matches_jacobian_contraction(self):
+        from braintrace._op.sparse import _sp_mm_yw_to_w
+        csr = self._random_masked_csr_mm()
+        n_in, n_out = csr.shape
+        row_of_nnz, col_of_nnz = _sparse_row_col_of_nnz(csr)
+        nnz = csr.data.shape[0]
+        batch = 2
+
+        brainstate.random.seed(512)
+        x0 = brainstate.random.randn(batch, n_in)
+
+        def fwd(w):
+            return x0 @ csr.with_data(w)
+
+        J = jax.jacobian(fwd)(csr.data)  # (batch, out, nnz)
+        for b in range(batch):
+            for o in range(n_out):
+                for k in range(nnz):
+                    expected = x0[b, row_of_nnz[k]] if col_of_nnz[k] == o else 0.0
+                    np.testing.assert_allclose(
+                        J[b, o, k], expected, atol=1e-10,
+                        err_msg=f'Jacobian mismatch at b={b}, o={o}, k={k}',
+                    )
+
+        g = brainstate.random.randn(batch, n_out)
+        trace_w = brainstate.random.randn(batch, nnz)
+        trace_b = brainstate.random.randn(batch, n_out)
+
+        ref_w = trace_w * g[:, col_of_nnz]
+        ref_b = trace_b * g
+
+        out = _sp_mm_yw_to_w(
+            g, {'weight': trace_w, 'bias': trace_b}, sparse_mat=csr, has_bias=True,
+        )
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
+
+    def _random_masked_csr_mv(self):
+        return _random_masked_csr(self._mask(), seed=513)
+
+    def _random_masked_csr_mm(self):
+        return _random_masked_csr(self._mask(), seed=514)

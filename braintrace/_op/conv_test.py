@@ -903,3 +903,140 @@ class TestGroupedConvDrtrlRejection:
             # the per-position trace allocation rejects grouped convs.
             with pytest.raises(NotImplementedError, match='pp_prop'):
                 algo.compile_graph(jnp.zeros((1, c_in, length)))
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``instant_drtrl`` / ``solve_drtrl``
+# from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
+    """Derive ``_conv_instant_drtrl`` / ``_conv_solve_drtrl`` from
+    ``jax.jacobian`` of the primitive's own forward, on tiny shapes, default
+    (OIH kernel / NCH data) layout, unbatched.
+
+    ``instant_drtrl``'s documented formula is
+    ``(dh/dK)_{s,u,c,k} = D_f^t_{s,k} * patch_{s,u,c}``, i.e. the per-position
+    (spatial index ``s`` never summed) contraction of the cotangent against
+    the raw conv Jacobian ``dy_{k,s}/dK_{k2,c,u} = delta(k,k2) * patch_{s,u,c}``.
+    This test builds the full Jacobian via ``jax.jacobian`` (never via the
+    rule's own patch-extraction helper), verifies its diagonal-in-out-channel
+    structure against an independently hand-built "SAME"-padding patch
+    (plain zero-padding + indexing, not :func:`_conv_extract_patches`), then
+    contracts the raw Jacobian with a random cotangent via a *repeated*-index
+    ``einsum`` (the spatial axis ``s`` appears in both operands and the
+    output, so it is kept rather than summed) and compares against the
+    rule's actual output.
+
+    ``solve_drtrl`` is checked separately: it performs a plain spatial-sum
+    contraction between a random loss cotangent and a random trace (no
+    forward model to differentiate), reimplemented here independently of
+    the rule's own axis bookkeeping.
+    """
+
+    def test_instant_drtrl_weight_matches_jacobian_repeated_index_contraction(self):
+        brainstate.random.seed(701)
+        in_ch, out_ch, kw, L = 2, 3, 3, 6  # odd kernel width: symmetric SAME pad
+        x = brainstate.random.randn(in_ch, L)  # unbatched, default NCH-style
+        K0 = brainstate.random.randn(out_ch, in_ch, kw)  # default OIH kernel
+
+        def fwd(K):
+            y = jax.lax.conv_general_dilated(
+                x[None], K, window_strides=(1,), padding='SAME',
+            )
+            return y[0]  # (out_ch, L)
+
+        J = jax.jacobian(fwd)(K0)  # (k, s, k2, c, u)
+
+        pad = (kw - 1) // 2
+        x_padded = jnp.pad(x, ((0, 0), (pad, pad)))
+
+        def manual_patch(s, u, c):
+            return x_padded[c, s + u]
+
+        for k in range(out_ch):
+            for s in range(L):
+                for k2 in range(out_ch):
+                    for c in range(in_ch):
+                        for u in range(kw):
+                            expected = float(manual_patch(s, u, c)) if k == k2 else 0.0
+                            np.testing.assert_allclose(
+                                J[k, s, k2, c, u], expected, atol=1e-6,
+                                err_msg=f'Jacobian mismatch at k={k},s={s},k2={k2},c={c},u={u}',
+                            )
+
+        g = brainstate.random.randn(out_ch, L)  # hidden_dim, (k, s) layout
+
+        # Repeated-index einsum: 's' appears in both operands and the output
+        # so it is NOT summed -- only the y-channel index (labelled 'k' on
+        # the cotangent, 'm' on the Jacobian's differentiation side) is
+        # contracted, matching the plan's "g-contraction ... per position".
+        ref_inst = jnp.einsum('ks,ksmcu->smcu', g, J)
+
+        from braintrace._op.conv import _conv_instant_drtrl
+        out = _conv_instant_drtrl(
+            x, g, {'weight': K0}, strides=(1,), padding='SAME', has_bias=False,
+        )
+        np.testing.assert_allclose(out['weight'], ref_inst, atol=1e-6)
+
+    def test_instant_drtrl_matches_jacobian_with_kernel_fn_and_bias_fn(self):
+        brainstate.random.seed(702)
+        in_ch, out_ch, kw, L = 2, 3, 3, 6
+        x = brainstate.random.randn(in_ch, L)
+        K0 = brainstate.random.randn(out_ch, in_ch, kw)
+        b0 = brainstate.random.randn(out_ch)
+
+        kernel_fn = lambda K: 1.5 * K + 0.1 * K ** 2
+        bias_fn = lambda b: jnp.tanh(b)
+
+        def fwd(K):
+            y = jax.lax.conv_general_dilated(
+                x[None], kernel_fn(K), window_strides=(1,), padding='SAME',
+            )
+            return y[0]
+
+        J = jax.jacobian(fwd)(K0)  # w.r.t. the RAW kernel; kernel_fn is inside fwd
+        g = brainstate.random.randn(out_ch, L)
+        ref_inst = jnp.einsum('ks,ksmcu->smcu', g, J)
+
+        from braintrace._op.conv import _conv_instant_drtrl
+        out = _conv_instant_drtrl(
+            x, g, {'weight': K0}, strides=(1,), padding='SAME', has_bias=False,
+            kernel_fn=kernel_fn,
+        )
+        np.testing.assert_allclose(out['weight'], ref_inst, atol=1e-5)
+
+        # Bias: jacobian of bias_fn itself (diagonal), never assumed.
+        J_b = jax.jacobian(bias_fn)(b0)
+        db = jnp.diagonal(J_b)
+        ref_bias = g * db[:, None]  # channel axis is axis 0 in (k, s) layout
+
+        out_b = _conv_instant_drtrl(
+            x, g, {'weight': K0, 'bias': b0}, strides=(1,), padding='SAME',
+            has_bias=True, bias_fn=bias_fn,
+        )
+        np.testing.assert_allclose(out_b['bias'], ref_bias, atol=1e-6)
+
+    def test_solve_drtrl_matches_independent_spatial_sum_reference(self):
+        from braintrace._op.conv import _conv_solve_drtrl
+        brainstate.random.seed(703)
+        in_ch, out_ch, kw, L = 2, 3, 3, 6
+        K0 = brainstate.random.randn(out_ch, in_ch, kw)
+
+        trace_w = brainstate.random.randn(L, out_ch, in_ch, kw)  # (*spatial_out, *kernel)
+        trace_b = brainstate.random.randn(out_ch, L)  # (*y_layout)
+        dg_hidden = brainstate.random.randn(out_ch, L)  # (*y_layout)
+
+        # Independent reimplementation of the documented spatial-sum
+        # contraction, built without reusing `_conv_layout` or any of the
+        # rule's own axis-alignment code.
+        dg_t = jnp.transpose(dg_hidden, (1, 0))  # (s, k)
+        ref_w = jnp.einsum('sk,skcu->kcu', dg_t, trace_w)
+        ref_b = jnp.sum(trace_b * dg_hidden, axis=1)
+
+        out = _conv_solve_drtrl(
+            dg_hidden, {'weight': trace_w, 'bias': trace_b}, {'weight': K0},
+            strides=(1,), padding='SAME', has_bias=True,
+        )
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-6)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-6)

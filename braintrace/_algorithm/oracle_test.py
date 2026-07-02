@@ -18,6 +18,7 @@ the headline exact-correctness proof (multi-step D_RTRL == BPTT), and the
 single-step naive recipe asserted as directionally aligned with BPTT (the
 former F-SINGLESTEP finding)."""
 
+import brainevent
 import brainstate
 import jax.numpy as jnp
 import numpy as np
@@ -173,3 +174,341 @@ def test_singlestep_naive_directionally_aligned_with_bptt():
         mag_bounds=(0.8, 1.3),
         keys=list(spec.etp_param_keys),
     )
+
+
+# =============================================================================
+# Audit Task 11: cross-family single-step oracle suite (T1, T3)
+# =============================================================================
+#
+# Every family below is an *exactly-diagonal* leaky-integrator model
+# (``h <- leak * h + drive``), so single-step D-RTRL's diagonal approximation
+# is exact and must reproduce a BPTT oracle element-wise for every parameter,
+# at every T. This is the "real test" the audit's T1 finding asked for: prior
+# coverage of the conv-kernel (Task 7) and LoRA-B (Task 6) fixes either used
+# an all-zero hidden state as the op's own *input* (making the weight/kernel
+# gradient trivially zero on both sides of the comparison) or never drove
+# the op with genuinely random, nonzero data at all. The factories here feed
+# real ``brainstate.random`` data through every op family, so the kernel and
+# weight gradients are actually exercised.
+#
+# ``pp_prop`` (ES-D-RTRL, an *approximate* algorithm) is exact only at T=1
+# (no history to factor/decay yet); for T>1 it is expected to diverge from
+# BPTT, so only a loose, structural-break-catching bound is asserted there
+# (rel < 1.0), never element-wise equality.
+
+LEAK = 0.5
+_TOL = 1e-10
+
+
+def _rel_err(a, b):
+    a = jnp.asarray(a)
+    b = jnp.asarray(b)
+    denom = float(jnp.maximum(jnp.abs(a).max(), 1e-12))
+    return float(jnp.abs(a - b).max() / denom)
+
+
+def _dense_mm_factory():
+    """Batched dense ``matmul`` (+bias) leaky-integrator, ``h`` shape ``(1, n_out)``."""
+    brainstate.random.seed(11)
+    n_in, n_out = 3, 4
+    w0 = 0.1 * brainstate.random.randn(n_in, n_out)
+    b0 = 0.05 * brainstate.random.randn(n_out)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(w0)
+            self.b = brainstate.ParamState(b0)
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_out)))
+
+        def update(self, x):
+            drive = braintrace.matmul(x, self.w.value, bias=self.b.value)
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _dense_mv_factory():
+    """Unbatched dense ``matmul`` leaky-integrator, ``h`` shape ``(n_out,)``."""
+    brainstate.random.seed(12)
+    n_in, n_out = 3, 4
+    w0 = 0.1 * brainstate.random.randn(n_in, n_out)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(w0)
+            self.h = brainstate.HiddenState(jnp.zeros((n_out,)))
+
+        def update(self, x):
+            drive = braintrace.matmul(x, self.w.value)
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _elemwise_factory():
+    """Elementwise-scaled input leaky-integrator, ``h`` shape ``(n,)``."""
+    brainstate.random.seed(13)
+    n = 4
+    w0 = 0.5 + 0.1 * brainstate.random.randn(n)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(w0)
+            self.h = brainstate.HiddenState(jnp.zeros((n,)))
+
+        def update(self, x):
+            drive = x * braintrace.element_wise(self.w.value)
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _conv_default_factory():
+    """1-D conv, JAX-default (NCH/OIH) layout, kernel width 3 (spatial extent > 1)."""
+    brainstate.random.seed(14)
+    in_ch, out_ch, kw, length = 2, 3, 3, 8
+    k0 = 0.1 * brainstate.random.randn(out_ch, in_ch, kw)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k = brainstate.ParamState(k0)
+            self.h = brainstate.HiddenState(jnp.zeros((1, out_ch, length)))
+
+        def update(self, x):
+            drive = braintrace.conv(x, self.k.value, strides=(1,), padding='SAME')
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _conv_nwc_bias_factory():
+    """1-D conv, channel-last (NWC/WIO) layout with a trainable bias."""
+    brainstate.random.seed(15)
+    in_ch, out_ch, kw, length = 2, 3, 3, 8
+    k0 = 0.1 * brainstate.random.randn(kw, in_ch, out_ch)
+    b0 = 0.05 * brainstate.random.randn(out_ch)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k = brainstate.ParamState(k0)
+            self.b = brainstate.ParamState(b0)
+            self.h = brainstate.HiddenState(jnp.zeros((1, length, out_ch)))
+
+        def update(self, x):
+            drive = braintrace.conv(
+                x, self.k.value, self.b.value,
+                strides=(1,), padding='SAME',
+                dimension_numbers=('NWC', 'WIO', 'NWC'),
+            )
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _sparse_csr():
+    dense_mask = np.array([
+        [1, 0, 1, 0],
+        [0, 1, 0, 1],
+        [1, 1, 0, 0],
+    ], dtype=bool)
+    return brainevent.CSR.fromdense(jnp.asarray(dense_mask, dtype=jnp.float64)), dense_mask.shape[1]
+
+
+def _sparse_unbatched_factory():
+    """Unbatched sparse ``matmul`` (real ``brainevent.CSR``), ``h`` shape ``(n_rec,)``."""
+    brainstate.random.seed(16)
+    csr, n_rec = _sparse_csr()
+    w0 = 0.1 * brainstate.random.randn(csr.data.shape[0])
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(w0)
+            self.h = brainstate.HiddenState(jnp.zeros((n_rec,)))
+
+        def update(self, x):
+            drive = braintrace.sparse_matmul(x, self.w.value, sparse_mat=csr)
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _sparse_batched_factory():
+    """Batched (batch=2) sparse ``matmul``, ``h`` shape ``(2, n_rec)``."""
+    brainstate.random.seed(17)
+    csr, n_rec = _sparse_csr()
+    batch = 2
+    w0 = 0.1 * brainstate.random.randn(csr.data.shape[0])
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(w0)
+            self.h = brainstate.HiddenState(jnp.zeros((batch, n_rec)))
+
+        def update(self, x):
+            drive = braintrace.sparse_matmul(x, self.w.value, sparse_mat=csr)
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _lora_factory():
+    """Batched LoRA ``lora_matmul`` with a trainable bias and ``alpha != 1``."""
+    brainstate.random.seed(18)
+    n_in, n_rec, rank = 3, 4, 2
+    b0_ = 0.1 * brainstate.random.randn(n_in, rank)
+    a0_ = 0.1 * brainstate.random.randn(rank, n_rec)
+    bias0 = 0.05 * brainstate.random.randn(n_rec)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.B = brainstate.ParamState(b0_)
+            self.A = brainstate.ParamState(a0_)
+            self.bias = brainstate.ParamState(bias0)
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+        def update(self, x):
+            drive = braintrace.lora_matmul(
+                x, self.B.value, self.A.value, alpha=2.0, bias=self.bias.value,
+            )
+            self.h.value = LEAK * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+def _xs_for(name, T, seed):
+    brainstate.random.seed(seed)
+    shapes = {
+        'dense_mm': (T, 1, 3),
+        'dense_mv': (T, 3),
+        'elemwise': (T, 4),
+        'conv_default': (T, 1, 2, 8),
+        'conv_nwc_bias': (T, 1, 8, 2),
+        'sparse_unbatched': (T, 3),
+        'sparse_batched': (T, 2, 3),
+        'lora': (T, 1, 3),
+    }
+    return 0.3 * brainstate.random.randn(*shapes[name])
+
+
+# name -> (factory, xs seed)
+_FAMILIES = {
+    'dense_mm': (_dense_mm_factory, 101),
+    'dense_mv': (_dense_mv_factory, 102),
+    'elemwise': (_elemwise_factory, 103),
+    'conv_default': (_conv_default_factory, 104),
+    'conv_nwc_bias': (_conv_nwc_bias_factory, 105),
+    'sparse_unbatched': (_sparse_unbatched_factory, 106),
+    'sparse_batched': (_sparse_batched_factory, 107),
+    'lora': (_lora_factory, 108),
+}
+
+
+@pytest.mark.parametrize('name', sorted(_FAMILIES))
+@pytest.mark.parametrize('T', [1, 4])
+def test_d_rtrl_singlestep_matches_bptt_across_families(name, T):
+    """D_RTRL (param-dim, single-step) is an *exact* algorithm: for every op
+    family, driven by real nonzero random input, it must reproduce the BPTT
+    gradient element-wise for every trainable factor -- including the conv
+    kernel at spatial extent > 1 (Task 7) and ``lora_b`` (Task 6), neither of
+    which any pre-existing test exercised with a nonzero op input."""
+    factory, seed = _FAMILIES[name]
+    with brainstate.environ.context(precision=64):
+        xs = _xs_for(name, T, seed)
+        g_bptt = bptt_param_gradients(factory, xs)
+        g_online = online_param_gradients_singlestep_naive(
+            factory, xs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='single-step'),
+        )
+        for key in g_bptt:
+            rel = _rel_err(g_bptt[key], g_online[key])
+            assert rel < _TOL, f'{name} T={T} {key}: D_RTRL vs BPTT rel={rel:.3e}'
+
+
+@pytest.mark.parametrize('name', sorted(set(_FAMILIES) - {'conv_nwc_bias'}))
+def test_pp_prop_singlestep_exact_at_t1_across_families(name):
+    """pp_prop (ES-D-RTRL, IO-dim, approximate) has no history to factor or
+    decay at T=1, so it must also match BPTT exactly there, for every family.
+
+    ``conv_nwc_bias`` is excluded here and covered separately by
+    ``test_pp_prop_conv_bias_known_limitation`` -- see that test's docstring
+    for the newly-discovered (pre-existing, out-of-scope-for-this-task) gap.
+    """
+    factory, seed = _FAMILIES[name]
+    with brainstate.environ.context(precision=64):
+        xs = _xs_for(name, 1, seed)
+        g_bptt = bptt_param_gradients(factory, xs)
+        g_online = online_param_gradients_singlestep_naive(
+            factory, xs,
+            algo_factory=lambda m: braintrace.pp_prop(m, decay_or_rank=0.9, vjp_method='single-step'),
+        )
+        for key in g_bptt:
+            rel = _rel_err(g_bptt[key], g_online[key])
+            assert rel < _TOL, f'{name} T=1 {key}: pp_prop vs BPTT rel={rel:.3e}'
+
+
+@pytest.mark.parametrize('name', sorted(set(_FAMILIES) - {'conv_nwc_bias'}))
+def test_pp_prop_singlestep_bounded_at_t2_across_families(name):
+    """pp_prop is an *approximate* algorithm beyond T=1: at T=2 it factors /
+    decays history and is **not** expected to match BPTT element-wise. This
+    only asserts a loose bound (rel < 1.0) to catch structural breaks (NaNs,
+    blow-ups, shape errors) without codifying the approximation's magnitude
+    as a spec.
+    """
+    factory, seed = _FAMILIES[name]
+    with brainstate.environ.context(precision=64):
+        xs = _xs_for(name, 2, seed)
+        g_bptt = bptt_param_gradients(factory, xs)
+        g_online = online_param_gradients_singlestep_naive(
+            factory, xs,
+            algo_factory=lambda m: braintrace.pp_prop(m, decay_or_rank=0.9, vjp_method='single-step'),
+        )
+        for key in g_bptt:
+            rel = _rel_err(g_bptt[key], g_online[key])
+            assert np.isfinite(rel) and rel < 1.0, (
+                f'{name} T=2 {key}: pp_prop vs BPTT rel={rel:.3e} (expected bounded, not exact)'
+            )
+
+
+def test_pp_prop_conv_bias_known_limitation():
+    """Documents a newly-discovered gap found while building this suite:
+    ``pp_prop``/``IODimVjpAlgorithm`` raises when a conv layer has a
+    trainable bias, regardless of layout (NCH or NWC) -- the custom-VJP bwd
+    rule returns the bias cotangent still shaped per-position
+    ``(batch, *spatial, out_ch)`` instead of reduced to the bias's own shape
+    ``(out_ch,)``.
+
+    This is unrelated to the Task 6/7 fixes under audit: ``D_RTRL``
+    (param-dim) handles conv+bias exactly (see
+    ``test_d_rtrl_singlestep_matches_bptt_across_families['conv_nwc_bias']``);
+    only the IO-dim path used by ``pp_prop`` is affected. Fixing it would
+    require touching ``io_dim_vjp.py``, which is out of scope for this task
+    (see module docstring / architecture notes: io_dim_vjp.py's core logic is
+    never modified as part of this audit). This test pins the *current*
+    behavior with ``xfail(strict=True)`` so that a future fix is caught (the
+    xfail will start failing as an unexpected pass) rather than silently
+    going unnoticed.
+    """
+    factory, seed = _FAMILIES['conv_nwc_bias']
+    with brainstate.environ.context(precision=64):
+        xs = _xs_for('conv_nwc_bias', 1, seed)
+        with pytest.raises(ValueError, match='Custom VJP bwd rule'):
+            online_param_gradients_singlestep_naive(
+                factory, xs,
+                algo_factory=lambda m: braintrace.pp_prop(m, decay_or_rank=0.9, vjp_method='single-step'),
+            )

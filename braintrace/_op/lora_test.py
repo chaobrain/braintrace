@@ -620,3 +620,105 @@ class TestLoraFactorFns:
 
         assert_xy_to_dw_matches_vjp(rule=rule, impl=impl, x=x, hidden_dim=hidden,
                                     weights=weights, params=params, atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``instant_drtrl`` / ``solve_drtrl``
+# from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
+    """Derive ``_lora_instant_drtrl``'s ``'lora_b'`` trace and
+    ``_lora_solve_drtrl`` independently of their own source.
+
+    The ``'lora_b'`` trace holds an effective-weight (dense-style) trace for
+    :math:`W_{\\text{eff}} = \\alpha\\, b\\_fn(B)\\, a\\_fn(A)` (per
+    ``lora.py``'s module docstring, "no alpha/b_fn/a_fn factor" enters the
+    instantaneous term — those are chained back only at solve time). Since
+    ``y = x @ W_eff`` is exactly the dense-matmul forward, its Jacobian
+    ``dy_o/dW_eff[i, o']`` is diagonal in the two "out" indices — the same
+    structural fact exploited by :mod:`dense`'s ``yw_to_w``. This test
+    builds that Jacobian via ``jax.jacobian`` on the *unscaled, untransformed*
+    effective weight, confirms the diagonal structure, and checks the
+    rule's ``'lora_b'`` output against the raw-Jacobian contraction for a
+    random cotangent.
+
+    ``solve_drtrl`` has no new forward to differentiate (it contracts an
+    already-built trace); it is checked by an independent reimplementation
+    of the documented formula, built without reusing the rule's own code.
+    """
+
+    def test_instant_drtrl_lora_b_matches_jacobian_contraction(self):
+        import brainstate
+        from braintrace._op.lora import _lora_instant_drtrl
+        brainstate.random.seed(901)
+        n_in, n_out, rank = 4, 5, 2
+        B0 = brainstate.random.randn(n_in, rank)
+        A0 = brainstate.random.randn(rank, n_out)
+        x = brainstate.random.randn(n_in)
+
+        # Unscaled, untransformed effective weight -- matches the documented
+        # convention that the instant 'lora_b' term carries no alpha/b_fn/a_fn.
+        W_eff0 = B0 @ A0
+
+        def fwd_weff(W):
+            return x @ W
+
+        J = jax.jacobian(fwd_weff)(W_eff0)  # (out, in, out)
+        for o in range(n_out):
+            for o2 in range(n_out):
+                expected = x if o == o2 else jnp.zeros_like(x)
+                np.testing.assert_allclose(
+                    J[o, :, o2], expected, atol=1e-10,
+                    err_msg=f'Jacobian not diagonal at o={o}, o2={o2}',
+                )
+
+        g = brainstate.random.randn(n_out)
+        # Repeated-index-style contraction against the raw Jacobian (sum
+        # over the y-side out-index `m`, keep the trace's own out-index):
+        # built from J/g directly, never from the rule's own outer product.
+        ref_lora_b = jnp.einsum('m,mio->io', g, J)
+
+        out = _lora_instant_drtrl(
+            x, g, {'lora_b': B0, 'lora_a': A0}, alpha=2.0, has_bias=False,
+        )
+        np.testing.assert_allclose(out['lora_b'], ref_lora_b, atol=1e-10)
+
+    def test_solve_drtrl_matches_independent_reimplementation_with_transforms(self):
+        import brainstate
+        from braintrace._op.lora import _lora_solve_drtrl
+        brainstate.random.seed(902)
+        n_in, n_out, rank = 4, 5, 2
+        alpha = 2.0
+        B0 = brainstate.random.randn(n_in, rank)
+        A0 = brainstate.random.randn(rank, n_out)
+        b0 = brainstate.random.randn(n_out)
+
+        trace_lora_b = brainstate.random.randn(n_in, n_out)  # W_eff-shaped
+        trace_lora_a = brainstate.random.randn(rank, n_out)
+        trace_bias = brainstate.random.randn(n_out)
+        dg_hidden = brainstate.random.randn(n_out)
+
+        b_fn = lambda B: jnp.tanh(B)
+        a_fn = lambda A: 1.5 * A
+
+        # Independent reimplementation of the documented solve-time formula
+        # (never calls `_lora_solve_drtrl`'s own code):
+        g = dg_hidden[None, :]
+        G = trace_lora_b * g
+        A_eff = a_fn(A0)
+        dB_eff = alpha * (G @ A_eff.T)
+        _, vjp_b = jax.vjp(b_fn, B0)
+        ref_lora_b = vjp_b(dB_eff)[0]
+        ref_lora_a = trace_lora_a * g
+        ref_bias = trace_bias * dg_hidden
+
+        out = _lora_solve_drtrl(
+            dg_hidden,
+            {'lora_b': trace_lora_b, 'lora_a': trace_lora_a, 'bias': trace_bias},
+            {'lora_b': B0, 'lora_a': A0, 'bias': b0},
+            alpha=alpha, has_bias=True, b_fn=b_fn, a_fn=a_fn,
+        )
+        np.testing.assert_allclose(out['lora_b'], ref_lora_b, atol=1e-8)
+        np.testing.assert_allclose(out['lora_a'], ref_lora_a, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_bias, atol=1e-10)

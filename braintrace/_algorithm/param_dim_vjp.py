@@ -609,6 +609,13 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     :math:`\partial \mathcal{L}^{t'}/\partial \mathbf{h}^{t'}` the learning
     signal back-propagated from the loss at each step.
 
+    :math:`\mathbf{D}_f^t` is read off by
+    :meth:`~braintrace._algorithm.vjp_graph_executor.ETraceVjpGraphExecutor._compute_hid2weight_jacobian`
+    from a single all-ones-tangent ``jax.jvp`` of the ``y -> hidden`` map; see
+    that method's docstring for when this is exact (elementwise maps) versus
+    an approximation (non-elementwise maps, e.g. a normalization layer
+    between the weight op and the neuron).
+
     Real-Time Recurrent Learning (RTRL) propagates the full sensitivity
     :math:`\partial \mathbf{h}^t/\partial \boldsymbol{\theta}` forward in time,
     which costs :math:`O(|\theta| \cdot H)` memory. D-RTRL keeps only the
