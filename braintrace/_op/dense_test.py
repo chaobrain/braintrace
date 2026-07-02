@@ -19,6 +19,8 @@ Coverage:
 
 * Auto-dispatch — ``x.ndim >= 2`` selects ``etp_mm_p``; otherwise
   ``etp_mv_p``. Verified by jaxpr inspection.
+* Rank guard — ``x.ndim > 2`` raises ``ValueError`` (every ETP trace rule
+  assumes a ``(batch, in)`` layout); rank 1 / 2 remain accepted.
 * Forward correctness — agrees with ``x @ w (+ b)``.
 * Bias presence — ``has_bias`` parameter is propagated through ``bind``.
 * brainunit support — quantities, mixed units, unitless inputs.
@@ -35,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
 import brainunit as u
+import pytest
 
 import braintrace
 from braintrace._op import (
@@ -81,12 +84,6 @@ class TestForwardCorrectness:
         out = matmul(x, w, bias=b)
         np.testing.assert_allclose(out, x @ w + b)
 
-    def test_higher_rank_input(self):
-        x = jnp.ones((2, 5, 3))
-        w = jnp.ones((3, 4))
-        out = matmul(x, w)
-        np.testing.assert_allclose(out, x @ w)
-
 
 class TestAutoDispatch:
 
@@ -103,6 +100,40 @@ class TestAutoDispatch:
         jaxpr = jax.make_jaxpr(lambda x, w: matmul(x, w))(x, w)
         assert any(eqn.primitive is etp_mm_p for eqn in jaxpr.jaxpr.eqns)
         assert not any(eqn.primitive is etp_mv_p for eqn in jaxpr.jaxpr.eqns)
+
+
+# ---------------------------------------------------------------------------
+# Rank guard (M5) — every ETP trace rule assumes a (batch, in) layout, so
+# rank>2 ``x`` (which used to run silently in the forward pass) must be
+# rejected at the user-API boundary rather than produce a primitive whose
+# trace rules are structurally wrong.
+# ---------------------------------------------------------------------------
+
+class TestRankGuard:
+
+    def test_rank3_input_raises_valueerror(self):
+        x = jnp.ones((2, 5, 3))
+        w = jnp.ones((3, 4))
+        with pytest.raises(ValueError, match=r'ndim'):
+            matmul(x, w)
+
+    def test_rank4_input_raises_valueerror(self):
+        x = jnp.ones((2, 5, 6, 3))
+        w = jnp.ones((3, 4))
+        with pytest.raises(ValueError, match=r'ndim'):
+            matmul(x, w)
+
+    def test_rank1_input_still_accepted(self):
+        x = jnp.ones((3,))
+        w = jnp.ones((3, 4))
+        out = matmul(x, w)
+        np.testing.assert_allclose(out, x @ w)
+
+    def test_rank2_input_still_accepted(self):
+        x = jnp.ones((2, 3))
+        w = jnp.ones((3, 4))
+        out = matmul(x, w)
+        np.testing.assert_allclose(out, x @ w)
 
 
 class TestHasBiasParam:

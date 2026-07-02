@@ -588,7 +588,9 @@ def lora_matmul(
     Parameters
     ----------
     x : ArrayLike
-        Input array, shape ``(..., in_features)`` or ``(in_features,)``.
+        Input array, shape ``(batch, in_features)`` or ``(in_features,)``.
+        Higher-rank ``x`` (``x.ndim > 2``) is rejected with a ``ValueError``:
+        every ETP trace rule assumes one of these two layouts.
     B : ArrayLike
         Low-rank matrix :math:`B`, shape ``(in_features, rank)``.
     A : ArrayLike
@@ -605,22 +607,30 @@ def lora_matmul(
         gradients w.r.t. the raw ``lora_b`` weights are correct.
         The transform operates on the unitless mantissa; physical units are
         split off before and recombined after.
+        Pass a module-level function, not a fresh ``lambda``, if this is
+        called repeatedly: the hook is stored as a static ``eqn.params``
+        entry hashed by object identity, so two textually identical
+        ``lambda`` objects are cache misses and silently retrace every call.
     a_fn : callable or None, optional
         Elementwise transform applied to the ``A`` factor before the
         matrix multiplication.  ``a_fn(A)`` must return an array of the
         same shape as ``A``.  ``None`` means identity.
         The transform operates on the unitless mantissa; physical units are
         split off before and recombined after.
+        Same re-tracing caveat as ``b_fn``: pass a module-level function
+        rather than a fresh ``lambda``.
     bias_fn : callable or None, optional
         Elementwise transform applied to ``bias`` before adding.
         ``None`` means identity.
         The transform operates on the unitless mantissa; physical units are
         split off before and recombined after.
+        Same re-tracing caveat as ``b_fn``: pass a module-level function
+        rather than a fresh ``lambda``.
 
     Returns
     -------
     ArrayLike
-        Output array, shape ``(..., out_features)`` or ``(out_features,)``.
+        Output array, shape ``(batch, out_features)`` or ``(out_features,)``.
 
     Examples
     --------
@@ -637,6 +647,15 @@ def lora_matmul(
         >>> print(y.shape)
         (16, 4)
     """
+    if x.ndim > 2:  # type: ignore[union-attr]
+        raise ValueError(
+            f'lora_matmul() supports x.ndim of 1 (unbatched `(in_features,)`) or 2 '
+            f'(batched `(batch, in_features)`); got x.ndim={x.ndim} '
+            f'(shape={x.shape}). Every ETP trace rule for etp_lora_mm_p / '
+            f'etp_lora_mv_p assumes one of those two layouts, so higher-rank '
+            f'inputs (e.g. `(batch, time, in_features)`) are not supported -- '
+            f'reshape/vmap over the extra axes before calling lora_matmul().'
+        )
     p = etp_lora_mm_p if x.ndim >= 2 else etp_lora_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)
     B_v, B_u = u.split_mantissa_unit(B)

@@ -32,6 +32,45 @@ __all__ = [
 ]
 
 
+def _fold_leading_axes(x: ArrayLike):
+    """Fold all leading axes of ``x`` into a single batch axis.
+
+    The rank-guarded ETP ops (:func:`braintrace.matmul`,
+    :func:`braintrace.lora_matmul`) accept only rank-1/rank-2 inputs, while
+    the nn layers document an ``(..., in_size)`` contract.  This helper
+    bridges the two: for ``x.ndim > 2`` it returns the rank-2 view
+    ``x.reshape(-1, in_size)`` plus an ``unfold`` callable that restores the
+    original leading axes on the op output; for ``x.ndim <= 2`` it returns
+    ``x`` unchanged and an identity ``unfold``, so the rank-1/rank-2 paths
+    are untouched.
+
+    ``reshape`` goes through ``brainunit`` so physical-unit quantities keep
+    their units on both the fold and the unfold.
+
+    Parameters
+    ----------
+    x : ArrayLike
+        Input array (or unit-carrying quantity) of shape ``(..., in_size)``.
+
+    Returns
+    -------
+    tuple
+        ``(x2, unfold)`` where ``x2`` has shape ``(prod(leading), in_size)``
+        (or is ``x`` itself when ``x.ndim <= 2``) and ``unfold`` maps an
+        output of shape ``(prod(leading), out_size)`` back to
+        ``(*leading, out_size)``.
+    """
+    if x.ndim <= 2:  # type: ignore[union-attr]  # scalars never reach here: callers feed (..., in_size)
+        return x, lambda y: y
+    lead_shape = x.shape[:-1]
+    x2 = u.math.reshape(x, (-1, x.shape[-1]))
+
+    def unfold(y: ArrayLike) -> ArrayLike:
+        return u.math.reshape(y, (*lead_shape, y.shape[-1]))
+
+    return x2, unfold
+
+
 class Linear(brainstate.nn.Linear):
     __module__ = 'braintrace.nn'
     __doc__ = (brainstate.nn.Linear.__doc__ or '').replace('brainstate', 'braintrace')
@@ -55,10 +94,11 @@ class Linear(brainstate.nn.Linear):
         """
         w = self.weight.value['weight']
         b = self.weight.value.get('bias')
+        x2, unfold = _fold_leading_axes(x)
         if self.w_mask is not None:
             mask = self.w_mask
-            return matmul(x, w, b, weight_fn=lambda ww: ww * mask)
-        return matmul(x, w, b)
+            return unfold(matmul(x2, w, b, weight_fn=lambda ww: ww * mask))
+        return unfold(matmul(x2, w, b))
 
 
 class SignedWLinear(brainstate.nn.SignedWLinear):
@@ -84,9 +124,10 @@ class SignedWLinear(brainstate.nn.SignedWLinear):
         """
         w = self.weight.value
         sign = self.w_sign
+        x2, unfold = _fold_leading_axes(x)
         if sign is not None:
-            return matmul(x, w, weight_fn=lambda ww: u.math.abs(ww) * sign)
-        return matmul(x, w, weight_fn=lambda ww: u.math.abs(ww))
+            return unfold(matmul(x2, w, weight_fn=lambda ww: u.math.abs(ww) * sign))
+        return unfold(matmul(x2, w, weight_fn=lambda ww: u.math.abs(ww)))
 
 
 class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
@@ -146,7 +187,8 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
         b = params.get('bias', None)
         # Do NOT pass bias into matmul; add it after gain so that bias is not
         # scaled by gain.  Correct forward: (x @ std(w)*mask) * gain + b.
-        result = matmul(x, params['weight'], weight_fn=_wfn)
+        x2, unfold = _fold_leading_axes(x)
+        result = unfold(matmul(x2, params['weight'], weight_fn=_wfn))
         if gain is not None:
             result = result * gain
         if b is not None:
@@ -285,7 +327,8 @@ class LoRA(brainstate.nn.LoRA):
         # ``lora_a`` is the input-facing ``(in, rank)`` factor and must be
         # applied before ``lora_b`` the ``(rank, out)`` factor:
         # ``y = alpha * x @ lora_a @ lora_b``.
-        out = lora_matmul(x, param['lora_a'], param['lora_b'], alpha=1.0 / lora_rank)
+        x2, unfold = _fold_leading_axes(x)
+        out = unfold(lora_matmul(x2, param['lora_a'], param['lora_b'], alpha=1.0 / lora_rank))
         if self.base_module is not None:
             if not callable(self.base_module):
                 raise ValueError('`self.base_module` must be callable.')
