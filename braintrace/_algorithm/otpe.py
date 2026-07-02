@@ -200,7 +200,6 @@ class OTPE(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         trace_clip_abs: Optional[float] = None,
-        **kwargs: Any,
     ) -> None:
         if mode not in ('full', 'approx'):
             raise ValueError(f"mode must be 'full' or 'approx'; got {mode!r}")

@@ -627,7 +627,6 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
-        **kwargs: Any,
     ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
