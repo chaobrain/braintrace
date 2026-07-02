@@ -24,6 +24,7 @@ __all__ = [
     'Literal',
     'new_var',
     'new_jaxpr_eqn',
+    'stop_gradient_p',
     'is_jit_primitive',
     'is_scan_primitive',
     'is_while_primitive',
@@ -36,6 +37,22 @@ try:
     from jax.extend.core import new_jaxpr_eqn
 except ImportError:  # older JAX exposes it on jax.core only
     from jax.core import new_jaxpr_eqn
+
+try:
+    from jax._src.ad_util import stop_gradient_p
+except ImportError:  # future JAX relocation: recover the primitive by tracing
+    import jax.numpy as _jnp
+
+    _probe_eqns = jax.make_jaxpr(jax.lax.stop_gradient)(_jnp.zeros((1,))).jaxpr.eqns
+    if len(_probe_eqns) != 1 or _probe_eqns[0].primitive.name != 'stop_gradient':
+        raise ImportError(
+            'Could not locate the stop_gradient primitive: jax._src.ad_util no '
+            'longer exposes stop_gradient_p and tracing jax.lax.stop_gradient '
+            f'produced {[e.primitive.name for e in _probe_eqns]} instead of a '
+            'single stop_gradient equation. Update braintrace._compatible_imports '
+            'for this JAX version.'
+        )
+    stop_gradient_p = _probe_eqns[0].primitive
 
 
 def new_var(suffix, aval):

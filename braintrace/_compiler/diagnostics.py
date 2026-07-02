@@ -104,6 +104,23 @@ class DiagnosticKind(str, Enum):
     SCAN_UNROLL_SKIPPED = 'scan_unroll_skipped'
     RELATION_EXCLUDED_SLICED_WEIGHT = 'relation_excluded_sliced_weight'
 
+    # Opaque control flow touching weights / hidden states (Phase 3)
+    #
+    # ``WEIGHT_IN_WHILE``: a tracked weight invar is consumed by a ``while``
+    # equation — always an ERROR (a data-dependent trip count admits no fixed
+    # per-iteration hoisting, so the weight cannot participate in online
+    # learning).
+    # ``CONTROL_FLOW_OPAQUE_FWD``: a weight-free opaque ``scan``/``while``/
+    # ``cond`` produces a hidden state and is kept as an opaque forward node
+    # (INFO; see ``ControlFlowPolicy.while_hidden``).
+    # ``CONTROL_FLOW_RECURRENT_MIXING``: an opaque control-flow body applies a
+    # recurrent weight-mixing primitive to the carried hidden state, so the
+    # equation is excluded from the hidden-to-hidden transition in the default
+    # ("without recurrence") grouping mode (WARNING).
+    WEIGHT_IN_WHILE = 'weight_in_while'
+    CONTROL_FLOW_OPAQUE_FWD = 'control_flow_opaque_fwd'
+    CONTROL_FLOW_RECURRENT_MIXING = 'control_flow_recurrent_mixing'
+
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
     PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'

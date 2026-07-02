@@ -37,6 +37,7 @@ from braintrace._algorithm.oracle_models import (
     stacked_tanh_rnn,
     tanh_rnn,
     tied_weight_rnn,
+    while_settle_twin_rnn,
 )
 
 ATOL_BPTT = 1e-4
@@ -101,6 +102,10 @@ _EXACT_MULTISTEP_ALGOS = {
 # scan_body exercises the Phase 2 inner-scan unrolling: ETP matmuls inside a
 # `for_loop` body must stay BPTT-exact after the scan is unrolled at
 # extraction time.
+# while_twin anchors the Phase 3 while-hidden equivalence to ground truth: it
+# is the hand-composed (no-while) twin of while_settle_rnn, so proving
+# twin == BPTT here plus while == twin (while_support_test.py, single-step)
+# chains the while model to the oracle.
 _EXACT_CASES = (
     [('tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('stacked_tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
@@ -108,6 +113,7 @@ _EXACT_CASES = (
     + [('scan_body', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('leaky_linear', 'D_RTRL')]
     + [('cond_gate', 'D_RTRL')]
+    + [('while_twin', 'D_RTRL'), ('while_twin', 'pp_prop_full')]
 )
 
 
@@ -124,6 +130,8 @@ def _model_spec(name):
         return tied_weight_rnn(n_rec=3, seed=0)
     if name == 'scan_body':
         return scan_body_rnn(n_rec=3, loops=3, seed=0)
+    if name == 'while_twin':
+        return while_settle_twin_rnn(n_in=3, n_rec=4, seed=0)
     raise KeyError(name)
 
 

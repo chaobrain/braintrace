@@ -57,6 +57,8 @@ class TestControlFlowPolicy:
     def test_defaults(self):
         assert DEFAULT_CONTROL_FLOW_POLICY.cond == 'convert'
         assert DEFAULT_CONTROL_FLOW_POLICY.scan_unroll_limit == 16
+        assert DEFAULT_CONTROL_FLOW_POLICY.while_hidden == 'opaque-fwd'
+        assert DEFAULT_CONTROL_FLOW_POLICY.etp_in_control_flow == 'error'
 
     def test_opaque_returns_input_unchanged(self):
         def f(x, w):

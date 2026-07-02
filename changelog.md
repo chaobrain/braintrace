@@ -5,6 +5,53 @@
 
 ### Highlights
 
+#### New: `while`-loop policy — weight-free opaque-forward support (Phase 3)
+
+- **Weight-free `lax.while_loop`s that read/update hidden state now
+  compile.** Under the new default policy knob
+  `ControlFlowPolicy(while_hidden='opaque-fwd')`, a `while` whose inputs
+  carry no trainable ETP weight is kept as an *opaque forward node*: the
+  compiler registers relations whose `y`→hidden tail crosses the loop,
+  emits a `CONTROL_FLOW_OPAQUE_FWD` INFO diagnostic, and extracts
+  hidden-to-hidden Jacobians for any hidden group whose transition contains
+  a `while` in **forward mode** (`jax.jvp`-based `jacfwd_last_dim` /
+  `jacfwd` block extraction) — reverse mode through `while_loop` is
+  structurally unsupported by JAX. Set
+  `ControlFlowPolicy(while_hidden='error')` to reject such loops instead.
+- **Perturbation detach keeps the VJP reverse-traceable.** The hidden
+  perturbation pass rewires every hidden-producing `while` to consume
+  `stop_gradient` copies of its inputs in the *perturbed jaxpr only*; the
+  `h = fresh + ε` add stays outside the detach, so the single-step learning
+  signal of the loop's **own** hidden group (taken exclusively from the
+  perturbation cotangents) is exact. Verified: D-RTRL single-step gradients
+  on a while-settle model match its hand-composed no-`while` twin
+  element-wise, and the twin matches the BPTT oracle.
+  **Limitation:** the detach zeroes every same-step reverse path *through*
+  the loop, so a parameter or other hidden group whose only same-step path
+  to the loss crosses the loop — e.g. the weights of an upstream layer
+  feeding a while-hidden layer — receives a **zero** learning signal (a
+  WARNING-level `CONTROL_FLOW_OPAQUE_FWD` diagnostic records each detach;
+  the zero-upstream-gradient behavior is pinned by test).
+  `vjp_method='multi-step'` on a `while`-hidden model still raises JAX's
+  reverse-through-`while_loop` `ValueError` (documented limitation — use
+  the default single-step path).
+- **A weight used inside a `while` is now a hard, actionable error**
+  (`WEIGHT_IN_WHILE` ERROR diagnostic + `NotImplementedError`): move the
+  weight application outside the loop so the loop consumes only its result
+  (subject to the same-step limitation above), or use a fixed-length
+  scan/`for_loop` (which the compiler unrolls).
+- **Breaking: ETP primitives left inside an un-flattened `scan`/`while`/
+  `cond` body now raise** instead of being silently warned-and-excluded
+  (`etp_in_control_flow='error'`, the new default). Pass
+  `ControlFlowPolicy(etp_in_control_flow='exclude')` to restore the old
+  warn-and-exclude behavior.
+- **Position-mixing guard**: a `while`/opaque control-flow body that applies
+  `dot_general`/`conv_general_dilated` to hidden-derived values (recurrent
+  weight mixing inside the loop) cannot be expressed as a per-position
+  Jacobian; the compiler treats it as a boundary, emits a
+  `CONTROL_FLOW_RECURRENT_MIXING` WARNING, and falls back to the
+  zero-recurrence (e-prop-style) group.
+
 #### New: inner-`scan` unrolling (compiler canonicalization, Phase 2)
 
 - **ETP operations inside `lax.scan` / `brainstate.transform.for_loop`

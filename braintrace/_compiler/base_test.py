@@ -34,6 +34,12 @@ from braintrace._compiler.base import (
     check_unsupported_op,
     JaxprEvaluation,
 )
+from braintrace._compiler.canonicalize import ControlFlowPolicy
+from braintrace._compiler.diagnostics import (
+    DiagnosticKind,
+    DiagnosticLevel,
+    diagnostic_context,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +251,8 @@ class TestCheckUnsupportedOp(unittest.TestCase):
         self.assertIn('weight states', str(ctx.exception))
 
     def test_hidden_var_in_outvars_raises(self):
+        """With ``while_hidden='error'`` (the pre-Phase-3 behaviour), a hidden
+        state produced by an opaque control-flow equation still raises."""
         v_in = _make_var(0)
         h_out = _make_var(1)
         eqn = _make_eqn([v_in], [h_out])
@@ -252,6 +260,7 @@ class TestCheckUnsupportedOp(unittest.TestCase):
             hidden_outvars={h_out},
             outvar_to_hidden_path={h_out: ('layer', 'hidden')},
         )
+        obj.control_flow = ControlFlowPolicy(while_hidden='error')
         with self.assertRaises(NotImplementedError) as ctx:
             check_unsupported_op(obj, eqn, 'while')
         self.assertIn('while', str(ctx.exception))
@@ -311,6 +320,120 @@ class TestCheckUnsupportedOp(unittest.TestCase):
         check_unsupported_op(obj, eqn, 'scan')
 
 
+class TestCheckUnsupportedOpPhase3(unittest.TestCase):
+    """Phase 3 control-flow policy: while-specific weight error, and the
+    opaque-forward relaxation for weight-free hidden-producing control flow."""
+
+    def _hidden_obj(self, h_out, **overrides):
+        return _make_evaluator(
+            hidden_outvars={h_out},
+            outvar_to_hidden_path={h_out: ('layer', 'hidden')},
+            **overrides,
+        )
+
+    def test_weight_in_while_raises_actionable_error(self):
+        """A weight consumed by a ``while`` raises with guidance (mentions
+        'while' and the fixed-length-scan alternative) and emits the
+        dedicated ``WEIGHT_IN_WHILE`` kind, not the generic one."""
+        w = _make_var(0)
+        eqn = _make_while_eqn([w], [_make_var(1)])
+        obj = _make_evaluator(weight_invars={w})
+        with diagnostic_context() as reporter:
+            with self.assertRaises(NotImplementedError) as ctx:
+                check_unsupported_op(obj, eqn, 'while')
+        msg = str(ctx.exception)
+        self.assertIn('while', msg)
+        self.assertIn('fixed-length', msg)
+        kinds = [r.kind for r in reporter.records()]
+        self.assertIn(DiagnosticKind.WEIGHT_IN_WHILE, kinds)
+        self.assertNotIn(DiagnosticKind.WEIGHT_IN_CONTROL_FLOW, kinds)
+        record = reporter.records()[0]
+        self.assertIs(record.level, DiagnosticLevel.ERROR)
+
+    def test_weight_in_scan_keeps_generic_kind(self):
+        """Weight-in-scan/cond keeps the pre-existing generic diagnostic."""
+        w = _make_var(0)
+        for factory, op_name in [(_make_scan_eqn, 'scan'), (_make_cond_eqn, 'cond')]:
+            eqn = factory([w], [_make_var(1)])
+            obj = _make_evaluator(weight_invars={w})
+            with diagnostic_context() as reporter:
+                with self.assertRaises(NotImplementedError):
+                    check_unsupported_op(obj, eqn, op_name)
+            kinds = [r.kind for r in reporter.records()]
+            self.assertIn(DiagnosticKind.WEIGHT_IN_CONTROL_FLOW, kinds)
+            self.assertNotIn(DiagnosticKind.WEIGHT_IN_WHILE, kinds)
+
+    def test_hidden_from_control_flow_default_policy_is_opaque_fwd(self):
+        """Under the default policy, a weight-free while/scan/cond producing a
+        hidden state does NOT raise; an INFO ``CONTROL_FLOW_OPAQUE_FWD``
+        record is emitted instead."""
+        for factory, op_name in [
+            (_make_while_eqn, 'while'),
+            (_make_scan_eqn, 'scan'),
+            (_make_cond_eqn, 'cond'),
+        ]:
+            h_out = _make_var(1)
+            eqn = factory([_make_var(0)], [h_out])
+            obj = self._hidden_obj(h_out)
+            with diagnostic_context() as reporter:
+                check_unsupported_op(obj, eqn, op_name)  # must not raise
+            records = [
+                r for r in reporter.records()
+                if r.kind is DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD
+            ]
+            self.assertEqual(len(records), 1, f'op={op_name}')
+            self.assertIs(records[0].level, DiagnosticLevel.INFO)
+            self.assertEqual(records[0].context['op_name'], op_name)
+            self.assertEqual(records[0].context['hidden_path'], ('layer', 'hidden'))
+
+    def test_hidden_from_while_error_policy_raises(self):
+        """``while_hidden='error'`` restores the pre-Phase-3 hard error."""
+        h_out = _make_var(1)
+        eqn = _make_while_eqn([_make_var(0)], [h_out])
+        obj = self._hidden_obj(
+            h_out, control_flow=ControlFlowPolicy(while_hidden='error')
+        )
+        with self.assertRaises(NotImplementedError) as ctx:
+            check_unsupported_op(obj, eqn, 'while')
+        self.assertIn('hidden states', str(ctx.exception))
+
+    def test_hidden_from_jit_still_raises(self):
+        """The opaque-forward relaxation applies only to scan/while/cond; a
+        hidden state produced by an opaque jit region still raises."""
+        h_out = _make_var(1)
+        eqn = _make_jit_eqn([_make_var(0)], [h_out])
+        obj = self._hidden_obj(h_out)
+        with self.assertRaises(NotImplementedError):
+            check_unsupported_op(obj, eqn, 'jit')
+
+    def test_bogus_while_hidden_raises_value_error(self):
+        """An invalid ``while_hidden`` value is a use-site ``ValueError``."""
+        h_out = _make_var(1)
+        eqn = _make_while_eqn([_make_var(0)], [h_out])
+        obj = self._hidden_obj(
+            h_out, control_flow=ControlFlowPolicy(while_hidden='bogus')
+        )
+        with self.assertRaises(ValueError) as ctx:
+            check_unsupported_op(obj, eqn, 'while')
+        self.assertIn('while_hidden', str(ctx.exception))
+
+    def test_object_without_control_flow_attr_uses_default(self):
+        """Callers that never set ``control_flow`` (e.g. hand-rolled mock
+        objects) behave as the default policy."""
+
+        class Bare:
+            weight_invars = set()
+            hidden_outvars = None
+            outvar_to_hidden_path = None
+
+        h_out = _make_var(1)
+        obj = Bare()
+        obj.hidden_outvars = {h_out}
+        obj.outvar_to_hidden_path = {h_out: ('h',)}
+        eqn = _make_while_eqn([_make_var(0)], [h_out])
+        check_unsupported_op(obj, eqn, 'while')  # must not raise
+
+
 # ===========================================================================
 # Tests for JaxprEvaluation
 # ===========================================================================
@@ -344,6 +467,16 @@ class TestJaxprEvaluationInit(unittest.TestCase):
         self.assertEqual(evaluator.hidden_outvars, set())
         self.assertEqual(evaluator.invar_to_hidden_path, {})
         self.assertEqual(evaluator.outvar_to_hidden_path, {})
+
+    def test_default_control_flow_policy_stored(self):
+        from braintrace._compiler.canonicalize import DEFAULT_CONTROL_FLOW_POLICY
+        evaluator = _make_evaluator()
+        self.assertIs(evaluator.control_flow, DEFAULT_CONTROL_FLOW_POLICY)
+
+    def test_custom_control_flow_policy_stored(self):
+        policy = ControlFlowPolicy(while_hidden='error')
+        evaluator = _make_evaluator(control_flow=policy)
+        self.assertIs(evaluator.control_flow, policy)
 
 
 class TestJaxprEvaluationEvalEqn(unittest.TestCase):
@@ -544,11 +677,25 @@ class TestJaxprEvaluationEvalScan(unittest.TestCase):
             evaluator._eval_scan(eqn)
         self.assertIn('scan', str(ctx.exception))
 
-    def test_scan_with_hidden_outvar_raises(self):
+    def test_scan_with_hidden_outvar_default_policy_evaluates(self):
+        """Default policy: a weight-free hidden-producing scan is kept as an
+        opaque forward node and still dispatched to ``_eval_eqn``."""
         h = _make_var(1)
         evaluator = _make_concrete_evaluator(
             hidden_outvars={h},
             outvar_to_hidden_path={h: ('h',)},
+        )
+        eqn = _make_scan_eqn([_make_var(0)], [h])
+
+        evaluator._eval_scan(eqn)
+        self.assertEqual(len(evaluator.evaluated_eqns), 1)
+
+    def test_scan_with_hidden_outvar_error_policy_raises(self):
+        h = _make_var(1)
+        evaluator = _make_concrete_evaluator(
+            hidden_outvars={h},
+            outvar_to_hidden_path={h: ('h',)},
+            control_flow=ControlFlowPolicy(while_hidden='error'),
         )
         eqn = _make_scan_eqn([_make_var(0)], [h])
 
@@ -579,11 +726,25 @@ class TestJaxprEvaluationEvalWhile(unittest.TestCase):
             evaluator._eval_while(eqn)
         self.assertIn('while', str(ctx.exception))
 
-    def test_while_with_hidden_outvar_raises(self):
+    def test_while_with_hidden_outvar_default_policy_evaluates(self):
+        """Default policy: a weight-free hidden-producing while is kept as an
+        opaque forward node and still dispatched to ``_eval_eqn``."""
         h = _make_var(1)
         evaluator = _make_concrete_evaluator(
             hidden_outvars={h},
             outvar_to_hidden_path={h: ('h',)},
+        )
+        eqn = _make_while_eqn([_make_var(0)], [h])
+
+        evaluator._eval_while(eqn)
+        self.assertEqual(len(evaluator.evaluated_eqns), 1)
+
+    def test_while_with_hidden_outvar_error_policy_raises(self):
+        h = _make_var(1)
+        evaluator = _make_concrete_evaluator(
+            hidden_outvars={h},
+            outvar_to_hidden_path={h: ('h',)},
+            control_flow=ControlFlowPolicy(while_hidden='error'),
         )
         eqn = _make_while_eqn([_make_var(0)], [h])
 
@@ -614,11 +775,25 @@ class TestJaxprEvaluationEvalCond(unittest.TestCase):
             evaluator._eval_cond(eqn)
         self.assertIn('cond', str(ctx.exception))
 
-    def test_cond_with_hidden_outvar_raises(self):
+    def test_cond_with_hidden_outvar_default_policy_evaluates(self):
+        """Default policy: a weight-free hidden-producing cond is kept as an
+        opaque forward node and still dispatched to ``_eval_eqn``."""
         h = _make_var(1)
         evaluator = _make_concrete_evaluator(
             hidden_outvars={h},
             outvar_to_hidden_path={h: ('h',)},
+        )
+        eqn = _make_cond_eqn([_make_var(0)], [h])
+
+        evaluator._eval_cond(eqn)
+        self.assertEqual(len(evaluator.evaluated_eqns), 1)
+
+    def test_cond_with_hidden_outvar_error_policy_raises(self):
+        h = _make_var(1)
+        evaluator = _make_concrete_evaluator(
+            hidden_outvars={h},
+            outvar_to_hidden_path={h: ('h',)},
+            control_flow=ControlFlowPolicy(while_hidden='error'),
         )
         eqn = _make_cond_eqn([_make_var(0)], [h])
 

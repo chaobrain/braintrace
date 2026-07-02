@@ -94,6 +94,25 @@ class ControlFlowPolicy:
         :attr:`~braintrace.DiagnosticKind.SCAN_UNROLL_SKIPPED` warning, and
         the existing control-flow restrictions apply. ``0`` (or negative)
         disables unrolling entirely. Default ``16``.
+    while_hidden : str, optional
+        How an *opaque* control-flow equation (``while``, or a ``scan``/
+        ``cond`` the canonicalizer left opaque) that produces a hidden-state
+        output **without consuming any weight invar** is handled.
+        ``'opaque-fwd'`` (default) keeps it as an opaque forward node: the
+        whole equation is embedded in the hidden-to-hidden transition and
+        its Jacobian is extracted in forward mode (``while`` has no
+        reverse-mode rule), recorded as a
+        :attr:`~braintrace.DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD` INFO
+        diagnostic. ``'error'`` restores the pre-opaque-forward behaviour of
+        raising ``NotImplementedError``.
+    etp_in_control_flow : str, optional
+        How an ETP primitive found *inside* a remaining opaque control-flow
+        body is handled during relation discovery. ``'error'`` (default)
+        raises ``NotImplementedError`` — that weight would otherwise
+        silently drop out of online learning. ``'exclude'`` restores the
+        previous behaviour of a loud warning
+        (:attr:`~braintrace.DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW`)
+        plus exclusion of the weight from ETP relations.
 
     Notes
     -----
@@ -133,6 +152,8 @@ class ControlFlowPolicy:
 
     cond: str = 'convert'
     scan_unroll_limit: int = 16
+    while_hidden: str = 'opaque-fwd'
+    etp_in_control_flow: str = 'error'
 
 
 DEFAULT_CONTROL_FLOW_POLICY = ControlFlowPolicy()

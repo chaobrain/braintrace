@@ -314,13 +314,31 @@ def compile_etrace_graph(
         Jacobian is extracted (RTRL-exact temporal credit, e.g. for
         :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`).
     control_flow : ControlFlowPolicy or None, optional
-        Policy governing control-flow canonicalization, forwarded to
-        :func:`~braintrace.extract_module_info`. ``None`` (default) uses the
-        default policy, which if-converts every ETP-relevant ``cond`` into
-        inlined branches + ``select_n`` (both branches then execute every
-        step). Pass ``ControlFlowPolicy(cond='opaque')`` to restore the
-        previous behavior (weights inside ``cond`` raise
-        ``NotImplementedError``).
+        Policy governing control-flow canonicalization and downstream
+        handling, forwarded to :func:`~braintrace.extract_module_info` and
+        (via ``ModuleInfo.control_flow``) to every later compiler pass.
+        ``None`` (default) uses the default policy, which:
+
+        - if-converts every ETP-relevant ``cond`` into inlined branches +
+          ``select_n`` (both branches then execute every step); pass
+          ``ControlFlowPolicy(cond='opaque')`` to restore the previous
+          behavior (weights inside ``cond`` raise ``NotImplementedError``);
+        - unrolls every ETP-relevant ``scan`` of static length at most
+          ``scan_unroll_limit`` (default 16);
+        - keeps a **weight-free** ``while`` that reads/updates hidden state
+          as an opaque forward node (``while_hidden='opaque-fwd'``):
+          hidden-to-hidden Jacobians for groups whose transition crosses the
+          loop are extracted in forward mode, and the perturbation pass
+          detaches the loop's inputs with ``stop_gradient`` so the perturbed
+          jaxpr stays reverse-traceable. Pass
+          ``ControlFlowPolicy(while_hidden='error')`` to reject such loops
+          instead. A weight *used through an ETP primitive* inside a
+          ``while`` is always a hard error;
+        - raises on ETP primitives left inside a control-flow body the
+          canonicalizer could not flatten
+          (``etp_in_control_flow='error'``); pass
+          ``ControlFlowPolicy(etp_in_control_flow='exclude')`` to restore
+          the warn-and-exclude behavior.
 
     Returns
     -------
