@@ -621,7 +621,6 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         trace_dtype: Optional[DTypeLike] = None,
-        **kwargs: Any,
     ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method)
         # ``fast_solve=True`` enables closed-form einsum kernels for

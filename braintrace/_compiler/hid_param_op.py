@@ -80,6 +80,7 @@ from .diagnostics import (
     emit,
 )
 from .hidden_group import HiddenGroup, find_hidden_groups_from_minfo
+from .jaxpr_graph import build_consumer_map, build_producer_map, forward_closure
 from .module_info import ModuleInfo, extract_module_info
 
 __all__ = [
@@ -168,6 +169,14 @@ class HiddenParamOpRelation(NamedTuple):
         Per-key dict mapping each key to the backward-trace processing chain
         (primitives traversed from the trainable invar back to the originating
         ``ParamState`` invar).
+
+    Notes
+    -----
+    The dict-typed fields default to class-level empty dicts that are SHARED
+    across instances (the usual ``NamedTuple`` default semantics). The
+    compiler always passes freshly-built dicts and no consumer mutates a
+    relation, so this never bites in the pipeline — but when hand-constructing
+    relations in tests, pass explicit dicts instead of mutating the defaults.
     """
     primitive: Primitive
     x_var: Optional[Var]
@@ -248,29 +257,6 @@ HiddenParamOpRelation.__module__ = 'braintrace'
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers — producer / consumer maps
-# ---------------------------------------------------------------------------
-
-def _build_producer_map(jaxpr: Jaxpr) -> Dict[Var, JaxprEqn]:
-    """Map each variable to the equation that produces it."""
-    producers: Dict[Var, JaxprEqn] = {}
-    for eqn in jaxpr.eqns:
-        for v in eqn.outvars:
-            producers[v] = eqn
-    return producers
-
-
-def _build_consumer_map(jaxpr: Jaxpr) -> Dict[Var, List[JaxprEqn]]:
-    """Map each variable to the equations that consume it."""
-    consumers: Dict[Var, List[JaxprEqn]] = {}
-    for eqn in jaxpr.eqns:
-        for v in eqn.invars:
-            if isinstance(v, Var):
-                consumers.setdefault(v, []).append(eqn)
-    return consumers
-
-
-# ---------------------------------------------------------------------------
 # Layout dispatch — locate weight / x / y vars on a primitive equation
 # ---------------------------------------------------------------------------
 
@@ -327,6 +313,13 @@ def _trace_var_to_param(
     deduplicated, insertion-ordered tuple of intermediate primitive types
     traversed (mask multiplication, weight_fn, etc.). When the var is the
     raw ParamState invar, the chain is empty.
+
+    Known limitation: the backward BFS stops at the FIRST ParamState invar it
+    reaches. A trainable invar computed from *two* ParamStates (e.g.
+    ``w1 + w2``) is attributed to whichever the search reaches first; the
+    other's gradient is silently dropped. No library op produces such a
+    joint-parametric trainable input today — route each ParamState through
+    its own ETP op if you need both trained online.
     """
     if cache is not None and var in cache:
         cached = cache[var]
@@ -434,14 +427,53 @@ def _bfs_forward(
     returns the full reachability set (used by path classification).
 
     When ``outvar_to_group_index`` is provided, the search restricts itself
-    to hidden outvars in the *closest* hidden group — outvars from different
-    groups are pruned so the relation only tracks the recurrence of the
-    layer this primitive actually feeds.
+    to the *directly fed* hidden groups: phase 1 walks forward from
+    ``start_var`` WITHOUT expanding through hidden outvars, so it collects
+    exactly the groups whose hidden state the primitive output reaches on a
+    hidden-free path. Phase 2 is the ordinary traversal filtered to those
+    groups. This keeps a fan-out to several independent groups intact (all
+    of them are directly fed) while still excluding downstream layers that
+    are reachable only *through* another hidden state.
     """
+    direct_groups: Optional[Set[int]] = None
+    if outvar_to_group_index is not None:
+        # --- Phase 1: directly-fed group discovery ------------------------
+        # Do not expand through hidden outvars: a group reachable only via
+        # another hidden state is a downstream layer, not a direct target.
+        direct_groups = set()
+        frontier: deque = deque([start_var])
+        visited: Set[Var] = set()
+        while frontier:
+            v = frontier.popleft()
+            if v in visited:
+                continue
+            visited.add(v)
+            if v in hidden_outvar_set:
+                g = outvar_to_group_index.get(v)
+                if g is None:
+                    raise ValueError(
+                        f'Hidden outvar {v} carries no hidden-group index. '
+                        f'The hidden-group table and the jaxpr disagree — '
+                        f'both must come from the same extract_module_info '
+                        f'result.'
+                    )
+                direct_groups.add(g)
+                continue
+            for eqn in consumer_map.get(v, []):
+                if (
+                    stop_at_non_grad_etp
+                    and is_etp_primitive(eqn.primitive)
+                    and not is_etp_enable_gradient_primitive(eqn.primitive)
+                ):
+                    continue
+                for ov in eqn.outvars:
+                    if ov not in visited:
+                        frontier.append(ov)
+
+    # --- Phase 2: full collection, filtered to the directly-fed groups ----
     reachable: Dict[Var, None] = {}
-    home_group_indices: Set[int] = set()
-    frontier: deque = deque([start_var])
-    visited: Set[Var] = set()
+    frontier = deque([start_var])
+    visited = set()
     blocking_eqns: List[JaxprEqn] = []
     blocking_seen: Set[int] = set()
     while frontier:
@@ -450,12 +482,16 @@ def _bfs_forward(
             continue
         visited.add(v)
         if v in hidden_outvar_set:
-            if outvar_to_group_index is not None:
+            if direct_groups is not None and outvar_to_group_index is not None:
                 g = outvar_to_group_index.get(v)
-                assert g is not None  # hidden outvars always carry a group index
-                if not home_group_indices:
-                    home_group_indices.add(g)
-                if g in home_group_indices:
+                if g is None:
+                    raise ValueError(
+                        f'Hidden outvar {v} carries no hidden-group index. '
+                        f'The hidden-group table and the jaxpr disagree — '
+                        f'both must come from the same extract_module_info '
+                        f'result.'
+                    )
+                if g in direct_groups:
                     reachable[v] = None
                 else:
                     continue
@@ -484,13 +520,17 @@ def _classify_path(
     consumer_map: Dict[Var, List[JaxprEqn]],
     producer_map: Dict[Var, JaxprEqn],
     self_eqn: JaxprEqn,
+    forward: Dict[Var, None],
 ) -> str:
     """Classify the set of paths from ``y_var`` to ``hidden_outvar``.
 
     Returns one of :class:`PathClassification` constants.
 
     Algorithm:
-      * ``forward`` = vars reachable from y_var without restriction.
+      * ``forward`` = vars reachable from y_var without restriction —
+        precomputed once per primitive equation by the caller (it depends
+        only on ``y_var``, not on ``hidden_outvar``) via
+        :func:`jaxpr_graph.forward_closure`.
       * ``backward`` = vars that can reach hidden_outvar by following
         consumers in reverse (i.e. equations that produce hidden_outvar).
       * ``mid`` = forward & backward = vars on at least one path y -> h.
@@ -500,19 +540,6 @@ def _classify_path(
         check if hidden_outvar is still reachable. Yes -> ``MIXED``;
         No -> ``ALL_THROUGH_OTHER_ETP``.
     """
-    # Forward reachability (unrestricted).
-    forward: Set[Var] = set()
-    frontier: deque = deque([y_var])
-    while frontier:
-        v = frontier.popleft()
-        if v in forward:
-            continue
-        forward.add(v)
-        for eqn in consumer_map.get(v, []):
-            for ov in eqn.outvars:
-                if ov not in forward:
-                    frontier.append(ov)
-
     if hidden_outvar not in forward:
         # Should not happen — caller already established reachability.
         return PathClassification.ALL_THROUGH_OTHER_ETP
@@ -673,11 +700,15 @@ def _scan_jaxpr_for_etp_eqns(
                     kind=DiagnosticKind.PRIMITIVE_INSIDE_NESTED_JIT,
                     level=DiagnosticLevel.WARNING,
                     message=(
-                        'Found ETP primitives inside a nested jit/pjit. '
-                        'This is currently handled by tracing through the '
-                        'outer jaxpr. If you see incorrect results, please '
-                        'avoid wrapping individual ETP calls in jax.jit. '
-                        f'Report issues at {git_issue_addr}.'
+                        'Found ETP primitives inside a jit/pjit call that was '
+                        'not inlined before relation analysis. These '
+                        'primitives are NOT registered as relations. The '
+                        'standard pipeline (extract_module_info / '
+                        'compile_etrace_graph) inlines user jit bodies before '
+                        'analysis; when running the relation pass on a raw '
+                        'jaxpr, apply '
+                        'braintrace._compiler.jaxpr_graph.inline_jit_calls '
+                        f'first. Report issues at {git_issue_addr}.'
                     ),
                     context={'inner_primitives': tuple(
                         e.primitive for e in inner_etp
@@ -723,15 +754,36 @@ def find_hidden_param_op_relations_from_jaxpr(
     **_ignored,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
-    producers = _build_producer_map(jaxpr)
-    consumers = _build_consumer_map(jaxpr)
+    producers = build_producer_map(jaxpr)
+    consumers = build_consumer_map(jaxpr)
     hidden_outvar_set: Set[Var] = set(outvar_to_hidden_path.keys())
     weight_trace_cache: Dict[Var, Optional[Tuple[Path, Tuple[Primitive, ...]]]] = {}
+
+    # --- Seam validation: the hidden-group table and the jaxpr's hidden
+    # tables must describe the SAME compile. A missing group for a hidden
+    # path, or a group referring to outvars this jaxpr does not produce,
+    # means the two came from different extract_module_info results and
+    # every downstream Var-identity lookup would silently misbehave.
+    missing = [p for p in outvar_to_hidden_path.values() if p not in hid_path_to_group]
+    if missing:
+        raise ValueError(
+            f'Hidden state path(s) {missing} have no hidden group. The '
+            f'hidden-group table and the jaxpr must come from the same '
+            f'extract_module_info result.'
+        )
+    for group in hid_path_to_group.values():
+        for ov in group.hidden_outvars:
+            if ov not in hidden_outvar_set:
+                raise ValueError(
+                    f'Hidden group {group.index} refers to hidden outvar '
+                    f'{ov} which this jaxpr does not produce. The '
+                    f'hidden-group table and the jaxpr must come from the '
+                    f'same extract_module_info result.'
+                )
 
     outvar_to_group_index: Dict[Var, int] = {
         ov: hid_path_to_group[p].index
         for ov, p in outvar_to_hidden_path.items()
-        if p in hid_path_to_group
     }
 
     etp_eqns = _scan_jaxpr_for_etp_eqns(jaxpr)
@@ -750,31 +802,10 @@ def find_hidden_param_op_relations_from_jaxpr(
         trainable_param_states: Dict[str, brainstate.ParamState] = {}
         trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
 
-        # Use the first trainable key for the primary weight trace (needed for
-        # diagnostics and shape-mismatch error messages below).
-        first_key = next(iter(trainable_invars_map)) if trainable_invars_map else None
-        weight_path: Optional[Path] = None
-        if first_key is not None:
-            primary_invar = trainable_invars_map[first_key]
-            weight_path, _ = _trace_var_to_param(
-                primary_invar, producers, invar_to_weight_path,
-                cache=weight_trace_cache,
-            )
-
-        if weight_path is None:
-            first_invar_repr = trainable_invars_map[first_key] if first_key is not None else None
-            emit(
-                kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
-                level=DiagnosticLevel.WARNING,
-                message=(
-                    f'ETP primitive {primitive.name} at {eqn} has a trainable input '
-                    f'({first_key}) that could not be traced back to any ParamState. Skipping.'
-                ),
-                primitive=primitive,
-                context={'trainable_var': first_invar_repr, 'key': first_key},
-            )
-            continue
-
+        # Resolve every trainable key first; the relation is skipped only if
+        # NONE of them traces to a ParamState. A primitive whose first key
+        # (e.g. a constant weight) is unresolvable but whose bias IS a
+        # ParamState still participates through the resolved keys.
         for key, invar in trainable_invars_map.items():
             t_path, t_chain = _trace_var_to_param(
                 invar, producers, invar_to_weight_path,
@@ -809,6 +840,24 @@ def find_hidden_param_op_relations_from_jaxpr(
             trainable_param_states[key] = t_state
             trainable_processing_chains[key] = t_chain
 
+        if not trainable_paths:
+            first_key = next(iter(trainable_invars_map)) if trainable_invars_map else None
+            first_invar_repr = trainable_invars_map[first_key] if first_key is not None else None
+            emit(
+                kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'ETP primitive {primitive.name} at {eqn} has no trainable input '
+                    f'({tuple(trainable_invars_map)}) that traces back to any ParamState. Skipping.'
+                ),
+                primitive=primitive,
+                context={'trainable_var': first_invar_repr, 'key': first_key},
+            )
+            continue
+
+        # The first *resolved* key names the relation in diagnostics.
+        weight_path: Path = next(iter(trainable_paths.values()))
+
         # --- Restricted reachability for relation registration ---
         reachable_hvars, blocking_eqns = _bfs_forward(
             y_var, consumers, hidden_outvar_set,
@@ -817,6 +866,9 @@ def find_hidden_param_op_relations_from_jaxpr(
         )
 
         # --- Filter by shape compatibility ---
+        # The unrestricted forward closure depends only on ``y_var``:
+        # compute it once per primitive equation, not once per hidden var.
+        y_forward = forward_closure(y_var, consumers)
         connected_paths: List[Path] = []
         path_class: Dict[Path, str] = {}
         for hvar in list(reachable_hvars):
@@ -846,6 +898,7 @@ def find_hidden_param_op_relations_from_jaxpr(
             connected_paths.append(hpath)
             cls = _classify_path(
                 y_var, hvar, consumers, producers, self_eqn=eqn,
+                forward=y_forward,
             )
             path_class[hpath] = cls
 
