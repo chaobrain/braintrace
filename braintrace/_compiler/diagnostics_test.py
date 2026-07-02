@@ -43,6 +43,16 @@ from braintrace._op import etp_mm_p, etp_mv_p
 
 class TestDiagnosticsBasics:
 
+    def test_phase3_control_flow_kinds_exist(self):
+        """The Phase 3 while/opaque-forward decisions each have a dedicated
+        machine-readable kind, so tests and users can assert on
+        ``CompilationRecord.kind`` instead of parsing messages."""
+        assert DiagnosticKind.WEIGHT_IN_WHILE.value == 'weight_in_while'
+        assert (DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD.value
+                == 'control_flow_opaque_fwd')
+        assert (DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING.value
+                == 'control_flow_recurrent_mixing')
+
     def test_graph_has_diagnostics_field(self):
         """``ETraceGraph`` carries a ``diagnostics`` field populated by the
         compiler. Each entry is a :class:`CompilationRecord`."""
