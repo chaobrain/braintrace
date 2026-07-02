@@ -123,3 +123,87 @@ class TestJAXRules:
         jaxpr = jax.make_jaxpr(jax.vmap(lambda i: embedding(i, table)))(idx)
         prims = [e.primitive for e in jaxpr.jaxpr.eqns]
         assert etp_emb_p in prims and etp_emb_v_p not in prims
+
+
+from braintrace._op import (
+    ETP_RULES_INIT_DRTRL,
+    ETP_RULES_INIT_PP,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_YW_TO_W,
+)
+from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+
+
+class TestEmbEtpRules:
+    B, V, D, A = 3, 5, 4, 2
+
+    def test_yw_to_w_broadcasts_over_vocab(self):
+        brainstate.random.seed(40)
+        hd = brainstate.random.randn(self.B, self.D)
+        tr = {'weight': brainstate.random.randn(self.B, self.V, self.D)}
+        out = ETP_RULES_YW_TO_W[etp_emb_p](hd, tr)
+        np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, None, :], atol=1e-6)
+
+    def test_yw_to_w_grad_context(self):
+        brainstate.random.seed(41)
+        hd = brainstate.random.randn(self.D)
+        tr = {'weight': brainstate.random.randn(self.V, self.D)}
+        out = ETP_RULES_YW_TO_W[etp_emb_p](hd, tr)
+        np.testing.assert_allclose(out['weight'], tr['weight'] * hd[None, :], atol=1e-6)
+
+    def test_xy_to_dw_matches_vjp_scatter_add(self):
+        brainstate.random.seed(42)
+        idx = jnp.array([0, 2, 2], dtype=jnp.int32)
+        hd = brainstate.random.randn(3, self.D)
+        weights = {'weight': brainstate.random.randn(self.V, self.D)}
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_emb_p],
+            impl=lambda wd: jnp.take(wd['weight'], idx, axis=0),
+            x=idx, hidden_dim=hd, weights=weights,
+        )
+
+    def test_xy_to_dw_with_weight_fn(self):
+        brainstate.random.seed(43)
+        idx = jnp.array([1, 3], dtype=jnp.int32)
+        hd = brainstate.random.randn(2, self.D)
+        weights = {'weight': brainstate.random.randn(self.V, self.D)}
+        fn = lambda w: jnp.tanh(w)
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_emb_p],
+            impl=lambda wd: jnp.take(fn(wd['weight']), idx, axis=0),
+            x=idx, hidden_dim=hd, weights=weights, params={'weight_fn': fn},
+        )
+
+    def test_init_shapes_and_dtypes(self):
+        drtrl = ETP_RULES_INIT_DRTRL[etp_emb_p](
+            _fake_var((self.B,), jnp.int32),
+            _fake_var((self.B, self.D), jnp.bfloat16),
+            {'weight': _fake_var((self.V, self.D), jnp.bfloat16)}, self.A)
+        assert drtrl['weight'].shape == (self.B, self.V, self.D, self.A)
+        # int32 indices don't affect jnp.result_type(int32, bf16, bf16)
+        assert drtrl['weight'].dtype == jnp.bfloat16
+        pp = ETP_RULES_INIT_PP[etp_emb_p](
+            _fake_var((self.B,), jnp.int32), _fake_var((self.B, self.D), jnp.bfloat16),
+            {'weight': _fake_var((self.V, self.D))}, self.A)
+        assert pp.shape == (self.B, self.D, self.A)
+        assert pp.dtype == jnp.bfloat16
+
+    def test_unbatched_rules(self):
+        brainstate.random.seed(44)
+        hd = brainstate.random.randn(self.D)
+        tr = {'weight': brainstate.random.randn(self.V, self.D)}
+        out = ETP_RULES_YW_TO_W[etp_emb_v_p](hd, tr)
+        np.testing.assert_allclose(out['weight'], tr['weight'] * hd[None, :], atol=1e-6)
+
+        idx = jnp.int32(2)
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_emb_v_p],
+            impl=lambda wd: jnp.take(wd['weight'], idx, axis=0),
+            x=idx, hidden_dim=hd, weights=tr,
+        )
+
+        drtrl = ETP_RULES_INIT_DRTRL[etp_emb_v_p](
+            _fake_var((), jnp.int32), _fake_var((self.D,), jnp.float16),
+            {'weight': _fake_var((self.V, self.D), jnp.float16)}, self.A)
+        assert drtrl['weight'].shape == (self.V, self.D, self.A)
+        assert drtrl['weight'].dtype == jnp.float16

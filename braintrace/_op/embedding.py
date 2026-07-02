@@ -71,6 +71,69 @@ def _emb_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return {'weight': 1}
 
 
+def _emb_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+                 weight_fn: WeightFn | None = None) -> dict[str, Any]:
+    r"""Propagate ``∂h/∂y`` through the table-shaped trace.
+
+    The feature axis is diagonal and the vocabulary axis is untouched
+    (row selection lives in the trace via the instantaneous scatter term),
+    so ``hidden_dim`` broadcasts over the vocabulary axis — the dense
+    ``axis=-2`` expand, with ``V`` playing the role of ``in``.
+    Contexts: scan ``(B, D)/(B, V, D)``; grad ``(D,)/(V, D)``.
+    """
+    return {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=-2)}
+
+
+def _emb_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                  weight_fn: WeightFn | None = None) -> dict[str, Any]:
+    r"""Instantaneous ``∂h/∂T`` — scatter-add VJP of the gather; the
+    ``weight_fn`` Jacobian is auto-composed and the gradient is w.r.t. the
+    **raw** table. ``x`` (the indices) is a closed-over constant."""
+
+    def _fwd(w_dict: dict[str, Any]) -> Any:
+        w = w_dict['weight']
+        if weight_fn is not None:
+            w = weight_fn(w)
+        return u.get_mantissa(jnp.take(w, x, axis=0))
+
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
+
+
+def _emb_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                    num_hidden_state: int) -> dict[str, Any]:
+    r"""Batched D-RTRL trace: ``ε_T (B, V, D, n)`` — scales with ``V``.
+
+    Dtype via :func:`jax.numpy.result_type` over the x/y/weight avals (the
+    dense idiom); the integer index dtype is absorbed by JAX's promotion
+    lattice (any int ∨ any float = the float)."""
+    batch = x_var.aval.shape[0]
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
+    return {'weight': jnp.zeros(
+        (batch, *weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype)}
+
+
+def _emb_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                 num_hidden_state: int) -> Any:
+    r"""pp-prop output-shaped df trace: ``ε_f (B, D, n)`` — V-independent."""
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
+def _emb_v_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                      num_hidden_state: int) -> dict[str, Any]:
+    r"""Unbatched D-RTRL trace: ``ε_T (V, D, n)``; same dtype derivation as
+    the batched rule."""
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
+    return {'weight': jnp.zeros(
+        (*weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype)}
+
+
 etp_emb_p = register_primitive(
     'etp_emb',
     _etp_embedding_impl,
@@ -87,6 +150,19 @@ etp_emb_v_p = register_primitive(
     x_invar_index=0,
 )
 register_batched_counterpart(etp_emb_v_p, etp_emb_p)
+
+etp_emb_p.register_etp_rules(
+    yw_to_w=_emb_yw_to_w,
+    xy_to_dw=_emb_xy_to_dw,
+    init_drtrl=_emb_init_drtrl,
+    init_pp=_emb_init_pp,
+)
+etp_emb_v_p.register_etp_rules(
+    yw_to_w=_emb_yw_to_w,
+    xy_to_dw=_emb_xy_to_dw,
+    init_drtrl=_emb_v_init_drtrl,
+    init_pp=_emb_init_pp,
+)
 
 
 # ---------------------------------------------------------------------------
