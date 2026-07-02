@@ -255,6 +255,17 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # etrace data
         last_etrace_vals = self._get_etrace_data()
 
+        # Optional per-call auxiliary data (e.g. OSTTP's `y_target`) that a
+        # subclass needs inside `_compute_learning_signal` but that must not be
+        # forwarded to the model itself. Read synchronously here -- before the
+        # custom_vjp machinery runs -- so it becomes a genuine argument of
+        # `_true_update_fun` rather than an instance-attribute side channel:
+        # outer transforms (e.g. `brainstate.transform.grad`) may stage the
+        # forward trace and only invoke the fwd/bwd rules after this `update()`
+        # call has already returned, by which point any such stash would
+        # already be gone.
+        aux = self._get_update_aux()
+
         # update all states
         #
         # [KEY] The key here is that we change the object-oriented attributes as the function arguments.
@@ -273,7 +284,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             hidden_vals,
             other_vals,
             last_etrace_vals,
-            self.running_index.value
+            self.running_index.value,
+            aux,
         )
 
         # assign/restore the weight values back
@@ -310,6 +322,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         oth_state_vals: StateVals,
         etrace_vals: ETraceVals,
         running_index: Any,
+        aux: Any = None,
     ) -> Tuple[Outputs, HiddenVals, StateVals, ETraceVals]:
         """
         The main function to update the [model] and the [eligibility trace] states.
@@ -329,6 +342,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         Note that the weight values are assumed not changed in this function.
 
+        The ``aux`` argument (see :meth:`_get_update_aux`) is unused on this
+        plain (non-differentiating) path; it only matters on the
+        ``_update_fn_fwd``/``_update_fn_bwd`` path, where it is threaded to
+        ``_compute_learning_signal``.
         """
         input_is_multi_step = has_multistep_data(*args)
 
@@ -386,6 +403,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         othstate_vals: StateVals,
         etrace_vals: ETraceVals,
         running_index: int,
+        aux: Any = None,
     ) -> Tuple[Tuple[Outputs, HiddenVals, StateVals, ETraceVals], Any]:
         """
         The forward function to update the [model] and the [eligibility trace] states when computing
@@ -474,6 +492,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             weight_vals,
             running_index,
             args,  # threaded to _update_fn_bwd for the learning-signal hook
+            aux,  # per-call auxiliary data (see _get_update_aux), also threaded to the hook
         )
         return fwd_out, fwd_res
 
@@ -481,7 +500,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         self,
         fwd_res: Any,
         grads: Any,
-    ) -> Tuple[dG_Inputs, dG_Weight, dG_Hidden, dG_State, None, None]:
+    ) -> Tuple[dG_Inputs, dG_Weight, dG_Hidden, dG_State, None, None, None]:
         """
         The backward function to compute the VJP gradients when the learning signal is arrived at
         this time step.
@@ -503,6 +522,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             weight_vals,  # the weight id to its value mapping
             running_index,  # the running index
             args,  # original update(*args) tuple, used by _compute_learning_signal
+            aux,  # per-call auxiliary data from _get_update_aux, also used by _compute_learning_signal
         ) = fwd_res
 
         (
@@ -600,8 +620,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # Hook: subclasses may replace the reverse-AD learning signal with an
         # alternative (e.g. target projection in OSTTP, κ-filtered signal in EProp).
         #
+        # `aux` (see `_get_update_aux`) is appended to `args` here, not inside
+        # `args` itself, so it never reaches the model's own forward call --
+        # only this hook sees it. Algorithms that don't use it (the default
+        # `_get_update_aux` returns None) are unaffected: the base
+        # implementation and EProp's override both ignore `args` entirely.
         dl2h_at_t_or_t_minus_1 = self._compute_learning_signal(
-            dl2h_at_t_or_t_minus_1, args
+            dl2h_at_t_or_t_minus_1, (*args, aux)
         )
 
         #
@@ -621,9 +646,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_etrace_params,
         )
 
-        # Note that there are no gradients flowing through the etrace data and the running index.
+        # Note that there are no gradients flowing through the etrace data, the
+        # running index, or the auxiliary data (e.g. OSTTP's y_target).
         dg_etrace = None
         dg_running_index = None
+        dg_aux = None
 
         return (
             dg_args,
@@ -631,8 +658,37 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_last_hiddens,
             dg_oth_states,
             dg_etrace,
-            dg_running_index
+            dg_running_index,
+            dg_aux,
         )
+
+    def _get_update_aux(self) -> Any:
+        """Override hook. Return per-call auxiliary data threaded to `_compute_learning_signal`.
+
+        Called synchronously at the start of `update()`, before the custom_vjp
+        forward/backward machinery runs, and passed to `_true_update_fun` as a
+        genuine argument (see `_update_fn`/`_update_fn_fwd`/`_update_fn_bwd`).
+        This makes the value a real data dependency of the traced computation.
+
+        This is deliberately *not* read lazily from an instance attribute
+        inside `_update_fn_fwd`/`_update_fn_bwd`/`_compute_learning_signal`:
+        outer transforms (e.g. `brainstate.transform.grad`) may stage the
+        forward trace and only invoke the custom_vjp fwd/bwd rules after the
+        `update()` call that set such a stash has already returned, so a
+        lazy read would silently observe a cleared/stale value.
+
+        Default returns `None` (unused). Subclasses that need auxiliary data
+        not already part of the model's own forward arguments (e.g. OSTTP's
+        `y_target`, which must not be forwarded to the model call) should
+        override this and read whatever they stashed on `self` during their
+        own `update()` override, at this exact call site.
+
+        Returns:
+            Any pytree (or `None`). Appended to the `args` tuple seen by
+            `_compute_learning_signal` (see below); never forwarded to the
+            model's forward call.
+        """
+        return None
 
     def _compute_learning_signal(
         self,
@@ -647,9 +703,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         Args:
             dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
                 by reverse-AD inside `_update_fn_bwd`.
-            args: The exact `*args` tuple passed to the most recent `update()` call,
-                made available so subclasses can pull auxiliary tensors (e.g.
-                ``y_target``) that were stashed elsewhere (e.g. on ``self``).
+            args: The `*args` tuple passed to the most recent `update()` call,
+                with the per-call auxiliary data from `_get_update_aux` appended
+                as the trailing element. Subclasses that override
+                `_get_update_aux` (e.g. OSTTP) can pull their auxiliary tensor
+                (e.g. ``y_target``) from there (see `extract_y_target` in
+                `_common.py`); subclasses that don't (the default `None`) can
+                ignore `args` entirely, as the base implementation does.
 
         Returns:
             Sequence of per-hidden-group gradient arrays, one per HiddenGroup. Must

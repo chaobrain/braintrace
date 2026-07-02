@@ -131,9 +131,14 @@ class PresynapticTrace(_ZeroResetState):
 
 
 class KappaFilter(_ZeroResetState):
-    r"""Low-pass output-side filter used by EProp.
+    r"""Low-pass filter helper state.
 
-    The filter smooths the output-side signal following
+    :class:`~braintrace.EProp` no longer uses this class directly — it filters
+    the eligibility trace internally instead. ``KappaFilter`` remains public
+    and available for user-side filtering of an output-side (or any other)
+    signal outside the algorithm's own hooks.
+
+    The filter smooths the signal following
     :math:`x_{\mathrm{filt}} \leftarrow (1-\kappa) \cdot x + \kappa \cdot x_{\mathrm{filt}}`.
 
     Parameters
@@ -234,7 +239,7 @@ class FixedRandomFeedback:
 
     def __init__(self, n_target: int, n_layer: int, key: Any, init_scale: float = 0.1) -> None:
         self.B = jax.lax.stop_gradient(
-            init_scale * jax.random.normal(key, (n_target, n_layer))
+            init_scale * brainstate.random.normal(size=(n_target, n_layer), key=key)
         )
         self.n_target = int(n_target)
         self.n_layer = int(n_layer)

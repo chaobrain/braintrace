@@ -164,7 +164,13 @@ class TestForwardWithCSR:
 
 class _HashableStubMat(_StubSparseMat):
     """Stub that is also ``__hash__``-able so JAX accepts it as a static
-    primitive parameter (CSR itself is not hashable in JAX 0.7+)."""
+    primitive parameter.
+
+    Predates the H1 fix that makes ``sparse_matmul`` wrap any
+    ``sparse_mat`` (including a stock, non-hashable ``brainevent.CSR``) in a
+    hashable ``_HashableSparseMat`` internally. Kept here as a lightweight
+    stand-in for rule-level and dispatch tests that don't need a real CSR's
+    sparse-matrix semantics."""
 
     def __hash__(self):
         return id(self)
@@ -624,21 +630,257 @@ class TestSparseWeightFnBiasFn:
 
 class TestSparseVmapPromotion:
     def test_vmap_sparse_matmul_promotes_to_etp_sp_mm(self):
-        # NOTE: real `brainevent.CSR` is not hashable under JAX 0.7+, so it
-        # cannot be a static primitive param under `jax.make_jaxpr`/`jit` —
-        # this is a pre-existing, unrelated limitation (reproduces even for
-        # the already-registered *unbatched* `etp_sp_mv` path with no vmap
-        # involved at all; see `TestAutoDispatch` above, which already works
-        # around it with `_HashableStubMat` for the same reason). Use the
-        # same hashable stub here so this test exercises vmap promotion
-        # rather than tripping the unrelated hashability bug.
+        # A real `brainevent.CSR` works directly here: `sparse_matmul` wraps
+        # it internally in a `_HashableSparseMat` (see the H1 fix in
+        # `sparse.py`), so it no longer needs a hashable stand-in to survive
+        # `jax.make_jaxpr`/`jit` under vmap.
         dense = jnp.where(brainstate.random.rand(3, 5) < 0.5,
                           brainstate.random.randn(3, 5), 0.0)
-        stub = _HashableStubMat(dense)
-        data = dense.reshape(-1)
+        csr = _csr_from_dense(dense)
+        data = csr.data
         x = brainstate.random.randn(4, 3)
-        fn = jax.vmap(lambda xi: braintrace.sparse_matmul(xi, data, sparse_mat=stub))
+        fn = jax.vmap(lambda xi: braintrace.sparse_matmul(xi, data, sparse_mat=csr))
         names = [e.primitive.name for e in jax.make_jaxpr(fn)(x).jaxpr.eqns]
         assert 'etp_sp_mm' in names
-        ref = braintrace.sparse_matmul(x, data, sparse_mat=stub)
+        ref = braintrace.sparse_matmul(x, data, sparse_mat=csr)
         assert jnp.allclose(fn(x), ref, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Audit C3/H1 regression: stock (unwrapped) brainevent.CSR usability +
+# batched D-RTRL trace recurrence.
+# ---------------------------------------------------------------------------
+
+class TestStockCSRHashable:
+    """H1: a stock ``brainevent.CSR`` — exactly as the module docstring shows,
+    with no user-side wrapper — must work as ``sparse_mat`` under
+    ``jax.jit``/``jax.grad``.
+
+    ``brainevent.CSR`` (like every ``DataRepresentation``) defines ``__eq__``
+    without a matching ``__hash__``, so binding it directly as a jaxpr
+    equation parameter previously raised ``TypeError: parameters to jaxpr
+    equations must have __hash__`` under JAX >= 0.7 -- the documented usage
+    failed outright.
+    """
+
+    def test_stock_csr_runs_under_jit_and_grad(self):
+        with brainstate.environ.context(precision=64):
+            mask = np.array([
+                [1, 0, 1, 0],
+                [0, 1, 0, 1],
+                [1, 1, 0, 0],
+            ], dtype=bool)
+            csr = brainevent.CSR.fromdense(jnp.asarray(mask, dtype=float))
+            x = jnp.ones((2, 3))
+
+            @jax.jit
+            def f(w):
+                return braintrace.sparse_matmul(x, w, sparse_mat=csr).sum()
+
+            out = f(csr.data)
+            assert bool(jnp.isfinite(out))
+
+            g = jax.grad(f)(csr.data)
+            assert g.shape == csr.data.shape
+            assert bool(jnp.all(jnp.isfinite(g)))
+
+
+class TestBatchedSparseDRTRLOracle:
+    """C3: ``_sp_mm_yw_to_w`` (the ``etp_sp_mm_p`` D-RTRL trace-recurrence rule)
+    is handed a leading batch axis -- ``hidden_dim: (batch, out)``,
+    ``trace['weight']: (batch, nnz)`` -- straight from the online-trace update.
+    ``brainevent``'s ``yw_to_w_transposed`` kernel only accepts 1-D operands, so
+    the rule must ``jax.vmap`` internally rather than handing it the batched
+    arrays directly. Exactly-diagonal recurrence: D-RTRL (an *exact* algorithm)
+    must match the BPTT oracle element-wise for a batch > 1 model.
+    """
+
+    def test_batched_drtrl_matches_bptt(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+
+        with brainstate.environ.context(precision=64):
+            leak = 0.5
+            n_rec = 4
+            batch = 2
+            dense_mask = np.array([
+                [1, 0, 1, 0],
+                [0, 1, 0, 1],
+                [1, 1, 0, 0],
+            ], dtype=bool)
+            csr = brainevent.CSR.fromdense(jnp.asarray(dense_mask, dtype=jnp.float64))
+            n_in = dense_mask.shape[0]
+            nnz = csr.data.shape[0]
+
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.w = brainstate.ParamState(0.1 * brainstate.random.randn(nnz))
+                    self.h = brainstate.HiddenState(jnp.zeros((batch, n_rec)))
+
+                def update(self, x):
+                    drive = braintrace.sparse_matmul(x, self.w.value, sparse_mat=csr)
+                    self.h.value = leak * self.h.value + drive
+                    return self.h.value
+
+            def factory():
+                # Deterministic weight init: bptt_param_gradients and
+                # online_param_gradients_singlestep_naive each call ``factory()``
+                # independently, so re-seeding here (rather than relying on
+                # ambient RNG state) is what makes the two models start from
+                # the *same* weights -- otherwise the "gradient mismatch" would
+                # just be two different random points, not a genuine algorithm
+                # discrepancy.
+                brainstate.random.seed(0)
+                return Net()
+
+            xs = 0.3 * brainstate.random.randn(3, batch, n_in)
+
+            g_bptt = bptt_param_gradients(factory, xs)
+            g_online = online_param_gradients_singlestep_naive(
+                factory, xs,
+                algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='single-step'),
+            )
+
+            assert set(g_bptt.keys()) == set(g_online.keys())
+            for key in g_bptt:
+                a = jnp.asarray(g_bptt[key])
+                b = jnp.asarray(g_online[key])
+                assert a.shape == b.shape
+                denom = max(float(jnp.abs(a).max()), 1e-12)
+                rel = float(jnp.abs(a - b).max() / denom)
+                assert rel < 1e-10, f'{key}: max_rel_err={rel:.3e}'
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+def _sparse_row_col_of_nnz(csr):
+    """Derive per-nnz (row, col) indices directly from CSR structure.
+
+    Built independently of ``yw_to_w_transposed`` so it can serve as ground
+    truth: ``csr.indices`` already *is* the per-nnz column index (standard
+    CSR layout), and the per-nnz row index is recovered from ``indptr`` by
+    repeating each row index by its nnz count.
+    """
+    indptr = np.asarray(csr.indptr)
+    row_of_nnz = np.repeat(np.arange(indptr.shape[0] - 1), np.diff(indptr))
+    col_of_nnz = np.asarray(csr.indices)
+    return row_of_nnz, col_of_nnz
+
+
+def _random_masked_csr(mask: np.ndarray, seed: int):
+    brainstate.random.seed(seed)
+    values = brainstate.random.randn(*mask.shape)
+    dense = jnp.where(jnp.asarray(mask), values, 0.0)
+    return brainevent.CSR.fromdense(dense)
+
+
+class TestYwToWFirstPrinciplesFromJacobian:
+    """Derive ``_sp_mv_yw_to_w`` / ``_sp_mm_yw_to_w`` from ``jax.jacobian`` of
+    the primitive's own forward on a real, non-diagonal :class:`brainevent.CSR`.
+
+    For ``y = x @ W`` with ``W`` sparse, ``partial y_o / partial data_k`` is
+    nonzero only for the nnz entries ``k`` whose column equals ``o``, in
+    which case it equals ``x`` at that entry's row — a structural fact
+    confirmed here numerically against ``row_of_nnz`` / ``col_of_nnz``
+    derived directly from the CSR's own ``indptr`` / ``indices`` (never from
+    ``yw_to_w_transposed``). Because the Jacobian is "diagonal" in this
+    per-nnz-column sense, the general contraction of a cotangent against it
+    reduces to indexing the cotangent by each nnz's column and multiplying
+    into the trace — exactly what the production rule computes. Checked
+    with random (never all-ones) cotangents and traces.
+    """
+
+    @staticmethod
+    def _mask():
+        return np.array([
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [1, 1, 0, 0],
+        ], dtype=bool)  # (in=3, out=4), deliberately non-diagonal/non-square
+
+    def test_mv_yw_to_w_matches_jacobian_contraction(self):
+        from braintrace._op.sparse import _sp_mv_yw_to_w
+        csr = self._random_masked_csr_mv()
+        n_in, n_out = csr.shape
+        row_of_nnz, col_of_nnz = _sparse_row_col_of_nnz(csr)
+        nnz = csr.data.shape[0]
+
+        brainstate.random.seed(511)
+        x0 = brainstate.random.randn(n_in)
+
+        def fwd(w):
+            return x0 @ csr.with_data(w)
+
+        J = jax.jacobian(fwd)(csr.data)  # (out, nnz)
+        for o in range(n_out):
+            for k in range(nnz):
+                expected = x0[row_of_nnz[k]] if col_of_nnz[k] == o else 0.0
+                np.testing.assert_allclose(
+                    J[o, k], expected, atol=1e-10,
+                    err_msg=f'Jacobian mismatch at o={o}, k={k}',
+                )
+
+        g = brainstate.random.randn(n_out)
+        trace_w = brainstate.random.randn(nnz)
+        trace_b = brainstate.random.randn(n_out)
+
+        # General contraction, specialized by the proven per-column-diagonal
+        # structure: each nnz only "sees" the cotangent component at its own
+        # column. Built from `col_of_nnz` (raw CSR structure), never from
+        # the rule's own `yw_to_w_transposed` call.
+        ref_w = trace_w * g[col_of_nnz]
+        ref_b = trace_b * g
+
+        out = _sp_mv_yw_to_w(
+            g, {'weight': trace_w, 'bias': trace_b}, sparse_mat=csr, has_bias=True,
+        )
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
+
+    def test_mm_yw_to_w_matches_jacobian_contraction(self):
+        from braintrace._op.sparse import _sp_mm_yw_to_w
+        csr = self._random_masked_csr_mm()
+        n_in, n_out = csr.shape
+        row_of_nnz, col_of_nnz = _sparse_row_col_of_nnz(csr)
+        nnz = csr.data.shape[0]
+        batch = 2
+
+        brainstate.random.seed(512)
+        x0 = brainstate.random.randn(batch, n_in)
+
+        def fwd(w):
+            return x0 @ csr.with_data(w)
+
+        J = jax.jacobian(fwd)(csr.data)  # (batch, out, nnz)
+        for b in range(batch):
+            for o in range(n_out):
+                for k in range(nnz):
+                    expected = x0[b, row_of_nnz[k]] if col_of_nnz[k] == o else 0.0
+                    np.testing.assert_allclose(
+                        J[b, o, k], expected, atol=1e-10,
+                        err_msg=f'Jacobian mismatch at b={b}, o={o}, k={k}',
+                    )
+
+        g = brainstate.random.randn(batch, n_out)
+        trace_w = brainstate.random.randn(batch, nnz)
+        trace_b = brainstate.random.randn(batch, n_out)
+
+        ref_w = trace_w * g[:, col_of_nnz]
+        ref_b = trace_b * g
+
+        out = _sp_mm_yw_to_w(
+            g, {'weight': trace_w, 'bias': trace_b}, sparse_mat=csr, has_bias=True,
+        )
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
+
+    def _random_masked_csr_mv(self):
+        return _random_masked_csr(self._mask(), seed=513)
+
+    def _random_masked_csr_mm(self):
+        return _random_masked_csr(self._mask(), seed=514)

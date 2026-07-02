@@ -19,6 +19,8 @@ Coverage:
 
 * Auto-dispatch — ``x.ndim >= 2`` selects ``etp_mm_p``; otherwise
   ``etp_mv_p``. Verified by jaxpr inspection.
+* Rank guard — ``x.ndim > 2`` raises ``ValueError`` (every ETP trace rule
+  assumes a ``(batch, in)`` layout); rank 1 / 2 remain accepted.
 * Forward correctness — agrees with ``x @ w (+ b)``.
 * Bias presence — ``has_bias`` parameter is propagated through ``bind``.
 * brainunit support — quantities, mixed units, unitless inputs.
@@ -35,6 +37,7 @@ import jax.numpy as jnp
 import numpy as np
 import numpy.testing as npt
 import brainunit as u
+import pytest
 
 import braintrace
 from braintrace._op import (
@@ -81,12 +84,6 @@ class TestForwardCorrectness:
         out = matmul(x, w, bias=b)
         np.testing.assert_allclose(out, x @ w + b)
 
-    def test_higher_rank_input(self):
-        x = jnp.ones((2, 5, 3))
-        w = jnp.ones((3, 4))
-        out = matmul(x, w)
-        np.testing.assert_allclose(out, x @ w)
-
 
 class TestAutoDispatch:
 
@@ -103,6 +100,40 @@ class TestAutoDispatch:
         jaxpr = jax.make_jaxpr(lambda x, w: matmul(x, w))(x, w)
         assert any(eqn.primitive is etp_mm_p for eqn in jaxpr.jaxpr.eqns)
         assert not any(eqn.primitive is etp_mv_p for eqn in jaxpr.jaxpr.eqns)
+
+
+# ---------------------------------------------------------------------------
+# Rank guard (M5) — every ETP trace rule assumes a (batch, in) layout, so
+# rank>2 ``x`` (which used to run silently in the forward pass) must be
+# rejected at the user-API boundary rather than produce a primitive whose
+# trace rules are structurally wrong.
+# ---------------------------------------------------------------------------
+
+class TestRankGuard:
+
+    def test_rank3_input_raises_valueerror(self):
+        x = jnp.ones((2, 5, 3))
+        w = jnp.ones((3, 4))
+        with pytest.raises(ValueError, match=r'ndim'):
+            matmul(x, w)
+
+    def test_rank4_input_raises_valueerror(self):
+        x = jnp.ones((2, 5, 6, 3))
+        w = jnp.ones((3, 4))
+        with pytest.raises(ValueError, match=r'ndim'):
+            matmul(x, w)
+
+    def test_rank1_input_still_accepted(self):
+        x = jnp.ones((3,))
+        w = jnp.ones((3, 4))
+        out = matmul(x, w)
+        np.testing.assert_allclose(out, x @ w)
+
+    def test_rank2_input_still_accepted(self):
+        x = jnp.ones((2, 3))
+        w = jnp.ones((3, 4))
+        out = matmul(x, w)
+        np.testing.assert_allclose(out, x @ w)
 
 
 class TestHasBiasParam:
@@ -759,3 +790,100 @@ class TestDenseFastPath:
         np.testing.assert_allclose(
             folded['bias'], unfolded['bias'].sum(axis=0), atol=1e-5
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# ---------------------------------------------------------------------------
+
+class TestYwToWFirstPrinciplesFromJacobian:
+    """Derive ``_mm_yw_to_w`` / ``_mv_yw_to_w`` from ``jax.jacobian`` of the
+    primitive's own forward, rather than trusting the rule's own formula.
+
+    ``y = x @ w`` has ``partial y_o / partial w_{i, o'} = delta(o, o') x_i`` —
+    diagonal in the two "out" indices. This is a *structural* fact about the
+    op, confirmed here numerically via ``jax.jacobian`` on non-square shapes
+    (``in != out``, so a wrong-axis broadcast would not silently line up).
+    Because the Jacobian is diagonal, the general chain-rule contraction of a
+    cotangent ``g`` against the full Jacobian collapses to an elementwise
+    broadcast-multiply — exactly what ``yw_to_w`` implements. Each test
+    builds the "general" contraction via an explicit ``jnp.einsum`` over the
+    *raw* Jacobian tensor (never the rule's own broadcast code) and compares
+    it, for a random (never all-ones) cotangent and random incoming trace,
+    against the rule's actual output.
+    """
+
+    def test_mm_yw_to_w_weight_and_bias_match_jacobian_contraction(self):
+        from braintrace._op.dense import _mm_yw_to_w
+        brainstate.random.seed(301)
+        batch, n_in, n_out = 2, 3, 5  # non-square: exercises axis=-2 broadcast
+        x = brainstate.random.randn(batch, n_in)
+        w0 = brainstate.random.randn(n_in, n_out)
+        b0 = brainstate.random.randn(n_out)
+
+        J_w = jax.jacobian(lambda w: x @ w)(w0)  # (batch, out, in, out)
+        J_b = jax.jacobian(lambda b: x @ w0 + b)(b0)  # (batch, out, out)
+
+        # Structural fact relied on by the rule: both Jacobians are diagonal
+        # in the two "out" axes.
+        for o in range(n_out):
+            for o2 in range(n_out):
+                expected_w = x if o == o2 else jnp.zeros_like(x)
+                np.testing.assert_allclose(
+                    J_w[:, o, :, o2], expected_w, atol=1e-10,
+                    err_msg=f'weight Jacobian not diagonal at o={o}, o2={o2}',
+                )
+                expected_b = jnp.ones(batch) if o == o2 else jnp.zeros(batch)
+                np.testing.assert_allclose(
+                    J_b[:, o, o2], expected_b, atol=1e-10,
+                    err_msg=f'bias Jacobian not diagonal at o={o}, o2={o2}',
+                )
+
+        # Random cotangent and random incoming trace — never all-ones.
+        g = brainstate.random.randn(batch, n_out)
+        trace_w = brainstate.random.randn(batch, n_in, n_out)
+        trace_b = brainstate.random.randn(batch, n_out)
+
+        # Because the Jacobian block above was shown to be nonzero only on
+        # the diagonal o == o2, contracting an arbitrary weight-shaped trace
+        # against it degenerates to a per-`o` broadcast multiply — the
+        # cross terms (o != o2) that a naive full contraction would include
+        # are provably zero, so they are omitted here deliberately, not by
+        # oversight. This is the "general contraction, specialized by the
+        # proven-diagonal structure" reference, built independently of the
+        # rule's own implementation.
+        ref_w = jnp.einsum('bo,bio->bio', g, trace_w)
+        ref_b = jnp.einsum('bo,bo->bo', g, trace_b)
+
+        out = _mm_yw_to_w(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
+
+    def test_mv_yw_to_w_weight_and_bias_match_jacobian_contraction(self):
+        from braintrace._op.dense import _mv_yw_to_w
+        brainstate.random.seed(302)
+        n_in, n_out = 3, 5  # non-square
+        x = brainstate.random.randn(n_in)
+        w0 = brainstate.random.randn(n_in, n_out)
+        b0 = brainstate.random.randn(n_out)
+
+        J_w = jax.jacobian(lambda w: x @ w)(w0)  # (out, in, out)
+        J_b = jax.jacobian(lambda b: x @ w0 + b)(b0)  # (out, out)
+
+        for o in range(n_out):
+            for o2 in range(n_out):
+                expected_w = x if o == o2 else jnp.zeros_like(x)
+                np.testing.assert_allclose(J_w[o, :, o2], expected_w, atol=1e-10)
+                expected_b = 1.0 if o == o2 else 0.0
+                np.testing.assert_allclose(J_b[o, o2], expected_b, atol=1e-10)
+
+        g = brainstate.random.randn(n_out)
+        trace_w = brainstate.random.randn(n_in, n_out)
+        trace_b = brainstate.random.randn(n_out)
+
+        ref_w = jnp.einsum('o,io->io', g, trace_w)
+        ref_b = jnp.einsum('o,o->o', g, trace_b)
+
+        out = _mv_yw_to_w(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
+        np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
+        np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)

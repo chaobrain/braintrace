@@ -84,6 +84,16 @@ are always taken w.r.t. the **raw** weight/bias, so the transform Jacobian
 :math:`f'` enters *only* through ``xy_to_dw`` via :func:`jax.vjp`. The
 ``yw_to_w`` rule does **not** apply :math:`f'`.
 
+Both hooks are threaded through ``eqn.params``, which JAX treats as a
+*static* (hashed-by-identity) part of the equation. Two textually identical
+``lambda`` expressions are two distinct Python objects, so passing a fresh
+``lambda`` each call (e.g. ``matmul(x, w, weight_fn=lambda ww: ww ** 2)``
+inside a loop or inside a jitted function called repeatedly) silently
+produces a cache miss / retrace every time even though the transform is
+unchanged. Pass a module-level (or otherwise stably-identified) function
+instead of a fresh ``lambda`` when ``weight_fn`` / ``bias_fn`` is used
+inside a hot path.
+
 **Fast path**
 
 A closed-form param-dim D-RTRL kernel bundle (:class:`FastPathRules`,
@@ -255,16 +265,25 @@ def _mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     in the recurrence
     :math:`\boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}
                                            + \operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t`.
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     batch = x_var.aval.shape[0]
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
         'weight': jnp.zeros(
-            (batch, *weight_vars['weight'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype
         )
     }
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 
@@ -543,15 +562,24 @@ def _mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
         \boldsymbol{\epsilon}_b \in \mathbb{R}^{O \times n_{\text{state}}}.
 
     Zero-initialised (matches :math:`\boldsymbol{\epsilon}^0 = \mathbf{0}`).
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
         'weight': jnp.zeros(
-            (*weight_vars['weight'].aval.shape, num_hidden_state)
+            (*weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype
         )
     }
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (*weight_vars['bias'].aval.shape, num_hidden_state)
+            (*weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 
@@ -613,7 +641,9 @@ def matmul(
     Parameters
     ----------
     x : ArrayLike
-        Input array, shape ``(..., in_features)`` or ``(in_features,)``.
+        Input array, shape ``(batch, in_features)`` or ``(in_features,)``.
+        Higher-rank ``x`` (``x.ndim > 2``) is rejected with a ``ValueError``:
+        every ETP trace rule assumes one of these two layouts.
     weight : ArrayLike
         Weight matrix, shape ``(in_features, out_features)``.
     bias : ArrayLike or None, optional
@@ -625,17 +655,24 @@ def matmul(
         The transform operates on the unitless mantissa; physical units are
         split off before and recombined after.
         Default ``None`` (identity).
+        Pass a module-level function, not a fresh ``lambda``, if this is
+        called repeatedly (e.g. once per step): ``weight_fn`` is stored as a
+        static ``eqn.params`` entry hashed by object identity, so two
+        textually identical ``lambda`` objects are cache misses and silently
+        retrace every call.
     bias_fn : Callable or None, optional
         Elementwise transform applied to ``bias`` inside the primitive
         (``+ bias_fn(bias)``). Ignored when ``bias is None``.
         The transform operates on the unitless mantissa; physical units are
         split off before and recombined after.
         Default ``None``.
+        Same re-tracing caveat as ``weight_fn``: pass a module-level
+        function rather than a fresh ``lambda``.
 
     Returns
     -------
     ArrayLike
-        Output array, shape ``(..., out_features)`` or ``(out_features,)``.
+        Output array, shape ``(batch, out_features)`` or ``(out_features,)``.
 
     Examples
     --------
@@ -663,6 +700,15 @@ def matmul(
         >>> print(y2.shape)
         (16, 4)
     """
+    if x.ndim > 2:  # type: ignore[union-attr]
+        raise ValueError(
+            f'matmul() supports x.ndim of 1 (unbatched `(in_features,)`) or 2 '
+            f'(batched `(batch, in_features)`); got x.ndim={x.ndim} '
+            f'(shape={x.shape}). Every ETP trace rule for etp_mm_p / etp_mv_p '
+            f'assumes one of those two layouts, so higher-rank inputs (e.g. '
+            f'`(batch, time, in_features)`) are not supported -- reshape/vmap '
+            f'over the extra axes before calling matmul().'
+        )
     p = etp_mm_p if x.ndim >= 2 else etp_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
     x_v, x_u = u.split_mantissa_unit(x)
     weight_v, weight_u = u.split_mantissa_unit(weight)

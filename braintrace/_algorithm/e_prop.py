@@ -20,8 +20,10 @@ eligibility trace and a *learning signal* broadcast from the readout. This
 module builds on ``D_RTRL``'s per-parameter trace and adds the two ingredients
 that make the rule biologically plausible:
 
-- An optional κ-filter on each HiddenGroup's learning signal
-  (:math:`\\bar L = F_\\kappa(L)`), matching the paper's readout-side low-pass.
+- An optional κ-filter on each weight's *eligibility trace*
+  (:math:`\\bar e = F_\\kappa(e)`), matching the paper's low-pass eligibility
+  filter. The trailing per-hidden-state axis is filtered elementwise, so
+  multi-state HiddenGroups (``num_state > 1``) never mix across states.
 - An optional random-feedback variant (``feedback='random'``) that replaces the
   readout's symmetric gradient with a fixed random projection, removing the
   weight-transport requirement.
@@ -31,13 +33,14 @@ See :class:`EProp` for the mathematical formulation, references, and an example.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 import brainstate
 import jax
 import jax.numpy as jnp
 
-from ._common import FixedRandomFeedback, KappaFilter
+from braintrace._typing import ETraceWG_Key, Path, PyTree
+from ._common import FixedRandomFeedback, _reset_state_in_a_dict
 from .param_dim_vjp import ParamDimVjpAlgorithm
 
 __all__ = ['EProp']
@@ -69,16 +72,17 @@ class EProp(ParamDimVjpAlgorithm):
     Here :math:`h_j^t` is the hidden state of neuron :math:`j` at time
     :math:`t`, :math:`x_i^t` the presynaptic input, :math:`D_j^t` the
     hidden-to-hidden (recurrent) Jacobian diagonal, :math:`D_{f,j}^t` the
-    state-to-output Jacobian, and :math:`\kappa \in [0, 1)` the readout-side
-    low-pass factor. The learning signal is
+    state-to-output Jacobian, and :math:`\kappa \in [0, 1)` the
+    eligibility-trace low-pass factor. The learning signal is
 
     .. math::
 
         L_j^t =
         \begin{cases}
-          \dfrac{\partial \mathcal{L}}{\partial h_j^t}
+          \ell_j^t = \dfrac{\partial \mathcal{L}}{\partial h_j^t}
             & \text{(symmetric feedback, standard backprop through readout)} \\[2ex]
-          \big(B\,e^t\big)_j
+          \big(B\,\hat\ell^t\big)_j,
+          \quad \hat\ell^t = \dfrac{\ell^t}{\lVert \ell^t \rVert + \varepsilon}
             & \text{(random feedback: a fixed random projection } B\text{)} .
         \end{cases}
 
@@ -87,10 +91,20 @@ class EProp(ParamDimVjpAlgorithm):
     only on quantities local to the synapse and is updated forward in time. The
     learning signal :math:`L_j^t` is broadcast from the readout. E-prop is
     therefore *online* (no backward pass through time) and uses memory linear in
-    the number of parameters. With ``kappa_filter_decay > 0`` the learning
-    signal is additionally low-pass filtered; with ``feedback='random'`` the
-    symmetric readout gradient is replaced by a frozen random matrix, removing
-    the biologically implausible weight-transport requirement.
+    the number of parameters. With ``kappa_filter_decay > 0`` each weight's
+    *eligibility trace* is additionally low-pass filtered (elementwise over the
+    trailing per-hidden-state axis, so multi-state HiddenGroups are filtered
+    per state with no cross-state mixing); with ``feedback='random'`` the
+    symmetric readout gradient :math:`\ell^t` is L2-normalized (removing its
+    dependence on the *magnitude* of the real readout weights, since
+    reverse-AD only ever exposes :math:`\ell^t = W_\mathrm{out}^\top \delta^t`,
+    never the pre-readout error :math:`\delta^t` itself) and then projected
+    through a frozen random matrix :math:`B`, removing the biologically
+    implausible weight-transport requirement. Normalization removes the
+    *scale* dependence on :math:`W_\mathrm{out}`; a residual *directional*
+    dependence on the readout weights remains, since full direction-
+    independence would require the pre-readout error :math:`\delta^t`
+    explicitly, which the current hook contract does not provide.
 
     Parameters
     ----------
@@ -99,13 +113,19 @@ class EProp(ParamDimVjpAlgorithm):
     feedback : {'symmetric', 'random'}, default 'symmetric'
         ``'symmetric'`` uses reverse-AD's :math:`\partial \mathcal{L}/\partial h`
         (standard backprop through the readout). ``'random'`` replaces the
-        readout gradient with a frozen random projection (requires
-        ``random_feedback_key``).
+        readout gradient with a frozen random projection of its L2-normalized
+        direction (requires ``random_feedback_key``). The projection matrix is
+        square (hidden-dim × hidden-dim): E-prop's hooks only see
+        :math:`\partial\mathcal L/\partial h`, which has no visibility into a
+        separate readout layer's width, so ``feedback='random'`` assumes a
+        single, direct readout whose output dimensionality equals the
+        HiddenGroup's own width.
     kappa_filter_decay : float in [0, 1), default 0.0
-        Readout-side low-pass factor :math:`\kappa`. If ``> 0``, each
-        HiddenGroup's learning signal is filtered each step
-        (:math:`\bar L^t = (1-\kappa)L^t + \kappa\bar L^{t-1}`). ``0`` disables
-        filtering.
+        Eligibility-trace low-pass factor :math:`\kappa` (see
+        :math:`\bar{e}_{ji}^t` above). If ``> 0``, each trainable weight's raw
+        eligibility trace is filtered every step, per hidden-state channel.
+        ``0`` disables filtering (the algorithm then reduces exactly to
+        :class:`~braintrace.D_RTRL`).
     random_feedback_key : jax.random.PRNGKey, optional
         Seed for the random-feedback matrices. Required when
         ``feedback='random'``; ignored otherwise.
@@ -180,69 +200,111 @@ class EProp(ParamDimVjpAlgorithm):
         self.feedback = feedback
         self.kappa_filter_decay = float(kappa_filter_decay)
         self._random_feedback_key = random_feedback_key
-        self._kappa_filters: Dict[int, KappaFilter] = {}
+        # Keyed exactly like ``self.etrace_bwg`` (ETraceWG_Key == (id(y_var),
+        # group.index)): one filter state per trainable weight / HiddenGroup
+        # relation, holding a PyTree that mirrors the raw trace's own
+        # structure and shape (including the trailing num_state axis).
+        self._trace_filters: Dict[ETraceWG_Key, brainstate.State] = {}
         self._random_feedback: Dict[int, FixedRandomFeedback] = {}
 
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         super().init_etrace_state(*args, **kwargs)
-        self._kappa_filters = {}
+        self._trace_filters = {}
         self._random_feedback = {}
         if self.kappa_filter_decay > 0.0:
-            for rel in self.graph.hidden_param_op_relations:
-                for group in rel.hidden_groups:
-                    gid = group.index
-                    if gid in self._kappa_filters:
-                        continue
-                    zeros = jnp.zeros(group.varshape, dtype=jnp.float32)
-                    self._kappa_filters[gid] = KappaFilter(
-                        zeros, self.kappa_filter_decay
-                    )
+            # One filter per raw-trace key, initialised to zeros with the
+            # exact PyTree structure/shape of that trace (batch axis, weight
+            # shape, and the trailing num_state axis all included) -- no
+            # reduction, so per-state channels never mix.
+            for trace_key, trace_state in self.etrace_bwg.items():
+                self._trace_filters[trace_key] = brainstate.ShortTermState(
+                    jax.tree.map(jnp.zeros_like, trace_state.value)
+                )
         if self.feedback == 'random':
-            key = self._random_feedback_key
-            assert key is not None  # constructor enforces a key when feedback='random'
+            rf_key = self._random_feedback_key
+            assert rf_key is not None  # constructor enforces a key when feedback='random'
+            # Collect the (group id -> width) pairs needed first so the
+            # random draws below are made under a single seeded scope, using
+            # only `brainstate.random` (never `jax.random` directly).
+            groups_needed: Dict[int, int] = {}
             for rel in self.graph.hidden_param_op_relations:
                 for group in rel.hidden_groups:
-                    gid = group.index
-                    if gid in self._random_feedback:
-                        continue
-                    key, sub = jax.random.split(key)
-                    n_layer = int(group.varshape[-1])
-                    # n_target == n_layer — square projection over reverse-AD signal.
+                    groups_needed.setdefault(group.index, int(group.varshape[-1]))
+            with brainstate.random.seed_context(rf_key):
+                for gid, n_layer in groups_needed.items():
+                    # n_target == n_layer — square projection over reverse-AD
+                    # signal (see the class docstring's single-readout note).
                     self._random_feedback[gid] = FixedRandomFeedback(
-                        n_target=n_layer, n_layer=n_layer, key=sub, init_scale=0.1
+                        n_target=n_layer,
+                        n_layer=n_layer,
+                        key=brainstate.random.split_key(),
+                        init_scale=0.1,
                     )
 
     def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
         super().reset_state(batch_size=batch_size, **kwargs)
-        for flt in self._kappa_filters.values():
-            flt.reset_state(batch_size=batch_size)
+        _reset_state_in_a_dict(self._trace_filters, batch_size)
 
     def _compute_learning_signal(self, dl_autodiff: Any, args: Any) -> Any:
         signals = list(dl_autodiff)
         if self.feedback == 'random' and self._random_feedback:
-            # dl_autodiff[g].shape == (*varshape, num_state). Project over the
-            # trailing n_layer axis (-2), preserving num_state on the tail.
+            # dl_autodiff[g].shape == (*varshape, num_state); varshape[-1] is
+            # the n_layer (hidden-width) axis, i.e. axis -2 of the full array.
+            # `s` is proportional to the *real* readout weights (reverse-AD
+            # only ever exposes W_out^T @ delta, never delta itself), so a
+            # linear projection through any fixed B cannot remove that
+            # dependency. L2-normalizing `s` per num_state channel over the
+            # n_layer axis strips the magnitude dependence on W_out (while
+            # keeping direction and the per-state axis untouched) before
+            # projecting through the frozen random matrix.
             def _project(B: Any, s: Any) -> Any:
-                return jnp.einsum('...lj,lk->...kj', s, B)
+                norm = jnp.sqrt(jnp.sum(jnp.square(s), axis=-2, keepdims=True))
+                s_normalized = s / (norm + 1e-8)
+                return jnp.einsum('...lj,lk->...kj', s_normalized, B)
 
             signals = [
                 _project(self._random_feedback[gid].B, s)
                 if gid in self._random_feedback else s
                 for gid, s in enumerate(signals)
             ]
-        if self._kappa_filters:
-            # KappaFilter state carries varshape, but signal has an extra
-            # trailing num_state axis. Collapse num_state for filter purposes;
-            # broadcast the filtered value back.
-            def _filter(flt: Any, s: Any) -> Any:
-                # collapse num_state tail: sum over last axis produces shape (*varshape,)
-                collapsed = s.sum(axis=-1)
-                filtered = flt.update(collapsed)
-                return jnp.expand_dims(filtered, axis=-1).astype(s.dtype)
-
-            signals = [
-                _filter(self._kappa_filters[gid], s)
-                if gid in self._kappa_filters else s
-                for gid, s in enumerate(signals)
-            ]
         return signals
+
+    def _solve_weight_gradients(
+        self,
+        running_index: int,
+        etrace_h2w_at_t: Dict[ETraceWG_Key, PyTree],
+        dl_to_hidden_groups: Sequence[jax.Array],
+        weight_vals: Dict[Path, PyTree],
+        dl_to_nonetws_at_t: Dict[Path, PyTree],
+        dl_to_etws_at_t: Optional[Dict[Path, PyTree]],
+    ) -> Any:
+        """Low-pass filter the raw eligibility trace, then delegate to D-RTRL.
+
+        Implements :math:`\\bar e_{ji}^t = \\kappa\\,\\bar e_{ji}^{t-1} + e_{ji}^t`
+        per weight-key, applied elementwise (``jax.tree.map`` over the trace's
+        own PyTree, including its trailing num_state axis) so multi-state
+        HiddenGroups are filtered independently per state -- never summed
+        across states and broadcast back.
+        """
+        if self._trace_filters:
+            kappa = self.kappa_filter_decay
+            filtered: Dict[ETraceWG_Key, PyTree] = {}
+            for key, trace in etrace_h2w_at_t.items():
+                flt = self._trace_filters.get(key)
+                if flt is None:
+                    filtered[key] = trace
+                    continue
+                new_val = jax.tree.map(
+                    lambda prev, e: kappa * prev + e, flt.value, trace
+                )
+                flt.value = new_val
+                filtered[key] = new_val
+            etrace_h2w_at_t = filtered
+        return super()._solve_weight_gradients(
+            running_index,
+            etrace_h2w_at_t,
+            dl_to_hidden_groups,
+            weight_vals,
+            dl_to_nonetws_at_t,
+            dl_to_etws_at_t,
+        )

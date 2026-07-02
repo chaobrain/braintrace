@@ -25,6 +25,7 @@ import brainunit as u
 
 from braintrace._op import matmul
 from braintrace._typing import Size, ArrayLike, as_size_tuple
+from braintrace.nn._linear import _fold_leading_axes
 
 __all__ = [
     'LeakyRateReadout',
@@ -148,6 +149,7 @@ class LeakyRateReadout(brainstate.nn.Module):
         ArrayLike
             The updated readout state, of shape ``(..., out_size)``.
         """
-        r = self.decay * self.r.value + matmul(x, self.W.value)
+        x2, unfold = _fold_leading_axes(x)
+        r = self.decay * self.r.value + unfold(matmul(x2, self.W.value))
         self.r.value = r
         return r

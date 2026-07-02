@@ -234,6 +234,31 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
 
         Returns:
             The weight x and df values.
+
+        Notes
+        -----
+        ``df`` is read off with a single all-ones-tangent :func:`jax.jvp` of
+        each relation's ``y -> hidden group`` map (see the ``[ KEY ]`` comment
+        in the loop body below). This is *exact* when that map is elementwise
+        — the common case where an ETP op output feeds exactly one neuron —
+        because the all-ones jvp then returns the map's Jacobian diagonal.
+
+        When a non-elementwise op sits between the weight op and the hidden
+        state (e.g. ``conv -> LayerNorm -> IF``), the true ``dh/dy`` is not
+        diagonal and the all-ones jvp instead returns its *row sums*. Both
+        :class:`~braintrace._algorithm.param_dim_vjp.ParamDimVjpAlgorithm`
+        (``D_RTRL``) and
+        :class:`~braintrace._algorithm.io_dim_vjp.IODimVjpAlgorithm`
+        (``pp_prop`` / ``ES_D_RTRL``) consume this ``df`` as their
+        :math:`\\mathbf{D}_f^t` term, so the approximation is shared by both
+        algorithm families: for a mean-subtracting (shift-invariant) op the
+        row sums happen to be exactly zero — the correct answer, since such
+        an op has no eligibility gradient to give upstream — but a
+        variance-style normalization computed with ``use_fast_variance=True``
+        leaves a small float32 residual instead of an exact zero, which
+        downstream recurrence/solve contractions can amplify. Prefer
+        ``use_fast_variance=False`` on any normalization layer that feeds an
+        ETP-traced op.
         """
 
         # the weight x
