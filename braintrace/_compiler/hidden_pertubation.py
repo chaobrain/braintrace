@@ -27,6 +27,7 @@ from braintrace._compatible_imports import (
     ClosedJaxpr,
     new_var,
     new_jaxpr_eqn,
+    stop_gradient_p,
 )
 from braintrace._misc import (
     git_issue_addr,
@@ -38,7 +39,10 @@ from braintrace._typing import (
 )
 from .base import (
     JaxprEvaluation,
+    check_unsupported_op,
 )
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
+from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .hidden_group import (
     HiddenGroup,
 )
@@ -221,10 +225,23 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         hidden_outvar_to_invar: The mapping from the hidden output variable to the hidden input variable.
         weight_invars: The weight input variables.
         invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
+        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
+            opaque control-flow handling.
 
     Returns:
         The revised closed jaxpr with the perturbations.
 
+    Notes:
+        A hidden-producing ``while`` equation gets special treatment: every
+        ``Var`` input of the loop is detached with ``stop_gradient`` in the
+        perturbed jaxpr (JAX has no transpose rule for ``while``, so an
+        undetached loop would make the VJP of the perturbed step
+        untraceable). The perturbation add ``h = fresh + p`` stays *outside*
+        the detach, so per-step learning signals ``dL/dp`` are exact.
+        Consequence: any *reverse-mode* path through the loop body within
+        the same step contributes zero — temporal credit through the loop
+        is carried instead by the forward-computed hidden-to-hidden
+        Jacobian ``D^t`` (see ``hidden_group.jacfwd_last_dim``).
     """
     __module__ = 'braintrace'
 
@@ -236,6 +253,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         invar_to_hidden_path: Dict[HiddenInVar, Path],
         outvar_to_hidden_path: Dict[Var, Path],
         path_to_state: Dict[Path, brainstate.HiddenState],
+        control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     ):
         # necessary data structures
         self.closed_jaxpr = closed_jaxpr
@@ -250,7 +268,8 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             hidden_invars=set(hidden_invars_ordered),
             hidden_outvars=set(hidden_outvars_ordered),
             invar_to_hidden_path=invar_to_hidden_path,
-            outvar_to_hidden_path=outvar_to_hidden_path
+            outvar_to_hidden_path=outvar_to_hidden_path,
+            control_flow=control_flow,
         )
         # Keep an ordered version for deterministic iteration in compile()
         self._hidden_outvars_ordered = hidden_outvars_ordered
@@ -356,6 +375,60 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         """
         self._eval_eqn(eqn)
 
+    def _eval_while(self, eqn: JaxprEqn) -> None:
+        """Evaluate a ``while`` equation, detaching its inputs when it
+        produces a hidden state.
+
+        JAX cannot transpose ``while``, so a hidden-producing loop left
+        as-is would make ``jax.vjp`` of the perturbed step untraceable.
+        Every ``Var`` input of the loop is therefore routed through a
+        ``stop_gradient`` equation first; the perturbation add stays
+        outside the detach (see the class Notes).
+        """
+        check_unsupported_op(self, eqn, 'while')
+        if any(ov in self.hidden_jaxvars_to_remove for ov in eqn.outvars):
+            eqn = self._detach_invars(eqn)
+        self._eval_eqn(eqn)
+
+    def _detach_invars(self, eqn: JaxprEqn) -> JaxprEqn:
+        """Route every ``Var`` input of *eqn* through ``stop_gradient``.
+
+        Emits the ``stop_gradient`` equations into ``revised_eqns`` and
+        returns a copy of *eqn* consuming the detached variables. Literal
+        inputs are left untouched.
+        """
+        new_invars = []
+        n_detached = 0
+        for iv in eqn.invars:
+            if not isinstance(iv, Var):
+                new_invars.append(iv)
+                continue
+            fresh = new_var('', iv.aval)
+            self.revised_eqns.append(
+                new_jaxpr_eqn(
+                    [iv],
+                    [fresh],
+                    stop_gradient_p,
+                    {},
+                    set(),
+                    eqn.source_info.replace(),
+                )
+            )
+            new_invars.append(fresh)
+            n_detached += 1
+        emit(
+            kind=DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD,
+            level=DiagnosticLevel.INFO,
+            message=(
+                'Detached the inputs of a hidden-producing while loop in the '
+                'perturbed jaxpr: reverse-mode signals THROUGH the loop are '
+                'zero there (temporal credit flows via the forward-computed '
+                'hidden-to-hidden Jacobian instead).'
+            ),
+            context={'site': 'perturbation', 'n_detached': n_detached},
+        )
+        return eqn.replace(invars=new_invars)
+
     def _eval_eqn(self, eqn: JaxprEqn):
         # ------------------------------------------------
         #
@@ -410,6 +483,7 @@ def add_hidden_perturbation_in_jaxpr(
     invar_to_hidden_path: Dict[HiddenInVar, Path],
     outvar_to_hidden_path: Dict[Var, Path],
     path_to_state: Dict[Path, brainstate.HiddenState],
+    control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
 ) -> HiddenPerturbation:
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
@@ -421,6 +495,11 @@ def add_hidden_perturbation_in_jaxpr(
         weight_invars: The weight input variables.
         invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
         path_to_state: The mapping from the hidden state path to the state.
+        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
+            opaque control-flow handling. Under the default policy a
+            hidden-producing ``while`` is kept and its inputs are detached
+            in the perturbed jaxpr (see
+            :class:`JaxprEvalForHiddenPerturbation`).
 
     Returns:
         The revised closed jaxpr with the perturbations.
@@ -432,6 +511,7 @@ def add_hidden_perturbation_in_jaxpr(
         invar_to_hidden_path=invar_to_hidden_path,
         outvar_to_hidden_path=outvar_to_hidden_path,
         path_to_state=path_to_state,
+        control_flow=control_flow,
     ).compile()
 
 
@@ -464,6 +544,7 @@ def add_hidden_perturbation_from_minfo(
         invar_to_hidden_path=minfo.invar_to_hidden_path,
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         path_to_state=minfo.retrieved_model_states,
+        control_flow=minfo.control_flow,
     )
 
 
