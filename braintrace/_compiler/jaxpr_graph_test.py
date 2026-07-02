@@ -232,3 +232,89 @@ class TestInlineJitCalls:
             return _eval_closed(inlined, xi)[0]
 
         np.testing.assert_allclose(jax.grad(f_inlined)(x), jax.grad(f)(x))
+
+
+class TestInlineJitInsideControlFlow:
+    """Phase 4: jit bodies inside scan/while/cond are inlined so body-level
+    analysis (structured scan descent) sees flat ETP equations."""
+
+    def test_inline_jit_calls_descends_into_scan_body(self):
+        from braintrace._compatible_imports import is_scan_primitive
+
+        @jax.jit
+        def inner(a):
+            return a * 2.0
+
+        def body(c, x):
+            return c + inner(x), c
+
+        def f(xs):
+            return jax.lax.scan(body, jnp.zeros(()), xs)
+
+        closed = jax.make_jaxpr(f)(jnp.arange(4.0))
+        scan_eqn = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
+        assert _has_jit_eqn(scan_eqn.params['jaxpr'].jaxpr)
+
+        cleaned = inline_jit_calls(closed)
+        scan_eqn2 = next(e for e in cleaned.jaxpr.eqns if is_scan_primitive(e))
+        assert not _has_jit_eqn(scan_eqn2.params['jaxpr'].jaxpr)
+        # outer interface identity preserved
+        assert cleaned.jaxpr.invars == closed.jaxpr.invars
+        assert list(cleaned.jaxpr.outvars) == list(closed.jaxpr.outvars)
+        # numerics preserved
+        xs = jnp.arange(4.0)
+        ref = _eval_closed(closed, xs)
+        got = _eval_closed(cleaned, xs)
+        for a, b in zip(ref, got):
+            np.testing.assert_allclose(a, b)
+
+    def test_inline_jit_calls_keeps_jitfree_scan_eqn_by_identity(self):
+        from braintrace._compatible_imports import is_scan_primitive
+
+        @jax.jit
+        def inner(a):
+            return a * 2.0
+
+        def body(c, x):
+            return c + x, c
+
+        def f(xs):
+            # a top-level jit forces the pass to actually run; the jit-free
+            # scan eqn must still come through by identity
+            return jax.lax.scan(body, inner(jnp.zeros(())), xs)
+
+        closed = jax.make_jaxpr(f)(jnp.arange(4.0))
+        cleaned = inline_jit_calls(closed)
+        e1 = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
+        e2 = next(e for e in cleaned.jaxpr.eqns if is_scan_primitive(e))
+        assert e1.params['jaxpr'] is e2.params['jaxpr']
+
+    def test_jitfree_program_with_scan_returned_unchanged(self):
+        def body(c, x):
+            return c + x, c
+
+        closed = jax.make_jaxpr(
+            lambda xs: jax.lax.scan(body, jnp.zeros(()), xs))(jnp.arange(4.0))
+        assert inline_jit_calls(closed) is closed
+
+    def test_inline_jit_calls_descends_into_cond_branches(self):
+        from braintrace._compatible_imports import is_cond_primitive
+
+        @jax.jit
+        def inner(a):
+            return a * 3.0
+
+        def f(x):
+            return jax.lax.cond(x.sum() > 0., lambda: inner(x), lambda: x * 2.)
+
+        closed = jax.make_jaxpr(f)(jnp.arange(3.0) - 1.0)
+        cond_eqn = next(e for e in closed.jaxpr.eqns if is_cond_primitive(e))
+        assert any(_has_jit_eqn(b.jaxpr) for b in cond_eqn.params['branches'])
+
+        cleaned = inline_jit_calls(closed)
+        cond_eqn2 = next(e for e in cleaned.jaxpr.eqns if is_cond_primitive(e))
+        assert all(
+            not _has_jit_eqn(b.jaxpr) for b in cond_eqn2.params['branches'])
+        for arg in (jnp.arange(3.0) + 1.0, jnp.arange(3.0) - 5.0):
+            np.testing.assert_allclose(
+                _eval_closed(cleaned, arg)[0], f(arg))

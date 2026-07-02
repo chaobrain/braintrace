@@ -29,7 +29,7 @@ memory-address hashes for jaxpr ``Var`` objects).
 """
 
 from collections import deque
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
@@ -128,6 +128,59 @@ def _contains_jit_eqn(jaxpr: Jaxpr) -> bool:
     return any(is_jit_primitive(eqn) for eqn in jaxpr.eqns)
 
 
+def _sub_closed_jaxprs(eqn: JaxprEqn):
+    """Yield the ``ClosedJaxpr`` bodies of a control-flow equation.
+
+    Covers ``scan`` (``jaxpr``), ``while`` (``cond_jaxpr``/``body_jaxpr``),
+    and ``cond`` (``branches``). ``call_jaxpr`` (custom-derivative calls) is
+    deliberately excluded: those bodies carry derivative semantics and are
+    never rewritten by :func:`inline_jit_calls`.
+    """
+    for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
+        sub = eqn.params.get(key)
+        if isinstance(sub, ClosedJaxpr):
+            yield sub
+    for b in eqn.params.get('branches', ()) or ():
+        if isinstance(b, ClosedJaxpr):
+            yield b
+
+
+def _contains_jit(jaxpr: Jaxpr) -> bool:
+    """``True`` when a jit eqn exists at top level or inside any
+    (transitively nested) control-flow body."""
+    for eqn in jaxpr.eqns:
+        if is_jit_primitive(eqn) and 'jaxpr' in eqn.params:
+            return True
+        for sub in _sub_closed_jaxprs(eqn):
+            if _contains_jit(sub.jaxpr):
+                return True
+    return False
+
+
+def _inline_jits_in_control_flow_params(eqn: JaxprEqn) -> Optional[dict]:
+    """Rewrite a control-flow eqn's body params so jit calls inside them are
+    inlined; return the new params dict, or ``None`` when every body is
+    already jit-free (so the caller can keep the eqn by identity)."""
+    new_params = dict(eqn.params)
+    changed = False
+    for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
+        sub = new_params.get(key)
+        if isinstance(sub, ClosedJaxpr) and _contains_jit(sub.jaxpr):
+            new_params[key] = inline_jit_calls(sub)
+            changed = True
+    branches = new_params.get('branches')
+    if branches is not None:
+        new_branches = tuple(
+            inline_jit_calls(b)
+            if isinstance(b, ClosedJaxpr) and _contains_jit(b.jaxpr) else b
+            for b in branches
+        )
+        if any(nb is not ob for nb, ob in zip(new_branches, branches)):
+            new_params['branches'] = new_branches
+            changed = True
+    return new_params if changed else None
+
+
 def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
     """Splice every top-level ``jit``/``pjit`` body into the enclosing jaxpr.
 
@@ -145,8 +198,11 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
     verbatim more than once would define its variables twice and silently
     alias the calls' results. Top-level equations that are not jit calls keep
     their original ``Var`` objects. Control-flow bodies
-    (``scan``/``while``/``cond``) and custom-derivative call primitives are
-    left untouched: control flow is diagnosed separately, and
+    (``scan``/``while``/``cond``) are descended: a body containing a jit call
+    is rewritten with that call inlined (the eqn is rebuilt with new body
+    params), while eqns whose bodies are jit-free are kept unchanged **by
+    identity** — later passes key exemption sets on eqn identity.
+    Custom-derivative call primitives are left untouched:
     ``custom_jvp_call``/``custom_vjp_call`` carry derivative semantics that
     must not be flattened away.
 
@@ -163,7 +219,7 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
         input object itself is returned unchanged.
     """
     jaxpr = closed_jaxpr.jaxpr
-    if not _contains_jit_eqn(jaxpr):
+    if not _contains_jit(jaxpr):
         return closed_jaxpr
 
     # Substitution at the top level only maps a jit call's outer outvars to
@@ -215,10 +271,15 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
                 fresh_outvars = [new_var('', v.aval) for v in eqn.outvars]
                 for ov, fresh in zip(eqn.outvars, fresh_outvars):
                     local[ov] = fresh
-                new_eqns.append(eqn.replace(
+                replace_kwargs = dict(
                     invars=[res(v) for v in eqn.invars],
                     outvars=fresh_outvars,
-                ))
+                )
+                # a control-flow eqn inside a jit body may itself hide jits
+                new_params = _inline_jits_in_control_flow_params(eqn)
+                if new_params is not None:
+                    replace_kwargs['params'] = new_params
+                new_eqns.append(eqn.replace(**replace_kwargs))
         return [res(v) for v in inner.outvars]
 
     for eqn in jaxpr.eqns:
@@ -230,8 +291,11 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
             for outer_ov, out_atom in zip(eqn.outvars, outs):
                 top_subst[outer_ov] = out_atom
         else:
+            new_params = _inline_jits_in_control_flow_params(eqn)
             new_invars = [resolve_top(v) for v in eqn.invars]
-            if all(a is b for a, b in zip(new_invars, eqn.invars)):
+            if new_params is not None:
+                new_eqns.append(eqn.replace(invars=new_invars, params=new_params))
+            elif all(a is b for a, b in zip(new_invars, eqn.invars)):
                 new_eqns.append(eqn)
             else:
                 new_eqns.append(eqn.replace(invars=new_invars))
