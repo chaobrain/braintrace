@@ -65,3 +65,24 @@ class TestShowGraph(unittest.TestCase):
         graph = braintrace.ETraceGraphExecutor(net)
         graph.compile_graph(brainstate.random.rand(n_in))
         graph.show_graph()
+
+
+class TestControlFlowThreading(unittest.TestCase):
+    def test_control_flow_policy_reaches_compiled_module_info(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 3)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+            def update(self, x):
+                self.h.value = 0.9 * self.h.value + braintrace.matmul(
+                    x.reshape(1, -1), self.w.value)
+                return self.h.value
+
+        policy = braintrace.ControlFlowPolicy(scan_unroll_limit=5)
+        model = Net()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.D_RTRL(model, control_flow=policy)
+        algo.compile_graph(jnp.ones((3,), dtype='float32'))
+        assert algo.graph.module_info.control_flow is policy

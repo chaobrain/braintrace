@@ -51,7 +51,7 @@ from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
 from braintrace._compatible_imports import Var
-from braintrace._compiler import compile_etrace_graph, HiddenGroup
+from braintrace._compiler import ControlFlowPolicy, compile_etrace_graph, HiddenGroup
 from braintrace._input_data import (
     get_single_step_data,
     split_input_data_types,
@@ -153,6 +153,13 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         - ``"multi-step"``: The VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by the
           data input.
+    include_recurrent_mixing : bool, optional
+        Hidden-group grouping mode for the hidden-to-hidden transition; see
+        ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
     """
     __module__ = 'braintrace'
 
@@ -161,8 +168,13 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         model: brainstate.nn.Module,
         vjp_method: str = 'single-step',
         include_recurrent_mixing: bool = False,
+        control_flow: Optional[ControlFlowPolicy] = None,
     ):
-        super().__init__(model, include_recurrent_mixing=include_recurrent_mixing)
+        super().__init__(
+            model,
+            include_recurrent_mixing=include_recurrent_mixing,
+            control_flow=control_flow,
+        )
 
         # the VJP method
         assert vjp_method in ('single-step', 'multi-step'), (
@@ -217,6 +229,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             self.model, *args,
             include_hidden_perturb=self.is_single_step_vjp,
             include_recurrent_mixing=self.include_recurrent_mixing,
+            control_flow=self.control_flow,
         )
 
     def _compute_hid2weight_jacobian(

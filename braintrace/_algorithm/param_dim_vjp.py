@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._compiler import HiddenParamOpRelation, HiddenGroup
+from braintrace._compiler import ControlFlowPolicy, HiddenParamOpRelation, HiddenGroup
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -587,6 +587,11 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
           the data input.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization (cond if-conversion,
+        scan unrolling, structured scan descent, ...) during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
     name : str, optional
         The name of the etrace algorithm.
     mode : braintrace.mixin.Mode, optional
@@ -691,8 +696,10 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         trace_dtype: Optional[DTypeLike] = None,
+        control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
-        super().__init__(model, name=name, vjp_method=vjp_method)
+        super().__init__(model, name=name, vjp_method=vjp_method,
+                         control_flow=control_flow)
         # ``fast_solve=True`` enables closed-form einsum kernels for
         # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
         # Conv / sparse / LoRA primitives always use the legacy path.

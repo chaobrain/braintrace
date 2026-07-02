@@ -37,6 +37,7 @@ import jax.numpy as jnp
 from braintrace._op import etp_mm_p, etp_mv_p, is_batched_primitive
 from braintrace._misc import etrace_df_key
 from ._common import _route_grads_by_path, _update_dict
+from braintrace._compiler import ControlFlowPolicy
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = ['OTPE']
@@ -121,6 +122,11 @@ class OTPE(ETraceVjpAlgorithm):
         :class:`ValueError` at construction; multi-step *inputs* (i.e. calling
         the compiled learner with :class:`~braintrace.MultiStepData`) raise
         :class:`NotImplementedError` instead, at call time.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization (cond if-conversion,
+        scan unrolling, structured scan descent, ...) during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
 
     Limitations
     -----------
@@ -215,6 +221,7 @@ class OTPE(ETraceVjpAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         trace_clip_abs: Optional[float] = None,
+        control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
         if mode not in ('full', 'approx'):
             raise ValueError(f"mode must be 'full' or 'approx'; got {mode!r}")
@@ -227,7 +234,8 @@ class OTPE(ETraceVjpAlgorithm):
                 f"a time and have no multi-step form; got "
                 f"vjp_method={vjp_method!r}."
             )
-        super().__init__(model, name=name, vjp_method=vjp_method)
+        super().__init__(model, name=name, vjp_method=vjp_method,
+                         control_flow=control_flow)
         self.mode = mode
         self.leak = float(leak)
         self.trace_clip_abs = trace_clip_abs

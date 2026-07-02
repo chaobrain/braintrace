@@ -40,6 +40,7 @@ from braintrace._typing import (
     dG_Hidden,
     dG_State,
 )
+from braintrace._compiler import ControlFlowPolicy
 from .base import ETraceAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
@@ -79,6 +80,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         - ``"multi-step"``: The VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by the
           data input.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing control-flow canonicalization (cond if-conversion,
+        scan unrolling, structured scan descent, ...) during graph
+        compilation. ``None`` (default) uses
+        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
 
     Notes
     -----
@@ -115,7 +121,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         self,
         model: brainstate.nn.Module,
         name: Optional[str] = None,
-        vjp_method: str = 'single-step'
+        vjp_method: str = 'single-step',
+        control_flow: Optional[ControlFlowPolicy] = None,
     ):
 
         # the VJP method
@@ -130,6 +137,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             model,
             vjp_method=vjp_method,
             include_recurrent_mixing=self._include_recurrent_mixing,
+            control_flow=control_flow,
         )
 
         # super initialization
