@@ -27,8 +27,10 @@ Phase 1 implements ``cond`` if-conversion (:func:`if_convert_conds`):
 every ETP-relevant ``cond`` equation is replaced by the inlined bodies of
 *all* its branches followed by one ``select_n`` equation per output. The
 integer index semantics of ``cond`` and ``select_n`` match exactly, and the
-JVP of ``select_n`` selects tangents, so values *and* Jacobians of the
-canonicalized jaxpr are exact.
+JVP of ``select_n`` selects tangents, so — for branches with finite values
+and Jacobians — the canonicalized jaxpr is exact in both value and
+derivative (see :class:`ControlFlowPolicy` for the dead-branch NaN/Inf
+caveat under reverse mode).
 
 Inner-``scan`` unrolling is Phase 2; the ``scan_unroll_limit`` knob on
 :class:`ControlFlowPolicy` is reserved for it.
@@ -83,12 +85,25 @@ class ControlFlowPolicy:
     -----
     If-conversion changes execution semantics: **both** branches of a
     converted ``cond`` execute every step, and ``select_n`` discards the
-    dead branch's value. Guarded partial operations (a ``cond`` used to
-    avoid ``sqrt`` of a negative number, for example) can produce NaN/Inf
-    in the dead branch — the value is discarded and, because whole outputs
-    are selected rather than multiplied, gradients are not contaminated.
-    Branches with effects, or containing ``while``/``scan``, are never
-    converted (see :func:`if_convert_conds`).
+    dead branch's *value*. Guarded partial operations (a ``cond`` used to
+    avoid ``sqrt`` of a negative number, for example) therefore need care:
+
+    - **Values and forward-mode (JVP) derivatives are safe** — ``select_n``
+      selects whole outputs and tangents, so a dead-branch NaN/Inf never
+      reaches the selected result.
+    - **Reverse-mode (VJP) gradients are NOT safe** when the dead branch's
+      local Jacobian is NaN/Inf: ``select_n``'s transpose hands the dead
+      branch an exact-zero cotangent, but the dead branch's VJP multiplies
+      that zero by its NaN/Inf Jacobian (``0 * nan = nan``), contaminating
+      gradients of inputs shared with the live branch — the classic
+      single-``where`` pitfall. If a ``cond`` guards a partial operation's
+      domain, keep it opaque (``cond='opaque'``) or guard the operand
+      itself (e.g. ``sqrt(where(ok, x, 1.))``) inside the branch.
+
+    For branches whose values and Jacobians are finite, the canonicalized
+    jaxpr is exact in both value and derivative. Branches with effects, or
+    containing ``while``/``scan``, are never converted (see
+    :func:`if_convert_conds`).
 
     Examples
     --------
@@ -110,8 +125,13 @@ ControlFlowPolicy.__module__ = 'braintrace'
 
 
 def _subjaxprs(eqn: JaxprEqn) -> Iterable[Jaxpr]:
-    """Yield every sub-jaxpr stored on an equation's params."""
-    for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
+    """Yield every sub-jaxpr stored on an equation's params.
+
+    ``call_jaxpr`` (custom_jvp/custom_vjp bodies) is descended for
+    *detection* only — those equations are never rewritten, but the gates
+    must still see ETP or while/scan primitives inside them.
+    """
+    for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr', 'call_jaxpr'):
         sub = eqn.params.get(key)
         if sub is not None:
             yield getattr(sub, 'jaxpr', sub)
@@ -204,9 +224,38 @@ def if_convert_conds(
             f"policy.cond must be 'convert' or 'opaque', got {policy.cond!r}."
         )
 
+    # Fixpoint loop: converting a cond can surface user ``jit`` equations
+    # from its branches, and their inlined bodies can expose further conds.
+    # Each iteration converts what is visible, then flattens surfaced jits;
+    # nesting depth is finite, so this terminates.
+    result = closed_jaxpr
+    while True:
+        converted, n_converted = _convert_conds_once(
+            result,
+            weight_invars=weight_invars,
+            hidden_invars=hidden_invars,
+            hidden_outvars=hidden_outvars,
+        )
+        if n_converted == 0:
+            return result
+        result = inline_jit_calls(converted)
+
+
+def _convert_conds_once(
+    closed_jaxpr: ClosedJaxpr,
+    *,
+    weight_invars: Container[Var],
+    hidden_invars: Container[Var],
+    hidden_outvars: Container[Var],
+):
+    """One conversion sweep over the top-level equations.
+
+    Returns ``(closed_jaxpr, n_converted)``; the input object itself when
+    nothing is converted.
+    """
     jaxpr = closed_jaxpr.jaxpr
     if not any(is_cond_primitive(eqn) for eqn in jaxpr.eqns):
-        return closed_jaxpr
+        return closed_jaxpr, 0
 
     extra_constvars: List[Var] = []
     extra_consts: List[Any] = []
@@ -361,7 +410,7 @@ def if_convert_conds(
         handle_eqn(eqn, lambda atom: atom, None)
 
     if n_converted == 0:
-        return closed_jaxpr
+        return closed_jaxpr, 0
 
     new_jaxpr = Jaxpr(
         constvars=list(jaxpr.constvars) + extra_constvars,
@@ -372,7 +421,4 @@ def if_convert_conds(
         debug_info=jaxpr.debug_info,
     )
     result = ClosedJaxpr(new_jaxpr, list(closed_jaxpr.consts) + extra_consts)
-    # Branch bodies may contain user ``jit`` calls that are now top-level
-    # equations; flatten them exactly as extract_module_info does before
-    # this pass runs. No-op (same object) when no jit equation surfaced.
-    return inline_jit_calls(result)
+    return result, n_converted

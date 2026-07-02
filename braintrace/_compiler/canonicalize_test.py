@@ -251,6 +251,86 @@ class TestIfConvertConds:
         for xi in (x, -x):
             assert jnp.allclose(_eval(conv, xi, w)[0], f(xi, w))
 
+    def test_shared_jitted_helper_in_both_branches(self):
+        # JAX's trace cache hands both branches' calls the SAME inner jaxpr
+        # object; conversion + jit inlining must freshen per call site or the
+        # two calls silently alias (values from the wrong branch).
+        @jax.jit
+        def helper(a, b):
+            return braintrace.matmul(a, b)
+
+        def f(x, wa, wb):
+            return jax.lax.cond(
+                jnp.sum(x) > 0.,
+                lambda: helper(x, wa),
+                lambda: helper(x, wb),
+            )
+
+        x = jnp.arange(1., 4.)
+        wa = jnp.eye(3) * 2.
+        wb = jnp.eye(3) * 3.
+        closed = jax.make_jaxpr(f)(x, wa, wb)
+        conv = _convert(closed)
+        names = _primitive_names(conv)
+        assert 'cond' not in names
+        assert 'jit' not in names and 'pjit' not in names
+        for xi in (x, -x):
+            assert jnp.allclose(_eval(conv, xi, wa, wb)[0], f(xi, wa, wb))
+            for argnum in (1, 2):
+                g_ref = jax.grad(
+                    lambda a, b, c: jnp.sum(f(a, b, c) ** 2), argnum)(xi, wa, wb)
+                g_conv = jax.grad(
+                    lambda a, b, c: jnp.sum(_eval(conv, a, b, c)[0] ** 2),
+                    argnum)(xi, wa, wb)
+                assert jnp.allclose(g_ref, g_conv, atol=1e-6)
+
+    def test_cond_inside_jit_inside_branch_converted(self):
+        # A cond hidden inside a jitted function inside a branch surfaces
+        # only after the surfaced jit is inlined; the fixpoint loop must
+        # gate/convert it too.
+        @jax.jit
+        def jitted(a, w):
+            return jax.lax.cond(
+                jnp.max(a) > 2.,
+                lambda: braintrace.matmul(a, w),
+                lambda: a * 5.,
+            )
+
+        def f(x, w):
+            return jax.lax.cond(
+                jnp.sum(x) > 0.,
+                lambda: jitted(x, w),
+                lambda: braintrace.matmul(x, w) * 2.,
+            )
+
+        x = jnp.arange(3, dtype=jnp.float32)
+        w = jnp.eye(3)
+        closed = jax.make_jaxpr(f)(x, w)
+        conv = _convert(closed)
+        names = _primitive_names(conv)
+        assert 'cond' not in names
+        assert 'jit' not in names and 'pjit' not in names
+        for xi in (x + 10., x + 0.1, x - 10.):
+            assert jnp.allclose(_eval(conv, xi, w)[0], f(xi, w))
+
+    def test_safety_gate_effects_in_branch(self):
+        def f(x, w):
+            def true_fn():
+                jax.debug.print('branch taken: {}', x[0])
+                return x * 2.
+
+            return jax.lax.cond(
+                jnp.sum(x) > 0., true_fn, lambda: braintrace.matmul(x, w)
+            )
+
+        closed = jax.make_jaxpr(f)(jnp.ones(3), jnp.eye(3))
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning, match='NOT if-converted'):
+                conv = _convert(closed)
+        assert 'cond' in _primitive_names(conv)
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.COND_CONVERSION_SKIPPED in kinds
+
     def test_safety_gate_while_in_branch(self):
         def f(x, w):
             def true_fn():
@@ -296,9 +376,9 @@ class TestIfConvertConds:
 
     def test_deterministic_output(self):
         _, closed, x, w = self._etp_cond_jaxpr()
-        names_a = _primitive_names(_convert(closed))
-        names_b = _primitive_names(_convert(closed))
-        assert names_a == names_b
+        # String form normalizes var names positionally, so equality pins
+        # the full equation *and wiring* order, not just the primitives.
+        assert str(_convert(closed).jaxpr) == str(_convert(closed).jaxpr)
 
 
 class _CondGateCell(brainstate.nn.Module):
