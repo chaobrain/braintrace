@@ -111,15 +111,64 @@ __all__ = [
 ]
 
 
+class _HashableSparseMat:
+    r"""Identity-hashable wrapper around a validated ``brainevent.DataRepresentation``.
+
+    ``brainevent.DataRepresentation`` subclasses (e.g. :class:`brainevent.CSR`)
+    define ``__eq__`` (structural/dense comparison) without a matching
+    ``__hash__``, so binding one directly as a jaxpr equation parameter raises
+    ``TypeError: parameters to jaxpr equations must have __hash__`` under
+    JAX >= 0.7 — the documented ``sparse_matmul`` usage otherwise fails
+    outright (audit finding H1).
+
+    This wrapper carries the already-validated structure opaquely and relies
+    on the inherited ``object.__hash__``/``object.__eq__`` (identity), which
+    is exactly what a static jaxpr parameter needs: the *same* Python sparse
+    object compares equal to itself (cache/jit-trace reuse), while two
+    distinct sparse objects are correctly unequal, even if their dense forms
+    happen to coincide.
+
+    Attributes
+    ----------
+    mat : brainevent.DataRepresentation
+        The wrapped, pre-validated sparse structure.
+    """
+
+    __slots__ = ('mat',)
+
+    def __init__(self, mat: brainevent.DataRepresentation) -> None:
+        self.mat = mat
+
+
+def _unwrap_sparse_mat(sparse_mat: Any) -> Any:
+    """Return the underlying sparse structure, unwrapping ``_HashableSparseMat``.
+
+    ``sparse_matmul`` binds a ``_HashableSparseMat`` wrapper (see above) so the
+    equation parameter is hashable. Every consumer of ``params['sparse_mat']``
+    (the forward impl -- and therefore also the auto-derived abstract-eval,
+    lowering, JVP and batching rules -- plus the ``yw_to_w``/``xy_to_dw`` ETP
+    rules) must unwrap it before calling the sparse-matrix protocol methods.
+
+    Direct (non-``sparse_matmul``) call sites -- e.g. the rule-level unit
+    tests in this module and in ``op_rule_oracle_test.py`` -- pass an
+    already-unwrapped ``DataRepresentation`` (or test stub) straight to the
+    impl/rule functions; those are returned unchanged.
+    """
+    if isinstance(sparse_mat, _HashableSparseMat):
+        return sparse_mat.mat
+    return sparse_mat
+
+
 def _etp_sp_matmul_impl(*args: Any,
                         sparse_mat: brainevent.DataRepresentation | None = None,
                         has_bias: bool = False,
                         weight_fn: WeightFn | None = None,
                         bias_fn: WeightFn | None = None) -> Any:
     x, weight_data = args[0], args[1]
+    mat = _unwrap_sparse_mat(sparse_mat)
     if weight_fn is not None:
         weight_data = weight_fn(weight_data)
-    w = sparse_mat.with_data(weight_data)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+    w = mat.with_data(weight_data)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     y = x @ w
     if has_bias:
         b = args[2]
@@ -179,8 +228,24 @@ def _sp_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
                       ``trace['weight'] : (batch, nnz)``,
                       ``trace['bias']   : (batch, out)``.
         solve context: batch axis dropped by the outer vmap.
+
+    **Batching (audit C3).** The scan-context call above hands this rule a
+    2-D ``hidden_dim``/``trace['weight']`` pair straight from the online
+    trace-recurrence update (no outer vmap — unlike the solve context).
+    ``brainevent``'s ``yw_to_w_transposed`` kernel (``csrmv_yw2y_p_call``)
+    only accepts 1-D operands, so when ``hidden_dim.ndim == 2`` this rule
+    ``jax.vmap``\ s the sparse call over the leading batch axis of both
+    operands instead of handing it the batched arrays directly.
     """
-    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+    mat = _unwrap_sparse_mat(sparse_mat)
+    weight_trace = trace['weight']
+    if hidden_dim.ndim == 2:
+        # (batch, out), (batch, nnz) -> vmap the 1-D-only brainevent kernel
+        # over the leading batch axis.
+        weight_out = jax.vmap(mat.yw_to_w_transposed)(hidden_dim, weight_trace)
+    else:
+        weight_out = mat.yw_to_w_transposed(hidden_dim, weight_trace)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+    out = {'weight': weight_out}
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
     return out
@@ -219,12 +284,13 @@ def _sp_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
     Both weight and bias pullbacks are fused into one ``jax.vjp`` over a
     dict-valued forward function.
     """
+    mat = _unwrap_sparse_mat(sparse_mat)
 
     def _fwd(w_dict: dict[str, Any]) -> Any:
         wd = w_dict['weight']
         if weight_fn is not None:
             wd = weight_fn(wd)
-        y = x @ sparse_mat.with_data(wd)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+        y = x @ mat.with_data(wd)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
         if has_bias:
             b = w_dict['bias']
             if bias_fn is not None:
@@ -308,7 +374,8 @@ def _sp_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
              ``trace['weight'] : (nnz,)``,
              ``trace['bias']   : (out,)``.
     """
-    out = {'weight': sparse_mat.yw_to_w_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+    mat = _unwrap_sparse_mat(sparse_mat)
+    out = {'weight': mat.yw_to_w_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
     return out
@@ -453,11 +520,15 @@ def sparse_matmul(
     x_v, x_u = u.split_mantissa_unit(x)
     w_v, w_u = u.split_mantissa_unit(weight)
     unit = x_u * w_u
+    # Bind an identity-hashable wrapper, not the DataRepresentation itself:
+    # brainevent structures define __eq__ without __hash__, which JAX >= 0.7
+    # rejects as a jaxpr equation parameter (audit finding H1).
+    wrapped_mat = _HashableSparseMat(sparse_mat)
     if bias is not None:
         bias_v = u.Quantity(bias).to_decimal(unit)
-        r = p.bind(x_v, w_v, bias_v, sparse_mat=sparse_mat, has_bias=True,
+        r = p.bind(x_v, w_v, bias_v, sparse_mat=wrapped_mat, has_bias=True,
                    weight_fn=weight_fn, bias_fn=bias_fn)
     else:
-        r = p.bind(x_v, w_v, sparse_mat=sparse_mat, has_bias=False,
+        r = p.bind(x_v, w_v, sparse_mat=wrapped_mat, has_bias=False,
                    weight_fn=weight_fn, bias_fn=bias_fn)
     return u.maybe_decimal(r * x_u * w_u)
