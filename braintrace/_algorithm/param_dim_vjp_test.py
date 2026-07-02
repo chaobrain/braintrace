@@ -601,3 +601,117 @@ def test_docstring_compile_example_runs():
     assert y.shape == (1,)
     assert bool(jnp.all(jnp.isfinite(y)))
     assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Optional instant_drtrl / solve_drtrl per-primitive dispatch
+# ---------------------------------------------------------------------------
+
+class TestInstantSolveDrtrlDispatch:
+    """Dispatch contract of the optional ``instant_drtrl`` / ``solve_drtrl``
+    per-primitive registries.
+
+    A primitive whose trace structure differs from its parameter structure
+    (LoRA, and later conv) registers both rules; every other primitive is
+    unregistered and must take the historical code path byte-identically.
+    The tests here exercise the *dispatch scaffolding* itself by temporarily
+    registering rules for the dense ``mm`` primitive that replicate the
+    legacy behavior — the LoRA oracle tests in ``lora_test.py`` cover the
+    real registered rules end-to-end.
+    """
+
+    def _grads(self, spec, inputs, **algo_kwargs):
+        return oracle.online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(
+                m, vjp_method='multi-step', **algo_kwargs
+            ),
+        )
+
+    def test_accessors_default_none_for_legacy_primitives(self):
+        """Dense / elemwise / sparse / conv register neither optional rule."""
+        from braintrace._op import (
+            etp_conv_p, etp_elemwise_p, etp_mm_p, etp_mv_p,
+            etp_sp_mm_p, etp_sp_mv_p,
+        )
+        from braintrace._op._registries import (
+            get_instant_drtrl_rule, get_solve_drtrl_rule,
+        )
+        for prim in (etp_mm_p, etp_mv_p, etp_elemwise_p,
+                     etp_sp_mm_p, etp_sp_mv_p, etp_conv_p):
+            assert get_instant_drtrl_rule(prim) is None
+            assert get_solve_drtrl_rule(prim) is None
+
+    def test_registered_rules_replicating_legacy_are_identical(self):
+        """Routing through the new dispatch with rules that replicate the
+        legacy ``xy_to_dw`` / ``yw_to_w`` behavior must reproduce the same
+        gradients — proving the ``weights_dict`` plumbing and the batch /
+        num_state vmap scaffolding are wired consistently."""
+        from braintrace._op import (
+            ETP_RULES_XY_TO_DW, ETP_RULES_YW_TO_W, etp_mm_p,
+        )
+        from braintrace._op._registries import (
+            ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL,
+        )
+
+        spec = om.leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(5, 3).astype('float32')
+
+        xy_rule = ETP_RULES_XY_TO_DW[etp_mm_p]
+        yw_rule = ETP_RULES_YW_TO_W[etp_mm_p]
+        seen_weight_keys = []
+
+        def instant(x, df, weights, **params):
+            return xy_rule(x, df, weights, **params)
+
+        def solve(dg_hidden, trace, weights, **params):
+            # Executed at trace time: record the weights_dict the dispatch
+            # built for this relation.
+            seen_weight_keys.append(tuple(sorted(weights.keys())))
+            return yw_rule(dg_hidden, trace, **params)
+
+        # ``fast_solve=False`` so the rule path (not the closed-form fast
+        # path) is what runs, exercising both new dispatch sites.
+        baseline = self._grads(spec, inputs, fast_solve=False)
+        try:
+            ETP_RULES_INSTANT_DRTRL[etp_mm_p] = instant
+            ETP_RULES_SOLVE_DRTRL[etp_mm_p] = solve
+            routed = self._grads(spec, inputs, fast_solve=False)
+        finally:
+            ETP_RULES_INSTANT_DRTRL.pop(etp_mm_p, None)
+            ETP_RULES_SOLVE_DRTRL.pop(etp_mm_p, None)
+
+        assert seen_weight_keys and all(
+            keys == ('weight',) for keys in seen_weight_keys
+        ), f'solve rule saw unexpected weights_dict keys: {seen_weight_keys}'
+        oracle.assert_param_gradients_close(routed, baseline, atol=0.0, rtol=0.0)
+
+    def test_fast_path_precedence_over_registered_rules(self):
+        """With ``fast_solve=True`` a fast-path primitive must keep using the
+        closed-form kernels even when the optional rules are registered: the
+        gradients stay identical and the rules are never invoked."""
+        from braintrace._op import etp_mm_p
+        from braintrace._op._registries import (
+            ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL,
+        )
+
+        spec = om.leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
+        brainstate.random.seed(2)
+        inputs = brainstate.random.randn(5, 3).astype('float32')
+
+        def _must_not_run(*args, **kwargs):
+            raise AssertionError(
+                'instant/solve drtrl rule invoked despite the fast path'
+            )
+
+        baseline = self._grads(spec, inputs, fast_solve=True)
+        try:
+            ETP_RULES_INSTANT_DRTRL[etp_mm_p] = _must_not_run
+            ETP_RULES_SOLVE_DRTRL[etp_mm_p] = _must_not_run
+            routed = self._grads(spec, inputs, fast_solve=True)
+        finally:
+            ETP_RULES_INSTANT_DRTRL.pop(etp_mm_p, None)
+            ETP_RULES_SOLVE_DRTRL.pop(etp_mm_p, None)
+
+        oracle.assert_param_gradients_close(routed, baseline, atol=0.0, rtol=0.0)
