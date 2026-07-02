@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
+from braintrace._algorithm import oracle
 from braintrace._algorithm.ottt import OTTT
 
 
@@ -64,6 +65,57 @@ def _two_state_net():
     return net
 
 
+def _lora_net():
+    """Net trained through `braintrace.lora_matmul` -- LoRA relations are outside
+    OTTT's supported primitive set (see finding H5)."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.B = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 2))
+            )
+            self.A = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(1), (2, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = 0.9 * self.v.value + braintrace.lora_matmul(
+                x, self.B.value, self.A.value
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _bias_net():
+    """Net trained through a recurrent `braintrace.matmul(..., bias=...)`, whose
+    recurrence coefficient (0.9) matches the `leak` OTTT/OTPE are given -- the
+    "exactly diagonal" regime in which both algorithms claim BPTT-exact gradients."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.b = brainstate.ParamState(jnp.zeros(3))
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = 0.9 * self.v.value + braintrace.matmul(
+                x, self.w.value, self.b.value
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
 class TestOTTTConstruction(unittest.TestCase):
     def test_default_mode_is_A(self):
         algo = OTTT(_ottt_net(), leak=0.9)
@@ -81,6 +133,14 @@ class TestOTTTConstruction(unittest.TestCase):
     def test_leak_out_of_range_raises(self):
         with self.assertRaises(ValueError):
             OTTT(_ottt_net(), leak=1.5)
+
+    def test_multi_step_vjp_method_rejected_at_construction(self):
+        """N6: OTTT's trace update/weight-gradient rules are derived one step at
+        a time and have no multi-step form; `vjp_method='multi-step'` must be
+        rejected eagerly at construction, not silently accepted until the first
+        (multi-step) call fails."""
+        with self.assertRaises(ValueError):
+            OTTT(_ottt_net(), leak=0.9, vjp_method='multi-step')
 
     def test_num_state_gt_one_raises(self):
         """Multi-state hidden groups have no theoretical basis for OTTT."""
@@ -134,6 +194,68 @@ class TestOTTTEnd2End(unittest.TestCase):
         g_A = compute('A')
         g_O = compute('O')
         assert not jnp.allclose(g_A, g_O, atol=1e-4)
+
+
+class TestOTTTBiasGradient(unittest.TestCase):
+    """H5: the weight-gradient solver indexed only the ``'weight'`` key of each
+    relation's trainable dict, so `braintrace.matmul(x, w, bias=b)` silently got
+    a zero bias gradient. Must route every key (here also ``'bias'``) through
+    `relation.trainable_paths`, exactly as `_common._route_grads_by_path` does.
+
+    OTTT's docstring claims it keeps BPTT's *spatial* credit assignment exactly
+    and only drops the *temporal* (hidden-to-hidden) Jacobian. In the "exactly
+    diagonal" regime -- the model's recurrence coefficient equals the `leak`
+    OTTT is given, mode='A' -- this is provably exact: both the outer-product
+    weight term and the scalar bias term reduce, via summation-order exchange,
+    to the same double sum BPTT computes. So we assert *element-wise* equality
+    with the BPTT oracle, not just non-zero/same-sign -- this model is squarely
+    in that exact regime.
+    """
+
+    def test_bias_gradient_matches_bptt_in_exactly_diagonal_regime(self):
+        inputs = jnp.stack([jnp.ones((1, 3)) * (i + 1) * 0.1 for i in range(4)])
+        bptt = oracle.bptt_param_gradients(_bias_net, inputs)
+        online = oracle.online_param_gradients_singlestep_naive(
+            _bias_net, inputs, algo_factory=lambda m: OTTT(m, leak=0.9)
+        )
+        assert bool(jnp.any(online[('b',)] != 0.0)), 'bias gradient must not be zero (H5)'
+        oracle.assert_param_gradients_close(
+            online, bptt, atol=1e-4, keys=[('b',), ('w',)]
+        )
+
+
+class TestOTTTUnsupportedRelationGuard(unittest.TestCase):
+    """H5: LoRA/conv/sparse relations don't reduce to OTTT's single
+    presynaptic-trace outer product; they must raise a compile-time
+    `NotImplementedError` naming the offending primitive rather than crashing
+    opaquely or silently mishandling the relation."""
+
+    def test_lora_relation_raises_named_primitive_at_compile_time(self):
+        algo = OTTT(_lora_net(), leak=0.9)
+        with self.assertRaises(NotImplementedError) as ctx:
+            algo.compile_graph(jnp.ones((1, 3)))
+        assert 'etp_lora_mm' in str(ctx.exception)
+
+    def test_is_compiled_stays_false_after_repeated_guard_failure(self):
+        """M6: a failed compile-time validation must not leave `is_compiled`
+        stuck True -- otherwise `base.compile_graph`'s ``if not
+        self.is_compiled:`` guard would silently skip re-validation (and
+        `init_etrace_state`) on a subsequent call. Calling `compile_graph`
+        twice on the same (permanently invalid) model must raise both times."""
+        algo = OTTT(_lora_net(), leak=0.9)
+        x = jnp.ones((1, 3))
+        with self.assertRaises(NotImplementedError):
+            algo.compile_graph(x)
+        assert algo.is_compiled is False
+
+        with self.assertRaises(NotImplementedError):
+            algo.compile_graph(x)
+        assert algo.is_compiled is False
+
+        # A fresh, valid model must still compile normally afterward.
+        ok_algo = OTTT(_ottt_net(), leak=0.9)
+        ok_algo.compile_graph(x)
+        assert ok_algo.is_compiled is True
 
 
 def _toy_net():

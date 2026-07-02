@@ -20,6 +20,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
+from braintrace._algorithm import oracle
 from braintrace._algorithm.otpe import OTPE
 
 
@@ -64,6 +65,78 @@ def _two_state_net():
     return net
 
 
+def _lora_net():
+    """Net trained through `braintrace.lora_matmul` -- LoRA relations are outside
+    OTPE's supported primitive set (see finding H5)."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.B = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 2))
+            )
+            self.A = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(1), (2, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = 0.9 * self.v.value + braintrace.lora_matmul(
+                x, self.B.value, self.A.value
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _bias_net():
+    """Net trained through a recurrent `braintrace.matmul(..., bias=...)`, whose
+    recurrence coefficient (0.9) matches the `leak` OTTT/OTPE are given -- the
+    "exactly diagonal" regime in which both algorithms claim BPTT-exact gradients."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.b = brainstate.ParamState(jnp.zeros(3))
+            self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+        def update(self, x):
+            self.v.value = 0.9 * self.v.value + braintrace.matmul(
+                x, self.w.value, self.b.value
+            )
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+def _unbatched_net():
+    """Net with an unbatched hidden state (no leading batch axis) -- exercises
+    OTPE's `reset_state` on `etp_mv` relations (see finding M4)."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+            )
+            self.v = brainstate.HiddenState(jnp.zeros((3,)))
+
+        def update(self, x):
+            self.v.value = 0.9 * self.v.value + braintrace.matmul(x, self.w.value)
+            return self.v.value
+
+    net = Net()
+    brainstate.nn.init_all_states(net)  # no batch_size -> unbatched
+    return net
+
+
 class TestOTPEConstruction(unittest.TestCase):
     def test_default_mode_full(self):
         algo = OTPE(_otpe_net_single_layer(), leak=0.9)
@@ -81,6 +154,14 @@ class TestOTPEConstruction(unittest.TestCase):
     def test_leak_out_of_range_raises(self):
         with self.assertRaises(ValueError):
             OTPE(_otpe_net_single_layer(), leak=1.5)
+
+    def test_multi_step_vjp_method_rejected_at_construction(self):
+        """N6: OTPE's trace update/weight-gradient rules are derived one step at
+        a time and have no multi-step form; `vjp_method='multi-step'` must be
+        rejected eagerly at construction, not silently accepted until the first
+        (multi-step) call fails."""
+        with self.assertRaises(ValueError):
+            OTPE(_otpe_net_single_layer(), leak=0.9, vjp_method='multi-step')
 
     def test_num_state_gt_one_raises(self):
         """Multi-state hidden groups are outside OTPE's LIF regime."""
@@ -140,6 +221,119 @@ class TestOTPEApproxMode(unittest.TestCase):
         )(x)
         g = grads[next(iter(grads))]
         assert g.shape == (3, 3)
+
+
+class TestOTPEBiasGradient(unittest.TestCase):
+    """H5: the weight-gradient solvers indexed only the ``'weight'`` key of each
+    relation's trainable dict, so `braintrace.matmul(x, w, bias=b)` silently got
+    a zero bias gradient. Must route every key (here also ``'bias'``) through
+    `relation.trainable_paths`, exactly as `_common._route_grads_by_path` does.
+
+    OTPE's docstring claims gradient-exactness for a single hidden layer under
+    the scalar-leak (LIF) assumption. In the "exactly diagonal" regime -- the
+    model's recurrence coefficient equals the `leak` OTPE is given -- both
+    'full' and 'approx' modes are exact for bias specifically: bias's local
+    Jacobian dy/db=1 has no "in" dimension, so 'approx' mode's outer-product
+    factorization (which only approximates the joint x-times-df weight trace)
+    introduces no approximation error for bias -- its ``R_hat_g``/``R_hat_bias``
+    companion trace follows the identical recursion in both modes. So we assert
+    *element-wise* equality with the BPTT oracle for bias in both modes.
+    """
+
+    def test_bias_gradient_matches_bptt_full_mode(self):
+        inputs = jnp.stack([jnp.ones((1, 3)) * (i + 1) * 0.1 for i in range(4)])
+        bptt = oracle.bptt_param_gradients(_bias_net, inputs)
+        online = oracle.online_param_gradients_singlestep_naive(
+            _bias_net, inputs, algo_factory=lambda m: OTPE(m, leak=0.9, mode='full')
+        )
+        assert bool(jnp.any(online[('b',)] != 0.0)), 'bias gradient must not be zero (H5)'
+        oracle.assert_param_gradients_close(
+            online, bptt, atol=1e-4, keys=[('b',), ('w',)]
+        )
+
+    def test_bias_gradient_matches_bptt_approx_mode(self):
+        inputs = jnp.stack([jnp.ones((1, 3)) * (i + 1) * 0.1 for i in range(4)])
+        bptt = oracle.bptt_param_gradients(_bias_net, inputs)
+        online = oracle.online_param_gradients_singlestep_naive(
+            _bias_net, inputs, algo_factory=lambda m: OTPE(m, leak=0.9, mode='approx')
+        )
+        assert bool(jnp.any(online[('b',)] != 0.0)), 'bias gradient must not be zero (H5)'
+        # Only the bias key is asserted exact here -- 'approx' mode's weight
+        # gradient is *not* BPTT-exact (its outer-product factorization is a
+        # genuine additional approximation), covered separately in
+        # TestOTPEApproxMode.
+        oracle.assert_param_gradients_close(online, bptt, atol=1e-4, keys=[('b',)])
+
+
+class TestOTPEUnsupportedRelationGuard(unittest.TestCase):
+    """H5: LoRA/conv/sparse relations don't reduce to OTPE's per-parameter
+    leaky trace; they must raise a compile-time `NotImplementedError` naming
+    the offending primitive rather than crashing opaquely or silently
+    mishandling the relation."""
+
+    def test_lora_relation_raises_named_primitive_at_compile_time(self):
+        algo = OTPE(_lora_net(), leak=0.9, mode='full')
+        with self.assertRaises(NotImplementedError) as ctx:
+            algo.compile_graph(jnp.ones((1, 3)))
+        assert 'etp_lora_mm' in str(ctx.exception)
+
+    def test_is_compiled_stays_false_after_repeated_guard_failure(self):
+        """M6: a failed compile-time validation must not leave `is_compiled`
+        stuck True -- otherwise `base.compile_graph`'s ``if not
+        self.is_compiled:`` guard would silently skip re-validation (and
+        `init_etrace_state`) on a subsequent call. Calling `compile_graph`
+        twice on the same (permanently invalid) model must raise both times."""
+        algo = OTPE(_lora_net(), leak=0.9, mode='full')
+        x = jnp.ones((1, 3))
+        with self.assertRaises(NotImplementedError):
+            algo.compile_graph(x)
+        assert algo.is_compiled is False
+
+        with self.assertRaises(NotImplementedError):
+            algo.compile_graph(x)
+        assert algo.is_compiled is False
+
+        # A fresh, valid model must still compile normally afterward.
+        ok_algo = OTPE(_otpe_net_single_layer(), leak=0.9, mode='full')
+        ok_algo.compile_graph(x)
+        assert ok_algo.is_compiled is True
+
+
+class TestOTPEUnbatchedResetState(unittest.TestCase):
+    """M4: `OTPE.reset_state` assumed a leading batch axis and corrupted
+    unbatched trace shapes (e.g. replacing the real leading `in`/`out` dim with
+    `batch_size`). Must derive reset shapes from the stored trace values
+    instead of assuming a batch axis is present."""
+
+    def test_reset_preserves_unbatched_trace_shapes_full_mode(self):
+        net = _unbatched_net()
+        algo = OTPE(net, leak=0.9, mode='full')
+        x = jnp.ones((3,))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        algo.update(x)  # populate traces with real (non-init) values first
+
+        before = {rid: r.value.shape for rid, r in algo._R_hat.items()}
+        algo.reset_state(batch_size=4)  # unbatched relations must ignore this
+        after = {rid: r.value.shape for rid, r in algo._R_hat.items()}
+        assert before == after
+        assert all(v.value.shape == (3, 3) for v in algo._R_hat.values())
+
+    def test_reset_preserves_unbatched_trace_shapes_approx_mode(self):
+        net = _unbatched_net()
+        algo = OTPE(net, leak=0.9, mode='approx')
+        x = jnp.ones((3,))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        algo.update(x)
+
+        before_x = {rid: r.value.shape for rid, r in algo._R_hat_x.items()}
+        before_g = {rid: r.value.shape for rid, r in algo._R_hat_g.items()}
+        algo.reset_state(batch_size=4)
+        after_x = {rid: r.value.shape for rid, r in algo._R_hat_x.items()}
+        after_g = {rid: r.value.shape for rid, r in algo._R_hat_g.items()}
+        assert before_x == after_x
+        assert before_g == after_g
 
 
 def _toy_net():
