@@ -25,6 +25,7 @@ import brainunit as u
 
 from braintrace._compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._op import (
+    etp_conv_p,
     etp_elemwise_p,
     ETP_RULES_YW_TO_W,
     ETP_RULES_XY_TO_DW,
@@ -104,9 +105,15 @@ def _init_param_dim_state(
         init_fn = ETP_RULES_INIT_DRTRL[relation.primitive]
         # ``etp_elemwise`` has no x/y batch carrier (its output is the weight),
         # so it needs the hidden group to size the trace's leading (position /
-        # batch) axes. Only that primitive accepts ``group``; others are
-        # unchanged.
-        init_kw = {'group': group} if relation.primitive is etp_elemwise_p else {}
+        # batch) axes. ``etp_conv``'s per-position trace shape depends on the
+        # equation's layout (``dimension_numbers`` / ``strides``) and grouped
+        # convolutions must be rejected at init, so it receives the eqn
+        # params. Other primitives are unchanged.
+        init_kw: dict = {}
+        if relation.primitive is etp_elemwise_p:
+            init_kw['group'] = group
+        elif relation.primitive is etp_conv_p:
+            init_kw['eqn_params'] = relation.eqn_params
         init_val = init_fn(
             relation.x_var,
             relation.y_var,
@@ -614,13 +621,21 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     and is sensitive to the context/mode of the computation. In particular, it is
     sensitive to ``brainstate.mixin.Batching`` behavior.
 
-    This algorithm has :math:`O(B\theta)` memory complexity, where
-    :math:`\theta` is the number of parameters and :math:`B` the batch size.
-    For a convolutional layer, the weight gradients are computed with
-    :math:`O(B\theta)` memory complexity, where :math:`\theta` is the dimension
-    of the convolutional kernel. For a linear transformation layer, the weight
-    gradients are computed with :math:`O(BIO)` computational complexity, where
-    :math:`I` and :math:`O` are the number of input and output dimensions.
+    For dense (linear) transformation layers this algorithm has
+    :math:`O(B\theta)` memory complexity, where :math:`\theta` is the number
+    of parameters and :math:`B` the batch size — the weight gradients are
+    computed with :math:`O(BIO)` complexity, where :math:`I` and :math:`O`
+    are the number of input and output dimensions.
+
+    For a convolutional layer the exact eligibility trace must keep one
+    kernel-shaped slot **per spatial output position** — the kernel is
+    spatially shared while the diagonal discount acts per output element,
+    so a spatially pre-summed (kernel-shaped) trace cannot follow the
+    recurrence. The conv trace therefore costs :math:`O(B S \theta)` memory,
+    where :math:`S` is the number of spatial output positions and
+    :math:`\theta` the kernel parameter count. For large convolutions prefer
+    the IO-dim algorithm (``pp_prop`` / :class:`IODimVjpAlgorithm`), whose
+    conv trace stays output-shaped.
 
     For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
 
