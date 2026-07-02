@@ -94,6 +94,7 @@ from ._algorithm import (
     PresynapticTrace,
 )
 from ._compiler import (
+    ControlFlowPolicy,
     ETraceGraph,
     compile_etrace_graph,
     HiddenParamOpRelation,
@@ -185,6 +186,7 @@ __all__ = [
     'ETraceGraphExecutor',
 
     # compiler
+    'ControlFlowPolicy',
     'ETraceGraph',
     'compile_etrace_graph',
     'HiddenGroup',

@@ -23,6 +23,7 @@ __all__ = [
     'ClosedJaxpr',
     'Literal',
     'new_var',
+    'new_jaxpr_eqn',
     'is_jit_primitive',
     'is_scan_primitive',
     'is_while_primitive',
@@ -30,6 +31,11 @@ __all__ = [
 ]
 
 from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal
+
+try:
+    from jax.extend.core import new_jaxpr_eqn
+except ImportError:  # older JAX exposes it on jax.core only
+    from jax.core import new_jaxpr_eqn
 
 
 def new_var(suffix, aval):

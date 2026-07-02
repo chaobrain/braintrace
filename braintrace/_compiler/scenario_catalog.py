@@ -321,6 +321,34 @@ def make_scan_body_etp_jaxpr(n_in: int, n_out: int, length: int = 4):
     return jax.make_jaxpr(f)(w, xs).jaxpr
 
 
+class CondBranchRNN(brainstate.nn.Module):
+    """``h = tanh(cond(sum(x) > 0, mv(x, Wa), mv(x, Wb)) + 0.9 h_prev)``.
+
+    ETP primitives inside ``lax.cond`` branches: the full pipeline
+    if-converts the cond into inlined branches + ``select_n`` at extraction
+    time (see ``_compiler/canonicalize.py``), so both weights participate
+    as relations exactly as in the hand-flattened select model.
+    """
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.w_a = brainstate.ParamState(brainstate.random.randn(n_in, n_out))
+        self.w_b = brainstate.ParamState(brainstate.random.randn(n_in, n_out))
+        self.h = brainstate.HiddenState(jnp.zeros(n_out))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        u = jax.lax.cond(
+            jnp.sum(x) > 0.,
+            lambda: braintrace.matmul(x, self.w_a.value),
+            lambda: braintrace.matmul(x, self.w_b.value),
+        )
+        self.h.value = jnp.tanh(u + 0.9 * self.h.value)
+        return self.h.value
+
+
 def make_cond_branches_etp_jaxpr(n_in: int, n_out: int):
     """Return a jaxpr containing ``braintrace.matmul`` in *both* cond branches."""
     w_true = jnp.zeros((n_in, n_out))

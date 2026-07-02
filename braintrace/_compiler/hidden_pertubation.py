@@ -25,7 +25,8 @@ from braintrace._compatible_imports import (
     JaxprEqn,
     Jaxpr,
     ClosedJaxpr,
-    new_var
+    new_var,
+    new_jaxpr_eqn,
 )
 from braintrace._misc import (
     git_issue_addr,
@@ -290,7 +291,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             perturb_var = self.perturb_invars[hidden_var]
             fresh = self._new_var_like(hidden_var)
             self.revised_eqns.append(
-                jax.core.new_jaxpr_eqn(
+                new_jaxpr_eqn(
                     [hidden_var, perturb_var],
                     [fresh],
                     jax.lax.add_p,
@@ -388,7 +389,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         for i in hidden_positions:
             hidden_var = eqn.outvars[i]
             self.revised_eqns.append(
-                jax.core.new_jaxpr_eqn(
+                new_jaxpr_eqn(
                     [new_outvars[i], self.perturb_invars[hidden_var]],
                     [hidden_var],
                     jax.lax.add_p,
