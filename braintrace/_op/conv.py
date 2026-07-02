@@ -133,6 +133,22 @@ def _etp_conv_impl(
         b = args[2]
         if bias_fn is not None:
             b = bias_fn(b)
+        if b.ndim == 1:
+            # Canonical per-output-channel bias vector: broadcast it along
+            # the layout's channel axis. The channel axis is NOT always
+            # trailing -- the default (``dimension_numbers=None``) layout is
+            # NCH-style, with the channel axis at position 1, so a naive
+            # ``y + b`` broadcasts against the trailing spatial axis instead
+            # (raising when sizes differ, silently corrupting the output
+            # when a spatial size happens to equal ``out_channels``).
+            # Bias arrays with rank > 1 are assumed to already be pre-shaped
+            # by the caller for direct broadcasting and are left untouched.
+            _, channel_axis, _, _ = _conv_layout(
+                {'strides': strides, 'dimension_numbers': dimension_numbers}
+            )
+            shape = [1] * y.ndim
+            shape[channel_axis] = b.shape[0]
+            b = b.reshape(shape)
         y = y + b
     return y
 
