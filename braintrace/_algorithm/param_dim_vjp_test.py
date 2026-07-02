@@ -508,7 +508,10 @@ def _accumulate_online_grads(model, algo_ctor, inputs, targets, batched):
     @brainstate.transform.jit
     def run(inputs, targets):
         if batched:
-            online = algo_ctor(model, mode=brainstate.mixin.Batching())
+            # ``mode`` was a dead kwarg (never forwarded; batching is detected
+            # from the batched states created by ``init_all_states``) and the
+            # constructors no longer swallow unknown kwargs.
+            online = algo_ctor(model)
             brainstate.nn.init_all_states(model, batch_size=inputs.shape[1])
         else:
             online = algo_ctor(model)
