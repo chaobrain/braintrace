@@ -501,3 +501,29 @@ class DeepNestedModuleRNN(brainstate.nn.Module):
 
     def update(self, x):
         return self.l1.update(x)
+
+
+# ---------------------------------------------------------------------------
+# Constant weight, trainable bias — any-trainable-key gating
+# ---------------------------------------------------------------------------
+
+class ConstWeightParamBiasRNN(brainstate.nn.Module):
+    """The matmul weight is a fixed constant; only the bias is a ParamState.
+
+    The relation must register with ``bias`` as its only resolved trainable
+    key — the unresolvable ``weight`` key must not veto the whole relation.
+    """
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.w_const = jnp.asarray(brainstate.random.randn(n_in + n_out, n_out))
+        self.b = brainstate.ParamState(brainstate.random.randn(n_out))
+        self.h = brainstate.HiddenState(jnp.zeros(n_out))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        xh = jnp.concatenate([x, self.h.value])
+        self.h.value = jnp.tanh(braintrace.matmul(xh, self.w_const, self.b.value))
+        return self.h.value

@@ -1063,3 +1063,113 @@ class TestCategoryO_NestedJit:
             return _relation_set(_compile(model, brainstate.random.rand(3)))
 
         assert build() == build()
+
+
+# ---------------------------------------------------------------------------
+# Category P — Branching fan-out (one y directly feeds two groups)
+# ---------------------------------------------------------------------------
+
+from braintrace._compiler.scenario_catalog import (
+    BranchingFanOutRNN,
+    ConstWeightParamBiasRNN,
+)
+
+
+class TestCategoryP_BranchingFanOut:
+    """``y = matmul(x, w)`` directly feeds two *independent* recurrent hidden
+    states (two hidden groups). The single relation must record BOTH groups —
+    not just the group of whichever hidden outvar the BFS happened to reach
+    first."""
+
+    def test_one_relation_records_both_groups(self):
+        model = BranchingFanOutRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 1
+        r = rels[0]
+        assert r.connected_hidden_paths == [('h1',), ('h2',)]
+        assert len(r.hidden_groups) == 2
+        assert len(r.y_to_hidden_group_jaxprs) == 2
+        assert r.primitive is etp_mv_p
+
+    def test_stacked_layers_stay_scoped(self):
+        # The directly-fed-groups fix must NOT leak downstream layers back
+        # in: cell0's weight still reaches only cell0's hidden state.
+        model = StackedDeepRNN(3, 4, depth=2)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {
+            (('cell0', 'w'), ('cell0', 'h')),
+            (('cell1', 'w'), ('cell1', 'h')),
+        }
+
+    def test_fan_out_stable_across_recompiles(self):
+        def build():
+            model = BranchingFanOutRNN(3, 4)
+            brainstate.nn.init_all_states(model)
+            g = _compile(model, brainstate.random.rand(3))
+            return [
+                (r.path, tuple(r.connected_hidden_paths),
+                 tuple(grp.index for grp in r.hidden_groups))
+                for r in g.hidden_param_op_relations
+            ]
+
+        assert build() == build()
+
+
+# ---------------------------------------------------------------------------
+# Category Q — Any-trainable-key gating (const weight, ParamState bias)
+# ---------------------------------------------------------------------------
+
+class TestCategoryQ_AnyTrainableKeyGating:
+    """The primitive's first trainable key ('weight') is a constant array,
+    but the 'bias' key IS a ParamState. The relation must be registered with
+    ``bias`` as its only resolved trainable key instead of being vetoed by
+    the unresolvable first key."""
+
+    def test_bias_only_relation_registers(self):
+        model = ConstWeightParamBiasRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 1
+        r = rels[0]
+        assert set(r.trainable_paths) == {'bias'}
+        assert r.trainable_paths['bias'] == ('b',)
+        assert r.connected_hidden_paths == [('h',)]
+
+    def test_no_paramstate_at_all_still_excluded(self):
+        # Both weight and bias constant: the exclusion diagnostic must
+        # be preserved.
+        class _AllConstRNN(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w_const = jnp.asarray(brainstate.random.randn(7, 4))
+                self.h = brainstate.HiddenState(jnp.zeros(4))
+
+            def init_state(self, *args, **kwargs):
+                self.h.value = jnp.zeros_like(self.h.value)
+
+            def update(self, x):
+                xh = jnp.concatenate([x, self.h.value])
+                self.h.value = jnp.tanh(braintrace.matmul(xh, self.w_const))
+                return self.h.value
+
+        model = _AllConstRNN()
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert len(graph.hidden_param_op_relations) == 0
+        assert len(graph.explain(kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE)) == 1
