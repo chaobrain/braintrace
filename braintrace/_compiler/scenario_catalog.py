@@ -43,6 +43,11 @@ exclude with a specific structured diagnostic).
 * Partial path (``PartialPathRNN``).
 * Control flow (``ScanBodyEtpRNN``, ``CondBranchEtpRNN``,
   ``WhileBodyEtpRNN``).
+* Nested jit (``NestedJitRNN``).
+* Branching fan-out (``BranchingFanOutRNN``).
+* Shared submodule, two call sites (``SharedSubmoduleTwiceRNN``).
+* Residual connection (``ResidualSkipRNN``).
+* Deep module nesting (``DeepNestedModuleRNN``).
 """
 
 
@@ -353,3 +358,172 @@ def make_while_body_etp_jaxpr(n_in: int, n_out: int, n_iter: int = 3):
         return jnp.tanh(h_final)
 
     return jax.make_jaxpr(f)(w, x).jaxpr
+
+
+# ---------------------------------------------------------------------------
+# Nested jit — ETP primitive inside a user ``jax.jit`` boundary
+# ---------------------------------------------------------------------------
+
+class NestedJitRNN(brainstate.nn.Module):
+    """The ETP matmul is wrapped in a user ``jax.jit`` function. The compiler
+    inlines the jit body at extraction time, so the relation must be found
+    exactly as in :class:`UnbatchedMvRNN`.
+    """
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.w = brainstate.ParamState(brainstate.random.randn(n_in + n_out, n_out))
+        self.h = brainstate.HiddenState(jnp.zeros(n_out))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        @jax.jit
+        def proj(xh, w):
+            return braintrace.matmul(xh, w)
+
+        xh = jnp.concatenate([x, self.h.value])
+        self.h.value = jnp.tanh(proj(xh, self.w.value))
+        return self.h.value
+
+
+# ---------------------------------------------------------------------------
+# Branching fan-out — one ETP output directly feeds two uncoupled hiddens
+# ---------------------------------------------------------------------------
+
+class BranchingFanOutRNN(brainstate.nn.Module):
+    """``y = matmul(x, w)`` feeds two *independent* recurrent hidden states.
+
+    ``h1`` and ``h2`` never read each other, so they land in two different
+    hidden groups; both are fed *directly* by ``y`` (no other hidden outvar
+    on the path), so the single relation must record **both** groups.
+    """
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.w = brainstate.ParamState(brainstate.random.randn(n_in, n_out))
+        self.h1 = brainstate.HiddenState(jnp.zeros(n_out))
+        self.h2 = brainstate.HiddenState(jnp.zeros(n_out))
+
+    def init_state(self, *args, **kwargs):
+        self.h1.value = jnp.zeros_like(self.h1.value)
+        self.h2.value = jnp.zeros_like(self.h2.value)
+
+    def update(self, x):
+        y = braintrace.matmul(x, self.w.value)
+        self.h1.value = jnp.tanh(0.9 * self.h1.value + y)
+        self.h2.value = jnp.tanh(0.5 * self.h2.value - y)
+        return self.h1.value + self.h2.value
+
+
+# ---------------------------------------------------------------------------
+# Shared submodule — one module instance called at two sites per step
+# ---------------------------------------------------------------------------
+
+class SharedSubmoduleTwiceRNN(brainstate.nn.Module):
+    """One ``UnbatchedMvRNN``-style projection module applied twice per step.
+
+    The single ``ParamState`` appears in two ETP equations (two call sites),
+    so the compiler must register two relations sharing one weight path —
+    the module-sharing analogue of :class:`SharedTiedWeightRNN`.
+    """
+
+    def __init__(self, n: int):
+        super().__init__()
+        self.proj = braintrace.nn.Linear(n, n, b_init=None)
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        a = self.proj(x)
+        b = self.proj(self.h.value)
+        self.h.value = jnp.tanh(a + b)
+        return self.h.value
+
+
+# ---------------------------------------------------------------------------
+# Residual connection — skip path around the recurrent projection
+# ---------------------------------------------------------------------------
+
+class ResidualSkipRNN(brainstate.nn.Module):
+    """``h = tanh(matmul(xh, w) + x_proj_skip)`` with an elementwise residual.
+
+    The residual add is on the non-parametric tail, so the relation for
+    ``w`` is unaffected by the skip path; the skip input reaches the hidden
+    state without any ETP op and must not create extra relations.
+    """
+
+    def __init__(self, n: int):
+        super().__init__()
+        self.w = brainstate.ParamState(brainstate.random.randn(2 * n, n))
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        xh = jnp.concatenate([x, self.h.value])
+        self.h.value = jnp.tanh(braintrace.matmul(xh, self.w.value) + x)
+        return self.h.value
+
+
+# ---------------------------------------------------------------------------
+# Deep module nesting — the recurrent cell sits four levels deep
+# ---------------------------------------------------------------------------
+
+class _NestingLevel(brainstate.nn.Module):
+    def __init__(self, inner):
+        super().__init__()
+        self.inner = inner
+
+    def init_state(self, *args, **kwargs):
+        self.inner.init_state()
+
+    def update(self, x):
+        return self.inner.update(x)
+
+
+class DeepNestedModuleRNN(brainstate.nn.Module):
+    """An :class:`UnbatchedMvRNN` wrapped in three pass-through modules.
+
+    Relation and group paths must reflect the full nested module path.
+    """
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.l1 = _NestingLevel(_NestingLevel(_NestingLevel(UnbatchedMvRNN(n_in, n_out))))
+
+    def init_state(self, *args, **kwargs):
+        self.l1.init_state()
+
+    def update(self, x):
+        return self.l1.update(x)
+
+
+# ---------------------------------------------------------------------------
+# Constant weight, trainable bias — any-trainable-key gating
+# ---------------------------------------------------------------------------
+
+class ConstWeightParamBiasRNN(brainstate.nn.Module):
+    """The matmul weight is a fixed constant; only the bias is a ParamState.
+
+    The relation must register with ``bias`` as its only resolved trainable
+    key — the unresolvable ``weight`` key must not veto the whole relation.
+    """
+
+    def __init__(self, n_in: int, n_out: int):
+        super().__init__()
+        self.w_const = jnp.asarray(brainstate.random.randn(n_in + n_out, n_out))
+        self.b = brainstate.ParamState(brainstate.random.randn(n_out))
+        self.h = brainstate.HiddenState(jnp.zeros(n_out))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        xh = jnp.concatenate([x, self.h.value])
+        self.h.value = jnp.tanh(braintrace.matmul(xh, self.w_const, self.b.value))
+        return self.h.value

@@ -709,6 +709,7 @@ from braintrace._compiler.scenario_catalog import (
     SharedTiedWeightRNN,
     MixedBatchedRNN,
     PartialPathRNN,
+    NestedJitRNN,
     make_scan_body_etp_jaxpr,
     make_cond_branches_etp_jaxpr,
     make_while_body_etp_jaxpr,
@@ -1017,3 +1018,253 @@ class TestCategoryG_StructuralSmoke:
             'No relation had its y_var available as a temp — '
             'the compiler is not emitting the y values it registered.'
         )
+
+
+# ---------------------------------------------------------------------------
+# Category O — Nested jit boundary
+# ---------------------------------------------------------------------------
+
+class TestCategoryO_NestedJit:
+    """The ETP matmul lives inside a user ``jax.jit`` function. The
+    compiler inlines the jit body at extraction time, so the relation
+    must be found exactly as for the plain :class:`UnbatchedMvRNN` —
+    same relation set, same primitive identity, executable transition."""
+
+    def test_jit_wrapped_matmul_registers_relation(self):
+        model = NestedJitRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {(('w',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+
+    def test_jit_wrapped_matmul_transition_executes(self):
+        model = NestedJitRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        _, _, _, temps = graph.module_info.jaxpr_call(inp)
+        rel = graph.hidden_param_op_relations[0]
+        y_val = temps[rel.y_var]
+        vals = rel.y_to_hidden_groups(y_val, temps, concat_hidden_vals=True)
+        assert len(vals) == len(rel.hidden_groups)
+        for v, group in zip(vals, rel.hidden_groups):
+            assert v.shape[:len(group.varshape)] == tuple(group.varshape)
+
+    def test_jit_compile_twice_same_order(self):
+        def build():
+            model = NestedJitRNN(3, 4)
+            brainstate.nn.init_all_states(model)
+            return _relation_set(_compile(model, brainstate.random.rand(3)))
+
+        assert build() == build()
+
+
+# ---------------------------------------------------------------------------
+# Category P — Branching fan-out (one y directly feeds two groups)
+# ---------------------------------------------------------------------------
+
+from braintrace._compiler.scenario_catalog import (
+    BranchingFanOutRNN,
+    ConstWeightParamBiasRNN,
+)
+
+
+class TestCategoryP_BranchingFanOut:
+    """``y = matmul(x, w)`` directly feeds two *independent* recurrent hidden
+    states (two hidden groups). The single relation must record BOTH groups —
+    not just the group of whichever hidden outvar the BFS happened to reach
+    first."""
+
+    def test_one_relation_records_both_groups(self):
+        model = BranchingFanOutRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 1
+        r = rels[0]
+        assert r.connected_hidden_paths == [('h1',), ('h2',)]
+        assert len(r.hidden_groups) == 2
+        assert len(r.y_to_hidden_group_jaxprs) == 2
+        assert r.primitive is etp_mv_p
+
+    def test_stacked_layers_stay_scoped(self):
+        # The directly-fed-groups fix must NOT leak downstream layers back
+        # in: cell0's weight still reaches only cell0's hidden state.
+        model = StackedDeepRNN(3, 4, depth=2)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {
+            (('cell0', 'w'), ('cell0', 'h')),
+            (('cell1', 'w'), ('cell1', 'h')),
+        }
+
+    def test_fan_out_stable_across_recompiles(self):
+        def build():
+            model = BranchingFanOutRNN(3, 4)
+            brainstate.nn.init_all_states(model)
+            g = _compile(model, brainstate.random.rand(3))
+            return [
+                (r.path, tuple(r.connected_hidden_paths),
+                 tuple(grp.index for grp in r.hidden_groups))
+                for r in g.hidden_param_op_relations
+            ]
+
+        assert build() == build()
+
+
+# ---------------------------------------------------------------------------
+# Category Q — Any-trainable-key gating (const weight, ParamState bias)
+# ---------------------------------------------------------------------------
+
+class TestCategoryQ_AnyTrainableKeyGating:
+    """The primitive's first trainable key ('weight') is a constant array,
+    but the 'bias' key IS a ParamState. The relation must be registered with
+    ``bias`` as its only resolved trainable key instead of being vetoed by
+    the unresolvable first key."""
+
+    def test_bias_only_relation_registers(self):
+        model = ConstWeightParamBiasRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 1
+        r = rels[0]
+        assert set(r.trainable_paths) == {'bias'}
+        assert r.trainable_paths['bias'] == ('b',)
+        assert r.connected_hidden_paths == [('h',)]
+
+    def test_no_paramstate_at_all_still_excluded(self):
+        # Both weight and bias constant: the exclusion diagnostic must
+        # be preserved.
+        class _AllConstRNN(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w_const = jnp.asarray(brainstate.random.randn(7, 4))
+                self.h = brainstate.HiddenState(jnp.zeros(4))
+
+            def init_state(self, *args, **kwargs):
+                self.h.value = jnp.zeros_like(self.h.value)
+
+            def update(self, x):
+                xh = jnp.concatenate([x, self.h.value])
+                self.h.value = jnp.tanh(braintrace.matmul(xh, self.w_const))
+                return self.h.value
+
+        model = _AllConstRNN()
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert len(graph.hidden_param_op_relations) == 0
+        assert len(graph.explain(kind=DiagnosticKind.RELATION_EXCLUDED_NO_PARAMSTATE)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Category R — Complex module graphs (shared submodule, residual, deep nesting)
+# ---------------------------------------------------------------------------
+
+from braintrace._compiler.scenario_catalog import (
+    SharedSubmoduleTwiceRNN,
+    ResidualSkipRNN,
+    DeepNestedModuleRNN,
+)
+
+
+class TestCategoryR_ComplexModuleGraphs:
+
+    def test_shared_submodule_two_call_sites(self):
+        # One Linear module (one ParamState) applied at two call sites per
+        # step: two distinct relations, both pointing at the shared weight
+        # path — the module-sharing analogue of the tied-weight scenario.
+        model = SharedSubmoduleTwiceRNN(4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+
+        rels = graph.hidden_param_op_relations
+        assert len(rels) == 2
+        for r in rels:
+            assert r.path == ('proj', 'weight')
+            assert r.connected_hidden_paths == [('h',)]
+        assert rels[0].y_var is not rels[1].y_var
+
+    def test_residual_skip_does_not_change_relation(self):
+        # The elementwise residual add sits on the non-parametric tail: the
+        # relation for ``w`` is unchanged and the skip path creates nothing.
+        model = ResidualSkipRNN(4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {(('w',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+        assert rel.path_classification == {('h',): PathClassification.ALL_DIRECT}
+
+    def test_residual_transition_includes_skip_add(self):
+        # dh/dy must run through the residual add: perturbing y shifts h by
+        # tanh'(y + x) — structurally, the transition jaxpr executes and
+        # produces the group-shaped output.
+        model = ResidualSkipRNN(4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(4)
+
+        graph = _compile(model, inp)
+        _, _, _, temps = graph.module_info.jaxpr_call(inp)
+        rel = graph.hidden_param_op_relations[0]
+        vals = rel.y_to_hidden_groups(temps[rel.y_var], temps, concat_hidden_vals=True)
+        assert len(vals) == 1
+        assert vals[0].shape[:len(rel.hidden_groups[0].varshape)] == tuple(
+            rel.hidden_groups[0].varshape
+        )
+
+    def test_deep_nested_module_paths(self):
+        # Four levels of module nesting: relation and hidden paths carry the
+        # full nested module path.
+        model = DeepNestedModuleRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        deep = ('l1', 'inner', 'inner', 'inner')
+        assert _relation_set(graph) == {(deep + ('w',), deep + ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+        assert len(rel.hidden_groups) == 1
+        assert rel.hidden_groups[0].hidden_paths == [deep + ('h',)]
+
+    def test_complex_graphs_deterministic(self):
+        for factory, n_inp in [
+            (lambda: SharedSubmoduleTwiceRNN(4), 4),
+            (lambda: ResidualSkipRNN(4), 4),
+            (lambda: DeepNestedModuleRNN(3, 4), 3),
+        ]:
+            def build():
+                m = factory()
+                brainstate.nn.init_all_states(m)
+                g = _compile(m, brainstate.random.rand(n_inp))
+                return [
+                    (r.path, tuple(r.connected_hidden_paths))
+                    for r in g.hidden_param_op_relations
+                ]
+
+            assert build() == build()
