@@ -234,7 +234,7 @@ class FixedRandomFeedback:
 
     def __init__(self, n_target: int, n_layer: int, key: Any, init_scale: float = 0.1) -> None:
         self.B = jax.lax.stop_gradient(
-            init_scale * jax.random.normal(key, (n_target, n_layer))
+            init_scale * brainstate.random.normal(size=(n_target, n_layer), key=key)
         )
         self.n_target = int(n_target)
         self.n_layer = int(n_layer)
