@@ -33,6 +33,7 @@ from braintrace._algorithm.oracle import (
 from braintrace._algorithm.oracle_models import (
     cond_gate_rnn,
     leaky_linear,
+    scan_body_rnn,
     stacked_tanh_rnn,
     tanh_rnn,
     tied_weight_rnn,
@@ -97,10 +98,14 @@ _EXACT_MULTISTEP_ALGOS = {
 # relations): trace state keyed per relation instance + per-path gradient
 # accumulation. Scan unrolling (Phase 2) multiplies relations per weight and
 # depends on it.
+# scan_body exercises the Phase 2 inner-scan unrolling: ETP matmuls inside a
+# `for_loop` body must stay BPTT-exact after the scan is unrolled at
+# extraction time.
 _EXACT_CASES = (
     [('tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('stacked_tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('tied_weight', a) for a in _EXACT_MULTISTEP_ALGOS]
+    + [('scan_body', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('leaky_linear', 'D_RTRL')]
     + [('cond_gate', 'D_RTRL')]
 )
@@ -117,6 +122,8 @@ def _model_spec(name):
         return cond_gate_rnn(n_in=3, n_rec=4, leak=0.9, seed=0)
     if name == 'tied_weight':
         return tied_weight_rnn(n_rec=3, seed=0)
+    if name == 'scan_body':
+        return scan_body_rnn(n_rec=3, loops=3, seed=0)
     raise KeyError(name)
 
 

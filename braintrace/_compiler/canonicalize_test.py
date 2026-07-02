@@ -13,6 +13,8 @@
 # limitations under the License.
 # ==============================================================================
 
+import warnings
+
 import brainstate
 import jax
 import jax.numpy as jnp
@@ -1156,6 +1158,38 @@ class TestScanModelCompilation:
                     _InnerLoopCell,
                     control_flow=ControlFlowPolicy(scan_unroll_limit=0),
                 )
+
+    def test_while_body_model_keeps_existing_error(self):
+        # `while_loop` is out of Phase 2 scope: an ETP-relevant while in the
+        # update must still hard-error, untouched by canonicalization.
+        class WhileCell(brainstate.nn.Module):
+            def __init__(self, n, loops):
+                super().__init__()
+                self.loops = loops
+                self.w = brainstate.ParamState(0.1 * brainstate.random.randn(n, n))
+                self.h = brainstate.HiddenState(jnp.zeros(n))
+
+            def update(self, x):
+                def cond_fn(carry):
+                    i, _ = carry
+                    return i < self.loops
+
+                def body_fn(carry):
+                    i, h = carry
+                    h = jnp.tanh(
+                        braintrace.matmul(x, self.w.value)
+                        + braintrace.matmul(h, self.w.value)
+                    )
+                    return i + 1, h
+
+                _, h = jax.lax.while_loop(cond_fn, body_fn, (0, self.h.value))
+                self.h.value = h
+                return h
+
+        with pytest.raises(NotImplementedError, match='while'):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', UserWarning)
+                self._graph_for(WhileCell)
 
     def test_drtrl_gradient_parity_with_unrolled_model(self):
         def build_and_grads(cell_cls):
