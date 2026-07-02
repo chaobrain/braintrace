@@ -37,6 +37,7 @@ runs of the same model.
 """
 
 from collections import deque
+from typing import TYPE_CHECKING
 from typing import (
     Any,
     Dict,
@@ -90,6 +91,9 @@ __all__ = [
     'find_hidden_param_op_relations_from_minfo',
     'find_hidden_param_op_relations_from_module',
 ]
+
+if TYPE_CHECKING:
+    from .scan_descent import RelationDescent  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +174,9 @@ class HiddenParamOpRelation(NamedTuple):
         Per-key dict mapping each key to the backward-trace processing chain
         (primitives traversed from the trainable invar back to the originating
         ``ParamState`` invar).
+    control_flow_context : RelationDescent or None
+        Descent context when this relation lives inside a descended scan body
+        (Phase 4 structured scan descent); ``None`` for flat relations.
 
     Notes
     -----
@@ -192,6 +199,13 @@ class HiddenParamOpRelation(NamedTuple):
     trainable_leaf_indices: Dict[str, int] = {}
     trainable_param_states: Dict[str, brainstate.ParamState] = {}
     trainable_processing_chains: Dict[str, Tuple[Primitive, ...]] = {}
+
+    control_flow_context: Optional['RelationDescent'] = None
+    """Set when this relation lives inside a descended scan body (Phase 4
+    structured scan descent): ``x_var`` / ``y_var`` /
+    ``y_to_hidden_group_jaxprs`` are body-scoped, and the executor must read
+    their runtime values through ``control_flow_context.scan.stacked_var_map``
+    (stacked over the substep axis). ``None`` for ordinary flat relations."""
 
     # backward compat aliases
     @property

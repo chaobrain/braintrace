@@ -45,6 +45,7 @@
 # -*- coding: utf-8 -*-
 
 from itertools import combinations
+from typing import TYPE_CHECKING
 from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
 
 import brainstate
@@ -80,6 +81,9 @@ __all__ = [
     'find_hidden_groups_from_minfo',
     'find_hidden_groups_from_module',
 ]
+
+if TYPE_CHECKING:
+    from .scan_descent import GroupDescent  # noqa: F401
 
 # Recurrent-weight mixing primitives -- dense / convolutional weights -- whose
 # consumption of a hidden state is a genuine *cross-position* coupling, i.e. that
@@ -128,6 +132,13 @@ class HiddenGroup(NamedTuple):
         The jaxpr computing the hidden-state transition for the group.
     transition_jaxpr_constvars : list of Var
         The other input variables required to evaluate ``transition_jaxpr``.
+    is_diagonal_recurrence : bool
+        Whether the recurrence is diagonal across the leading ``varshape``
+        positions (see the field comment for the full contract).
+    descent : GroupDescent or None
+        Descent context when this group's transition is one substep of a
+        descended scan (Phase 4 structured scan descent); ``None`` for
+        ordinary groups.
 
     See Also
     --------
@@ -186,6 +197,13 @@ class HiddenGroup(NamedTuple):
     # opts into the coupled transition that needs the block-diagonal path. Defaults
     # to ``True`` to preserve the cheap behavior for any positional construction.
     is_diagonal_recurrence: bool = True
+
+    descent: Optional['GroupDescent'] = None
+    """Set when this group's transition is one substep of a descended scan
+    (Phase 4 structured scan descent): ``transition_jaxpr``/
+    ``transition_jaxpr_constvars`` are body-scoped while ``hidden_invars``/
+    ``hidden_outvars`` are the outer scan carry vars. ``None`` for ordinary
+    groups."""
 
     @property
     def varshape(self) -> Tuple[int, ...]:

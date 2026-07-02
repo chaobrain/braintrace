@@ -38,7 +38,7 @@ perturbation, seam checks, and learning signals are untouched; only the
 Jacobian extraction and the trace update see the substep axis.
 """
 
-from typing import Dict, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
@@ -55,6 +55,62 @@ from .canonicalize import ControlFlowPolicy
 from .jaxpr_graph import _sub_closed_jaxprs
 
 __all__ = []
+
+
+class ScanDescentInfo(NamedTuple):
+    """Compile-time context for one descended scan equation.
+
+    All ``Var``s in ``stacked_var_map`` keys (and ``body_jaxpr``) are
+    **body**-scoped; the map's values are fresh **outer**-scope vars produced
+    by :func:`add_scan_ys`, hoisted as jaxpr outputs so the executor can read
+    their runtime values (leading substep axis ``length``).
+    """
+
+    length: int
+    """Static trip count ``L`` of the scan."""
+
+    num_consts: int
+    """Number of const entries at the head of the scan invars."""
+
+    num_carry: int
+    """Number of carry entries following the consts."""
+
+    body_jaxpr: Jaxpr
+    """The (jit-inlined) scan body; ``invars = [*consts, *carry, *xs]``."""
+
+    stacked_var_map: Dict[Var, Var]
+    """Body var -> outer stacked var of aval ``(length, *shape)``;
+    insertion-ordered."""
+
+    scan_eqn_id: int
+    """``id()`` of the REWRITTEN scan eqn — the key the outer walkers use to
+    exempt this equation."""
+
+
+class GroupDescent(NamedTuple):
+    """Descent context attached to a :class:`~.hidden_group.HiddenGroup`.
+
+    The group's ``transition_jaxpr``/``transition_jaxpr_constvars`` are
+    **body**-scoped (one substep) while its ``hidden_invars``/
+    ``hidden_outvars`` are re-scoped to the **outer** scan carry vars;
+    ``body_hidden_invars`` preserves the body-scope carry invars (substep-
+    entry hidden values), matching ``transition_jaxpr.invars``.
+    """
+
+    scan: ScanDescentInfo
+    body_hidden_invars: List[Var]
+
+
+class RelationDescent(NamedTuple):
+    """Descent context attached to a
+    :class:`~.hid_param_op.HiddenParamOpRelation`.
+
+    The relation's ``x_var``/``y_var``/``y_to_hidden_group_jaxprs`` are
+    **body**-scoped; runtime values are read through
+    ``scan.stacked_var_map`` (stacked over the substep axis).
+    """
+
+    scan: ScanDescentInfo
 
 
 def _body_has_etp(jaxpr: Jaxpr) -> bool:

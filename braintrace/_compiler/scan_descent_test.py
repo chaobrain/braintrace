@@ -182,3 +182,21 @@ class TestAddScanYs:
         new_eqn, stacked = add_scan_ys(eqn, [carry_invar, carry_invar])
         assert len(stacked) == 1
         assert len(new_eqn.outvars) == len(eqn.outvars) + 1
+
+
+class TestDescentContextTypes:
+    def test_descent_context_types_and_default_fields(self):
+        from braintrace._compiler.scan_descent import (
+            ScanDescentInfo, GroupDescent, RelationDescent)
+        from braintrace._compiler.hid_param_op import HiddenParamOpRelation
+        from braintrace._compiler.hidden_group import HiddenGroup
+        assert HiddenParamOpRelation._field_defaults.get(
+            'control_flow_context') is None
+        assert 'control_flow_context' in HiddenParamOpRelation._field_defaults
+        assert HiddenGroup._field_defaults.get('descent') is None
+        assert 'descent' in HiddenGroup._field_defaults
+        assert ScanDescentInfo._fields == (
+            'length', 'num_consts', 'num_carry', 'body_jaxpr',
+            'stacked_var_map', 'scan_eqn_id')
+        assert GroupDescent._fields == ('scan', 'body_hidden_invars')
+        assert RelationDescent._fields == ('scan',)
