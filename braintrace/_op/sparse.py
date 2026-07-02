@@ -111,7 +111,8 @@ __all__ = [
 ]
 
 
-def _etp_sp_matmul_impl(*args: Any, sparse_mat: brainevent.DataRepresentation | None = None,
+def _etp_sp_matmul_impl(*args: Any,
+                        sparse_mat: brainevent.DataRepresentation | None = None,
                         has_bias: bool = False,
                         weight_fn: WeightFn | None = None,
                         bias_fn: WeightFn | None = None) -> Any:

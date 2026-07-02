@@ -42,6 +42,7 @@ from braintrace._typing import (
     TempData,
 )
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
+from .jaxpr_graph import inline_jit_calls
 
 __all__ = [
     'ModuleInfo',
@@ -503,6 +504,14 @@ def extract_module_info(
     --------
     ModuleInfo : The returned data structure.
 
+    Notes
+    -----
+    Prefer positional arguments. ``**model_kwargs`` is accepted here for
+    tracing, but ``ModuleInfo.jaxpr_call`` and the downstream
+    ``compile_etrace_graph`` pipeline rebuild inputs from positional
+    arguments only — bind static keyword arguments with
+    ``functools.partial`` before compiling.
+
     Examples
     --------
     .. code-block:: python
@@ -539,6 +548,12 @@ def extract_module_info(
     state_id_to_path = brainstate.util.PrettyDict(state_id_to_path)
 
     closed_jaxpr = stateful_model.get_jaxpr_by_cache(cache_key)
+    # Splice user ``jax.jit`` bodies into the top-level jaxpr before any
+    # lookup table is built: every downstream analysis (weight/hidden var
+    # tables, hidden-group discovery, relation finding) identifies states
+    # and ETP primitives by ``Var`` identity in this one flat jaxpr, and a
+    # jit call boundary hides its body behind fresh inner variables.
+    closed_jaxpr = inline_jit_calls(closed_jaxpr)
     jaxpr = closed_jaxpr.jaxpr
 
     # out information

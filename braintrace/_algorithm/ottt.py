@@ -165,7 +165,6 @@ class OTTT(ETraceVjpAlgorithm):
         leak: float,
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
-        **kwargs: Any,
     ) -> None:
         if mode not in ('A', 'O'):
             raise ValueError(f"mode must be 'A' or 'O'; got {mode!r}")

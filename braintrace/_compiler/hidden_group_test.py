@@ -1105,3 +1105,100 @@ class TestHiddenGroup_diagonal_jacobian:
             print(jax_jac)
 
             assert (u.math.allclose(diag_jac, jax_jac, atol=1e-5))
+
+
+class TestGroupOrderingAndDiagnostics:
+    """Task-4 contracts: canonical member ordering, merge diagnostics, and
+    varshape validation at group construction time."""
+
+    def _lstm_minfo(self):
+        lstm = braintrace.nn.LSTMCell(3, 4)
+        brainstate.nn.init_all_states(lstm)
+        inp = brainstate.random.rand(3)
+        minfo = braintrace.extract_module_info(lstm, inp)
+        return lstm, inp, minfo
+
+    def test_lstm_group_paths_follow_compiled_state_order(self):
+        # Member order inside a merged group is canonical: it follows the
+        # compiled state order (hidden_path_to_outvar insertion order), not
+        # the hash order of an intermediate set.
+        _, inp, minfo = self._lstm_minfo()
+        state_order = list(minfo.hidden_path_to_outvar.keys())
+
+        from braintrace._compiler.hidden_group import find_hidden_groups_from_minfo
+        groups, _ = find_hidden_groups_from_minfo(minfo)
+
+        assert len(groups) == 1
+        assert groups[0].hidden_paths == state_order
+        # invars/outvars follow the same canonical order.
+        expected_outvars = [minfo.hidden_path_to_outvar[p] for p in state_order]
+        assert groups[0].hidden_outvars == expected_outvars
+
+    def test_group_ordering_identical_across_two_compiles(self):
+        def build():
+            lstm = braintrace.nn.LSTMCell(3, 4)
+            brainstate.nn.init_all_states(lstm)
+            inp = brainstate.random.rand(3)
+            groups, _ = find_hidden_groups_from_module(lstm, inp)
+            return [g.hidden_paths for g in groups]
+
+        assert build() == build()
+
+    def test_merged_group_emits_info_record(self):
+        from braintrace._compiler.diagnostics import (
+            DiagnosticKind,
+            DiagnosticLevel,
+            diagnostic_context,
+        )
+        lstm, inp, _ = self._lstm_minfo()
+
+        with diagnostic_context() as reporter:
+            find_hidden_groups_from_module(lstm, inp)
+
+        recs = [
+            r for r in reporter.records()
+            if r.kind is DiagnosticKind.HIDDEN_GROUP_MERGED
+        ]
+        assert len(recs) == 1, (
+            f'LSTM h/c must yield exactly one HIDDEN_GROUP_MERGED record; '
+            f'got {recs}'
+        )
+        assert recs[0].level is DiagnosticLevel.INFO
+        assert set(recs[0].hidden_paths) == {('h',), ('c',)}
+
+    def test_singleton_group_emits_no_merge_record(self):
+        from braintrace._compiler.diagnostics import (
+            DiagnosticKind,
+            diagnostic_context,
+        )
+        gru = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(gru)
+        inp = brainstate.random.rand(3)
+
+        with diagnostic_context() as reporter:
+            find_hidden_groups_from_module(gru, inp)
+
+        assert not any(
+            r.kind is DiagnosticKind.HIDDEN_GROUP_MERGED
+            for r in reporter.records()
+        )
+
+    def test_check_consistent_varshape_raises_on_mismatch(self):
+        from braintrace._misc import NotSupportedError
+
+        class _FakeState:
+            def __init__(self, varshape):
+                self.varshape = varshape
+                self.num_state = 1
+
+        group = braintrace.HiddenGroup(
+            index=0,
+            hidden_paths=[('a',), ('b',)],
+            hidden_states=[_FakeState((3,)), _FakeState((4,))],
+            hidden_invars=[],
+            hidden_outvars=[],
+            transition_jaxpr=None,
+            transition_jaxpr_constvars=[],
+        )
+        with pytest.raises(NotSupportedError):
+            group.check_consistent_varshape()

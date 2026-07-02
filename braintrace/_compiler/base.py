@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Dict, Sequence, Set, List
+from typing import Container, Dict, Sequence, Set, List
 
 from braintrace._compatible_imports import (
     Var,
@@ -37,7 +37,7 @@ __all__ = [
 
 def find_matched_vars(
     invars: Sequence[Var],
-    invar_needed_in_oth_eqns: Set[Var]
+    invar_needed_in_oth_eqns: Container[Var]
 ) -> List[Var]:
     """
     Checking whether the invars are matched with the invar_needed_in_oth_eqns.
@@ -46,8 +46,9 @@ def find_matched_vars(
     ----------
     invars : Sequence[Var]
         The input variables of the equation.
-    invar_needed_in_oth_eqns : Set[Var]
-        The variables needed in the other equations.
+    invar_needed_in_oth_eqns : Container[Var]
+        The variables needed in the other equations (a set, or an
+        insertion-ordered dict used as an ordered set).
 
     Returns
     -------
@@ -114,16 +115,17 @@ def check_unsupported_op(
         in an unsupported manner.
     """
     # checking whether the weight variables are used in the equation
-    # Note: with the primitive-based system, weight vars inside JIT are
-    # handled by backward tracing in the compiler, so we only warn.
+    # Note: user ``jax.jit`` boundaries are inlined at extraction time
+    # (see ``jaxpr_graph.inline_jit_calls``), so reaching this check means
+    # a weight is used inside a genuinely opaque region (scan/while/cond).
     invar = find_element_exist_in_the_set(eqn.invars, self.weight_invars)
     if invar is not None:
         emit(
             kind=DiagnosticKind.WEIGHT_IN_CONTROL_FLOW,
-            level=DiagnosticLevel.WARNING,
+            level=DiagnosticLevel.ERROR,
             message=(
-                f'Weight state found inside a {op_name} function. '
-                f'The primitive-based compiler handles this via backward tracing.'
+                f'Weight state used inside a {op_name} region; the ETrace '
+                f'compiler cannot trace through it and compilation fails.'
             ),
             context={'op_name': op_name, 'invar': invar},
         )
@@ -238,6 +240,10 @@ class JaxprEvaluation(object):
         eqn : JaxprEqn
             The JAX equation to evaluate.
         """
+        # Defensive branch: in the dispatch flow a jit equation's primitive is
+        # never an ETP primitive (those are custom Primitive instances), so
+        # this is reachable only when ``_eval_pjit`` is called directly — as
+        # unit tests do. Kept for that reason.
         if is_etp_primitive(eqn.primitive):
             if is_etp_enable_gradient_primitive(eqn.primitive):
                 self._eval_eqn(eqn)
