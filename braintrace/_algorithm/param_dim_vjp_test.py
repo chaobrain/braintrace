@@ -346,6 +346,70 @@ class TestTraceDtypeGateMatchesRuntimePredicate:
         self._run(fast_solve=False)
 
 
+def _leaky_plain_model(n_in=3, n_h=4, seed=3):
+    """Leaky integrator driven by a *plain* dense ETP matmul — no
+    ``weight_fn``/``bias_fn`` hook at all.
+
+    Unlike ``_leaky_weight_fn_model``, nothing here makes
+    ``fp.applicable(eqn_params)`` return ``False`` on its own: per
+    ``_dense_fast_applicable``, the dense fast path for ``etp_mm_p`` is
+    genuinely applicable to this equation. That isolates the ``fast_solve``
+    conjunct of the init-gate predicate — with ``fast_solve=False``, the
+    *only* way ``use_fast`` can come out ``False`` is if ``fast_solve`` is
+    actually being consulted (as opposed to a test that also relies on
+    ``fp.applicable`` being ``False`` for an unrelated reason).
+    """
+    brainstate.random.seed(seed)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(brainstate.random.randn(n_in, n_h) * 0.2)
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_h)))
+
+        def update(self, x):
+            drive = braintrace.matmul(x, self.w.value)
+            self.h.value = 0.5 * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+class TestFastSolveConjunctIsolated:
+    """Regression test for the review finding on
+    ``TestTraceDtypeGateMatchesRuntimePredicate``: that class's
+    ``test_fast_solve_false_runs`` reused the ``weight_fn=jnp.tanh`` model,
+    which already makes ``fp.applicable(...)`` False on its own — so that
+    test would pass even if the implementation dropped the ``fast_solve``
+    conjunct from the init-gate predicate entirely. This test uses a model
+    with no ``weight_fn``/``bias_fn`` (``fp.applicable`` is True), so
+    ``fast_solve=False`` is the *only* thing that can make ``use_fast``
+    False in the init gate.
+    """
+
+    def test_fast_solve_false_no_weight_fn_runs(self):
+        model = _leaky_plain_model()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        inputs = brainstate.random.randn(4, 1, 3)  # (T, B=1, n_in)
+        algo = D_RTRL(
+            model, vjp_method='multi-step',
+            fast_solve=False, trace_dtype=jnp.bfloat16,
+        )
+        algo.compile_graph(inputs[0])
+        algo.init_etrace_state()
+
+        weights = model.states(brainstate.ParamState)
+
+        def loss(inp):
+            return algo(braintrace.MultiStepData(inp)).sum()
+
+        grads = brainstate.transform.grad(loss, weights)(inputs)
+        leaves = jax.tree.leaves(grads)
+        assert leaves
+        for leaf in leaves:
+            assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
+
+
 # ---------------------------------------------------------------------------
 # RNN-cell sweep — finite gradients across the public cell zoo
 # ---------------------------------------------------------------------------
