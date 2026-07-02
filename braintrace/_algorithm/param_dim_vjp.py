@@ -614,7 +614,8 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     from a single all-ones-tangent ``jax.jvp`` of the ``y -> hidden`` map; see
     that method's docstring for when this is exact (elementwise maps) versus
     an approximation (non-elementwise maps, e.g. a normalization layer
-    between the weight op and the neuron).
+    between the weight op and the neuron) — the same approximation is shared
+    with :class:`~braintrace._algorithm.io_dim_vjp.IODimVjpAlgorithm`.
 
     Real-Time Recurrent Learning (RTRL) propagates the full sensitivity
     :math:`\partial \mathbf{h}^t/\partial \boldsymbol{\theta}` forward in time,

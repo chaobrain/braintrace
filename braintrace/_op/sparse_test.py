@@ -164,7 +164,13 @@ class TestForwardWithCSR:
 
 class _HashableStubMat(_StubSparseMat):
     """Stub that is also ``__hash__``-able so JAX accepts it as a static
-    primitive parameter (CSR itself is not hashable in JAX 0.7+)."""
+    primitive parameter.
+
+    Predates the H1 fix that makes ``sparse_matmul`` wrap any
+    ``sparse_mat`` (including a stock, non-hashable ``brainevent.CSR``) in a
+    hashable ``_HashableSparseMat`` internally. Kept here as a lightweight
+    stand-in for rule-level and dispatch tests that don't need a real CSR's
+    sparse-matrix semantics."""
 
     def __hash__(self):
         return id(self)
@@ -624,23 +630,19 @@ class TestSparseWeightFnBiasFn:
 
 class TestSparseVmapPromotion:
     def test_vmap_sparse_matmul_promotes_to_etp_sp_mm(self):
-        # NOTE: real `brainevent.CSR` is not hashable under JAX 0.7+, so it
-        # cannot be a static primitive param under `jax.make_jaxpr`/`jit` —
-        # this is a pre-existing, unrelated limitation (reproduces even for
-        # the already-registered *unbatched* `etp_sp_mv` path with no vmap
-        # involved at all; see `TestAutoDispatch` above, which already works
-        # around it with `_HashableStubMat` for the same reason). Use the
-        # same hashable stub here so this test exercises vmap promotion
-        # rather than tripping the unrelated hashability bug.
+        # A real `brainevent.CSR` works directly here: `sparse_matmul` wraps
+        # it internally in a `_HashableSparseMat` (see the H1 fix in
+        # `sparse.py`), so it no longer needs a hashable stand-in to survive
+        # `jax.make_jaxpr`/`jit` under vmap.
         dense = jnp.where(brainstate.random.rand(3, 5) < 0.5,
                           brainstate.random.randn(3, 5), 0.0)
-        stub = _HashableStubMat(dense)
-        data = dense.reshape(-1)
+        csr = _csr_from_dense(dense)
+        data = csr.data
         x = brainstate.random.randn(4, 3)
-        fn = jax.vmap(lambda xi: braintrace.sparse_matmul(xi, data, sparse_mat=stub))
+        fn = jax.vmap(lambda xi: braintrace.sparse_matmul(xi, data, sparse_mat=csr))
         names = [e.primitive.name for e in jax.make_jaxpr(fn)(x).jaxpr.eqns]
         assert 'etp_sp_mm' in names
-        ref = braintrace.sparse_matmul(x, data, sparse_mat=stub)
+        ref = braintrace.sparse_matmul(x, data, sparse_mat=csr)
         assert jnp.allclose(fn(x), ref, atol=1e-6)
 
 

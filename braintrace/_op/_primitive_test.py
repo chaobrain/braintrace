@@ -222,8 +222,6 @@ class TestIntBoolPrimalZeroTangent:
     def test_grad_int_primal_matches_float_cast(self):
         """``jax.grad`` through an ETP op with an int input must agree with
         the gradient computed from the float-cast version of that input."""
-        import braintrace
-
         x_int = jnp.ones((2, 3), dtype=jnp.int32)
         w = jnp.ones((3, 4))
 
@@ -238,8 +236,6 @@ class TestIntBoolPrimalZeroTangent:
 
     def test_grad_bool_primal_matches_float_cast(self):
         """Same contract, for a boolean ETP input."""
-        import braintrace
-
         x_bool = jnp.ones((2, 3), dtype=bool)
         w = jnp.ones((3, 4))
 

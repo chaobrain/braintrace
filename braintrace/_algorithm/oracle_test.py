@@ -500,9 +500,10 @@ def test_pp_prop_conv_bias_known_limitation():
     require touching ``io_dim_vjp.py``, which is out of scope for this task
     (see module docstring / architecture notes: io_dim_vjp.py's core logic is
     never modified as part of this audit). This test pins the *current*
-    behavior with ``xfail(strict=True)`` so that a future fix is caught (the
-    xfail will start failing as an unexpected pass) rather than silently
-    going unnoticed.
+    behavior with ``pytest.raises(ValueError, ...)`` so that a future fix is
+    caught loudly (the raise will stop happening and this test will fail),
+    prompting promotion to an exactness assertion instead of silently going
+    unnoticed.
     """
     factory, seed = _FAMILIES['conv_nwc_bias']
     with brainstate.environ.context(precision=64):

@@ -936,7 +936,7 @@ class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
 
     def test_instant_drtrl_weight_matches_jacobian_repeated_index_contraction(self):
         brainstate.random.seed(701)
-        in_ch, out_ch, kw, L = 2, 3, 3, 6  # odd kernel width: symmetric SAME pad
+        in_ch, out_ch, kw, L = 2, 4, 3, 6  # odd kernel width: symmetric SAME pad
         x = brainstate.random.randn(in_ch, L)  # unbatched, default NCH-style
         K0 = brainstate.random.randn(out_ch, in_ch, kw)  # default OIH kernel
 
@@ -981,7 +981,7 @@ class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
 
     def test_instant_drtrl_matches_jacobian_with_kernel_fn_and_bias_fn(self):
         brainstate.random.seed(702)
-        in_ch, out_ch, kw, L = 2, 3, 3, 6
+        in_ch, out_ch, kw, L = 2, 4, 3, 6
         x = brainstate.random.randn(in_ch, L)
         K0 = brainstate.random.randn(out_ch, in_ch, kw)
         b0 = brainstate.random.randn(out_ch)
@@ -1020,7 +1020,7 @@ class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
     def test_solve_drtrl_matches_independent_spatial_sum_reference(self):
         from braintrace._op.conv import _conv_solve_drtrl
         brainstate.random.seed(703)
-        in_ch, out_ch, kw, L = 2, 3, 3, 6
+        in_ch, out_ch, kw, L = 2, 4, 3, 6
         K0 = brainstate.random.randn(out_ch, in_ch, kw)
 
         trace_w = brainstate.random.randn(L, out_ch, in_ch, kw)  # (*spatial_out, *kernel)

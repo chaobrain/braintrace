@@ -314,7 +314,10 @@ class OTPE(ETraceVjpAlgorithm):
             batched = is_batched_primitive(rel.primitive)
             self._rid_is_batched[rid] = batched
             if self.mode == 'full':
-                weight_key = next(iter(rel.trainable_vars))
+                # 'weight' always exists: the primitive guard above restricts
+                # relations to etp_mm/etp_mv, whose dense-matmul rules key
+                # trainable_vars with 'weight' (and, optionally, 'bias').
+                weight_key = 'weight'
                 weight_var = rel.trainable_vars[weight_key]
                 weight_shape = weight_var.aval.shape
                 if batched:

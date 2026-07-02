@@ -131,9 +131,14 @@ class PresynapticTrace(_ZeroResetState):
 
 
 class KappaFilter(_ZeroResetState):
-    r"""Low-pass output-side filter used by EProp.
+    r"""Low-pass filter helper state.
 
-    The filter smooths the output-side signal following
+    :class:`~braintrace.EProp` no longer uses this class directly — it filters
+    the eligibility trace internally instead. ``KappaFilter`` remains public
+    and available for user-side filtering of an output-side (or any other)
+    signal outside the algorithm's own hooks.
+
+    The filter smooths the signal following
     :math:`x_{\mathrm{filt}} \leftarrow (1-\kappa) \cdot x + \kappa \cdot x_{\mathrm{filt}}`.
 
     Parameters

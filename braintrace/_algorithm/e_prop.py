@@ -72,8 +72,8 @@ class EProp(ParamDimVjpAlgorithm):
     Here :math:`h_j^t` is the hidden state of neuron :math:`j` at time
     :math:`t`, :math:`x_i^t` the presynaptic input, :math:`D_j^t` the
     hidden-to-hidden (recurrent) Jacobian diagonal, :math:`D_{f,j}^t` the
-    state-to-output Jacobian, and :math:`\kappa \in [0, 1)` the readout-side
-    low-pass factor. The learning signal is
+    state-to-output Jacobian, and :math:`\kappa \in [0, 1)` the
+    eligibility-trace low-pass factor. The learning signal is
 
     .. math::
 
@@ -100,8 +100,11 @@ class EProp(ParamDimVjpAlgorithm):
     reverse-AD only ever exposes :math:`\ell^t = W_\mathrm{out}^\top \delta^t`,
     never the pre-readout error :math:`\delta^t` itself) and then projected
     through a frozen random matrix :math:`B`, removing the biologically
-    implausible weight-transport requirement up to that residual scale
-    dependence.
+    implausible weight-transport requirement. Normalization removes the
+    *scale* dependence on :math:`W_\mathrm{out}`; a residual *directional*
+    dependence on the readout weights remains, since full direction-
+    independence would require the pre-readout error :math:`\delta^t`
+    explicitly, which the current hook contract does not provide.
 
     Parameters
     ----------

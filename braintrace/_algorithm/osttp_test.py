@@ -127,7 +127,6 @@ class TestOSTTPLearningSignalNonzero(unittest.TestCase):
     """
 
     def _grad_for_target(self, y_target: jnp.ndarray, B: jnp.ndarray) -> jnp.ndarray:
-        brainstate.random.seed(0)
         net = _osttp_net()
         algo = OSTTP(net, B_list=[B])
         x = jnp.ones((1, 3))

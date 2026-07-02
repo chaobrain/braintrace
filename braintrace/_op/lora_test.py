@@ -540,6 +540,10 @@ class TestLoRAOnlineLearningExact:
         denom = jnp.maximum(jnp.abs(a).max(), 1e-12)
         return float(jnp.abs(a - b).max() / denom)
 
+    @staticmethod
+    def _mantissa(a):
+        return u.get_mantissa(a) if isinstance(a, u.Quantity) else a
+
     def _assert_exact(self, **factory_kwargs):
         import brainstate
         from braintrace._algorithm.oracle import (
@@ -564,6 +568,10 @@ class TestLoRAOnlineLearningExact:
                     ),
                 )
                 for key in g_bptt:
+                    assert jnp.abs(self._mantissa(g_bptt[key])).max() > 0, (
+                        f'BPTT gradient for {key} at T={T} is all-zero; '
+                        f'the exactness check below would pass vacuously'
+                    )
                     rel = self._rel_err(g_bptt[key], g_online[key])
                     assert rel < self.TOL, (
                         f'D-RTRL diverges from BPTT for {key} at T={T}: '
