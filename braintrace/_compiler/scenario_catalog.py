@@ -424,6 +424,91 @@ def make_while_body_etp_jaxpr(n_in: int, n_out: int, n_iter: int = 3):
     return jax.make_jaxpr(f)(w, x).jaxpr
 
 
+def make_while_hidden_weightfree_jaxpr(n: int, n_iter: int = 3):
+    """Return a jaxpr whose output is produced by a **weight-free**
+    ``lax.while_loop`` reading the first argument (a hidden-state stand-in)."""
+    h = jnp.zeros(n)
+    x = jnp.zeros(n)
+
+    def f(h, x):
+        def body_fn(state):
+            i, hh = state
+            return i + 1, hh + 0.5 * jnp.tanh(x - hh)
+
+        return jax.lax.while_loop(lambda s: s[0] < n_iter, body_fn, (0, h))[1]
+
+    return jax.make_jaxpr(f)(h, x).jaxpr
+
+
+# ---------------------------------------------------------------------------
+# While-hidden — weight-free while loop reading/updating the hidden state
+# ---------------------------------------------------------------------------
+
+class WhileSettleRNN(brainstate.nn.Module):
+    """``pre = etp_matmul(x, W_in) + decay * h_prev``, then a **weight-free**
+    ``lax.while_loop`` running exactly ``k`` settle iterations
+    ``h <- h + 0.5 * tanh(pre - h)`` from ``h_prev``.
+
+    The while consumes only weight-*derived* values (``pre``) and the carried
+    hidden state — no weight invar — so under the default policy it is kept
+    as an opaque forward node: the compiler registers the single ``W_in``
+    relation whose ``y``-to-hidden tail crosses the while, extracts the
+    hidden-to-hidden Jacobian in forward mode, and detaches the loop inputs
+    in the perturbed jaxpr. :class:`WhileSettleTwinRNN` is its exact
+    hand-composed equivalent (fixed trip count).
+    """
+
+    def __init__(self, n_in: int, n_rec: int, k: int = 3, decay: float = 0.8):
+        super().__init__()
+        self.k = k
+        self.decay = decay
+        self.win = brainstate.ParamState(0.3 * brainstate.random.randn(n_in, n_rec))
+        self.h = brainstate.HiddenState(jnp.zeros(n_rec))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        h_prev = self.h.value
+        pre = braintrace.matmul(x, self.win.value) + self.decay * h_prev
+
+        def cond_fn(s):
+            return s[0] < self.k
+
+        def body_fn(s):
+            i, h = s
+            return i + 1, h + 0.5 * jnp.tanh(pre - h)
+
+        _, h_new = jax.lax.while_loop(cond_fn, body_fn, (0, h_prev))
+        self.h.value = h_new
+        return h_new
+
+
+class WhileSettleTwinRNN(brainstate.nn.Module):
+    """Hand-composed twin of :class:`WhileSettleRNN`: identical ``update()``
+    with the fixed-trip-count while replaced by its ``k``-fold composition,
+    so reverse-mode oracles (BPTT) work on it."""
+
+    def __init__(self, n_in: int, n_rec: int, k: int = 3, decay: float = 0.8):
+        super().__init__()
+        self.k = k
+        self.decay = decay
+        self.win = brainstate.ParamState(0.3 * brainstate.random.randn(n_in, n_rec))
+        self.h = brainstate.HiddenState(jnp.zeros(n_rec))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        h_prev = self.h.value
+        pre = braintrace.matmul(x, self.win.value) + self.decay * h_prev
+        h = h_prev
+        for _ in range(self.k):
+            h = h + 0.5 * jnp.tanh(pre - h)
+        self.h.value = h
+        return h
+
+
 # ---------------------------------------------------------------------------
 # Nested jit — ETP primitive inside a user ``jax.jit`` boundary
 # ---------------------------------------------------------------------------
