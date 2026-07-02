@@ -5,6 +5,37 @@
 
 ### Highlights
 
+#### New: `cond` if-conversion (compiler canonicalization, Phase 1)
+
+- **ETP operations inside `lax.cond` branches now participate in online
+  learning.** A new canonicalization pass (`_compiler/canonicalize.py`)
+  runs at extraction time (after user-`jit` inlining) and rewrites every
+  ETP-relevant `cond` equation into the inlined bodies of *all* branches
+  followed by one `select_n` per output. `select_n`'s index semantics and
+  JVP match `cond` exactly, so for finite branches values and Jacobians —
+  and therefore exact algorithms such as D-RTRL — are unchanged. Weights used inside `cond`
+  branches previously raised `NotImplementedError` (or were silently
+  excluded when only ETP primitives appeared inside).
+- **Semantics note**: on the canonicalized graph **both branches execute
+  every step** and the dead branch's value is discarded by `select_n`.
+  Values and forward-mode derivatives are unaffected by dead-branch
+  NaN/Inf. **Reverse-mode gradients are not**: if the dead branch's local
+  Jacobian is NaN/Inf (e.g. a `cond` protecting a `sqrt` domain), its VJP
+  multiplies the exact-zero cotangent by that Jacobian (`0 * nan = nan`)
+  and contaminates gradients of shared inputs — the classic single-`where`
+  pitfall. Keep such domain-guard conds opaque
+  (`ControlFlowPolicy(cond='opaque')`) or guard the operand inside the
+  branch.
+- **Gates**: conds that touch no ETP primitive, weight, or hidden state
+  stay opaque at zero cost. Conds with effects or containing `while`/`scan`
+  in a branch are never converted; an ETP-relevant one that is skipped this
+  way emits a `COND_CONVERSION_SKIPPED` warning and keeps today's behavior.
+  Conversions are recorded as `COND_IF_CONVERTED` INFO diagnostics on
+  `ETraceGraph.diagnostics`.
+- **Opt-out**: `braintrace.ControlFlowPolicy(cond='opaque')` via the new
+  `control_flow` keyword on `compile_etrace_graph` / `extract_module_info`
+  restores the previous behavior.
+
 #### New: vmap identity preservation (operator layer)
 
 - **vmap identity preservation (operator layer)**: `jax.vmap` over an
