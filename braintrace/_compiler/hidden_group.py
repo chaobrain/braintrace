@@ -53,7 +53,15 @@ import jax.core
 import numpy as np
 from brainstate import HiddenGroupState
 
-from braintrace._compatible_imports import Var, Literal, JaxprEqn, Jaxpr
+from braintrace._compatible_imports import (
+    Var,
+    Literal,
+    JaxprEqn,
+    Jaxpr,
+    is_scan_primitive,
+    is_while_primitive,
+    is_cond_primitive,
+)
 from braintrace._op import is_etp_primitive, is_etp_enable_gradient_primitive
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
@@ -63,6 +71,7 @@ from braintrace._typing import (
     Path,
 )
 from .base import JaxprEvaluation, find_matched_vars
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
 
@@ -276,12 +285,21 @@ class HiddenGroup(NamedTuple):
         cross-position terms -- inflating every entry and driving the eligibility
         trace to overflow -- so the true block diagonal is extracted directly via
         :func:`block_diagonal_last_dim`.
+
+        When the transition contains a ``while`` equation (an opaque forward
+        node), reverse-mode differentiation is unavailable (JAX has no
+        transpose rule for ``while``), so the Jacobian is extracted in
+        forward mode instead (:func:`jacfwd_last_dim`, or
+        :func:`block_diagonal_last_dim` with ``use_forward_mode=True``) --
+        same values, different derivative mode.
         """
         fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
         concat_hid = self.concat_hidden(hidden_vals)
+        needs_fwd = _transition_contains_while(self.transition_jaxpr)
         if self.is_diagonal_recurrence:
-            return jacrev_last_dim(fn, concat_hid)
-        return block_diagonal_last_dim(fn, concat_hid)
+            extract = jacfwd_last_dim if needs_fwd else jacrev_last_dim
+            return extract(fn, concat_hid)
+        return block_diagonal_last_dim(fn, concat_hid, use_forward_mode=needs_fwd)
 
     def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]):
         """Concatenate split hidden-state values into a single array.
@@ -394,9 +412,53 @@ def jacrev_last_dim(
     return jac[0]
 
 
+def jacfwd_last_dim(
+    fn: Callable[..., jax.Array],
+    hid_vals: jax.Array,
+) -> jax.Array:
+    """Forward-mode counterpart of :func:`jacrev_last_dim`.
+
+    Computes the same ``(*varshape, num_state, num_state)`` last-dimension
+    Jacobian, but by pushing ``num_state`` one-hot tangents through
+    :func:`jax.jvp` instead of pulling cotangents through ``vjp``. Valid on
+    the same position-diagonal maps as :func:`jacrev_last_dim`, and — unlike
+    it — usable when ``fn`` contains a ``while`` loop (JAX supports
+    forward-mode but not reverse-mode differentiation of ``while``).
+
+    Parameters
+    ----------
+    fn : Callable[[jax.Array], jax.Array]
+        A shape-preserving map on ``(*varshape, num_state)`` arrays.
+    hid_vals : jax.Array
+        The point at which to linearize, shape ``(*varshape, num_state)``.
+
+    Returns
+    -------
+    jax.Array
+        The Jacobian with shape ``(*varshape, num_state, num_state)``; entry
+        ``[p, a, b]`` is ``d fn(hid)[p, a] / d hid[p, b]``.
+
+    Raises
+    ------
+    AssertionError
+        If the number of input and output states are not the same.
+    """
+    num_state = hid_vals.shape[-1]
+    varshape = hid_vals.shape[:-1]
+    basis = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
+
+    def _push(tangent):
+        out, tang = jax.jvp(fn, (hid_vals,), (tangent,))
+        assert out.shape[-1] == num_state, 'Error: the number of input/output states should be the same.'
+        return tang
+
+    return jax.vmap(_push, in_axes=-2, out_axes=-1)(basis)
+
+
 def block_diagonal_last_dim(
     fn: Callable[..., jax.Array],
     hid_vals: jax.Array,
+    use_forward_mode: bool = False,
 ) -> jax.Array:
     """Compute the per-position block diagonal of ``fn``'s Jacobian.
 
@@ -414,6 +476,11 @@ def block_diagonal_last_dim(
         A shape-preserving map on ``(*varshape, num_state)`` arrays.
     hid_vals : jax.Array
         The point at which to linearize, shape ``(*varshape, num_state)``.
+    use_forward_mode : bool, optional
+        Materialize the full Jacobian with :func:`jax.jacfwd` instead of
+        :func:`jax.jacrev`. Required when ``fn`` contains a ``while`` loop
+        (no reverse-mode rule); the extracted blocks are identical.
+        Default ``False``.
 
     Returns
     -------
@@ -431,12 +498,133 @@ def block_diagonal_last_dim(
     num_state = hid_vals.shape[-1]
     varshape = hid_vals.shape[:-1]
     num_pos = int(np.prod(varshape)) if varshape else 1
-    full_jac = jax.jacrev(fn)(hid_vals)  # (*varshape, num_state, *varshape, num_state)
+    jac_fn = jax.jacfwd if use_forward_mode else jax.jacrev
+    full_jac = jac_fn(fn)(hid_vals)  # (*varshape, num_state, *varshape, num_state)
     full_jac = u.math.reshape(full_jac, (num_pos, num_state, num_pos, num_state))
     # take the per-position block: block[p] = full_jac[p, :, p, :]
     block = u.math.diagonal(full_jac, axis1=0, axis2=2)  # (num_state, num_state, num_pos)
     block = u.math.moveaxis(block, -1, 0)  # (num_pos, num_state, num_state)
     return u.math.reshape(block, (*varshape, num_state, num_state))
+
+
+def _transition_contains_while(jaxpr: Jaxpr) -> bool:
+    """Whether *jaxpr* (descending sub-jaxprs) contains a ``while`` equation.
+
+    Used by :meth:`HiddenGroup.diagonal_jacobian` to switch Jacobian
+    extraction to forward mode: ``while`` has no reverse-mode rule.
+    """
+    for eqn in jaxpr.eqns:
+        if is_while_primitive(eqn):
+            return True
+        for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr', 'call_jaxpr'):
+            sub = eqn.params.get(key)
+            if sub is not None and _transition_contains_while(getattr(sub, 'jaxpr', sub)):
+                return True
+        branches = eqn.params.get('branches')
+        if branches is not None:
+            for b in branches:
+                if _transition_contains_while(getattr(b, 'jaxpr', b)):
+                    return True
+    return False
+
+
+def _map_positions_to_subjaxpr_seeds(
+    eqn: JaxprEqn,
+    positions: Sequence[int],
+) -> List[Tuple[Jaxpr, List[Var], Dict[Var, Var]]]:
+    """Map hidden-derived invar *positions* of a control-flow equation to the
+    corresponding body-jaxpr variables.
+
+    Returns ``(sub_jaxpr, seed_vars, carry_feedback)`` triples, one per body
+    to inspect. ``carry_feedback`` maps a body outvar at carry position ``c``
+    to the body invar receiving it on the next iteration, so reachability can
+    be closed over loop-carried values.
+
+    Layouts (JAX): ``while`` invars are ``[*cond_consts, *body_consts,
+    *carry]`` with ``body.invars = [*body_consts, *carry]`` (cond consts only
+    steer the trip count and are skipped); ``scan`` invars are ``[*consts,
+    *carry, *xs]`` positionally identical to ``body.invars``; ``cond`` invars
+    are ``[pred, *operands]`` with each branch taking the operands.
+    """
+    name = eqn.primitive.name
+    results: List[Tuple[Jaxpr, List[Var], Dict[Var, Var]]] = []
+    if name == 'while':
+        cn = eqn.params['cond_nconsts']
+        bn = eqn.params['body_nconsts']
+        body = eqn.params['body_jaxpr'].jaxpr
+        n_carry = len(eqn.invars) - cn - bn
+        seeds = []
+        for j in positions:
+            if j < cn:
+                continue  # cond consts influence the trip count, not carried values
+            seeds.append(body.invars[j - cn])
+        feedback: Dict[Var, Var] = {}
+        for c in range(n_carry):
+            ov = body.outvars[c]
+            if isinstance(ov, Var):
+                feedback[ov] = body.invars[bn + c]
+        if seeds:
+            results.append((body, seeds, feedback))
+    elif name == 'scan':
+        body = eqn.params['jaxpr'].jaxpr
+        num_consts = eqn.params['num_consts']
+        num_carry = eqn.params['num_carry']
+        seeds = [body.invars[j] for j in positions]
+        feedback = {}
+        for c in range(num_carry):
+            ov = body.outvars[c]
+            if isinstance(ov, Var):
+                feedback[ov] = body.invars[num_consts + c]
+        if seeds:
+            results.append((body, seeds, feedback))
+    elif name == 'cond':
+        for branch in eqn.params['branches']:
+            b = getattr(branch, 'jaxpr', branch)
+            seeds = [b.invars[j - 1] for j in positions if j >= 1]
+            if seeds:
+                results.append((b, seeds, {}))
+    return results
+
+
+def _jaxpr_mixes_from(
+    jaxpr: Jaxpr,
+    seeds: Sequence[Var],
+    carry_feedback: Dict[Var, Var],
+) -> bool:
+    """Whether a recurrent weight-mixing primitive in *jaxpr* consumes a
+    value forward-reachable from *seeds*.
+
+    Runs a forward reachability sweep from the seed variables, returning
+    ``True`` as soon as a ``_RECURRENT_WEIGHT_MIXING_PRIMITIVES`` equation
+    consumes a reachable value; nested control flow is descended with the
+    same position mapping. The sweep is repeated until the carry feedback
+    (loop outvar fed back as next-iteration invar) adds no new seeds, so
+    mixing that only appears after the first loop iteration is still found.
+    """
+    seed_set = set(seeds)
+    while True:
+        reachable = set(seed_set)
+        for eqn in jaxpr.eqns:
+            hit = [
+                j for j, v in enumerate(eqn.invars)
+                if isinstance(v, Var) and v in reachable
+            ]
+            if not hit:
+                continue
+            if eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES:
+                return True
+            if is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn):
+                for sub, sub_seeds, sub_fb in _map_positions_to_subjaxpr_seeds(eqn, hit):
+                    if _jaxpr_mixes_from(sub, sub_seeds, sub_fb):
+                        return True
+            reachable.update(v for v in eqn.outvars if isinstance(v, Var))
+        new_seeds = set(seed_set)
+        for outvar, invar in carry_feedback.items():
+            if outvar in reachable:
+                new_seeds.add(invar)
+        if new_seeds == seed_set:
+            return False
+        seed_set = new_seeds
 
 
 class HiddenToHiddenGroupTracer(NamedTuple):
@@ -687,6 +875,8 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
         outvar_to_hidden_path: The mapping from the hidden output variable to the hidden state path.
         path_to_state: The mapping from the hidden state path to the state.
+        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
+            opaque control-flow handling (see ``base.check_unsupported_op``).
     """
     __module__ = 'braintrace'
 
@@ -699,6 +889,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         outvar_to_hidden_path: Dict[HiddenOutVar, Path],
         path_to_state: Dict[Path, brainstate.HiddenState],
         include_recurrent_mixing: bool = False,
+        control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     ):
         # the jaxpr of the original model, assuming that the model is well-defined,
         # see the doc for the model which can be online learning compiled.
@@ -725,7 +916,8 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             hidden_invars=hidden_invars,
             hidden_outvars=hidden_outvars,
             invar_to_hidden_path=invar_to_hidden_path,
-            outvar_to_hidden_path=outvar_to_hidden_path
+            outvar_to_hidden_path=outvar_to_hidden_path,
+            control_flow=control_flow,
         )
 
     def compile(self) -> Tuple[
@@ -792,6 +984,32 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             and eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES
             and self._eqn_consumes_hidden(eqn)
         ):
+            return
+
+        # An opaque control-flow equation (while, or a scan/cond the
+        # canonicalizer left opaque) whose *body* applies a recurrent
+        # weight-mixing primitive to the carried hidden state couples the
+        # positions exactly like a top-level recurrent matmul -- so in the
+        # default mode it is likewise a boundary. Bodies that only mix
+        # loop constants (an input projection ``x @ W_in``) are kept.
+        if (
+            not self.include_recurrent_mixing
+            and (is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn))
+            and self._control_flow_mixes_hidden(eqn)
+        ):
+            emit(
+                kind=DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'An opaque {eqn.primitive.name} whose body applies a '
+                    f'recurrent weight-mixing primitive to the carried hidden '
+                    f'state was excluded from the hidden-to-hidden transition '
+                    f'(default "without recurrence" mode). Its temporal credit '
+                    f'falls back to the zero-recurrence (e-prop) approximation; '
+                    f'pass include_recurrent_mixing=True to trace through it.'
+                ),
+                context={'op_name': eqn.primitive.name},
+            )
             return
 
         # check whether the invars have one of the hidden states.
@@ -878,6 +1096,37 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             if find_matched_vars(eqn.invars, tracer.invar_needed_in_oth_eqns):
                 return True
         return False
+
+    def _hidden_derived_invar_positions(self, eqn: JaxprEqn) -> List[int]:
+        """Positions of ``eqn.invars`` carrying a hidden-derived value.
+
+        A position qualifies when the invar is a previous hidden state
+        (:attr:`hidden_invars`) or transitively derived from one (tracked by
+        an active tracer's ``invar_needed_in_oth_eqns``).
+        """
+        positions = []
+        for j, invar in enumerate(eqn.invars):
+            if not isinstance(invar, Var):
+                continue
+            if invar in self.hidden_invars:
+                positions.append(j)
+                continue
+            for tracer in self.active_tracers.values():
+                if invar in tracer.invar_needed_in_oth_eqns:
+                    positions.append(j)
+                    break
+        return positions
+
+    def _control_flow_mixes_hidden(self, eqn: JaxprEqn) -> bool:
+        """Whether a control-flow equation's body applies a recurrent
+        weight-mixing primitive to a hidden-derived input."""
+        positions = self._hidden_derived_invar_positions(eqn)
+        if not positions:
+            return False
+        return any(
+            _jaxpr_mixes_from(sub, seeds, feedback)
+            for sub, seeds, feedback in _map_positions_to_subjaxpr_seeds(eqn, positions)
+        )
 
     def _post_check(self) -> Tuple[
         Sequence[HiddenGroup],
@@ -1284,6 +1533,7 @@ def find_hidden_groups_from_jaxpr(
     outvar_to_hidden_path: Dict[HiddenOutVar, Path],
     path_to_state: Dict[Path, brainstate.State],
     include_recurrent_mixing: bool = False,
+    control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """
     Find hidden groups from the jaxpr.
@@ -1310,6 +1560,10 @@ def find_hidden_groups_from_jaxpr(
               coupling. The resulting (coupled) Jacobian is extracted per
               position via :func:`block_diagonal_last_dim` (selected automatically
               by :attr:`HiddenGroup.is_diagonal_recurrence`).
+        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing how
+            opaque control-flow equations touching hidden states are handled
+            (``'opaque-fwd'`` keeps a weight-free while/scan/cond as an opaque
+            forward node; ``'error'`` raises as before Phase 3).
 
     Returns:
         A tuple containing:
@@ -1328,6 +1582,7 @@ def find_hidden_groups_from_jaxpr(
         # brainstate is currently untyped (both collapse to Any).
         path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),  # type: ignore[redundant-cast]
         include_recurrent_mixing=include_recurrent_mixing,
+        control_flow=control_flow,
     )
     hidden_groups, hid_path_to_group = evaluator.compile()
     return hidden_groups, brainstate.util.PrettyDict(hid_path_to_group)
@@ -1369,6 +1624,7 @@ def find_hidden_groups_from_minfo(
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         path_to_state=minfo.retrieved_model_states,
         include_recurrent_mixing=include_recurrent_mixing,
+        control_flow=minfo.control_flow,
     )
     return hidden_groups, hid_path_to_group
 

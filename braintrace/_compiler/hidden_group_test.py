@@ -15,6 +15,7 @@
 
 
 import unittest
+import warnings
 from pprint import pprint
 
 import brainstate
@@ -1202,3 +1203,341 @@ class TestGroupOrderingAndDiagnostics:
         )
         with pytest.raises(NotSupportedError):
             group.check_consistent_varshape()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: weight-free while loops as opaque forward nodes
+# ---------------------------------------------------------------------------
+
+import jax.numpy as jnp
+
+from braintrace import DiagnosticKind, DiagnosticLevel
+from braintrace._compiler.diagnostics import diagnostic_context
+from braintrace._compiler.hidden_group import (
+    _transition_contains_while,
+    block_diagonal_last_dim,
+    find_hidden_groups_from_minfo,
+    jacfwd_last_dim,
+    jacrev_last_dim,
+)
+
+_WHILE_K = 3
+
+
+def _settle_step(h, x):
+    return h + 0.5 * jnp.tanh(x - h)
+
+
+def _settle_twin(h, x):
+    """Hand-composed K-step equivalent of the while fixture (no while eqn,
+    so reverse-mode oracles work on it)."""
+    for _ in range(_WHILE_K):
+        h = _settle_step(h, x)
+    return h
+
+
+class WhileSettleCell(brainstate.nn.Module):
+    """Weight-free ``lax.while_loop`` reading and updating the hidden state.
+
+    Runs exactly ``_WHILE_K`` iterations of the element-wise settle step, so
+    ``_settle_twin`` is its exact hand-composed equivalent.
+    """
+
+    def __init__(self, n, k=_WHILE_K):
+        super().__init__()
+        self.k = k
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        h_prev = self.h.value
+
+        def cond_fn(s):
+            return s[0] < self.k
+
+        def body_fn(s):
+            i, h = s
+            return i + 1, _settle_step(h, x)
+
+        _, h_new = jax.lax.while_loop(cond_fn, body_fn, (0, h_prev))
+        self.h.value = h_new
+        return h_new
+
+
+class WhileMixingCell(brainstate.nn.Module):
+    """While body applying a (constant) recurrent matrix to the carried
+    hidden state — cross-position coupling inside the loop."""
+
+    def __init__(self, n, k=2):
+        super().__init__()
+        self.k = k
+        self.R = 0.1 * brainstate.random.randn(n, n)
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        h_prev = self.h.value
+
+        def cond_fn(s):
+            return s[0] < self.k
+
+        def body_fn(s):
+            i, h = s
+            return i + 1, jnp.tanh(h @ self.R + x)
+
+        _, h_new = jax.lax.while_loop(cond_fn, body_fn, (0, h_prev))
+        self.h.value = h_new
+        return h_new
+
+
+class WhileInputProjCell(brainstate.nn.Module):
+    """While body whose ``dot_general`` consumes only loop constants
+    (``x @ W``) — no cross-position coupling of the carried hidden."""
+
+    def __init__(self, n, k=2):
+        super().__init__()
+        self.k = k
+        self.W = 0.1 * brainstate.random.randn(n, n)
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        h_prev = self.h.value
+
+        def cond_fn(s):
+            return s[0] < self.k
+
+        def body_fn(s):
+            i, h = s
+            return i + 1, h + 0.5 * jnp.tanh(x @ self.W - h)
+
+        _, h_new = jax.lax.while_loop(cond_fn, body_fn, (0, h_prev))
+        self.h.value = h_new
+        return h_new
+
+
+def _constvals_for(group, x):
+    """Values for ``group.transition_jaxpr_constvars``: the float vector
+    matching ``x``'s shape gets ``x``; every other constvar (e.g. the loop
+    counter's initial value) gets zeros of its aval."""
+    vals = []
+    for v in group.transition_jaxpr_constvars:
+        aval = v.aval
+        if aval.shape == x.shape and jnp.issubdtype(aval.dtype, jnp.floating):
+            vals.append(x)
+        else:
+            vals.append(jnp.zeros(aval.shape, aval.dtype))
+    return vals
+
+
+class TestJacfwdLastDim:
+    """Forward-mode last-dim Jacobian extraction (`while` has no
+    reverse-mode rule, so opaque-forward transitions need these)."""
+
+    def test_matches_jacrev_on_position_diagonal_map(self):
+        h = brainstate.random.rand(5, 2)
+
+        def fn(hid):
+            a, b = hid[..., 0], hid[..., 1]
+            return jnp.stack([jnp.tanh(a) * b, a + jnp.sin(b)], axis=-1)
+
+        fwd = jacfwd_last_dim(fn, h)
+        rev = jacrev_last_dim(fn, h)
+        assert fwd.shape == rev.shape == (5, 2, 2)
+        assert u.math.allclose(fwd, rev, atol=1e-6)
+
+    def test_block_diagonal_forward_mode_matches_reverse(self):
+        h = brainstate.random.rand(4, 2)
+        R = brainstate.random.rand(4, 4)
+
+        def fn(hid):
+            return jnp.tanh(jnp.einsum('ps,pq->qs', hid, R))
+
+        fwd = block_diagonal_last_dim(fn, h, use_forward_mode=True)
+        rev = block_diagonal_last_dim(fn, h)
+        assert fwd.shape == rev.shape == (4, 2, 2)
+        assert u.math.allclose(fwd, rev, atol=1e-6)
+
+    def test_jacfwd_through_while_matches_twin(self):
+        x = brainstate.random.rand(5)
+
+        def fn_while(hid):
+            def cond_fn(s):
+                return s[0] < _WHILE_K
+
+            def body_fn(s):
+                i, h = s
+                return i + 1, _settle_step(h, x)
+
+            _, h_final = jax.lax.while_loop(cond_fn, body_fn, (0, hid[..., 0]))
+            return h_final[..., None]
+
+        def fn_twin(hid):
+            return _settle_twin(hid[..., 0], x)[..., None]
+
+        h = brainstate.random.rand(5, 1)
+        fwd = jacfwd_last_dim(fn_while, h)
+        rev = jacrev_last_dim(fn_twin, h)
+        assert fwd.shape == (5, 1, 1)
+        assert u.math.allclose(fwd, rev, atol=1e-6)
+
+    def test_transition_contains_while_helper(self):
+        x = brainstate.random.rand(3)
+
+        def with_while(h):
+            def body_fn(s):
+                i, hh = s
+                return i + 1, _settle_step(hh, x)
+
+            return jax.lax.while_loop(lambda s: s[0] < 2, body_fn, (0, h))[1]
+
+        jaxpr_w = jax.make_jaxpr(with_while)(x).jaxpr
+        jaxpr_plain = jax.make_jaxpr(lambda h: jnp.tanh(h))(x).jaxpr
+        assert _transition_contains_while(jaxpr_w)
+        assert not _transition_contains_while(jaxpr_plain)
+
+
+class TestWhileOpaqueForwardGroups:
+    """A weight-free while reading/updating the hidden state becomes an
+    opaque forward node in the hidden-to-hidden transition."""
+
+    def _compile_settle(self, n=4):
+        cell = WhileSettleCell(n)
+        brainstate.nn.init_all_states(cell)
+        x = brainstate.random.rand(n)
+        with diagnostic_context() as reporter:
+            groups, path_to_group = find_hidden_groups_from_module(cell, x)
+        return cell, x, groups, path_to_group, reporter
+
+    def test_one_group_with_while_in_transition(self):
+        _, _, groups, _, reporter = self._compile_settle()
+        assert len(groups) == 1
+        names = [e.primitive.name for e in groups[0].transition_jaxpr.eqns]
+        assert 'while' in names
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD in kinds
+
+    def test_transition_evaluates_and_matches_twin(self):
+        _, x, groups, _, _ = self._compile_settle()
+        group = groups[0]
+        h0 = brainstate.random.rand(*group.hidden_invars[0].aval.shape)
+        out = group.transition([h0], _constvals_for(group, x))
+        expect = _settle_twin(h0, x)
+        assert u.math.allclose(out[0], expect, atol=1e-6)
+
+    def test_diagonal_jacobian_matches_twin(self):
+        _, x, groups, _, _ = self._compile_settle()
+        group = groups[0]
+        n = group.hidden_invars[0].aval.shape[0]
+        h0 = brainstate.random.rand(n)
+
+        diag = group.diagonal_jacobian([h0], _constvals_for(group, x))
+
+        twin_full = jax.jacrev(lambda h: _settle_twin(h, x))(h0)
+        expect = jnp.diagonal(twin_full)[..., None, None]
+        assert diag.shape == (n, 1, 1)
+        assert u.math.allclose(diag, expect, atol=1e-5)
+
+    def test_while_hidden_error_policy_raises_in_group_pass(self):
+        """``find_hidden_groups_from_minfo`` must consult the policy the
+        canonicalizer ran with (threaded through ``ModuleInfo``)."""
+        cell = WhileSettleCell(4)
+        brainstate.nn.init_all_states(cell)
+        x = brainstate.random.rand(4)
+        policy = braintrace.ControlFlowPolicy(while_hidden='error')
+        minfo = braintrace.extract_module_info(cell, x, control_flow=policy)
+        with pytest.raises(NotImplementedError):
+            find_hidden_groups_from_minfo(minfo)
+
+
+class TestWhileRecurrentMixingGuard:
+    """A while body applying a recurrent weight-mixing primitive to the
+    carried hidden state is a boundary in the default ("without
+    recurrence") grouping mode."""
+
+    def _compile_mixing(self, include_recurrent_mixing=False, n=4):
+        cell = WhileMixingCell(n)
+        brainstate.nn.init_all_states(cell)
+        x = brainstate.random.rand(n)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                groups, path_to_group = find_hidden_groups_from_module(
+                    cell, x, include_recurrent_mixing=include_recurrent_mixing,
+                )
+        return cell, x, groups, reporter
+
+    def test_default_mode_falls_back_to_zero_recurrence(self):
+        _, x, groups, reporter = self._compile_mixing()
+        assert len(groups) == 1
+        group = groups[0]
+        # zero-recurrence fallback: empty transition, D == 0
+        assert list(group.transition_jaxpr.eqns) == []
+        h0 = brainstate.random.rand(*group.hidden_invars[0].aval.shape)
+        const_vals = [
+            brainstate.random.rand(*v.aval.shape)
+            for v in group.transition_jaxpr_constvars
+        ]
+        diag = group.diagonal_jacobian([h0], const_vals)
+        assert u.math.allclose(diag, jnp.zeros_like(diag))
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING in kinds
+        record = next(
+            r for r in reporter.records()
+            if r.kind is DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING
+        )
+        assert record.level is DiagnosticLevel.WARNING
+
+    def test_include_recurrent_mixing_traces_through_while(self):
+        cell, x, groups, reporter = self._compile_mixing(include_recurrent_mixing=True)
+        assert len(groups) == 1
+        group = groups[0]
+        names = [e.primitive.name for e in group.transition_jaxpr.eqns]
+        assert 'while' in names
+        assert group.is_diagonal_recurrence is False
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
+
+        # forward-mode block diagonal equals the hand-composed twin's blocks.
+        # The mixing cell's constvars are the counter init (int) plus two
+        # float arrays distinguishable by shape: x (n,) and R (n, n).
+        n = group.hidden_invars[0].aval.shape[0]
+        h0 = brainstate.random.rand(n)
+        const_vals = []
+        for v in group.transition_jaxpr_constvars:
+            aval = v.aval
+            if aval.shape == x.shape and jnp.issubdtype(aval.dtype, jnp.floating):
+                const_vals.append(x)
+            elif aval.shape == cell.R.shape and jnp.issubdtype(aval.dtype, jnp.floating):
+                const_vals.append(jnp.asarray(cell.R))
+            else:
+                const_vals.append(jnp.zeros(aval.shape, aval.dtype))
+        diag = group.diagonal_jacobian([h0], const_vals)
+
+        def twin(h):
+            for _i in range(cell.k):
+                h = jnp.tanh(h @ cell.R + x)
+            return h
+
+        full = jax.jacrev(twin)(h0)
+        expect = jnp.diagonal(full)[..., None, None]
+        assert diag.shape == (n, 1, 1)
+        assert u.math.allclose(diag, expect, atol=1e-5)
+
+    def test_input_projection_in_body_is_not_a_boundary(self):
+        cell = WhileInputProjCell(4)
+        brainstate.nn.init_all_states(cell)
+        x = brainstate.random.rand(4)
+        with diagnostic_context() as reporter:
+            groups, _pg = find_hidden_groups_from_module(cell, x)
+        assert len(groups) == 1
+        names = [e.primitive.name for e in groups[0].transition_jaxpr.eqns]
+        assert 'while' in names
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
