@@ -21,7 +21,10 @@ module. The submodule layout is:
 * :mod:`._registries` — global registries + flag-checking helpers
 * :mod:`._primitive` — :class:`ETPPrimitive` + :func:`register_primitive`
 * :mod:`.dense` — ``etp_mm_p``, ``etp_mv_p``, :func:`matmul`
+* :mod:`.grouped` — ``etp_gmm_p``, ``etp_gmv_p``, :func:`grouped_matmul`
+* :mod:`.einsum` — ``etp_einsum_p``, :func:`einsum`
 * :mod:`.elemwise` — ``etp_elemwise_p``, :func:`element_wise`
+* :mod:`.embedding` — ``etp_emb_p``, ``etp_emb_v_p``, :func:`embedding`
 * :mod:`.conv` — ``etp_conv_p``, :func:`conv`
 * :mod:`.sparse` — ``etp_sp_mm_p``, ``etp_sp_mv_p``, :func:`sparse_matmul`
 * :mod:`.lora` — ``etp_lora_mm_p``, ``etp_lora_mv_p``, :func:`lora_matmul`
@@ -39,6 +42,7 @@ from ._registries import (
     ETP_PRIMITIVES,
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
+    ETP_RULES_PP_X_REPR,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_YW_TO_W,
     ETP_TRAINABLE_INVARS_FNS,
@@ -47,6 +51,7 @@ from ._registries import (
     FastPathRules,
     GRADIENT_ENABLED_PRIMITIVES,
     get_fast_path_rules,
+    get_pp_x_repr,
     get_trainable_invars,
     get_x_invar_index,
     get_y_outvar_index,
@@ -57,7 +62,10 @@ from ._registries import (
 from .conv import _etp_conv_impl
 from .conv import conv, etp_conv_p
 from .dense import etp_mm_p, etp_mv_p, matmul
+from .einsum import einsum, etp_einsum_p
 from .elemwise import element_wise, etp_elemwise_p
+from .embedding import embedding, etp_emb_p, etp_emb_v_p
+from .grouped import etp_gmm_p, etp_gmv_p, grouped_matmul
 from .lora import etp_lora_mm_p, etp_lora_mv_p, lora_matmul
 from .sparse import etp_sp_mm_p, etp_sp_mv_p, sparse_matmul
 
@@ -86,10 +94,17 @@ __all__ = [
     'FastPathRules',
     'ETP_FAST_PATH_RULES',
     'get_fast_path_rules',
+    'ETP_RULES_PP_X_REPR',
+    'get_pp_x_repr',
 
     # primitives
     'etp_mm_p',
     'etp_mv_p',
+    'etp_gmm_p',
+    'etp_gmv_p',
+    'etp_emb_p',
+    'etp_emb_v_p',
+    'etp_einsum_p',
     'etp_elemwise_p',
     'etp_conv_p',
     'etp_sp_mm_p',
@@ -99,6 +114,9 @@ __all__ = [
 
     # user API
     'matmul',
+    'grouped_matmul',
+    'embedding',
+    'einsum',
     'element_wise',
     'conv',
     'sparse_matmul',

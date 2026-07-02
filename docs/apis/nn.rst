@@ -30,9 +30,21 @@ Linear Layers
    :template: classtemplate.rst
 
    Linear
+   GroupedLinear
    SignedWLinear
    SparseLinear
    LoRA
+
+
+Embedding Layers
+----------------
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   Embedding
 
 
 Convolutional Layers

@@ -12,8 +12,10 @@ rules (abstract eval, lowering, JVP, transpose, batching) are **auto-derived**
 from the op's implementation — you only hand-write the small set of
 *ETP-specific* rules that describe trace propagation. This page shows how to
 register your own primitive; the built-ins (``etp_mm``, ``etp_mv``,
-``etp_conv``, ``etp_elemwise``, ``etp_sp_mm``, ``etp_sp_mv``, ``etp_lora_mm``,
-``etp_lora_mv``) are registered through the very same machinery.
+``etp_gmm``, ``etp_gmv``, ``etp_emb``, ``etp_emb_v``, ``etp_einsum``,
+``etp_conv``, ``etp_elemwise``, ``etp_sp_mm``, ``etp_sp_mv``,
+``etp_lora_mm``, ``etp_lora_mv``) are registered through the very same
+machinery.
 
 
 Registration
