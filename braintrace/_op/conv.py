@@ -443,17 +443,26 @@ def _conv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     performed on the trace-update side, not at the ``xy_to_dw`` step.
 
     Zero-initialised (matches :math:`\boldsymbol{\epsilon}^0 = \mathbf{0}`).
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     batch = x_var.aval.shape[0]
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
         'weight': jnp.zeros(
-            (batch, *weight_vars['weight'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype
         )
     }
     if 'bias' in weight_vars:
         # y_var.aval.shape = (batch, *spatial, out_ch); strip the batch dim.
         out['bias'] = jnp.zeros(
-            (batch, *y_var.aval.shape[1:], num_hidden_state)
+            (batch, *y_var.aval.shape[1:], num_hidden_state), dtype=dtype
         )
     return out
 

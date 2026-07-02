@@ -270,6 +270,83 @@ class TestGradientCorrectness:
 
 
 # ---------------------------------------------------------------------------
+# H2 regression: the trace_dtype init gate must mirror the runtime fast-path
+# predicate (fast_solve AND fp is not None AND fp.applicable(eqn_params)).
+# ---------------------------------------------------------------------------
+
+def _leaky_weight_fn_model(n_in=3, n_h=4, seed=3):
+    """Leaky integrator driven by a dense ETP matmul with an active
+    ``weight_fn`` transform hook.
+
+    ``weight_fn=jnp.tanh`` makes ``fp.applicable(eqn_params)`` return
+    ``False`` at runtime (see ``_dense_fast_applicable``), even though a
+    fast-path bundle is registered for ``etp_mm_p``. ``w`` reaches every
+    future hidden state through the leaky carry, so it is a genuine ETP
+    relation (mirrors ``oracle_models.leaky_linear``).
+    """
+    brainstate.random.seed(seed)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(brainstate.random.randn(n_in, n_h) * 0.2)
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_h)))
+
+        def update(self, x):
+            drive = braintrace.matmul(x, self.w.value, weight_fn=jnp.tanh)
+            self.h.value = 0.5 * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+class TestTraceDtypeGateMatchesRuntimePredicate:
+    """Before the fix, ``_init_param_dim_state`` cast the trace to
+    ``trace_dtype`` whenever ``get_fast_path_rules(primitive) is not None`` —
+    i.e. whenever a bundle *existed* for the primitive — regardless of
+    whether the runtime predicate (``fast_solve and fp is not None and
+    fp.applicable(eqn_params)``) would actually select the fast path. With
+    ``trace_dtype=jnp.bfloat16`` and a ``weight_fn`` on a dense op (or with
+    ``fast_solve=False``), the scan carry was allocated bfloat16 at init but
+    the legacy (non-fast) update emitted float32, raising a
+    ``jax.lax.scan`` carry-dtype ``TypeError``.
+    """
+
+    @staticmethod
+    def _run(*, fast_solve):
+        model = _leaky_weight_fn_model()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        inputs = brainstate.random.randn(4, 1, 3)  # (T, B=1, n_in)
+        algo = ParamDimVjpAlgorithm(
+            model, vjp_method='multi-step',
+            fast_solve=fast_solve, trace_dtype=jnp.bfloat16,
+        )
+        algo.compile_graph(inputs[0])
+        algo.init_etrace_state()
+
+        weights = model.states(brainstate.ParamState)
+
+        def loss(inp):
+            return algo(braintrace.MultiStepData(inp)).sum()
+
+        grads = brainstate.transform.grad(loss, weights)(inputs)
+        leaves = jax.tree.leaves(grads)
+        assert leaves
+        for leaf in leaves:
+            assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
+
+    def test_fast_solve_true_with_weight_fn_runs(self):
+        # fp exists for etp_mm_p, but weight_fn makes fp.applicable False ->
+        # use_fast is False at runtime despite fast_solve=True.
+        self._run(fast_solve=True)
+
+    def test_fast_solve_false_runs(self):
+        # fast_solve=False alone also disagrees with the old init gate
+        # (which only checked "does a fast-path bundle exist").
+        self._run(fast_solve=False)
+
+
+# ---------------------------------------------------------------------------
 # RNN-cell sweep — finite gradients across the public cell zoo
 # ---------------------------------------------------------------------------
 

@@ -76,14 +76,21 @@ def _init_param_dim_state(
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State],
     relation: HiddenParamOpRelation,
     trace_dtype: Optional[DTypeLike] = None,
+    fast_solve: bool = True,
 ) -> None:
     """
     Initialize the eligibility trace states for parameter dimensions.
 
     Traces are stored as ``Dict[str, Array]`` keyed by the primitive's
-    trainable-input names (dict-based rule API). When ``trace_dtype`` is set and
-    the primitive uses the elementwise fast path (mm/mv/elemwise), the trace is
-    allocated at that reduced precision; conv/sparse/LoRA keep native precision.
+    trainable-input names (dict-based rule API). When ``trace_dtype`` is set,
+    the trace is only allocated at that reduced precision when the runtime
+    update will actually take the fast path for this relation — i.e. the same
+    predicate used by :func:`_update_param_dim_etrace_scan_fn` /
+    :func:`_solve_param_dim_weight_gradients`: ``fast_solve and fp is not None
+    and fp.applicable(relation.eqn_params)``. Otherwise the trace stays at
+    native precision, because the legacy (non-fast) update always emits
+    native-precision arrays and a mismatched scan-carry dtype would raise at
+    trace time.
     """
     group: HiddenGroup
     for group in relation.hidden_groups:
@@ -108,7 +115,9 @@ def _init_param_dim_state(
                 f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
                 f'got {type(init_val).__name__}.'
             )
-        if get_fast_path_rules(relation.primitive) is not None:
+        fp = get_fast_path_rules(relation.primitive)
+        use_fast = fast_solve and fp is not None and fp.applicable(relation.eqn_params)
+        if use_fast:
             init_val = _cast_to_dtype(init_val, trace_dtype)
         etrace_bwg[bwg_key] = EligibilityTrace(init_val)
 
@@ -630,7 +639,14 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         self.fast_solve = fast_solve
         # Optional reduced-precision storage for the eligibility trace (e.g.
         # ``jnp.bfloat16`` / ``jnp.float16``); ``None`` keeps native fp32. Only
-        # the mm/mv/elemwise fast path honors it.
+        # applies on the fast path: a relation's trace is cast to
+        # ``trace_dtype`` iff ``fast_solve`` is ``True`` *and* the relation's
+        # primitive has a registered fast-path bundle whose ``applicable``
+        # gate accepts its ``eqn_params`` (false, e.g., when a ``weight_fn`` /
+        # ``bias_fn`` transform is active). When that predicate is false the
+        # trace stays at native precision, since the legacy update always
+        # produces native-precision arrays and a mismatched scan-carry dtype
+        # would raise at trace time.
         self.trace_dtype = trace_dtype
 
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
@@ -642,7 +658,9 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # The states of batched weight gradients
         self.etrace_bwg = dict()
         for relation in self.graph.hidden_param_op_relations:
-            _init_param_dim_state(self.etrace_bwg, relation, self.trace_dtype)
+            _init_param_dim_state(
+                self.etrace_bwg, relation, self.trace_dtype, self.fast_solve,
+            )
 
     def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.

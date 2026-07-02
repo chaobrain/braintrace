@@ -294,17 +294,26 @@ def _lora_mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     Memory cost :math:`\mathcal{O}(B\, r\, (I + O))` versus
     :math:`\mathcal{O}(B\, I\, O)` for a dense layer — the whole point
     of LoRA. Zero-initialised.
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     batch = x_var.aval.shape[0]
     B_shape = weight_vars['lora_b'].aval.shape
     A_shape = weight_vars['lora_a'].aval.shape
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
-        'lora_b': jnp.zeros((batch, *B_shape, num_hidden_state)),
-        'lora_a': jnp.zeros((batch, *A_shape, num_hidden_state)),
+        'lora_b': jnp.zeros((batch, *B_shape, num_hidden_state), dtype=dtype),
+        'lora_a': jnp.zeros((batch, *A_shape, num_hidden_state), dtype=dtype),
     }
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 
@@ -336,16 +345,25 @@ def _lora_mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
         \boldsymbol{\epsilon}_b \in \mathbb{R}^{O \times n_{\text{state}}}.
 
     Zero-initialised.
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     B_shape = weight_vars['lora_b'].aval.shape
     A_shape = weight_vars['lora_a'].aval.shape
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
-        'lora_b': jnp.zeros((*B_shape, num_hidden_state)),
-        'lora_a': jnp.zeros((*A_shape, num_hidden_state)),
+        'lora_b': jnp.zeros((*B_shape, num_hidden_state), dtype=dtype),
+        'lora_a': jnp.zeros((*A_shape, num_hidden_state), dtype=dtype),
     }
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (*weight_vars['bias'].aval.shape, num_hidden_state)
+            (*weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 

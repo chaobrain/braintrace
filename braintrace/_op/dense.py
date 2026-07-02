@@ -255,16 +255,25 @@ def _mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     in the recurrence
     :math:`\boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}
                                            + \operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t`.
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     batch = x_var.aval.shape[0]
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
         'weight': jnp.zeros(
-            (batch, *weight_vars['weight'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype
         )
     }
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 
@@ -543,15 +552,24 @@ def _mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
         \boldsymbol{\epsilon}_b \in \mathbb{R}^{O \times n_{\text{state}}}.
 
     Zero-initialised (matches :math:`\boldsymbol{\epsilon}^0 = \mathbf{0}`).
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
     out = {
         'weight': jnp.zeros(
-            (*weight_vars['weight'].aval.shape, num_hidden_state)
+            (*weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype
         )
     }
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (*weight_vars['bias'].aval.shape, num_hidden_state)
+            (*weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 

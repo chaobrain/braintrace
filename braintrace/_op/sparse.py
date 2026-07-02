@@ -248,13 +248,22 @@ def _sp_mm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
 
     ``nnz`` can be orders of magnitude smaller than :math:`I \cdot O`
     for typical connectivity matrices. Zero-initialised.
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     batch = x_var.aval.shape[0]
     nnz = weight_vars['weight'].aval.shape[0]
-    out = {'weight': jnp.zeros((batch, nnz, num_hidden_state))}
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
+    out = {'weight': jnp.zeros((batch, nnz, num_hidden_state), dtype=dtype)}
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (batch, *weight_vars['bias'].aval.shape, num_hidden_state)
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 
@@ -314,12 +323,21 @@ def _sp_mv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
         \boldsymbol{\epsilon}_b \in \mathbb{R}^{O \times n_{\text{state}}}.
 
     Zero-initialised.
+
+    The trace dtype is derived from the participating ``x``/``y``/weight
+    avals via :func:`jax.numpy.result_type` rather than left to ``jnp.zeros``'
+    default (which silently follows the global x64 flag instead of the
+    operands' actual dtype).
     """
     nnz = weight_vars['weight'].aval.shape[0]
-    out = {'weight': jnp.zeros((nnz, num_hidden_state))}
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
+    out = {'weight': jnp.zeros((nnz, num_hidden_state), dtype=dtype)}
     if 'bias' in weight_vars:
         out['bias'] = jnp.zeros(
-            (*weight_vars['bias'].aval.shape, num_hidden_state)
+            (*weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
         )
     return out
 
