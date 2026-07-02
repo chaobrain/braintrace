@@ -152,7 +152,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
 )
 from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
 
@@ -160,20 +160,20 @@ from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
 class TestGmmEtpRules:
     B, G, K, N, A = 5, 2, 3, 4, 2   # batch, groups, in, out, n_state
 
-    def test_yw_to_w_broadcasts_hidden_over_in_axis(self):
+    def test_dt_to_t_broadcasts_hidden_over_in_axis(self):
         brainstate.random.seed(10)
         hd = brainstate.random.randn(self.B, self.G, self.N)
         tr = {'weight': brainstate.random.randn(self.B, self.G, self.K, self.N),
               'bias': brainstate.random.randn(self.B, self.G, self.N)}
-        out = ETP_RULES_YW_TO_W[etp_gmm_p](hd, tr, has_bias=True)
+        out = ETP_RULES_DT_TO_T[etp_gmm_p](hd, tr, has_bias=True)
         np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, :, None, :], atol=1e-6)
         np.testing.assert_allclose(out['bias'], tr['bias'] * hd, atol=1e-6)
 
-    def test_yw_to_w_grad_context_batch_stripped(self):
+    def test_dt_to_t_grad_context_batch_stripped(self):
         brainstate.random.seed(11)
         hd = brainstate.random.randn(self.G, self.N)
         tr = {'weight': brainstate.random.randn(self.G, self.K, self.N)}
-        out = ETP_RULES_YW_TO_W[etp_gmm_p](hd, tr, has_bias=False)
+        out = ETP_RULES_DT_TO_T[etp_gmm_p](hd, tr, has_bias=False)
         np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, None, :], atol=1e-6)
 
     def test_xy_to_dw_matches_vjp_plain(self):
@@ -238,12 +238,12 @@ class TestGmmEtpRules:
 class TestGmvEtpRules:
     G, K, N, A = 2, 3, 4, 2
 
-    def test_yw_to_w(self):
+    def test_dt_to_t(self):
         brainstate.random.seed(20)
         hd = brainstate.random.randn(self.G, self.N)
         tr = {'weight': brainstate.random.randn(self.G, self.K, self.N),
               'bias': brainstate.random.randn(self.G, self.N)}
-        out = ETP_RULES_YW_TO_W[etp_gmv_p](hd, tr, has_bias=True)
+        out = ETP_RULES_DT_TO_T[etp_gmv_p](hd, tr, has_bias=True)
         np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, None, :], atol=1e-6)
         np.testing.assert_allclose(out['bias'], tr['bias'] * hd, atol=1e-6)
 

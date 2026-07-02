@@ -27,7 +27,7 @@ from braintrace._compiler import HiddenParamOpRelation, HiddenGroup
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
@@ -220,12 +220,12 @@ def _update_param_dim_etrace_scan_fn(
             get_instant_drtrl_rule(relation.primitive)
             or ETP_RULES_XY_TO_DW[relation.primitive]
         )
-        yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
+        dt_to_t_rule = ETP_RULES_DT_TO_T[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
         batched = is_batched_primitive(relation.primitive)
         has_bias = eqn_params.get('has_bias', False)
-        # Fast path only applies to primitives with elementwise yw_to_w, and
+        # Fast path only applies to primitives with elementwise dt_to_t, and
         # only when no parameter-transform hook is present (the closed-form
         # kernels drop the f'(W) factor — gated by ``fp.applicable``).
         fp = get_fast_path_rules(relation.primitive)
@@ -239,7 +239,7 @@ def _update_param_dim_etrace_scan_fn(
         def _call_xy_to_dw_dict(x_: Any, df_: Any, weights_: Any, _rule: Any = xy_to_dw_rule, _params: Any = eqn_params) -> Any:
             return _rule(x_, df_, weights_, **_params)
 
-        def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
+        def _call_dt_to_t_dict(d: Any, trace_: Any, _rule: Any = dt_to_t_rule, _params: Any = eqn_params) -> Any:
             return _rule(d, trace_, **_params)
 
         def comp_dw_with_x(x_: Any, df_: Any, _wdict: Any = weights_dict) -> Any:
@@ -266,14 +266,14 @@ def _update_param_dim_etrace_scan_fn(
             return _inner(df_all)
 
         def _comp_recurrent_legacy(diag_: Any, old_bwg_: Any, num_state_: Any) -> Any:
-            """Legacy nested-vmap yw_to_w + sum path."""
+            """Legacy nested-vmap dt_to_t + sum path."""
 
             # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-state
             # Jacobian (diag) is per-lane and has lost its leading batch axis,
             # while the weight trace (old_bwg) still carries the singleton batch
             # from ``init_drtrl`` (``batch = x_var.shape[0]`` == 1 for a conv whose
             # forward forces a batch axis). Re-insert the matching singleton on
-            # diag so the ``yw_to_w`` rule sees a consistent batch prefix on both
+            # diag so the ``dt_to_t`` rule sees a consistent batch prefix on both
             # the cotangent and the trace (collapsed again by the solve-time sum).
             if batched and x is not None and diag_.ndim == x.ndim + 1:
                 diag_ = diag_[None]
@@ -281,7 +281,7 @@ def _update_param_dim_etrace_scan_fn(
             def fn_bwg_pre(d: Any, _old: Any = old_bwg_) -> Any:
                 return jax.tree.map(
                     lambda arr: _sum_dim(arr, axis=-1),
-                    jax.vmap(_call_yw_to_w_dict, in_axes=-1, out_axes=-1)(d, _old),
+                    jax.vmap(_call_dt_to_t_dict, in_axes=-1, out_axes=-1)(d, _old),
                 )
 
             # num_state == 1 shortcut: squeeze the size-1 alpha axis to skip
@@ -378,7 +378,7 @@ def _solve_param_dim_weight_gradients(
     # summing the unbatched gradient would collapse its leading (in-feature) axis.
     batched_paths: set = set()
     for relation in weight_hidden_relations:
-        yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
+        dt_to_t_rule = ETP_RULES_DT_TO_T[relation.primitive]
         solve_drtrl_rule = get_solve_drtrl_rule(relation.primitive)
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
@@ -395,7 +395,7 @@ def _solve_param_dim_weight_gradients(
             # e.g. LoRA's effective-weight trace): chain the learning signal
             # through the current weights. The rule sees batch-free,
             # num_state-free slices — the vmap scaffolding below is shared
-            # with the legacy ``yw_to_w`` path.
+            # with the legacy ``dt_to_t`` path.
             weights_dict = {
                 key: _extract_leaf(
                     weight_vals[relation.trainable_paths[key]],
@@ -413,12 +413,12 @@ def _solve_param_dim_weight_gradients(
 
             _call_rule_dict = _call_solve_drtrl_dict
         else:
-            def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
+            def _call_dt_to_t_dict(d: Any, trace_: Any, _rule: Any = dt_to_t_rule, _params: Any = eqn_params) -> Any:
                 return _rule(d, trace_, **_params)
 
-            _call_rule_dict = _call_yw_to_w_dict
+            _call_rule_dict = _call_dt_to_t_dict
 
-        yw_to_w = (
+        dt_to_t = (
             jax.vmap(_call_rule_dict)
             if batched
             else _call_rule_dict
@@ -439,7 +439,7 @@ def _solve_param_dim_weight_gradients(
             # (necessarily conv here — dense/lora/sparse dispatch to their
             # unbatched variants when per-lane) has a per-lane hidden cotangent
             # that lost its leading batch axis, while the weight trace keeps the
-            # singleton batch from ``init_drtrl``. Both the batched ``yw_to_w`` and
+            # singleton batch from ``init_drtrl``. Both the batched ``dt_to_t`` and
             # the closed-form solve map a shared leading batch axis, so re-insert
             # the matching singleton on the cotangent; the trailing solve-time sum
             # (``has_batched`` branch below) collapses it again.
@@ -479,11 +479,11 @@ def _solve_param_dim_weight_gradients(
                 etr_squeezed = jax.tree.map(
                     lambda a: u.math.squeeze(a, axis=-1), etrace_data_unitless
                 )
-                dg_weight_dict = yw_to_w(dg_hid_squeezed, etr_squeezed)
+                dg_weight_dict = dt_to_t(dg_hid_squeezed, etr_squeezed)
             else:
                 dg_weight_dict = jax.tree.map(
                     lambda arr: _sum_dim(arr, axis=-1),
-                    jax.vmap(yw_to_w, in_axes=-1, out_axes=-1)(
+                    jax.vmap(dt_to_t, in_axes=-1, out_axes=-1)(
                         dg_hidden_unitless, etrace_data_unitless
                     ),
                 )

@@ -49,7 +49,7 @@ output element). The conv primitive implements:
   **without** summing over spatial positions (the sum happens at the
   consumer's contraction step).
 
-* ``instant_drtrl`` / ``yw_to_w`` / ``solve_drtrl`` — the param-dim
+* ``instant_drtrl`` / ``dt_to_t`` / ``solve_drtrl`` — the param-dim
   D-RTRL trace machinery. Because the kernel is *spatially shared*
   (every output position reads the same :math:`K`) while the D-RTRL
   discount :math:`\mathbf{D}^t` acts per output element, no kernel-shaped
@@ -71,7 +71,7 @@ output element). The conv primitive implements:
     :math:`(\mathbf{D}_f^t)_{b,\mathbf{s},k}\,\mathrm{patch}^t_{b,\mathbf{s},\mathbf{u},c}`
     for the kernel, and the per-position cotangent (with the ``bias_fn``
     chain) for the bias.
-  - ``yw_to_w`` (recurrence only) multiplies every trace slot by the
+  - ``dt_to_t`` (recurrence only) multiplies every trace slot by the
     per-position factor :math:`D^t_{b,\mathbf{s},k}` — no spatial sums
     anywhere.
   - ``solve_drtrl`` contracts the learning signal with the trace,
@@ -106,7 +106,7 @@ are always taken w.r.t. the **raw** kernel / bias, so the transform
 Jacobian :math:`f'` enters *only* through the instantaneous rules via
 :func:`jax.vjp` (``kernel_fn`` through a kernel VJP — applied per output
 position in ``instant_drtrl`` — ``bias_fn`` as an elementwise per-channel
-diagonal factor). The ``yw_to_w`` / ``solve_drtrl`` rules and the trace
+diagonal factor). The ``dt_to_t`` / ``solve_drtrl`` rules and the trace
 initialisers are transform-free and stay exact (they operate on
 :math:`\partial h / \partial K_{\text{raw}}`).
 
@@ -248,7 +248,7 @@ def _conv_layout(params: dict[str, Any]) -> tuple[int, int, int, int]:
     return n_spatial, channel_axis, batch_axis, kernel_out_axis
 
 
-def _conv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], **params: Any) -> dict[str, Any]:
+def _conv_dt_to_t(hidden_dim: Any, trace: dict[str, Any], **params: Any) -> dict[str, Any]:
     r"""Apply the recurrence factor :math:`D^t = \partial h^t / \partial y`
     to the per-position conv trace — a pure elementwise multiply.
 
@@ -343,7 +343,7 @@ def _conv_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], **params: A
     **Bias path.** The bias appears additively with no spatial coupling,
     so its instantaneous Jacobian is the cotangent itself at each
     spatial position. We store this per-position (no spatial sum here);
-    the sum is performed inside :func:`_conv_yw_to_w` during trace
+    the sum is performed inside :func:`_conv_dt_to_t` during trace
     propagation — this keeps the bias-trace shape identical to
     :math:`\partial h / \partial y` so the :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}`
     recurrence can be applied element-by-element.
@@ -669,7 +669,7 @@ def _conv_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     convolutions prefer the IO-dim algorithm (``pp_prop`` /
     ``IODimVjpAlgorithm``), whose conv trace stays output-shaped.
 
-    The bias trace keeps spatial dims so :func:`_conv_yw_to_w` can apply
+    The bias trace keeps spatial dims so :func:`_conv_dt_to_t` can apply
     the per-position :math:`D^t` factor elementwise; the spatial sum
     implementing :math:`\sum_{\mathbf{s}} g_{\mathbf{s}} \partial
     h/\partial b_k` is performed at solve time by
@@ -759,7 +759,7 @@ etp_conv_p = register_primitive(
     x_invar_index=0,
 )
 etp_conv_p.register_etp_rules(
-    yw_to_w=_conv_yw_to_w,
+    dt_to_t=_conv_dt_to_t,
     xy_to_dw=_conv_xy_to_dw,
     init_drtrl=_conv_init_drtrl,
     init_pp=_conv_init_pp,
@@ -767,7 +767,7 @@ etp_conv_p.register_etp_rules(
 # Param-dim D-RTRL overrides: the per-position kernel trace (spatial output
 # axes retained) differs from the parameter structure, so the instantaneous
 # term and the solve-time contraction cannot be expressed by xy_to_dw /
-# yw_to_w alone. IO-dim (ES-D-RTRL) keeps using xy_to_dw.
+# dt_to_t alone. IO-dim (ES-D-RTRL) keeps using xy_to_dw.
 ETP_RULES_INSTANT_DRTRL[etp_conv_p] = _conv_instant_drtrl
 ETP_RULES_SOLVE_DRTRL[etp_conv_p] = _conv_solve_drtrl
 

@@ -129,7 +129,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
 )
 from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
 
@@ -137,18 +137,18 @@ from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
 class TestEmbEtpRules:
     B, V, D, A = 3, 5, 4, 2
 
-    def test_yw_to_w_broadcasts_over_vocab(self):
+    def test_dt_to_t_broadcasts_over_vocab(self):
         brainstate.random.seed(40)
         hd = brainstate.random.randn(self.B, self.D)
         tr = {'weight': brainstate.random.randn(self.B, self.V, self.D)}
-        out = ETP_RULES_YW_TO_W[etp_emb_p](hd, tr)
+        out = ETP_RULES_DT_TO_T[etp_emb_p](hd, tr)
         np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, None, :], atol=1e-6)
 
-    def test_yw_to_w_grad_context(self):
+    def test_dt_to_t_grad_context(self):
         brainstate.random.seed(41)
         hd = brainstate.random.randn(self.D)
         tr = {'weight': brainstate.random.randn(self.V, self.D)}
-        out = ETP_RULES_YW_TO_W[etp_emb_p](hd, tr)
+        out = ETP_RULES_DT_TO_T[etp_emb_p](hd, tr)
         np.testing.assert_allclose(out['weight'], tr['weight'] * hd[None, :], atol=1e-6)
 
     def test_xy_to_dw_matches_vjp_scatter_add(self):
@@ -192,7 +192,7 @@ class TestEmbEtpRules:
         brainstate.random.seed(44)
         hd = brainstate.random.randn(self.D)
         tr = {'weight': brainstate.random.randn(self.V, self.D)}
-        out = ETP_RULES_YW_TO_W[etp_emb_v_p](hd, tr)
+        out = ETP_RULES_DT_TO_T[etp_emb_v_p](hd, tr)
         np.testing.assert_allclose(out['weight'], tr['weight'] * hd[None, :], atol=1e-6)
 
         idx = jnp.int32(2)

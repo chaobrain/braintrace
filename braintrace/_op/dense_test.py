@@ -25,7 +25,7 @@ Coverage:
 * Bias presence — ``has_bias`` parameter is propagated through ``bind``.
 * brainunit support — quantities, mixed units, unitless inputs.
 * JAX rules — jit, vmap, grad, jvp work with no extra plumbing.
-* Four ETP rules — ``yw_to_w``, ``xy_to_dw``, ``init_drtrl``, ``init_pp``
+* Four ETP rules — ``dt_to_t``, ``xy_to_dw``, ``init_drtrl``, ``init_pp``
   return tensors of the documented shape and value.
 """
 
@@ -44,7 +44,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     etp_mm_p,
     etp_mv_p,
     get_fast_path_rules,
@@ -230,19 +230,19 @@ class TestJAXRules:
 
 
 # ---------------------------------------------------------------------------
-# ETP rules — yw_to_w / xy_to_dw / init_drtrl / init_pp
+# ETP rules — dt_to_t / xy_to_dw / init_drtrl / init_pp
 # ---------------------------------------------------------------------------
 
 class TestMmEtpRules:
 
-    def test_yw_to_w_broadcasts_hidden(self):
-        """``yw_to_w`` multiplies ``trace['weight']`` element-wise by
+    def test_dt_to_t_broadcasts_hidden(self):
+        """``dt_to_t`` multiplies ``trace['weight']`` element-wise by
         ``hidden_dim`` broadcast along the input axis. Trace shape is
         ``(in, out)`` (solve context, batch stripped); ``hidden_dim`` is
         ``(out,)``. ``expand_dims(hidden_dim, axis=-2)`` → ``(1, out)``
         broadcasts against ``(in, out)`` → per-row scaling by ``hidden[o]``.
         Correct for non-square (in != out)."""
-        rule = ETP_RULES_YW_TO_W[etp_mm_p]
+        rule = ETP_RULES_DT_TO_T[etp_mm_p]
         in_dim, out_dim = 5, 3
         hidden = jnp.array([1.0, 2.0, 3.0])  # (out,)
         trace = {'weight': jnp.ones((in_dim, out_dim))}
@@ -254,9 +254,9 @@ class TestMmEtpRules:
             out['weight'], jnp.ones((in_dim, out_dim)) * hidden[None, :]
         )
 
-    def test_yw_to_w_with_bias(self):
-        """When has_bias=True, ``yw_to_w`` also scales ``trace['bias']``."""
-        rule = ETP_RULES_YW_TO_W[etp_mm_p]
+    def test_dt_to_t_with_bias(self):
+        """When has_bias=True, ``dt_to_t`` also scales ``trace['bias']``."""
+        rule = ETP_RULES_DT_TO_T[etp_mm_p]
         in_dim, out_dim = 5, 4
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
         trace = {
@@ -325,10 +325,10 @@ class TestMmEtpRules:
 
 class TestMvEtpRules:
 
-    def test_yw_to_w_broadcasts_hidden(self):
-        """``yw_to_w`` multiplies ``trace['weight']`` by ``hidden`` broadcast
+    def test_dt_to_t_broadcasts_hidden(self):
+        """``dt_to_t`` multiplies ``trace['weight']`` by ``hidden`` broadcast
         along the column axis. The rule accepts and returns a dict."""
-        rule = ETP_RULES_YW_TO_W[etp_mv_p]
+        rule = ETP_RULES_DT_TO_T[etp_mv_p]
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out,)
         trace = {'weight': jnp.ones((3, 4))}  # (in, out)
         out = rule(hidden, trace)
@@ -337,9 +337,9 @@ class TestMvEtpRules:
         # column j scaled by hidden[j]
         np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
 
-    def test_yw_to_w_with_bias(self):
-        """When has_bias=True, ``yw_to_w`` also scales ``trace['bias']``."""
-        rule = ETP_RULES_YW_TO_W[etp_mv_p]
+    def test_dt_to_t_with_bias(self):
+        """When has_bias=True, ``dt_to_t`` also scales ``trace['bias']``."""
+        rule = ETP_RULES_DT_TO_T[etp_mv_p]
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
         trace = {'weight': jnp.ones((3, 4)), 'bias': jnp.ones((4,))}
         out = rule(hidden, trace, has_bias=True)
@@ -480,7 +480,7 @@ class TestMMBiasGradient:
 
 
 class TestMMNonSquareWeight:
-    """_mm_yw_to_w must broadcast hidden_dim correctly when in != out.
+    """_mm_dt_to_t must broadcast hidden_dim correctly when in != out.
 
     The latent bug was ``jnp.expand_dims(hidden_dim, axis=1)`` in the
     gradient-solve context where the batch axis is stripped: for
@@ -490,8 +490,8 @@ class TestMMNonSquareWeight:
     in both the batched (trace-update) and unbatched (solve) contexts.
     """
 
-    def test_yw_to_w_non_square_solve_context(self):
-        from braintrace._op.dense import _mm_yw_to_w
+    def test_dt_to_t_non_square_solve_context(self):
+        from braintrace._op.dense import _mm_dt_to_t
         # Gradient-solve shapes (batch axis stripped by outer vmap).
         in_dim, out_dim = 5, 3
         trace_weight = jnp.arange(in_dim * out_dim, dtype=jnp.float32).reshape(
@@ -499,21 +499,21 @@ class TestMMNonSquareWeight:
         )
         hidden_dim = jnp.array([1.0, 2.0, 3.0])  # (out,)
 
-        out = _mm_yw_to_w(hidden_dim, {'weight': trace_weight}, has_bias=False)
+        out = _mm_dt_to_t(hidden_dim, {'weight': trace_weight}, has_bias=False)
 
         # Expected: trace[i, o] * hidden_dim[o] — broadcast across in axis.
         expected = trace_weight * hidden_dim[None, :]
         np.testing.assert_array_equal(out['weight'], expected)
         assert out['weight'].shape == (in_dim, out_dim)
 
-    def test_yw_to_w_non_square_trace_update_context(self):
-        from braintrace._op.dense import _mm_yw_to_w
+    def test_dt_to_t_non_square_trace_update_context(self):
+        from braintrace._op.dense import _mm_dt_to_t
         # Trace-update shapes (batch retained).
         batch, in_dim, out_dim = 2, 5, 3
         trace_weight = jnp.ones((batch, in_dim, out_dim)) * 0.5
         hidden_dim = jnp.ones((batch, out_dim)) * 2.0
 
-        out = _mm_yw_to_w(hidden_dim, {'weight': trace_weight}, has_bias=False)
+        out = _mm_dt_to_t(hidden_dim, {'weight': trace_weight}, has_bias=False)
 
         # Expected: trace[b,i,o] * hidden_dim[b,o].
         expected = trace_weight * hidden_dim[:, None, :]
@@ -635,8 +635,8 @@ class TestWeightFnBiasFn:
         assert_xy_to_dw_matches_vjp(rule=rule, impl=impl, x=x, hidden_dim=hidden,
                                     weights=weights, params=params)
 
-    def test_yw_to_w_tolerates_transform_params(self):
-        rule = ETP_RULES_YW_TO_W[etp_mv_p]
+    def test_dt_to_t_tolerates_transform_params(self):
+        rule = ETP_RULES_DT_TO_T[etp_mv_p]
         hidden = jnp.arange(4.0)
         trace = {'weight': jnp.ones((3, 4))}
         out = rule(hidden, trace, has_bias=False, weight_fn=jnp.tanh, bias_fn=None)
@@ -793,11 +793,11 @@ class TestDenseFastPath:
 
 
 # ---------------------------------------------------------------------------
-# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# Audit Task 11 (T3): first-principles ``dt_to_t`` from ``jax.jacobian``
 # ---------------------------------------------------------------------------
 
-class TestYwToWFirstPrinciplesFromJacobian:
-    """Derive ``_mm_yw_to_w`` / ``_mv_yw_to_w`` from ``jax.jacobian`` of the
+class TestDtToTFirstPrinciplesFromJacobian:
+    """Derive ``_mm_dt_to_t`` / ``_mv_dt_to_t`` from ``jax.jacobian`` of the
     primitive's own forward, rather than trusting the rule's own formula.
 
     ``y = x @ w`` has ``partial y_o / partial w_{i, o'} = delta(o, o') x_i`` —
@@ -806,15 +806,15 @@ class TestYwToWFirstPrinciplesFromJacobian:
     (``in != out``, so a wrong-axis broadcast would not silently line up).
     Because the Jacobian is diagonal, the general chain-rule contraction of a
     cotangent ``g`` against the full Jacobian collapses to an elementwise
-    broadcast-multiply — exactly what ``yw_to_w`` implements. Each test
+    broadcast-multiply — exactly what ``dt_to_t`` implements. Each test
     builds the "general" contraction via an explicit ``jnp.einsum`` over the
     *raw* Jacobian tensor (never the rule's own broadcast code) and compares
     it, for a random (never all-ones) cotangent and random incoming trace,
     against the rule's actual output.
     """
 
-    def test_mm_yw_to_w_weight_and_bias_match_jacobian_contraction(self):
-        from braintrace._op.dense import _mm_yw_to_w
+    def test_mm_dt_to_t_weight_and_bias_match_jacobian_contraction(self):
+        from braintrace._op.dense import _mm_dt_to_t
         brainstate.random.seed(301)
         batch, n_in, n_out = 2, 3, 5  # non-square: exercises axis=-2 broadcast
         x = brainstate.random.randn(batch, n_in)
@@ -855,12 +855,12 @@ class TestYwToWFirstPrinciplesFromJacobian:
         ref_w = jnp.einsum('bo,bio->bio', g, trace_w)
         ref_b = jnp.einsum('bo,bo->bo', g, trace_b)
 
-        out = _mm_yw_to_w(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
+        out = _mm_dt_to_t(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
         np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
         np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
 
-    def test_mv_yw_to_w_weight_and_bias_match_jacobian_contraction(self):
-        from braintrace._op.dense import _mv_yw_to_w
+    def test_mv_dt_to_t_weight_and_bias_match_jacobian_contraction(self):
+        from braintrace._op.dense import _mv_dt_to_t
         brainstate.random.seed(302)
         n_in, n_out = 3, 5  # non-square
         x = brainstate.random.randn(n_in)
@@ -884,6 +884,6 @@ class TestYwToWFirstPrinciplesFromJacobian:
         ref_w = jnp.einsum('o,io->io', g, trace_w)
         ref_b = jnp.einsum('o,o->o', g, trace_b)
 
-        out = _mv_yw_to_w(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
+        out = _mv_dt_to_t(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
         np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
         np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)

@@ -44,7 +44,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     GRADIENT_ENABLED_PRIMITIVES,
     element_wise,
     etp_elemwise_p,
@@ -179,8 +179,8 @@ class TestJAXRules:
 
 class TestEtpRules:
 
-    def test_yw_to_w_is_elementwise_multiply(self):
-        rule = ETP_RULES_YW_TO_W[etp_elemwise_p]
+    def test_dt_to_t_is_elementwise_multiply(self):
+        rule = ETP_RULES_DT_TO_T[etp_elemwise_p]
         hidden = jnp.array([1.0, 2.0, 3.0])
         trace = {'weight': jnp.array([10.0, 20.0, 30.0])}
         out = rule(hidden, trace)
@@ -236,10 +236,10 @@ class TestElemwiseDictRules:
         assert set(out.keys()) == {'weight'}
         assert out['weight'].shape == (3, 4)
 
-    def test_yw_to_w_returns_dict(self):
+    def test_dt_to_t_returns_dict(self):
         hidden_dim = jnp.full((3, 4), 2.0)
         trace = {'weight': jnp.full((3, 4), 5.0)}
-        out = ETP_RULES_YW_TO_W[etp_elemwise_p](hidden_dim, trace)
+        out = ETP_RULES_DT_TO_T[etp_elemwise_p](hidden_dim, trace)
         assert isinstance(out, dict)
         assert out['weight'].shape == (3, 4)
         # 5 * 2 = 10
@@ -401,24 +401,24 @@ class TestElemwiseFastPath:
 
 
 # ---------------------------------------------------------------------------
-# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# Audit Task 11 (T3): first-principles ``dt_to_t`` from ``jax.jacobian``
 # ---------------------------------------------------------------------------
 
-class TestYwToWFirstPrinciplesFromJacobian:
-    """Derive ``_elemwise_yw_to_w`` from ``jax.jacobian`` of the primitive's
+class TestDtToTFirstPrinciplesFromJacobian:
+    """Derive ``_elemwise_dt_to_t`` from ``jax.jacobian`` of the primitive's
     own (``weight_fn=None``) forward, rather than trusting its formula.
 
     With ``weight_fn=None``, ``y = w`` elementwise, so
     ``partial y_j / partial w_k = delta(j, k)`` — the identity matrix. A
     general chain-rule contraction of a cotangent ``g`` against that
     Jacobian, applied to an arbitrary weight-shaped trace, degenerates to a
-    plain elementwise product ``g * trace`` — exactly what ``_elemwise_yw_to_w``
+    plain elementwise product ``g * trace`` — exactly what ``_elemwise_dt_to_t``
     computes. This is verified with a random (never all-ones) cotangent and
     a random trace, independent of the rule's own code.
     """
 
-    def test_yw_to_w_matches_identity_jacobian_contraction(self):
-        from braintrace._op.elemwise import _elemwise_yw_to_w
+    def test_dt_to_t_matches_identity_jacobian_contraction(self):
+        from braintrace._op.elemwise import _elemwise_dt_to_t
         brainstate.random.seed(401)
         n = 5
         w0 = brainstate.random.randn(n)
@@ -437,16 +437,16 @@ class TestYwToWFirstPrinciplesFromJacobian:
         propagated = jnp.einsum('jk,k->j', J, trace)
         ref = g * propagated
 
-        out = _elemwise_yw_to_w(g, {'weight': trace})
+        out = _elemwise_dt_to_t(g, {'weight': trace})
         np.testing.assert_allclose(out['weight'], ref, atol=1e-10)
 
-    def test_yw_to_w_matches_identity_jacobian_contraction_batched(self):
-        from braintrace._op.elemwise import _elemwise_yw_to_w
+    def test_dt_to_t_matches_identity_jacobian_contraction_batched(self):
+        from braintrace._op.elemwise import _elemwise_dt_to_t
         brainstate.random.seed(402)
         batch, n = 3, 5
         g = brainstate.random.randn(batch, n)
         trace = brainstate.random.randn(batch, n)
 
         ref = g * trace
-        out = _elemwise_yw_to_w(g, {'weight': trace})
+        out = _elemwise_dt_to_t(g, {'weight': trace})
         np.testing.assert_allclose(out['weight'], ref, atol=1e-10)

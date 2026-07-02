@@ -26,7 +26,7 @@ blocks:
 
 Each weight entry touches exactly one output component per example
 (:math:`\partial y_{\dots gn} / \partial W_{g'kn'} = \delta_{gg'}\delta_{nn'}
-x_{\dots gk}`), the same diagonal structure as dense matmul — so ``yw_to_w``
+x_{\dots gk}`), the same diagonal structure as dense matmul — so ``dt_to_t``
 is the dense broadcast generalized by one leading group axis, and the same
 closed-form fast path applies.
 
@@ -81,15 +81,15 @@ def _gmm_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return base
 
 
-def _gmm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+def _gmm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
                  weight_fn: WeightFn | None = None,
                  bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Batched ``yw_to_w`` — the dense broadcast with one extra group axis.
+    r"""Batched ``dt_to_t`` — the dense broadcast with one extra group axis.
 
     ``∂y[b,g,n]/∂W[g',k,n'] = δ_gg' δ_nn' x[b,g,k]``, so the y→W chain
     factor is ``1`` on the matching ``(g, n)`` slot and ``hidden_dim`` is
     broadcast over the ``in`` axis (``axis=-2``), exactly as in dense
-    ``_mm_yw_to_w``. Contexts: scan ``(B,G,N)/(B,G,K,N)``; grad ``(G,N)/(G,K,N)``.
+    ``_mm_dt_to_t``. Contexts: scan ``(B,G,N)/(B,G,K,N)``; grad ``(G,N)/(G,K,N)``.
     """
     out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=-2)}
     if has_bias:
@@ -229,7 +229,7 @@ etp_gmm_p = register_primitive(
     x_invar_index=0,
 )
 etp_gmm_p.register_etp_rules(
-    yw_to_w=_gmm_yw_to_w,
+    dt_to_t=_gmm_dt_to_t,
     xy_to_dw=_gmm_xy_to_dw,
     init_drtrl=_gmm_init_drtrl,
     init_pp=_gmm_init_pp,
@@ -249,10 +249,10 @@ def _gmv_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return base
 
 
-def _gmv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+def _gmv_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
                  weight_fn: WeightFn | None = None,
                  bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Unbatched ``yw_to_w`` — shapes ``hd (G,N)``, ``trace['weight'] (G,K,N)``."""
+    r"""Unbatched ``dt_to_t`` — shapes ``hd (G,N)``, ``trace['weight'] (G,K,N)``."""
     out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=-2)}
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
@@ -316,7 +316,7 @@ etp_gmv_p = register_primitive(
     x_invar_index=0,
 )
 etp_gmv_p.register_etp_rules(
-    yw_to_w=_gmv_yw_to_w,
+    dt_to_t=_gmv_dt_to_t,
     xy_to_dw=_gmv_xy_to_dw,
     init_drtrl=_gmv_init_drtrl,
     init_pp=_gmv_init_pp,

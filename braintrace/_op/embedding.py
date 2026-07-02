@@ -24,7 +24,7 @@ r"""Embedding (trainable gather) ETP primitives.
 
 has :math:`\partial y_{bd} / \partial T_{v d'} = \delta_{dd'}\,
 \delta_{v,\mathrm{idx}_b}` — diagonal in the feature axis, one-hot in the
-vocabulary axis. ``yw_to_w`` is therefore the dense broadcast over the
+vocabulary axis. ``dt_to_t`` is therefore the dense broadcast over the
 vocabulary axis, and ``xy_to_dw`` is the scatter-add VJP of the gather.
 
 The indices are the primitive's ``x`` input and are **never
@@ -71,7 +71,7 @@ def _emb_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return {'weight': 1}
 
 
-def _emb_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+def _emb_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
                  weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Propagate ``∂h/∂y`` through the table-shaped trace.
 
@@ -177,14 +177,14 @@ etp_emb_v_p = register_primitive(
 register_batched_counterpart(etp_emb_v_p, etp_emb_p)
 
 etp_emb_p.register_etp_rules(
-    yw_to_w=_emb_yw_to_w,
+    dt_to_t=_emb_dt_to_t,
     xy_to_dw=_emb_xy_to_dw,
     init_drtrl=_emb_init_drtrl,
     init_pp=_emb_init_pp,
     pp_x_repr=_emb_pp_x_repr,
 )
 etp_emb_v_p.register_etp_rules(
-    yw_to_w=_emb_yw_to_w,
+    dt_to_t=_emb_dt_to_t,
     xy_to_dw=_emb_xy_to_dw,
     init_drtrl=_emb_v_init_drtrl,
     init_pp=_emb_init_pp,

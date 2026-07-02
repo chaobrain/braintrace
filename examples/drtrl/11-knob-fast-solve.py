@@ -6,7 +6,7 @@ Demonstrates:
   * wall-clock speedup from the einsum fast path
 
 The fast path applies when every ETP primitive in the graph has an
-elementwise ``yw_to_w`` rule (matmul, mv, element_wise). For this example
+elementwise ``dt_to_t`` rule (matmul, mv, element_wise). For this example
 (ValinaRNN + Linear) all primitives qualify.
 """
 

@@ -153,7 +153,7 @@ class ETraceOp:
         """
         return self.xw_to_y(inputs, weights)
 
-    def yw_to_w(self, hidden_dim_arr, weight_dim_tree):
+    def dt_to_t(self, hidden_dim_arr, weight_dim_tree):
         raise NotImplementedError
 
     def xy_to_dw(self, input_dim_arr, hidden_dim_arr, weights):

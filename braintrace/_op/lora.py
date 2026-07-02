@@ -52,7 +52,7 @@ Let :math:`g = \partial h / \partial y`. The chain rule yields
   three pullbacks from a single ``jax.vjp`` call. This **param-shaped**
   rule is what the IO-dim (ES-D-RTRL) algorithm applies at solve time.
 
-* ``instant_drtrl`` / ``yw_to_w`` / ``solve_drtrl`` — the param-dim
+* ``instant_drtrl`` / ``dt_to_t`` / ``solve_drtrl`` — the param-dim
   D-RTRL trace machinery. No :math:`B`-shaped ``(in, rank)`` trace can
   be exact: the hidden-to-hidden discount :math:`\mathbf{D}^t` acts on
   the *output* axis, which :math:`B`'s shape lacks (:math:`\partial h /
@@ -65,7 +65,7 @@ Let :math:`g = \partial h / \partial y`. The chain rule yields
     :math:`\boldsymbol{\epsilon}_{W}` (the exact dense instantaneous
     term for :math:`y = x\,W_{\text{eff}}`), while the :math:`A` and
     bias entries reuse the exact ``xy_to_dw`` pullbacks.
-  - ``yw_to_w`` scales *every* trace along the output axis by
+  - ``dt_to_t`` scales *every* trace along the output axis by
     :math:`g = \partial h / \partial y` (the dense :math:`y \to W`
     link) — including the :math:`W_{\text{eff}}` trace.
   - ``solve_drtrl`` contracts the learning signal with each trace and
@@ -115,7 +115,7 @@ param-dim D-RTRL path, ``a_fn'`` and ``bias_fn'`` enter through
 the :math:`A` / bias trace entries), while ``b_fn'`` enters at solve time
 through :func:`_lora_solve_drtrl` via :func:`jax.vjp` (the effective-weight
 trace itself is transform-free). In the IO-dim path all three Jacobians
-enter through ``xy_to_dw``'s single fused VJP. The ``yw_to_w`` rule and the
+enter through ``xy_to_dw``'s single fused VJP. The ``dt_to_t`` rule and the
 trace initialisers are transform-free.
 
 These primitives have **no fast path** — they always use the generic rule
@@ -168,10 +168,10 @@ def _lora_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return base
 
 
-def _lora_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1.0,
+def _lora_mm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1.0,
                      has_bias: bool = False, b_fn: WeightFn | None = None,
                      a_fn: WeightFn | None = None, bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Batched LoRA ``yw_to_w`` — propagate :math:`\partial h / \partial y`
+    r"""Batched LoRA ``dt_to_t`` — propagate :math:`\partial h / \partial y`
     through every trace along the output axis.
 
     **Role in D-RTRL.** Realises the :math:`y \to` chain factor of
@@ -222,10 +222,10 @@ def _lora_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1
     return out
 
 
-def _lora_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1.0,
+def _lora_mv_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1.0,
                      has_bias: bool = False, b_fn: WeightFn | None = None,
                      a_fn: WeightFn | None = None, bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Unbatched LoRA ``yw_to_w`` — identical algebra with no batch axis.
+    r"""Unbatched LoRA ``dt_to_t`` — identical algebra with no batch axis.
 
     Trace shapes (recurrence context, after the ``n_state``-vmap):
         ``trace['lora_b'] : (in, out)``    — :math:`\boldsymbol{\epsilon}_W`, scaled by :math:`g`
@@ -235,7 +235,7 @@ def _lora_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, alpha: float = 1
     ``jnp.expand_dims(hidden_dim, axis=-2)`` turns ``(out,) → (1, out)``
     so it broadcasts against both the ``(in, out)`` effective-weight
     trace and the ``(rank, out)`` :math:`A` trace. See
-    :func:`_lora_mm_yw_to_w` for the algebra.
+    :func:`_lora_mm_dt_to_t` for the algebra.
     """
     g = jnp.expand_dims(hidden_dim, axis=-2)
     out = {'lora_b': trace['lora_b'] * g, 'lora_a': trace['lora_a'] * g}
@@ -333,7 +333,7 @@ def _lora_instant_drtrl(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
     * ``'lora_a'`` and ``'bias'`` reuse the exact param-shaped
       :func:`_lora_xy_to_dw` pullbacks (which thread ``a_fn'`` /
       ``bias_fn'`` through the fused VJP); their per-factor traces are
-      already exact under the dense-style ``yw_to_w`` recurrence. The
+      already exact under the dense-style ``dt_to_t`` recurrence. The
       VJP's unused ``'lora_b'`` pullback is dead code eliminated under
       ``jit``.
 
@@ -377,7 +377,7 @@ def _lora_solve_drtrl(dg_hidden: Any, trace: dict[str, Any], weights: dict[str, 
       parameters held fixed over the gradient window.
 
     * ``'lora_a'`` / ``'bias'`` — the same contraction the generic
-      ``yw_to_w`` solve path produced (it was exact): broadcast-multiply
+      ``dt_to_t`` solve path produced (it was exact): broadcast-multiply
       the signal along the output axis. ``a_fn'`` / ``bias_fn'`` are
       **not** re-applied here — they already entered the traces through
       :func:`_lora_instant_drtrl`.
@@ -539,7 +539,7 @@ etp_lora_mm_p = register_primitive(
     x_invar_index=0,
 )
 etp_lora_mm_p.register_etp_rules(
-    yw_to_w=_lora_mm_yw_to_w,
+    dt_to_t=_lora_mm_dt_to_t,
     xy_to_dw=_lora_xy_to_dw,
     init_drtrl=_lora_mm_init_drtrl,
     init_pp=_lora_mm_init_pp,
@@ -547,7 +547,7 @@ etp_lora_mm_p.register_etp_rules(
 # Param-dim D-RTRL overrides: the trace structure ('lora_b' holds the
 # effective-weight trace) differs from the parameter structure, so the
 # instantaneous term and the solve-time contraction cannot be expressed by
-# xy_to_dw / yw_to_w alone. IO-dim (ES-D-RTRL) keeps using xy_to_dw.
+# xy_to_dw / dt_to_t alone. IO-dim (ES-D-RTRL) keeps using xy_to_dw.
 ETP_RULES_INSTANT_DRTRL[etp_lora_mm_p] = _lora_instant_drtrl
 ETP_RULES_SOLVE_DRTRL[etp_lora_mm_p] = _lora_solve_drtrl
 
@@ -559,7 +559,7 @@ etp_lora_mv_p = register_primitive(
     x_invar_index=0,
 )
 etp_lora_mv_p.register_etp_rules(
-    yw_to_w=_lora_mv_yw_to_w,
+    dt_to_t=_lora_mv_dt_to_t,
     xy_to_dw=_lora_xy_to_dw,
     init_drtrl=_lora_mv_init_drtrl,
     init_pp=_lora_mv_init_pp,

@@ -196,7 +196,7 @@ input contract. Two public APIs are renamed and one operand type is now required
 
 - **Correct `weight_fn` / `bias_fn` gradients on the fast path.** The
   transform Jacobian `f'(W)` is now applied on the param-dim D-RTRL closed-form
-  fast path (it lives solely in `xy_to_dw`; `yw_to_w` stays transform-free), so
+  fast path (it lives solely in `xy_to_dw`; `dt_to_t` stays transform-free), so
   transformed-parameter gradients match the slow path. Also fixes an
   `element_wise` slow-path batched-cotangent crash (#120).
 - **Operator-layer fast-path kernels.** The closed-form fast-path kernels
@@ -421,7 +421,7 @@ hardens the package with PEP 561 typing and a BPTT-oracle-backed test suite.
   **bias gradient support**, each verified element-wise against a BPTT oracle.
 - **Fixed layout-aware axis handling in conv** primitives (1D/2D, NHWC/NCHW,
   OIHW/HWIO kernel layouts) that previously corrupted gradients on non-default
-  layouts, and **fixed non-square dense weight broadcasting** in `_mm_yw_to_w`.
+  layouts, and **fixed non-square dense weight broadcasting** in `_mm_dt_to_t`.
 - Eligibility traces are now stored as per-key dicts; the transitional
   legacy-array adapter has been fully removed.
 

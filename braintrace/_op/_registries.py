@@ -38,13 +38,13 @@ weight / ``x`` / ``y`` variables on an equation. They are populated by
 One further metadata dictionary — :data:`ETP_FAST_PATH_RULES` — holds the
 optional per-primitive closed-form param-dim D-RTRL "fast-path" kernel
 bundle (:class:`FastPathRules`). Only primitives with an elementwise
-``yw_to_w`` rule register one; it is queried through
+``dt_to_t`` rule register one; it is queried through
 :func:`get_fast_path_rules`.
 
 Two further *optional* rule dictionaries —
 :data:`ETP_RULES_INSTANT_DRTRL` and :data:`ETP_RULES_SOLVE_DRTRL` — let a
 primitive override the param-dim D-RTRL algorithm's default use of
-``xy_to_dw`` (instantaneous trace term) and ``yw_to_w`` (solve-time
+``xy_to_dw`` (instantaneous trace term) and ``dt_to_t`` (solve-time
 contraction) when the trace structure it carries differs from its
 parameter structure (e.g. LoRA's effective-weight trace). They are queried
 through :func:`get_instant_drtrl_rule` / :func:`get_solve_drtrl_rule`,
@@ -58,7 +58,7 @@ from braintrace._compatible_imports import Primitive
 
 __all__ = [
     'ETP_PRIMITIVES',
-    'ETP_RULES_YW_TO_W',
+    'ETP_RULES_DT_TO_T',
     'ETP_RULES_XY_TO_DW',
     'ETP_RULES_INIT_DRTRL',
     'ETP_RULES_INIT_PP',
@@ -89,7 +89,7 @@ __all__ = [
 
 ETP_PRIMITIVES: set = set()
 
-ETP_RULES_YW_TO_W: Dict[Primitive, Callable] = {}
+ETP_RULES_DT_TO_T: Dict[Primitive, Callable] = {}
 r"""D-RTRL trace propagation: ``(hidden_dim, trace, **params) -> trace``."""
 
 ETP_RULES_XY_TO_DW: Dict[Primitive, Callable] = {}
@@ -232,7 +232,7 @@ class FastPathRules(NamedTuple):
 
     Bundles the three closed-form einsum kernels that replace the generic
     nested-``vmap`` trace path for primitives with an *elementwise*
-    ``yw_to_w`` rule (currently ``etp_mm_p`` / ``etp_mv_p`` / ``etp_elemwise_p``),
+    ``dt_to_t`` rule (currently ``etp_mm_p`` / ``etp_mv_p`` / ``etp_elemwise_p``),
     together with a gate predicate that decides whether the fast path is
     valid for a given equation.
 
@@ -245,7 +245,7 @@ class FastPathRules(NamedTuple):
         Recurrent term ``D^t · ε^{t-1}``. Signature
         ``(diag, old_bwg, num_state) -> dict``.
     solve : Callable
-        Solve-time contraction ``Σ_alpha diag_like[..., alpha] · yw_to_w(ε[..., alpha])``.
+        Solve-time contraction ``Σ_alpha diag_like[..., alpha] · dt_to_t(ε[..., alpha])``.
         Signature ``(diag_like, etrace_data, *, fold_batch) -> dict``.
     applicable : Callable
         Gate predicate ``(eqn_params) -> bool`` — ``True`` iff the closed-form
@@ -265,7 +265,7 @@ ETP_FAST_PATH_RULES: Dict[Primitive, FastPathRules] = {}
 r"""Closed-form param-dim D-RTRL fast-path bundle per primitive.
 
 Populated by :meth:`ETPPrimitive.register_etp_rules` (via its ``fast_path``
-keyword). Only primitives with an elementwise ``yw_to_w`` rule register one;
+keyword). Only primitives with an elementwise ``dt_to_t`` rule register one;
 conv / sparse / LoRA primitives are absent (they have no closed-form fast
 path). Queried through :func:`get_fast_path_rules`.
 """
@@ -310,10 +310,10 @@ r"""Optional solve-time weight-gradient rule for param-dim D-RTRL.
 returning **param-shaped** gradients keyed by the primitive's trainable
 names. Register it (together with :data:`ETP_RULES_INSTANT_DRTRL`) when the
 trace structure differs from the parameter structure, so the solve step can
-no longer be expressed by ``yw_to_w`` alone. The rule sees **batch-free,
+no longer be expressed by ``dt_to_t`` alone. The rule sees **batch-free,
 num_state-free slices** (the algorithm vmaps over both axes, mirroring the
-legacy ``yw_to_w`` scaffolding). Unregistered primitives fall back to
-:data:`ETP_RULES_YW_TO_W`.
+legacy ``dt_to_t`` scaffolding). Unregistered primitives fall back to
+:data:`ETP_RULES_DT_TO_T`.
 """
 
 
@@ -349,7 +349,7 @@ def get_solve_drtrl_rule(primitive) -> Optional[Callable]:
         Rule ``(dg_hidden, trace_dict, weights_dict, **eqn_params) -> dict``
         producing param-shaped gradients keyed by trainable names, or
         ``None`` if the primitive did not register one (the algorithm then
-        uses ``yw_to_w``).
+        uses ``dt_to_t``).
     """
     return ETP_RULES_SOLVE_DRTRL.get(primitive)
 

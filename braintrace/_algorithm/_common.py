@@ -456,7 +456,7 @@ def _route_grads_by_path(
     """Route per-key gradients from a dict-API rule into per-path pytrees.
 
     Both D-RTRL and ES-D-RTRL share this bookkeeping: for each key in
-    ``per_key_grads`` (returned by ``xy_to_dw`` or ``yw_to_w``), look up the
+    ``per_key_grads`` (returned by ``xy_to_dw`` or ``dt_to_t``), look up the
     owning ``ParamState`` path and the leaf index from ``relation``, accumulate
     into ``per_path``, then wrap with ``_wrap_leaves_as_pytree`` and merge into
     ``target_dict`` via ``_update_dict``.

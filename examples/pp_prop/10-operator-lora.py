@@ -3,7 +3,7 @@
 
 Parameterise the recurrent matrix as W = alpha * B @ A with rank r << n_rec.
 pp_prop dispatches to the LoRA ETP primitive etp_lora_mm_p, which registers
-its own xy_to_dw / yw_to_w rules so the eligibility trace propagates through
+its own xy_to_dw / dt_to_t rules so the eligibility trace propagates through
 the low-rank factors rather than a dense W.
 """
 

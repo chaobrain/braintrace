@@ -29,7 +29,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
 )
 from braintrace._op.dense import etp_mm_p, _etp_matmul_impl
 from braintrace._op.conv import etp_conv_p, _etp_conv_impl
@@ -124,14 +124,14 @@ def test_lora_xy_to_dw_matches_vjp():
     )
 
 
-def test_lora_yw_to_w_scales_both_traces_along_output_axis():
-    """yw_to_w applies the dense ``y -> W`` link to BOTH traces: the
+def test_lora_dt_to_t_scales_both_traces_along_output_axis():
+    """dt_to_t applies the dense ``y -> W`` link to BOTH traces: the
     ``'lora_b'`` entry is the effective-weight trace ``(in, out)`` for
     ``W_eff = alpha * b_fn(B) @ a_fn(A)`` and follows the same recurrence as
     the dense ``mm`` rule (a raw B-shaped trace cannot be discounted along
     the output axis it lacks — the old pass-through made ``lora_b``
     gradients wrong even at T=1)."""
-    rule = ETP_RULES_YW_TO_W[etp_lora_mm_p]
+    rule = ETP_RULES_DT_TO_T[etp_lora_mm_p]
     in_dim, rank, out_dim = 6, 3, 4
     hidden = jnp.arange(1.0, out_dim + 1.0)            # (out,)
     trace = {'lora_b': jnp.ones((in_dim, out_dim)), 'lora_a': jnp.ones((rank, out_dim))}
