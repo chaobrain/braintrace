@@ -272,6 +272,34 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         # revising equations
         self._eval_jaxpr(self.closed_jaxpr.jaxpr)
 
+        # [read-only hidden states]
+        # A hidden state that is read but never written has no producing
+        # equation: its jaxpr outvar IS its invar (or a constvar). Synthesize
+        # the perturbed passthrough  ``h^t = h^{t-1} + p``  and substitute the
+        # fresh var into the jaxpr outvar slots that referenced the old one.
+        # The equation invars are NOT substituted: reads inside the step see
+        # ``h^{t-1}``, which is unperturbed by definition.
+        outvar_subst: Dict[Var, Var] = {}
+        source_vars = set(self.closed_jaxpr.jaxpr.invars) | set(self.closed_jaxpr.jaxpr.constvars)
+        for hidden_var in tuple(self._hidden_outvars_ordered):
+            if hidden_var not in self.hidden_jaxvars_to_remove:
+                continue
+            if hidden_var not in source_vars:
+                continue  # truly unexplained; reported below
+            self.hidden_jaxvars_to_remove.remove(hidden_var)
+            perturb_var = self.perturb_invars[hidden_var]
+            fresh = self._new_var_like(hidden_var)
+            self.revised_eqns.append(
+                jax.core.new_jaxpr_eqn(
+                    [hidden_var, perturb_var],
+                    [fresh],
+                    jax.lax.add_p,
+                    {},
+                    set(),
+                )
+            )
+            outvar_subst[hidden_var] = fresh
+
         # [final checking]
         # If there are hidden states that are not found in the code, we raise an error.
         if len(self.hidden_jaxvars_to_remove) > 0:
@@ -286,11 +314,16 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             )
 
         # new jaxpr
+        new_outvars = [
+            outvar_subst.get(v, v) if isinstance(v, Var) else v
+            for v in self.closed_jaxpr.jaxpr.outvars
+        ]
         jaxpr = Jaxpr(
             constvars=list(self.closed_jaxpr.jaxpr.constvars),
             invars=list(self.closed_jaxpr.jaxpr.invars) + list(self.perturb_invars.values()),
-            outvars=list(self.closed_jaxpr.jaxpr.outvars),
+            outvars=new_outvars,
             eqns=self.revised_eqns,
+            effects=self.closed_jaxpr.jaxpr.effects,
             debug_info=self.closed_jaxpr.jaxpr.debug_info,
         )
         revised_closed_jaxpr = ClosedJaxpr(jaxpr, self.closed_jaxpr.literals)
@@ -322,50 +355,48 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         """
         self._eval_eqn(eqn)
 
-    def _add_perturb_eqn(
-        self,
-        eqn: JaxprEqn,
-        perturb_var: Var
-    ):
+    def _eval_eqn(self, eqn: JaxprEqn):
         # ------------------------------------------------
         #
-        # For the hidden var eqn, we want to add a perturbation:
+        # For every hidden outvar the equation produces (any number, at any
+        # position), we add a perturbation:
         #    y = f(x)  =>  y = f(x) + perturb_var
         #
-        # Particularly, we first define a new variable
+        # Particularly, each hidden outvar slot is first redirected to a
+        # fresh variable
         #    new_outvar = f(x)
         #
-        # Then, we add a new equation for the perturbation
+        # then a perturbation equation re-defines the hidden var
         #    y = new_outvar + perturb_var
         #
         # ------------------------------------------------
+        hidden_positions = [
+            i for i, ov in enumerate(eqn.outvars)
+            if ov in self.hidden_jaxvars_to_remove
+        ]
+        if not hidden_positions:
+            self.revised_eqns.append(eqn.replace())
+            return
 
-        hidden_var = eqn.outvars[0]
+        new_outvars = list(eqn.outvars)
+        for i in hidden_positions:
+            hidden_var = eqn.outvars[i]
+            self.hidden_jaxvars_to_remove.remove(hidden_var)
+            new_outvars[i] = self._new_var_like(hidden_var)
+        self.revised_eqns.append(eqn.replace(outvars=new_outvars))
 
-        # Frist step, define the hidden var as a new variable
-        new_outvar = self._new_var_like(perturb_var)
-        old_eqn = eqn.replace(outvars=[new_outvar])
-        self.revised_eqns.append(old_eqn)
-
-        # Second step, add the perturbation equation
-        new_eqn = jax.core.new_jaxpr_eqn(
-            [new_outvar, perturb_var],
-            [hidden_var],
-            jax.lax.add_p,
-            {},
-            set(),
-            eqn.source_info.replace()
-        )
-        self.revised_eqns.append(new_eqn)
-
-    def _eval_eqn(self, eqn: JaxprEqn):
-        if len(eqn.outvars) == 1:
-            if eqn.outvars[0] in self.hidden_jaxvars_to_remove:
-                hidden_var = eqn.outvars[0]
-                self.hidden_jaxvars_to_remove.remove(hidden_var)
-                self._add_perturb_eqn(eqn, self.perturb_invars[hidden_var])
-                return
-        self.revised_eqns.append(eqn.replace())
+        for i in hidden_positions:
+            hidden_var = eqn.outvars[i]
+            self.revised_eqns.append(
+                jax.core.new_jaxpr_eqn(
+                    [new_outvars[i], self.perturb_invars[hidden_var]],
+                    [hidden_var],
+                    jax.lax.add_p,
+                    {},
+                    set(),
+                    eqn.source_info.replace(),
+                )
+            )
 
     def _new_var_like(self, v):
         return new_var('', jax.core.ShapedArray(v.aval.shape, v.aval.dtype))
