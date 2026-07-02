@@ -59,6 +59,17 @@ import braintrace
 import braintools
 import brainpy.state
 
+# `etp_conv` has no registered batched counterpart, so every model here that
+# routes a sample through `braintrace.nn.Conv2d` under `brainstate.nn.Vmap`
+# hits the identity-preserving batching rule's decomposition fallback in
+# `braintrace/_op/_primitive.py`, which emits a `UserWarning`. That warning is
+# expected-but-not-under-test in this module (the module tests gradient
+# correctness, not the vmap-decomposition warning itself — that is covered by
+# `braintrace/_op/_primitive_test.py`), so it is filtered narrowly by message.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:ETP primitive 'etp_conv' was decomposed:UserWarning"
+)
+
 H = W = 6
 C_IN = 2
 C_OUT = 3

@@ -367,7 +367,7 @@ def _accumulate_online_grads(model, algo_ctor, inputs, targets, batched):
     @brainstate.transform.jit
     def run(inputs, targets):
         if batched:
-            online = algo_ctor(model, mode=brainstate.mixin.Batching())
+            online = algo_ctor(model)
             brainstate.nn.init_all_states(model, batch_size=inputs.shape[1])
         else:
             online = algo_ctor(model)

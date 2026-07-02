@@ -21,7 +21,7 @@ flag-sets, and the True/False semantics of the three predicates that
 the compiler relies on.
 """
 
-
+import pytest
 
 from braintrace._compatible_imports import Primitive
 from braintrace._op import (
@@ -44,6 +44,12 @@ from braintrace._op import (
     is_batched_primitive,
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
+)
+from braintrace._op._primitive import register_primitive
+from braintrace._op._registries import (
+    BATCHED_COUNTERPARTS,
+    get_batched_counterpart,
+    register_batched_counterpart,
 )
 
 _ALL_SHIPPED = (
@@ -175,3 +181,35 @@ def test_get_fast_path_rules_none_for_sparse_conv_lora():
     """
     for prim in (etp_sp_mm_p, etp_sp_mv_p, etp_conv_p, etp_lora_mm_p, etp_lora_mv_p):
         assert get_fast_path_rules(prim) is None, prim.name
+
+
+class TestBatchedCounterparts:
+    def test_lookup_unregistered_returns_none(self):
+        p = register_primitive('etp_test_ctr_unreg', lambda x, w: x @ w, batched=False)
+        assert get_batched_counterpart(p) is None
+
+    def test_register_and_lookup(self):
+        pu = register_primitive('etp_test_ctr_u', lambda x, w: x @ w, batched=False)
+        pb = register_primitive('etp_test_ctr_b', lambda x, w: x @ w, batched=True)
+        register_batched_counterpart(pu, pb)
+        assert get_batched_counterpart(pu) is pb
+        assert BATCHED_COUNTERPARTS[pu] is pb
+
+    def test_rejects_non_etp_primitive(self):
+        from braintrace._compatible_imports import Primitive
+        plain = Primitive('not_etp_test_ctr')
+        pb = register_primitive('etp_test_ctr_b2', lambda x, w: x @ w, batched=True)
+        with pytest.raises(ValueError, match='ETP'):
+            register_batched_counterpart(plain, pb)
+
+    def test_rejects_batched_source(self):
+        pb1 = register_primitive('etp_test_ctr_b3', lambda x, w: x @ w, batched=True)
+        pb2 = register_primitive('etp_test_ctr_b4', lambda x, w: x @ w, batched=True)
+        with pytest.raises(ValueError, match='unbatched'):
+            register_batched_counterpart(pb1, pb2)
+
+    def test_rejects_unbatched_target(self):
+        pu1 = register_primitive('etp_test_ctr_u2', lambda x, w: x @ w, batched=False)
+        pu2 = register_primitive('etp_test_ctr_u3', lambda x, w: x @ w, batched=False)
+        with pytest.raises(ValueError, match='batched'):
+            register_batched_counterpart(pu1, pu2)

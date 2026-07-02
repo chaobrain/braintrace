@@ -24,6 +24,7 @@ implementation function via :func:`register_primitive`.
 
 from __future__ import annotations
 
+import warnings
 from functools import partial
 from typing import Any, Callable
 
@@ -46,6 +47,7 @@ from ._registries import (
     ETP_Y_OUTVAR_INDICES,
     FastPathRules,
     GRADIENT_ENABLED_PRIMITIVES,
+    get_batched_counterpart,
 )
 
 __all__ = [
@@ -221,7 +223,12 @@ def register_primitive(
     - **lowering** — via ``mlir.lower_fun(impl)``.
     - **JVP** — via ``jax.jvp(impl)``.
     - **transpose** — derived by JAX from the JVP.
-    - **batching** — via ``jax.vmap(impl)``.
+    - **batching** — identity-preserving: when only ``x`` is mapped and a
+      batched counterpart is registered
+      (:func:`~braintrace._op._registries.register_batched_counterpart`),
+      the counterpart primitive is bound with the batch axis leading;
+      otherwise falls back to ``jax.vmap(impl)`` with a ``UserWarning``
+      (the decomposed weight drops out of eligibility-trace compilation).
     """
     p = ETPPrimitive(name)
     ETP_PRIMITIVES.add(p)
@@ -256,6 +263,36 @@ def register_primitive(
     ad.primitive_jvps[p] = _jvp
 
     def _batching(args: Any, dims: Any, **params: Any) -> Any:
+        # Identity-preserving promotion: when only ``x`` carries the batch
+        # dim and a batched counterpart is registered, re-bind that
+        # counterpart so the ETP primitive stays visible to the etrace
+        # compiler. Otherwise decompose (value-correct) and warn: the
+        # decomposed weight cannot participate in eligibility traces.
+        counterpart = get_batched_counterpart(p)
+        x_idx = ETP_X_INVAR_INDICES.get(p)
+        if (
+            counterpart is not None
+            and x_idx is not None
+            and dims[x_idx] is not None
+            and all(d is None for i, d in enumerate(dims) if i != x_idx)
+        ):
+            x = args[x_idx]
+            if dims[x_idx] != 0:
+                x = jnp.moveaxis(x, dims[x_idx], 0)
+            new_args = tuple(
+                x if i == x_idx else a for i, a in enumerate(args)
+            )
+            return counterpart.bind(*new_args, **params), 0
+        warnings.warn(
+            f'ETP primitive {name!r} was decomposed into standard JAX ops '
+            f'under vmap (batch dims {tuple(dims)}). Its trainable '
+            f'parameters will NOT be recognized by the eligibility-trace '
+            f'compiler if this trace is compiled for online learning. '
+            f'Map over the data input only (weights unbatched), or call '
+            f'the batched op directly.',
+            UserWarning,
+            stacklevel=2,
+        )
         return jax.vmap(partial(impl_fn, **params), in_axes=dims)(*args), 0
 
     batching.primitive_batchers[p] = _batching

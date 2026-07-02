@@ -107,6 +107,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 from ._primitive import register_primitive
+from ._registries import register_batched_counterpart
 from braintrace._typing import ArrayLike, WeightFn
 
 __all__ = [
@@ -388,6 +389,7 @@ etp_lora_mv_p.register_etp_rules(
     init_drtrl=_lora_mv_init_drtrl,
     init_pp=_lora_mv_init_pp,
 )
+register_batched_counterpart(etp_lora_mv_p, etp_lora_mm_p)
 
 
 def lora_matmul(
