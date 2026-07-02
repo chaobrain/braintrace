@@ -77,6 +77,16 @@ class TestControlFlowPolicy:
         with pytest.raises(ValueError, match='cond'):
             _convert(closed, policy=ControlFlowPolicy(cond='bogus'))
 
+    def test_scan_descent_default_off(self):
+        assert DEFAULT_CONTROL_FLOW_POLICY.scan_descent == 'off'
+
+    def test_scan_descent_accepts_auto(self):
+        assert ControlFlowPolicy(scan_descent='auto').scan_descent == 'auto'
+
+    def test_scan_descent_rejects_unknown_value(self):
+        with pytest.raises(ValueError, match='scan_descent'):
+            ControlFlowPolicy(scan_descent='yes-please')
+
 
 class TestIfConvertConds:
     """Unit tests of the cond -> inlined branches + select_n rewrite."""

@@ -113,6 +113,14 @@ class ControlFlowPolicy:
         previous behaviour of a loud warning
         (:attr:`~braintrace.DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW`)
         plus exclusion of the weight from ETP relations.
+    scan_descent : str, optional
+        How ETP-relevant scans too long to unroll are handled. ``'auto'``
+        rewrites the scan for structured descent: relations and hidden
+        groups are discovered inside the body and the eligibility trace is
+        folded over the substep axis (see
+        ``braintrace._compiler.scan_descent``). ``'off'`` (default)
+        preserves the pre-Phase-4 behavior: the scan stays opaque and
+        compilation fails on the existing control-flow restrictions.
 
     Notes
     -----
@@ -154,6 +162,14 @@ class ControlFlowPolicy:
     scan_unroll_limit: int = 16
     while_hidden: str = 'opaque-fwd'
     etp_in_control_flow: str = 'error'
+    scan_descent: str = 'off'
+
+    def __post_init__(self):
+        if self.scan_descent not in ('auto', 'off'):
+            raise ValueError(
+                f"ControlFlowPolicy.scan_descent must be 'auto' or 'off', "
+                f"got {self.scan_descent!r}."
+            )
 
 
 DEFAULT_CONTROL_FLOW_POLICY = ControlFlowPolicy()
