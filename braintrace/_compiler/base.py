@@ -28,6 +28,7 @@ from braintrace._op import (
     is_etp_enable_gradient_primitive,
 )
 from braintrace._typing import Path
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 
 __all__ = [
@@ -102,7 +103,10 @@ def check_unsupported_op(
     Parameters
     ----------
     self : JaxprEvaluation
-        The instance of the class containing this method.
+        The instance of the class containing this method. Its optional
+        ``control_flow`` attribute (a :class:`ControlFlowPolicy`) governs
+        the hidden-state branch; instances without the attribute behave as
+        the default policy.
     eqn : JaxprEqn
         The JAX equation to be checked.
     op_name : str
@@ -111,15 +115,45 @@ def check_unsupported_op(
     Raises
     ------
     NotImplementedError
-        If the equation uses weight variables or computes hidden state variables
-        in an unsupported manner.
+        If the equation uses weight variables, or computes hidden state
+        variables in an unsupported manner (``jit`` regions always; opaque
+        control flow when ``control_flow.while_hidden == 'error'``).
+    ValueError
+        If ``control_flow.while_hidden`` is not ``'opaque-fwd'`` or
+        ``'error'``.
     """
+    policy = getattr(self, 'control_flow', DEFAULT_CONTROL_FLOW_POLICY)
+
     # checking whether the weight variables are used in the equation
     # Note: user ``jax.jit`` boundaries are inlined at extraction time
     # (see ``jaxpr_graph.inline_jit_calls``), so reaching this check means
     # a weight is used inside a genuinely opaque region (scan/while/cond).
     invar = find_element_exist_in_the_set(eqn.invars, self.weight_invars)
     if invar is not None:
+        if op_name == 'while':
+            # A while body has no fixed trip count, so there is no
+            # per-iteration hoisting that could connect the weight to the
+            # hidden states — always a hard error with its own kind.
+            guidance = (
+                'Weight state used inside a while loop; while bodies cannot '
+                'participate in online learning (a data-dependent trip count '
+                'admits no fixed per-iteration decomposition). Restructure '
+                'the loop, use a fixed-length scan/for_loop (which the '
+                'compiler unrolls), or apply the weight through a plain '
+                '(non-ETP) op to exclude it from ETP.'
+            )
+            emit(
+                kind=DiagnosticKind.WEIGHT_IN_WHILE,
+                level=DiagnosticLevel.ERROR,
+                message=guidance,
+                context={'op_name': op_name, 'invar': invar},
+            )
+            raise NotImplementedError(
+                f'{guidance} \n\n'
+                f'The weight state variable is: {invar}. \n'
+                f'The Jaxpr of the while function is: \n\n'
+                f'{eqn} \n\n'
+            )
         emit(
             kind=DiagnosticKind.WEIGHT_IN_CONTROL_FLOW,
             level=DiagnosticLevel.ERROR,
@@ -140,6 +174,33 @@ def check_unsupported_op(
     # checking whether the hidden variables are computed in the equation
     outvar = find_element_exist_in_the_set(eqn.outvars, self.hidden_outvars)
     if outvar is not None:
+        if op_name in ('scan', 'while', 'cond'):
+            if policy.while_hidden == 'opaque-fwd':
+                # Weight-free control flow producing a hidden state is kept
+                # as an opaque forward node: the transition embeds the whole
+                # equation and its Jacobian is extracted in forward mode.
+                emit(
+                    kind=DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD,
+                    level=DiagnosticLevel.INFO,
+                    message=(
+                        f'Hidden state {self.outvar_to_hidden_path[outvar]} is '
+                        f'produced by an opaque {op_name} with no weight inside; '
+                        f'treating it as an opaque forward node (forward-mode '
+                        f'Jacobians; reverse-mode signals through it are detached '
+                        f'in the perturbed jaxpr for while).'
+                    ),
+                    context={
+                        'op_name': op_name,
+                        'evaluator': type(self).__name__,
+                        'hidden_path': self.outvar_to_hidden_path[outvar],
+                    },
+                )
+                return
+            if policy.while_hidden != 'error':
+                raise ValueError(
+                    f"policy.while_hidden must be 'opaque-fwd' or 'error', "
+                    f'got {policy.while_hidden!r}.'
+                )
         raise NotImplementedError(
             f'Currently, we do not support the hidden states are computed within a {op_name} function. \n'
             f'Please remove your {op_name} on the intermediate steps. \n\n'
@@ -172,6 +233,10 @@ class JaxprEvaluation(object):
         Mapping from input variables to their paths in the hidden state hierarchy.
     outvar_to_hidden_path : Dict[Var, Path]
         Mapping from output variables to their paths in the hidden state hierarchy.
+    control_flow : ControlFlowPolicy, optional
+        Policy governing opaque control-flow handling (see
+        :class:`~braintrace.ControlFlowPolicy`). Keyword-only. Defaults to
+        the package default policy.
 
     Attributes
     ----------
@@ -185,6 +250,8 @@ class JaxprEvaluation(object):
         Stored mapping from input variables to hidden paths.
     outvar_to_hidden_path : Dict[Var, Path]
         Stored mapping from output variables to hidden paths.
+    control_flow : ControlFlowPolicy
+        Stored control-flow policy.
     """
     __module__ = 'braintrace'
 
@@ -195,12 +262,15 @@ class JaxprEvaluation(object):
         hidden_outvars: Set[Var],
         invar_to_hidden_path: Dict[Var, Path],
         outvar_to_hidden_path: Dict[Var, Path],
+        *,
+        control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     ):
         self.weight_invars = weight_invars
         self.hidden_invars = hidden_invars
         self.hidden_outvars = hidden_outvars
         self.invar_to_hidden_path = invar_to_hidden_path
         self.outvar_to_hidden_path = outvar_to_hidden_path
+        self.control_flow = control_flow
 
     def _eval_jaxpr(self, jaxpr) -> None:
         """
