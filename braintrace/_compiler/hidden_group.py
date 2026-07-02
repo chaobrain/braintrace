@@ -63,6 +63,7 @@ from braintrace._typing import (
     Path,
 )
 from .base import JaxprEvaluation, find_matched_vars
+from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
 
 __all__ = [
@@ -442,17 +443,23 @@ class HiddenToHiddenGroupTracer(NamedTuple):
     """
     The data structure for the tracing of the hidden-to-hidden states.
 
+    The variable collections are insertion-ordered ``dict`` objects used as
+    ordered sets (values are always ``None``), so every downstream ordering
+    (group members, transition constvars) is deterministic across processes;
+    plain ``set`` iteration follows memory-address hashes for jaxpr ``Var``
+    objects.
+
     Attributes:
         hidden_invar (Var): The input variable representing the hidden state.
-        connected_hidden_outvars (set[Var]): A set of output variables representing the connected hidden states.
-        other_invars (set[Var]): A set of other input variables involved in the tracing.
-        invar_needed_in_oth_eqns (set[Var]): A set of variables needed in other equations for trace analysis.
+        connected_hidden_outvars (Dict[Var, None]): Ordered set of output variables representing the connected hidden states.
+        other_invars (Dict[Var, None]): Ordered set of other input variables involved in the tracing.
+        invar_needed_in_oth_eqns (Dict[Var, None]): Ordered set of variables needed in other equations for trace analysis.
         trace (List[JaxprEqn]): A list of JAX equations representing the trace of operations.
     """
     hidden_invar: Var
-    connected_hidden_outvars: set[Var]
-    other_invars: set[Var]
-    invar_needed_in_oth_eqns: set[Var]
+    connected_hidden_outvars: Dict[Var, None]
+    other_invars: Dict[Var, None]
+    invar_needed_in_oth_eqns: Dict[Var, None]
     trace: List[JaxprEqn]
 
     def dict(self) -> Dict[str, Any]:
@@ -593,11 +600,13 @@ def _simplify_hid2hid_tracer(
     #      different sequential layers and are excluded.
     invar_path = hidden_invar_to_path[tracer.hidden_invar]
     invar_state = path_to_state[invar_path]
-    compatible_outvars = {
+    # Ordered dict-as-set: preserves the tracer's encounter order so the
+    # resulting transition outvars/constvars are deterministic.
+    compatible_outvars = dict.fromkeys(
         hv for hv in tracer.connected_hidden_outvars
         if (path_to_state[hidden_outvar_to_path[hv]].varshape == invar_state.varshape
             and _same_recurrence_layer(invar_path, hidden_outvar_to_path[hv]))
-    }
+    )
     if not compatible_outvars:
         return None
 
@@ -609,17 +618,19 @@ def _simplify_hid2hid_tracer(
     # that do not contain the hidden states.
     tracer.invar_needed_in_oth_eqns.clear()
     new_trace = []
-    whole_trace_needed_vars = set(compatible_outvars)
-    visited_needed_vars = set()  # needed_vars has been satisfied
+    whole_trace_needed_vars = dict.fromkeys(compatible_outvars)
+    visited_needed_vars: Dict[Var, None] = {}  # needed_vars has been satisfied
     for eqn in reversed(tracer.trace):
         need_outvars = []
         for outvar in eqn.outvars:
             if outvar in whole_trace_needed_vars:
                 need_outvars.append(outvar)
         if len(need_outvars):
-            visited_needed_vars.update(need_outvars)
+            visited_needed_vars.update(dict.fromkeys(need_outvars))
             new_trace.append(eqn)
-            whole_trace_needed_vars.update([invar for invar in eqn.invars if isinstance(invar, Var)])
+            whole_trace_needed_vars.update(
+                dict.fromkeys(invar for invar in eqn.invars if isinstance(invar, Var))
+            )
 
     # [second step]
     #
@@ -629,8 +640,8 @@ def _simplify_hid2hid_tracer(
     # [third step]
     #
     # Simplify the trace
-    visited_needed_vars.add(tracer.hidden_invar)
-    constvars = list(whole_trace_needed_vars.difference(visited_needed_vars))
+    visited_needed_vars[tracer.hidden_invar] = None
+    constvars = [v for v in whole_trace_needed_vars if v not in visited_needed_vars]
     jaxpr_opt = Jaxpr(
         # the const vars are not the hidden states, they are
         # intermediate data that are not used in the hidden states
@@ -798,18 +809,18 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                     f'{hidden_paths}'
                 )
             hidden_var = hidden_invars[0]
-            hidden_outvars = set([outvar for outvar in eqn.outvars if outvar in self.hidden_outvars])
-            needed_invars = set([outvar for outvar in eqn.outvars if outvar not in self.hidden_outvars])
+            hidden_outvars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar in self.hidden_outvars)
+            needed_invars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar not in self.hidden_outvars)
             if hidden_var in self.active_tracers:
                 self.active_tracers[hidden_var].trace.append(eqn.replace())
-                self.active_tracers[hidden_var].other_invars.update(other_invars)
+                self.active_tracers[hidden_var].other_invars.update(dict.fromkeys(other_invars))
                 self.active_tracers[hidden_var].invar_needed_in_oth_eqns.update(needed_invars)
                 self.active_tracers[hidden_var].connected_hidden_outvars.update(hidden_outvars)
             else:
                 tracer = HiddenToHiddenGroupTracer(
                     hidden_invar=hidden_var,
                     connected_hidden_outvars=hidden_outvars,
-                    other_invars=set(other_invars),
+                    other_invars=dict.fromkeys(other_invars),
                     invar_needed_in_oth_eqns=needed_invars,
                     trace=[eqn.replace()]
                 )
@@ -831,12 +842,12 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
     ) -> None:
 
         tracer.trace.append(eqn.replace())
-        tracer.invar_needed_in_oth_eqns.update(eqn.outvars)
+        tracer.invar_needed_in_oth_eqns.update(dict.fromkeys(eqn.outvars))
 
         # check whether the hidden states are needed in the other equations
         for outvar in eqn.outvars:
             if outvar in self.hidden_outvars:
-                tracer.connected_hidden_outvars.add(outvar)
+                tracer.connected_hidden_outvars[outvar] = None
 
     def _eqn_consumes_hidden(self, eqn: JaxprEqn) -> bool:
         """Whether ``eqn`` reads a hidden-derived value.
@@ -884,16 +895,25 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # [ second step ]
         #
         # Find out the hidden group,
-        # i.e., the hidden states that are connected to each other, the union of all hidden-to-group
+        # i.e., the hidden states that are connected to each other, the union of all hidden-to-group.
+        #
+        # The merge is deterministic and the result is canonicalized against
+        # the compiled state order (``hidden_outvar_to_invar`` insertion
+        # order): members within a group and the groups themselves follow the
+        # order the hidden states appear in the compiled model, never the
+        # address-hash order of an intermediate set.
         outvar_groups: list = [
-            set(
-                [self.hidden_invar_to_outvar[transition.hidden_invar]] +
-                list(transition.connected_hidden_outvars)
-            )
+            [self.hidden_invar_to_outvar[transition.hidden_invar]]
+            + list(transition.connected_hidden_outvars)
             for transition in hidden_to_group_transition
         ]
-        outvar_groups = group_merging(outvar_groups, version=0)
-        outvar_groups = [list(group) for group in outvar_groups]
+        outvar_groups = _merge_groups_ordered(outvar_groups)
+        outvar_order = {ov: i for i, ov in enumerate(self.hidden_outvar_to_invar)}
+        outvar_groups = [
+            sorted(group, key=outvar_order.__getitem__)
+            for group in outvar_groups
+        ]
+        outvar_groups.sort(key=lambda group: outvar_order[group[0]])
         invar_groups = [
             [self.hidden_outvar_to_invar[outvar] for outvar in group]
             for group in outvar_groups
@@ -954,6 +974,20 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 transition_jaxpr_constvars=list(jaxpr.constvars),
                 is_diagonal_recurrence=not self.include_recurrent_mixing,
             )
+            # Belt-and-braces: the per-transition shape filter in
+            # ``_simplify_hid2hid_tracer`` should already guarantee this, but
+            # a merged group violating it would corrupt concat/split downstream.
+            group.check_consistent_varshape()
+            if len(group.hidden_paths) > 1:
+                emit(
+                    kind=DiagnosticKind.HIDDEN_GROUP_MERGED,
+                    level=DiagnosticLevel.INFO,
+                    message=(
+                        f'Hidden states {group.hidden_paths} are mutually '
+                        f'recurrent and were merged into one hidden group.'
+                    ),
+                    hidden_paths=tuple(group.hidden_paths),
+                )
             hidden_groups.append(group)
 
         # [ fourth-b step ]
@@ -976,7 +1010,10 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         covered_outvars: Set[Var] = set()
         for group in hidden_groups:
             covered_outvars.update(group.hidden_outvars)
-        for outvar in self.hidden_outvars:
+        # Iterate the insertion-ordered outvar->invar mapping (compiled state
+        # order), NOT the base-class ``hidden_outvars`` set, so the fallback
+        # groups are appended in deterministic order.
+        for outvar in self.hidden_outvar_to_invar:
             if outvar in covered_outvars:
                 continue
             invar = self.hidden_outvar_to_invar[outvar]
@@ -1044,23 +1081,25 @@ def write_jaxpr_of_hidden_group_transition(
     # 3. all outvars
     #
     eqns = []
-    all_invars = set()
-    all_outvars = set()
+    # Ordered dict-as-set bookkeeping keeps the derived ``constvars`` order
+    # deterministic across processes (Var hashing is address-based).
+    all_invars: Dict[Var, None] = {}
+    all_outvars: Dict[Var, None] = {}
     for invar in hidden_invars:
         if invar in hidden_invar_to_transition:
             transition = hidden_invar_to_transition[invar]
             for eq in transition.transition_jaxpr.eqns:
                 this_eq_exist = [outvar in all_outvars for outvar in eq.outvars]
-                # this_eq_exist = False
-                # for outvar in eq.outvars:
-                #     if outvar in all_outvars:
-                #         this_eq_exist = True
-                #         break
                 if not all(this_eq_exist):
                     eqns.append(eq.replace())
-                    all_invars.update([invar for invar in eq.invars if not isinstance(invar, Literal)])
-                    all_outvars.update(eq.outvars)
-    other_invars = list(all_invars.difference(all_outvars).difference(hidden_invars))
+                    all_invars.update(
+                        dict.fromkeys(invar for invar in eq.invars if not isinstance(invar, Literal))
+                    )
+                    all_outvars.update(dict.fromkeys(eq.outvars))
+    other_invars = [
+        v for v in all_invars
+        if v not in all_outvars and v not in hidden_invars
+    ]
 
     #
     # step 2:
@@ -1106,6 +1145,41 @@ def write_jaxpr_of_hidden_group_transition(
         eqns=new_eqns,
         debug_info=debug_info,
     )
+
+
+def _merge_groups_ordered(groups: Sequence[Sequence[HiddenOutVar]]) -> List[List[HiddenOutVar]]:
+    """Union intersecting groups, deterministically.
+
+    Semantically identical to :func:`group_merging` (transitive union of any
+    groups sharing a member) but order-preserving: the result lists groups by
+    first appearance in ``groups``, and each group's members by first
+    appearance, so the output never depends on ``Var`` hash (memory-address)
+    order. Used by the compiler; :func:`group_merging` is kept for its direct
+    importers.
+
+    Parameters
+    ----------
+    groups : sequence of sequence of Var
+        The groups to merge.
+
+    Returns
+    -------
+    list of list of Var
+        Disjoint merged groups, in deterministic order.
+    """
+    merged: List[Dict[HiddenOutVar, None]] = []
+    for g in groups:
+        new = dict.fromkeys(g)
+        hits = [m for m in merged if any(v in m for v in new)]
+        if hits:
+            base = hits[0]
+            for other in hits[1:]:
+                base.update(other)
+                merged.remove(other)
+            base.update(new)
+        else:
+            merged.append(new)
+    return [list(m) for m in merged]
 
 
 def group_merging(groups, version: int = 1) -> List[frozenset[HiddenOutVar]]:
