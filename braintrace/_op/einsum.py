@@ -148,6 +148,78 @@ etp_einsum_p = register_primitive(
 )
 
 
+def _einsum_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, equation: str,
+                    weight_fn: WeightFn | None = None) -> dict[str, Any]:
+    r"""Propagate ``∂h/∂y`` through the weight-shaped trace, mechanically.
+
+    Diagonal letters broadcast; shared letters are summed out of
+    ``hidden_dim`` first (deferred reduction, the pre-audit conv scheme —
+    which is why shared-axis equations stay gated at the user API);
+    contracted letters are free trace axes. The broadcast-multiply is one
+    letter-aligned ``jnp.einsum`` whose output spec equals the trace spec,
+    so no manual transpose/reshape logic is needed.
+
+    Contexts (detected from ``hidden_dim.ndim``): scan keeps the batch
+    axis on both ``hidden_dim`` and the trace; the gradient-solve context
+    strips it from both.
+    """
+    spec = parse_etp_einsum(equation)
+    w_trace = trace['weight']
+    has_batch = hidden_dim.ndim == len(spec.y_spec)
+    y_letters = spec.y_spec if has_batch else spec.y_spec[1:]
+    shared_axes = tuple(i for i, c in enumerate(y_letters) if c in spec.shared)
+    hd = jnp.sum(hidden_dim, axis=shared_axes) if shared_axes else hidden_dim
+    hd_letters = ''.join(c for c in y_letters if c not in spec.shared)
+    trace_letters = (spec.batch + spec.w_spec) if has_batch else spec.w_spec
+    out = jnp.einsum(f'{hd_letters},{trace_letters}->{trace_letters}', hd, w_trace)
+    return {'weight': out}
+
+
+def _einsum_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                     equation: str,
+                     weight_fn: WeightFn | None = None) -> dict[str, Any]:
+    r"""Instantaneous ``∂h/∂W`` via the dict-valued VJP of the contraction
+    (transforms auto-composed; gradient w.r.t. the **raw** weight)."""
+
+    def _fwd(w_dict: dict[str, Any]) -> Any:
+        w = w_dict['weight']
+        if weight_fn is not None:
+            w = weight_fn(w)
+        return u.get_mantissa(jnp.einsum(equation, x, w))
+
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
+
+
+def _einsum_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                       num_hidden_state: int) -> dict[str, Any]:
+    r"""Batched D-RTRL trace: ``ε_W (B, *w_shape, n)``.
+
+    Dtype via :func:`jax.numpy.result_type` over the participating x/y/weight
+    avals (dense ``_mm_init_drtrl`` idiom)."""
+    batch = x_var.aval.shape[0]
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
+    return {'weight': jnp.zeros(
+        (batch, *weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype)}
+
+
+def _einsum_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                    num_hidden_state: int) -> Any:
+    r"""pp-prop output-shaped df trace: ``ε_f (*y_shape, n)``."""
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
+etp_einsum_p.register_etp_rules(
+    yw_to_w=_einsum_yw_to_w,
+    xy_to_dw=_einsum_xy_to_dw,
+    init_drtrl=_einsum_init_drtrl,
+    init_pp=_einsum_init_pp,
+)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

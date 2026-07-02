@@ -144,3 +144,101 @@ class TestJAXRules:
         np.testing.assert_allclose(f(x, w), x @ w, atol=1e-5)
         g = jax.grad(lambda ww: einsum('bk,kn->bn', x, ww).sum())(w)
         np.testing.assert_allclose(g, jnp.tile(x.sum(0)[:, None], (1, 4)), atol=1e-5)
+
+
+from braintrace._op import (
+    ETP_RULES_INIT_DRTRL,
+    ETP_RULES_INIT_PP,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_YW_TO_W,
+)
+from braintrace._op.dense import etp_mm_p
+from braintrace._op.grouped import etp_gmm_p
+from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+
+
+class TestEinsumEtpRules:
+
+    def test_yw_to_w_matches_dense_rule(self):
+        brainstate.random.seed(10)
+        hd = brainstate.random.randn(5, 4)
+        tr = {'weight': brainstate.random.randn(5, 3, 4)}
+        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bk,kn->bn')
+        want = ETP_RULES_YW_TO_W[etp_mm_p](hd, dict(tr), has_bias=False)
+        np.testing.assert_allclose(got['weight'], want['weight'], atol=1e-6)
+
+    def test_yw_to_w_matches_grouped_rule(self):
+        brainstate.random.seed(11)
+        hd = brainstate.random.randn(5, 2, 4)
+        tr = {'weight': brainstate.random.randn(5, 2, 3, 4)}
+        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bgk,gkn->bgn')
+        want = ETP_RULES_YW_TO_W[etp_gmm_p](hd, dict(tr), has_bias=False)
+        np.testing.assert_allclose(got['weight'], want['weight'], atol=1e-6)
+
+    def test_yw_to_w_grad_context_batch_stripped(self):
+        brainstate.random.seed(12)
+        hd = brainstate.random.randn(4)                    # (n,) — batch stripped
+        tr = {'weight': brainstate.random.randn(3, 4)}     # (k, n)
+        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bk,kn->bn')
+        np.testing.assert_allclose(got['weight'], tr['weight'] * hd[None, :], atol=1e-6)
+
+    def test_yw_to_w_per_head_diagonal_axes(self):
+        brainstate.random.seed(13)
+        hd = brainstate.random.randn(5, 2, 4)              # (b, h, e)
+        tr = {'weight': brainstate.random.randn(5, 2, 3, 4)}  # (b, h, d, e)
+        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bhd,hde->bhe')
+        want = tr['weight'] * hd[:, :, None, :]
+        np.testing.assert_allclose(got['weight'], want, atol=1e-6)
+
+    def test_yw_to_w_shared_axis_sums_hidden(self):
+        """Rule-level contract for shared axes (API gate notwithstanding):
+        hd is summed over 't' then broadcast — the pre-audit conv scheme,
+        pinned here as the rule's defined behaviour while the gate is closed."""
+        brainstate.random.seed(14)
+        hd = brainstate.random.randn(5, 2, 4)              # (b, t, n)
+        tr = {'weight': brainstate.random.randn(5, 3, 4)}  # (b, k, n)
+        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='btk,kn->btn')
+        want = tr['weight'] * hd.sum(axis=1)[:, None, :]
+        np.testing.assert_allclose(got['weight'], want, atol=1e-5)
+
+    @pytest.mark.parametrize('eq,x_shape,w_shape', [
+        ('bk,kn->bn', (5, 3), (3, 4)),
+        ('bhd,hde->bhe', (5, 2, 3), (2, 3, 4)),
+        ('bd,d->bd', (5, 3), (3,)),
+    ])
+    def test_xy_to_dw_matches_vjp(self, eq, x_shape, w_shape):
+        brainstate.random.seed(15)
+        x = brainstate.random.randn(*x_shape)
+        w = {'weight': brainstate.random.randn(*w_shape)}
+        y = jnp.einsum(eq, x, w['weight'])
+        hd = brainstate.random.randn(*y.shape)
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_einsum_p],
+            impl=lambda wd: jnp.einsum(eq, x, wd['weight']),
+            x=x, hidden_dim=hd, weights=w, params={'equation': eq},
+        )
+
+    def test_xy_to_dw_with_weight_fn(self):
+        brainstate.random.seed(16)
+        x = brainstate.random.randn(5, 3)
+        w = {'weight': brainstate.random.randn(3, 4)}
+        hd = brainstate.random.randn(5, 4)
+        fn = lambda ww: jnp.tanh(ww)
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_einsum_p],
+            impl=lambda wd: jnp.einsum('bk,kn->bn', x, fn(wd['weight'])),
+            x=x, hidden_dim=hd, weights=w,
+            params={'equation': 'bk,kn->bn', 'weight_fn': fn},
+        )
+
+    def test_init_shapes_and_dtypes(self):
+        drtrl = ETP_RULES_INIT_DRTRL[etp_einsum_p](
+            _fake_var((5, 2, 3), jnp.bfloat16), _fake_var((5, 2, 4), jnp.bfloat16),
+            {'weight': _fake_var((2, 3, 4), jnp.bfloat16)}, 2)
+        assert drtrl['weight'].shape == (5, 2, 3, 4, 2)
+        assert drtrl['weight'].dtype == jnp.bfloat16
+        pp = ETP_RULES_INIT_PP[etp_einsum_p](
+            _fake_var((5, 2, 3)), _fake_var((5, 2, 4), jnp.bfloat16),
+            {'weight': _fake_var((2, 3, 4))}, 2)
+        assert pp.shape == (5, 2, 4, 2)
+        assert pp.dtype == jnp.bfloat16
