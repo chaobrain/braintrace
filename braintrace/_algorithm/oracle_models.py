@@ -308,3 +308,77 @@ def scan_body_rnn(n_rec: int = 4, loops: int = 3, seed: int = 0) -> ModelSpec:
         return Net()
 
     return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
+
+
+def while_settle_rnn(
+    n_in: int = 3, n_rec: int = 4, k: int = 3, decay: float = 0.8, seed: int = 0
+) -> ModelSpec:
+    """Leaky drive followed by a **weight-free** ``lax.while_loop`` settle.
+
+    ``pre = matmul(x, win) + decay * h_prev`` (ETP input weight, plain leak),
+    then ``k`` settle iterations ``h <- h + 0.5 * tanh(pre - h)`` inside a
+    ``lax.while_loop`` starting from ``h_prev``. The loop consumes only
+    weight-*derived* values, so the compiler keeps it as an opaque forward
+    node (Phase 3 ``while_hidden='opaque-fwd'``): hidden Jacobians are
+    extracted in forward mode and the perturbation pass detaches the loop
+    inputs. :func:`while_settle_twin_rnn` with the same ``seed`` builds the
+    mathematically identical model with the loop hand-composed, so the pair
+    isolates the while-specific machinery.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.win = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_in, n_rec)
+                    )
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                h_prev = self.h.value
+                pre = braintrace.matmul(x.reshape(1, -1), self.win.value) + decay * h_prev
+
+                def body(s):
+                    i, h = s
+                    return i + 1, h + 0.5 * jnp.tanh(pre - h)
+
+                _, h_new = jax.lax.while_loop(lambda s: s[0] < k, body, (0, h_prev))
+                self.h.value = h_new
+                return h_new
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('win',),), plain_param_keys=())
+
+
+def while_settle_twin_rnn(
+    n_in: int = 3, n_rec: int = 4, k: int = 3, decay: float = 0.8, seed: int = 0
+) -> ModelSpec:
+    """Hand-composed twin of :func:`while_settle_rnn` (same ``seed`` gives
+    identical weights): the fixed-trip-count while is replaced by its
+    ``k``-fold composition, so reverse-mode oracles (BPTT) apply."""
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.win = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_in, n_rec)
+                    )
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                h_prev = self.h.value
+                pre = braintrace.matmul(x.reshape(1, -1), self.win.value) + decay * h_prev
+                h = h_prev
+                for _ in range(k):
+                    h = h + 0.5 * jnp.tanh(pre - h)
+                self.h.value = h
+                return h
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('win',),), plain_param_keys=())
