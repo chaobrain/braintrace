@@ -113,3 +113,72 @@ class TestDescendabilityPredicate:
         closed = jax.make_jaxpr(f)(jnp.arange(8.0))
         eqn = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
         assert not _is_etp_relevant(eqn.params['jaxpr'].jaxpr, eqn, set())
+
+
+class TestAddScanYs:
+    def test_add_scan_ys_emits_per_substep_values(self):
+        from braintrace._compiler.scan_descent import add_scan_ys
+        from braintrace._compatible_imports import Jaxpr
+
+        def body(c, x):
+            y = jnp.tanh(c) + x
+            return y, y * 2.0
+
+        closed = jax.make_jaxpr(
+            lambda xs: jax.lax.scan(body, jnp.zeros(()), xs))(jnp.arange(4.0))
+        eqn = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
+        body_jaxpr = eqn.params['jaxpr'].jaxpr
+        # hoist: the tanh intermediate (a body-computed var) and the carry invar
+        tanh_var = next(e.outvars[0] for e in body_jaxpr.eqns
+                        if e.primitive.name == 'tanh')
+        num_consts, num_carry = eqn.params['num_consts'], eqn.params['num_carry']
+        carry_invar = body_jaxpr.invars[num_consts]
+
+        new_eqn, stacked = add_scan_ys(eqn, [tanh_var, carry_invar])
+        assert list(new_eqn.outvars[:len(eqn.outvars)]) == list(eqn.outvars)
+        assert stacked[tanh_var].aval.shape == (4,)
+        assert stacked[carry_invar].aval.shape == (4,)
+        assert new_eqn.params['num_carry'] == num_carry
+        assert new_eqn.params['num_consts'] == num_consts
+        assert new_eqn.params['length'] == eqn.params['length']
+        # body eqns preserved by identity
+        assert new_eqn.params['jaxpr'].jaxpr.eqns == body_jaxpr.eqns
+
+        # evaluate the rewritten jaxpr: replace the eqn, extend outvars, compare
+        new_eqns = [new_eqn if e is eqn else e for e in closed.jaxpr.eqns]
+        new_jaxpr = Jaxpr(
+            constvars=closed.jaxpr.constvars, invars=closed.jaxpr.invars,
+            outvars=list(closed.jaxpr.outvars) + [stacked[tanh_var],
+                                                  stacked[carry_invar]],
+            eqns=new_eqns, effects=closed.jaxpr.effects,
+            debug_info=closed.jaxpr.debug_info)
+        xs = jnp.arange(4.0)
+        outs = jax.core.eval_jaxpr(new_jaxpr, closed.consts, xs)
+        # reference: replay by hand
+        cs, tanhs = [], []
+        c = jnp.zeros(())
+        for x in xs:
+            cs.append(c)
+            t = jnp.tanh(c)
+            c = t + x
+            tanhs.append(t)
+        assert jnp.allclose(outs[-2], jnp.stack(tanhs))
+        assert jnp.allclose(outs[-1], jnp.stack(cs))
+        # original outputs unchanged
+        ref = jax.core.eval_jaxpr(closed.jaxpr, closed.consts, xs)
+        assert jnp.allclose(outs[0], ref[0])
+        assert jnp.allclose(outs[1], ref[1])
+
+    def test_add_scan_ys_dedups_preserving_order(self):
+        from braintrace._compiler.scan_descent import add_scan_ys
+
+        def body(c, x):
+            return c + x, c
+
+        closed = jax.make_jaxpr(
+            lambda xs: jax.lax.scan(body, jnp.zeros(()), xs))(jnp.arange(4.0))
+        eqn = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
+        carry_invar = eqn.params['jaxpr'].jaxpr.invars[eqn.params['num_consts']]
+        new_eqn, stacked = add_scan_ys(eqn, [carry_invar, carry_invar])
+        assert len(stacked) == 1
+        assert len(new_eqn.outvars) == len(eqn.outvars) + 1

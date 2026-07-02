@@ -38,15 +38,17 @@ perturbation, seam checks, and learning signals are untouched; only the
 Jacobian extraction and the trace update see the substep axis.
 """
 
-from typing import Optional, Set
+from typing import Dict, Optional, Sequence, Set, Tuple
 
 from braintrace._compatible_imports import (
+    ClosedJaxpr,
     Jaxpr,
     JaxprEqn,
     Var,
     is_cond_primitive,
     is_scan_primitive,
     is_while_primitive,
+    new_var,
 )
 from braintrace._op import is_etp_primitive
 from .canonicalize import ControlFlowPolicy
@@ -135,3 +137,52 @@ def _descent_blockers(
             return ('a trainable weight is scanned over as xs (per-iteration '
                     'weight slices); not supported by descent')
     return None
+
+
+def add_scan_ys(
+    eqn: JaxprEqn,
+    extra_body_outvars: Sequence[Var],
+) -> Tuple[JaxprEqn, Dict[Var, Var]]:
+    """Rebuild a scan eqn so its body also emits ``extra_body_outvars`` as ys.
+
+    Parameters
+    ----------
+    eqn : JaxprEqn
+        A ``scan`` equation (``is_scan_primitive(eqn)`` must hold).
+    extra_body_outvars : Sequence[Var]
+        Body-scope vars (computed vars or body invars — passthrough ys are
+        valid jaxpr) to stack over the trip axis. Deduplicated preserving
+        order; vars already among the body outvars are still appended as new
+        ys so the stacked outer var is dedicated.
+
+    Returns
+    -------
+    tuple
+        ``(new_eqn, stacked_var_map)`` where ``stacked_var_map[body_var]`` is
+        a fresh outer ``Var`` of aval ``(length, *body_var.aval.shape)``. The
+        new eqn keeps the original outvars (by identity) followed by the
+        stacked vars; ``num_consts``/``num_carry``/``length``/``linear`` are
+        unchanged, and the body's eqns/invars keep their identity.
+    """
+    body_closed = eqn.params['jaxpr']
+    body = body_closed.jaxpr
+    length = eqn.params['length']
+    extra = list(dict.fromkeys(extra_body_outvars))
+    new_body = Jaxpr(
+        constvars=body.constvars,
+        invars=body.invars,
+        outvars=list(body.outvars) + extra,
+        eqns=body.eqns,
+        effects=body.effects,
+        debug_info=body.debug_info,
+    )
+    new_closed = ClosedJaxpr(new_body, body_closed.consts)
+    stacked = {
+        v: new_var('', v.aval.update(shape=(length, *v.aval.shape)))
+        for v in extra
+    }
+    new_eqn = eqn.replace(
+        params={**eqn.params, 'jaxpr': new_closed},
+        outvars=list(eqn.outvars) + [stacked[v] for v in extra],
+    )
+    return new_eqn, stacked
