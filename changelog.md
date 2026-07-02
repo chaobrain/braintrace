@@ -15,7 +15,10 @@
   eligibility-trace relations. When promotion is impossible (batched
   weights, `etp_conv`, nested vmap), the op decomposes as before but emits
   a `UserWarning` instead of silently dropping the parameter from online
-  learning.
+  learning. Note: when this warning appears from a `compile(..., vmap=True)`
+  learner's execution trace (e.g. conv models), it is expected and benign —
+  the eligibility-trace graph was already compiled per-sample before the
+  learner was vmapped, so no parameter is dropped.
 
 
 ## Version 0.2.3
