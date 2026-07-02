@@ -616,3 +616,111 @@ class TestSparseWeightFnBiasFn:
             rule=rule, impl=impl, x=x, hidden_dim=hidden,
             weights=weights, params=params, atol=1e-4,
         )
+
+
+# ---------------------------------------------------------------------------
+# Audit C3/H1 regression: stock (unwrapped) brainevent.CSR usability +
+# batched D-RTRL trace recurrence.
+# ---------------------------------------------------------------------------
+
+class TestStockCSRHashable:
+    """H1: a stock ``brainevent.CSR`` — exactly as the module docstring shows,
+    with no user-side wrapper — must work as ``sparse_mat`` under
+    ``jax.jit``/``jax.grad``.
+
+    ``brainevent.CSR`` (like every ``DataRepresentation``) defines ``__eq__``
+    without a matching ``__hash__``, so binding it directly as a jaxpr
+    equation parameter previously raised ``TypeError: parameters to jaxpr
+    equations must have __hash__`` under JAX >= 0.7 -- the documented usage
+    failed outright.
+    """
+
+    def test_stock_csr_runs_under_jit_and_grad(self):
+        with brainstate.environ.context(precision=64):
+            mask = np.array([
+                [1, 0, 1, 0],
+                [0, 1, 0, 1],
+                [1, 1, 0, 0],
+            ], dtype=bool)
+            csr = brainevent.CSR.fromdense(jnp.asarray(mask, dtype=float))
+            x = jnp.ones((2, 3))
+
+            @jax.jit
+            def f(w):
+                return braintrace.sparse_matmul(x, w, sparse_mat=csr).sum()
+
+            out = f(csr.data)
+            assert bool(jnp.isfinite(out))
+
+            g = jax.grad(f)(csr.data)
+            assert g.shape == csr.data.shape
+            assert bool(jnp.all(jnp.isfinite(g)))
+
+
+class TestBatchedSparseDRTRLOracle:
+    """C3: ``_sp_mm_yw_to_w`` (the ``etp_sp_mm_p`` D-RTRL trace-recurrence rule)
+    is handed a leading batch axis -- ``hidden_dim: (batch, out)``,
+    ``trace['weight']: (batch, nnz)`` -- straight from the online-trace update.
+    ``brainevent``'s ``yw_to_w_transposed`` kernel only accepts 1-D operands, so
+    the rule must ``jax.vmap`` internally rather than handing it the batched
+    arrays directly. Exactly-diagonal recurrence: D-RTRL (an *exact* algorithm)
+    must match the BPTT oracle element-wise for a batch > 1 model.
+    """
+
+    def test_batched_drtrl_matches_bptt(self):
+        from braintrace._algorithm.oracle import (
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+
+        with brainstate.environ.context(precision=64):
+            leak = 0.5
+            n_rec = 4
+            batch = 2
+            dense_mask = np.array([
+                [1, 0, 1, 0],
+                [0, 1, 0, 1],
+                [1, 1, 0, 0],
+            ], dtype=bool)
+            csr = brainevent.CSR.fromdense(jnp.asarray(dense_mask, dtype=jnp.float64))
+            n_in = dense_mask.shape[0]
+            nnz = csr.data.shape[0]
+
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.w = brainstate.ParamState(0.1 * brainstate.random.randn(nnz))
+                    self.h = brainstate.HiddenState(jnp.zeros((batch, n_rec)))
+
+                def update(self, x):
+                    drive = braintrace.sparse_matmul(x, self.w.value, sparse_mat=csr)
+                    self.h.value = leak * self.h.value + drive
+                    return self.h.value
+
+            def factory():
+                # Deterministic weight init: bptt_param_gradients and
+                # online_param_gradients_singlestep_naive each call ``factory()``
+                # independently, so re-seeding here (rather than relying on
+                # ambient RNG state) is what makes the two models start from
+                # the *same* weights -- otherwise the "gradient mismatch" would
+                # just be two different random points, not a genuine algorithm
+                # discrepancy.
+                brainstate.random.seed(0)
+                return Net()
+
+            xs = 0.3 * brainstate.random.randn(3, batch, n_in)
+
+            g_bptt = bptt_param_gradients(factory, xs)
+            g_online = online_param_gradients_singlestep_naive(
+                factory, xs,
+                algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='single-step'),
+            )
+
+            assert set(g_bptt.keys()) == set(g_online.keys())
+            for key in g_bptt:
+                a = jnp.asarray(g_bptt[key])
+                b = jnp.asarray(g_online[key])
+                assert a.shape == b.shape
+                denom = max(float(jnp.abs(a).max()), 1e-12)
+                rel = float(jnp.abs(a - b).max() / denom)
+                assert rel < 1e-10, f'{key}: max_rel_err={rel:.3e}'
