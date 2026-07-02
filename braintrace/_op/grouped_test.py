@@ -270,3 +270,66 @@ class TestGmvEtpRules:
             {'weight': _fake_var((self.G, self.K, self.N))}, self.A)
         assert pp.shape == (self.G, self.N, self.A)
         assert pp.dtype == jnp.float16
+
+
+from braintrace._op import get_fast_path_rules
+
+
+class TestGroupedFastPath:
+    B, G, K, N, A = 5, 2, 3, 4, 2
+
+    def test_registered_and_shared(self):
+        rules = get_fast_path_rules(etp_gmm_p)
+        assert rules is not None
+        assert rules is get_fast_path_rules(etp_gmv_p)
+
+    def test_applicable_gate(self):
+        rules = get_fast_path_rules(etp_gmm_p)
+        assert rules.applicable({'weight_fn': None, 'bias_fn': None}) is True
+        assert rules.applicable({'weight_fn': jnp.tanh, 'bias_fn': None}) is False
+        assert rules.applicable({'weight_fn': None, 'bias_fn': jnp.tanh}) is False
+
+    def test_instant(self):
+        brainstate.random.seed(30)
+        x = brainstate.random.randn(self.B, self.G, self.K)
+        df = brainstate.random.randn(self.B, self.G, self.N, self.A)
+        out = get_fast_path_rules(etp_gmm_p).instant(x, df, True)
+        want = jnp.einsum('bgk,bgna->bgkna', x, df)
+        np.testing.assert_allclose(out['weight'], want, atol=1e-6)
+        np.testing.assert_allclose(out['bias'], df, atol=1e-6)
+
+    def test_recurrent_general_vs_manual(self):
+        brainstate.random.seed(31)
+        diag = brainstate.random.randn(self.B, self.G, self.N, self.A, self.A)
+        bwg = {'weight': brainstate.random.randn(self.B, self.G, self.K, self.N, self.A),
+               'bias': brainstate.random.randn(self.B, self.G, self.N, self.A)}
+        out = get_fast_path_rules(etp_gmm_p).recurrent(diag, bwg, self.A)
+        # reference einsum: x = new-state axis, y = contracted old-state axis
+        # (cannot reuse 'b' for a state axis — it is the batch label here)
+        want_w = jnp.einsum('bgnxy,bgkny->bgknx', diag, bwg['weight'])
+        want_b = jnp.einsum('bgnxy,bgny->bgnx', diag, bwg['bias'])
+        np.testing.assert_allclose(out['weight'], want_w, atol=1e-5)
+        np.testing.assert_allclose(out['bias'], want_b, atol=1e-5)
+
+    def test_recurrent_single_state_shortcut_equals_einsum(self):
+        brainstate.random.seed(32)
+        diag = brainstate.random.randn(self.B, self.G, self.N, 1, 1)
+        bwg = {'weight': brainstate.random.randn(self.B, self.G, self.K, self.N, 1)}
+        out = get_fast_path_rules(etp_gmm_p).recurrent(diag, bwg, 1)
+        want = jnp.einsum('bgnxy,bgkny->bgknx', diag, bwg['weight'])
+        np.testing.assert_allclose(out['weight'], want, atol=1e-6)
+
+    def test_solve_with_and_without_fold_batch(self):
+        brainstate.random.seed(33)
+        dl = brainstate.random.randn(self.B, self.G, self.N, self.A)
+        tr = {'weight': brainstate.random.randn(self.B, self.G, self.K, self.N, self.A),
+              'bias': brainstate.random.randn(self.B, self.G, self.N, self.A)}
+        rules = get_fast_path_rules(etp_gmm_p)
+        out = rules.solve(dl, tr, fold_batch=False)
+        np.testing.assert_allclose(
+            out['weight'], jnp.einsum('bgna,bgkna->bgkn', dl, tr['weight']), atol=1e-5)
+        folded = rules.solve(dl, tr, fold_batch=True)
+        np.testing.assert_allclose(
+            folded['weight'], jnp.einsum('bgna,bgkna->gkn', dl, tr['weight']), atol=1e-5)
+        np.testing.assert_allclose(
+            folded['bias'], jnp.einsum('bgna,bgna->gn', dl, tr['bias']), atol=1e-5)

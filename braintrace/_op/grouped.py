@@ -150,6 +150,77 @@ def _gmm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
+# ---------------------------------------------------------------------------
+# Closed-form param-dim D-RTRL fast-path kernels (shared by gmm and gmv)
+# ---------------------------------------------------------------------------
+
+def _grouped_fast_instant(x: ArrayLike, df: ArrayLike, has_bias: bool) -> dict[str, Any]:
+    r"""Instantaneous term ``x ⊗ df`` per group: ``'...gk,...gna->...gkna'``.
+
+    Parameters
+    ----------
+    x : ArrayLike
+        Presynaptic input, shape ``(..., G, K)`` (``(B, G, K)`` for gmm,
+        ``(G, K)`` for gmv).
+    df : ArrayLike
+        State-to-output Jacobian, shape ``(..., G, N, num_state)``.
+    has_bias : bool
+        Whether to emit a ``'bias'`` entry (equal to ``df``).
+
+    Returns
+    -------
+    dict
+        ``{'weight': (..., G, K, N, num_state)}`` plus ``'bias'`` when
+        ``has_bias``.
+    """
+    out: dict[str, Any] = {'weight': jnp.einsum('...gk,...gna->...gkna', x, df)}
+    if has_bias:
+        out['bias'] = df
+    return out
+
+
+def _grouped_fast_recurrent(diag: jax.Array, old_bwg: dict[str, Any],
+                            num_state: int) -> dict[str, Any]:
+    r"""Recurrent term ``D^t ε^{t-1}``: ``'...gnab,...gknb->...gkna'`` (bias
+    ``'...gnab,...gnb->...gna'``); broadcast shortcut when ``num_state == 1``."""
+    if num_state == 1:
+        d = diag[..., 0, 0]  # (..., G, N)
+        out = {'weight': d[..., :, None, :, None] * old_bwg['weight']}
+        if 'bias' in old_bwg:
+            out['bias'] = d[..., None] * old_bwg['bias']
+        return out
+    out = {'weight': jnp.einsum('...gnab,...gknb->...gkna', diag, old_bwg['weight'])}
+    if 'bias' in old_bwg:
+        out['bias'] = jnp.einsum('...gnab,...gnb->...gna', diag, old_bwg['bias'])
+    return out
+
+
+def _grouped_fast_solve(diag_like: ArrayLike, etrace_data: dict[str, Any], *,
+                        fold_batch: bool = False) -> dict[str, Any]:
+    r"""Solve-time contraction over the ``num_state`` axis (and batch when
+    ``fold_batch``)."""
+    w_spec = 'bgna,bgkna->gkn' if fold_batch else '...gna,...gkna->...gkn'
+    out = {'weight': jnp.einsum(w_spec, diag_like, etrace_data['weight'])}
+    if 'bias' in etrace_data:
+        b_spec = 'bgna,bgna->gn' if fold_batch else '...gna,...gna->...gn'
+        out['bias'] = jnp.einsum(b_spec, diag_like, etrace_data['bias'])
+    return out
+
+
+def _grouped_fast_applicable(eqn_params: dict[str, Any]) -> bool:
+    r"""Gate: kernels drop the ``f'`` factor, so any active transform disables
+    the fast path (same rule as dense)."""
+    return eqn_params.get('weight_fn') is None and eqn_params.get('bias_fn') is None
+
+
+_GROUPED_FAST_PATH = FastPathRules(
+    _grouped_fast_instant,
+    _grouped_fast_recurrent,
+    _grouped_fast_solve,
+    _grouped_fast_applicable,
+)
+
+
 etp_gmm_p = register_primitive(
     'etp_gmm',
     _etp_grouped_matmul_impl,
@@ -162,6 +233,7 @@ etp_gmm_p.register_etp_rules(
     xy_to_dw=_gmm_xy_to_dw,
     init_drtrl=_gmm_init_drtrl,
     init_pp=_gmm_init_pp,
+    fast_path=_GROUPED_FAST_PATH,
 )
 
 
@@ -248,6 +320,7 @@ etp_gmv_p.register_etp_rules(
     xy_to_dw=_gmv_xy_to_dw,
     init_drtrl=_gmv_init_drtrl,
     init_pp=_gmv_init_pp,
+    fast_path=_GROUPED_FAST_PATH,
 )
 register_batched_counterpart(etp_gmv_p, etp_gmm_p)
 
