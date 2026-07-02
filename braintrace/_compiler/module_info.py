@@ -41,7 +41,7 @@ from braintrace._typing import (
     StateVals,
     TempData,
 )
-from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY, if_convert_conds
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY, canonicalize_control_flow
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .jaxpr_graph import inline_jit_calls
 
@@ -495,11 +495,12 @@ def extract_module_info(
     *model_args
         The positional arguments of the model.
     control_flow : ControlFlowPolicy or None, optional
-        Policy governing control-flow canonicalization (currently ``cond``
-        if-conversion; see
-        :func:`~braintrace._compiler.canonicalize.if_convert_conds`).
+        Policy governing control-flow canonicalization (``cond``
+        if-conversion and inner-``scan`` unrolling; see
+        :func:`~braintrace._compiler.canonicalize.canonicalize_control_flow`).
         ``None`` (default) uses the default policy, which converts every
-        ETP-relevant ``cond``.
+        ETP-relevant ``cond`` and unrolls every ETP-relevant ``scan`` of
+        static length at most 16.
     **model_kwargs
         The keyword arguments of the model.
 
@@ -641,11 +642,12 @@ def extract_module_info(
 
     weight_invars = brainstate.util.PrettyList(dict.fromkeys(v for vs in weight_path_to_invars.values() for v in vs))
 
-    # Canonicalize ETP-relevant control flow (Phase 1: cond -> select_n).
-    # The pass reuses each converted equation's original outvars and never
-    # touches the jaxpr's invars/outvars, so every Var-identity table built
-    # above stays valid; only the equation list (and consts) change.
-    closed_jaxpr = if_convert_conds(
+    # Canonicalize ETP-relevant control flow (cond -> select_n, inner-scan
+    # unrolling, run to a joint fixpoint). The passes reuse each rewritten
+    # equation's original outvars and never touch the jaxpr's invars/outvars,
+    # so every Var-identity table built above stays valid; only the equation
+    # list (and consts) change.
+    closed_jaxpr = canonicalize_control_flow(
         closed_jaxpr,
         weight_invars=set(weight_invars),
         hidden_invars=set(hidden_path_to_invar.values()),

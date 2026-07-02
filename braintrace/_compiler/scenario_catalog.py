@@ -303,9 +303,12 @@ class PartialPathRNN(brainstate.nn.Module):
 def make_scan_body_etp_jaxpr(n_in: int, n_out: int, length: int = 4):
     """Return a jaxpr containing ``braintrace.matmul`` inside ``lax.scan``.
 
-    The compiler's full pipeline rejects ETP inside scan at the
-    ``hidden_group`` stage, so this scenario is exercised by feeding the
-    raw jaxpr to the lower-level ``_scan_jaxpr_for_etp_eqns``.
+    The full pipeline unrolls *eligible* inner scans at extraction time
+    (Phase 2 canonicalization, ``_compiler/canonicalize.py``); only
+    ineligible scans (too long, effectful, while-in-body) still reach the
+    lower layers and are rejected/skipped there. This fixture bypasses the
+    canonicalizer and feeds the raw jaxpr to the lower-level
+    ``_scan_jaxpr_for_etp_eqns`` to exercise the scanner directly.
     """
     w = jnp.zeros((n_in, n_out))
     xs = jnp.zeros((length, n_in))
@@ -347,6 +350,39 @@ class CondBranchRNN(brainstate.nn.Module):
         )
         self.h.value = jnp.tanh(u + 0.9 * self.h.value)
         return self.h.value
+
+
+class ScanBodyRNN(brainstate.nn.Module):
+    """``h <- tanh(mv(x, W) + mv(h, W))`` applied ``loops`` times per step
+    inside ``brainstate.transform.for_loop`` (which lowers to ``lax.scan``).
+
+    ETP primitives inside a ``scan`` body: the full pipeline unrolls the
+    inner scan at extraction time (Phase 2 canonicalization, see
+    ``_compiler/canonicalize.py``). Only the *last* sub-step's ETP ops
+    become relations — earlier sub-steps reach the hidden state through
+    another trainable ETP op and are excluded per the
+    weight->weight->hidden invariant.
+    """
+
+    def __init__(self, n: int, loops: int = 3):
+        super().__init__()
+        self.loops = loops
+        self.w = brainstate.ParamState(0.1 * brainstate.random.randn(n, n))
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        def substep(_):
+            self.h.value = jnp.tanh(
+                braintrace.matmul(x, self.w.value)
+                + braintrace.matmul(self.h.value, self.w.value)
+            )
+            return self.h.value
+
+        outs = brainstate.transform.for_loop(substep, jnp.arange(self.loops))
+        return outs[-1]
 
 
 def make_cond_branches_etp_jaxpr(n_in: int, n_out: int):

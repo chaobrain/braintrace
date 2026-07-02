@@ -5,6 +5,42 @@
 
 ### Highlights
 
+#### New: inner-`scan` unrolling (compiler canonicalization, Phase 2)
+
+- **ETP operations inside `lax.scan` / `brainstate.transform.for_loop`
+  bodies now participate in online learning.** A new canonicalization pass
+  (`unroll_inner_scans` in `_compiler/canonicalize.py`) runs at extraction
+  time and replaces every ETP-relevant, statically short scan with its
+  unrolled body: one cloned copy per iteration with fresh variables, `xs`
+  sliced per step, consumed `ys` re-stacked via `broadcast_in_dim` +
+  `concatenate`, and `reverse=True` respected. The unrolled program is
+  value- and Jacobian-identical to the scan, so exact algorithms (D-RTRL,
+  full-rank pp_prop, EProp(k=0), OSTLRecurrent) match BPTT element-wise on
+  scan-body models — verified against hand-flattened twins and the BPTT
+  oracle. Cond and scan canonicalization now run as a joint fixpoint
+  (`canonicalize_control_flow`), so a `cond` inside a scan body (and an
+  eligible scan inside a `cond` branch) both flatten.
+- **Relation counts follow the weight→weight→hidden invariant**: in an
+  unrolled inner loop only the *last* sub-step's ETP ops become relations —
+  earlier sub-steps reach the hidden state through another trainable ETP op
+  and are excluded (with the usual no-relation warning).
+- **Eligibility gates**: only scans whose static `length` is ≤
+  `ControlFlowPolicy.scan_unroll_limit` (default 16) and that carry no
+  effects and contain no `while` are unrolled. An ETP-relevant scan that
+  fails a gate emits a `SCAN_UNROLL_SKIPPED` warning and keeps today's
+  hard-error behavior; unrolls are recorded as `SCAN_UNROLLED` INFO
+  diagnostics on `ETraceGraph.diagnostics`. Scans that scan *over* a
+  trainable weight (weights as `xs`) are never unrolled
+  (`RELATION_EXCLUDED_SLICED_WEIGHT` warning) — per-slice trace lineage is
+  deferred.
+- **Cond gate revision**: a branch containing a scan no longer blocks
+  if-conversion when that scan is itself unrollable; `scan_unroll_limit=0`
+  disables unrolling and restores the exact Phase 1 gating.
+- **Tied-weight invariant locked**: one `ParamState` consumed by several
+  ETP call sites (which unrolling multiplies) is keyed per relation
+  instance with per-path gradient accumulation — verified BPTT-exact and
+  now covered by regression tests.
+
 #### New: `cond` if-conversion (compiler canonicalization, Phase 1)
 
 - **ETP operations inside `lax.cond` branches now participate in online
