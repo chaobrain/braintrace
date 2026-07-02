@@ -308,15 +308,15 @@ class TestEPropRandomFeedbackInvariance(unittest.TestCase):
         class Net(brainstate.nn.Module):
             def __init__(self):
                 super().__init__()
+                brainstate.random.seed(0)
                 self.w = brainstate.ParamState(
-                    0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+                    0.1 * brainstate.random.normal(size=(3, 3))
                 )
                 self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
                 # Plain (non-ETP) readout matrix -- only its *scale* matters
                 # for this test, so it is not wrapped in a ParamState.
-                self.w_out = readout_scale * jax.random.normal(
-                    jax.random.PRNGKey(1), (3, 3)
-                )
+                brainstate.random.seed(1)
+                self.w_out = readout_scale * brainstate.random.normal(size=(3, 3))
 
             def update(self, x):
                 self.h.value = jax.nn.tanh(
