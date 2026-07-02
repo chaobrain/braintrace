@@ -32,6 +32,10 @@ from braintrace._op import (
     is_batched_primitive,
     get_fast_path_rules,
 )
+from braintrace._op._registries import (
+    get_instant_drtrl_rule,
+    get_solve_drtrl_rule,
+)
 from braintrace._misc import etrace_df_key
 from braintrace._typing import (
     PyTree,
@@ -201,7 +205,14 @@ def _update_param_dim_etrace_scan_fn(
             for key in relation.trainable_vars
         }
 
-        xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
+        # Instantaneous-term rule: a primitive whose trace structure differs
+        # from its parameter structure registers a dedicated ``instant_drtrl``
+        # rule (same call signature as ``xy_to_dw``); everyone else falls back
+        # to ``xy_to_dw`` — the historical, byte-identical default.
+        xy_to_dw_rule = (
+            get_instant_drtrl_rule(relation.primitive)
+            or ETP_RULES_XY_TO_DW[relation.primitive]
+        )
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
@@ -361,6 +372,7 @@ def _solve_param_dim_weight_gradients(
     batched_paths: set = set()
     for relation in weight_hidden_relations:
         yw_to_w_rule = ETP_RULES_YW_TO_W[relation.primitive]
+        solve_drtrl_rule = get_solve_drtrl_rule(relation.primitive)
         eqn_params = relation.eqn_params
         batched = is_batched_primitive(relation.primitive)
         if batched:
@@ -370,8 +382,29 @@ def _solve_param_dim_weight_gradients(
         fp = get_fast_path_rules(relation.primitive)
         use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
 
-        def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
-            return _rule(d, trace_, **_params)
+        if solve_drtrl_rule is not None:
+            # Dedicated solve rule (trace structure != parameter structure,
+            # e.g. LoRA's effective-weight trace): chain the learning signal
+            # through the current weights. The rule sees batch-free,
+            # num_state-free slices — the vmap scaffolding below is shared
+            # with the legacy ``yw_to_w`` path.
+            weights_dict = {
+                key: _extract_leaf(
+                    weight_vals[relation.trainable_paths[key]],
+                    relation.trainable_leaf_indices[key],
+                )
+                for key in relation.trainable_vars
+            }
+
+            def _call_yw_to_w_dict(
+                d: Any, trace_: Any,
+                _rule: Any = solve_drtrl_rule, _params: Any = eqn_params,
+                _weights: Any = weights_dict,
+            ) -> Any:
+                return _rule(d, trace_, _weights, **_params)
+        else:
+            def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
+                return _rule(d, trace_, **_params)
 
         yw_to_w = (
             jax.vmap(_call_yw_to_w_dict)

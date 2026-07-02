@@ -40,6 +40,16 @@ optional per-primitive closed-form param-dim D-RTRL "fast-path" kernel
 bundle (:class:`FastPathRules`). Only primitives with an elementwise
 ``yw_to_w`` rule register one; it is queried through
 :func:`get_fast_path_rules`.
+
+Two further *optional* rule dictionaries —
+:data:`ETP_RULES_INSTANT_DRTRL` and :data:`ETP_RULES_SOLVE_DRTRL` — let a
+primitive override the param-dim D-RTRL algorithm's default use of
+``xy_to_dw`` (instantaneous trace term) and ``yw_to_w`` (solve-time
+contraction) when the trace structure it carries differs from its
+parameter structure (e.g. LoRA's effective-weight trace). They are queried
+through :func:`get_instant_drtrl_rule` / :func:`get_solve_drtrl_rule`,
+which return ``None`` for unregistered primitives — the algorithm then
+falls back to the legacy rules, byte-identically.
 """
 
 from typing import Callable, Dict, NamedTuple, Optional
@@ -66,6 +76,10 @@ __all__ = [
     'FastPathRules',
     'ETP_FAST_PATH_RULES',
     'get_fast_path_rules',
+    'ETP_RULES_INSTANT_DRTRL',
+    'ETP_RULES_SOLVE_DRTRL',
+    'get_instant_drtrl_rule',
+    'get_solve_drtrl_rule',
 ]
 
 ETP_PRIMITIVES: set = set()
@@ -204,3 +218,69 @@ def get_fast_path_rules(primitive) -> Optional[FastPathRules]:
         fast path (e.g. conv / sparse / LoRA).
     """
     return ETP_FAST_PATH_RULES.get(primitive)
+
+
+ETP_RULES_INSTANT_DRTRL: Dict[Primitive, Callable] = {}
+r"""Optional trace-structured instantaneous term for param-dim D-RTRL.
+
+``(x, df, weights_dict, **eqn_params) -> Dict[str, Array]`` — same call
+signature as :data:`ETP_RULES_XY_TO_DW`, but the returned dict is
+*trace*-structured rather than parameter-structured. Register it when the
+D-RTRL trace a primitive carries does not have the parameter's shape (e.g.
+LoRA's effective-weight trace under its ``'lora_b'`` key). The rule sees
+**batch-free, num_state-free slices**: the algorithm handles both axes by
+``vmap`` exactly as it does for the legacy ``xy_to_dw`` rule. Unregistered
+primitives fall back to :data:`ETP_RULES_XY_TO_DW`.
+"""
+
+ETP_RULES_SOLVE_DRTRL: Dict[Primitive, Callable] = {}
+r"""Optional solve-time weight-gradient rule for param-dim D-RTRL.
+
+``(dg_hidden, trace_dict, weights_dict, **eqn_params) -> Dict[str, Array]``
+— contracts the learning signal ``dg_hidden`` with the eligibility trace
+``trace_dict`` and chains through the current weights ``weights_dict``,
+returning **param-shaped** gradients keyed by the primitive's trainable
+names. Register it (together with :data:`ETP_RULES_INSTANT_DRTRL`) when the
+trace structure differs from the parameter structure, so the solve step can
+no longer be expressed by ``yw_to_w`` alone. The rule sees **batch-free,
+num_state-free slices** (the algorithm vmaps over both axes, mirroring the
+legacy ``yw_to_w`` scaffolding). Unregistered primitives fall back to
+:data:`ETP_RULES_YW_TO_W`.
+"""
+
+
+def get_instant_drtrl_rule(primitive) -> Optional[Callable]:
+    """Return the param-dim D-RTRL instantaneous-term rule, or ``None``.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The ETP primitive to look up.
+
+    Returns
+    -------
+    Callable or None
+        Rule ``(x, df, weights_dict, **eqn_params) -> dict`` producing the
+        trace-structured instantaneous term, or ``None`` if the primitive
+        did not register one (the algorithm then uses ``xy_to_dw``).
+    """
+    return ETP_RULES_INSTANT_DRTRL.get(primitive)
+
+
+def get_solve_drtrl_rule(primitive) -> Optional[Callable]:
+    """Return the param-dim D-RTRL solve-time gradient rule, or ``None``.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The ETP primitive to look up.
+
+    Returns
+    -------
+    Callable or None
+        Rule ``(dg_hidden, trace_dict, weights_dict, **eqn_params) -> dict``
+        producing param-shaped gradients keyed by trainable names, or
+        ``None`` if the primitive did not register one (the algorithm then
+        uses ``yw_to_w``).
+    """
+    return ETP_RULES_SOLVE_DRTRL.get(primitive)
