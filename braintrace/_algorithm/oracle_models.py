@@ -193,3 +193,43 @@ def batched_tanh_rnn(n_in: int = 3, n_rec: int = 4, batch: int = 4, seed: int = 
         return Net()
 
     return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
+
+
+def cond_gate_rnn(n_in: int = 3, n_rec: int = 4, leak: float = 0.9, seed: int = 0) -> ModelSpec:
+    """Leaky integrator whose drive is a ``lax.cond`` between two ETP matmuls.
+
+    The ETP primitives live inside the ``cond`` branches; the compiler
+    if-converts the equation into both inlined branches + ``select_n`` at
+    extraction time (Phase 1 canonicalization), so ``w_a`` and ``w_b`` are
+    both genuine ETP relations. The hidden-to-hidden Jacobian stays
+    ``leak * I`` (the drive contains no ``h``), keeping D_RTRL exact.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w_a = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_in, n_rec)
+                    )
+                    self.w_b = brainstate.ParamState(
+                        0.1 * brainstate.random.randn(n_in, n_rec)
+                    )
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+                drive = jax.lax.cond(
+                    jnp.sum(x) > 0.,
+                    lambda: braintrace.matmul(x_row, self.w_a.value),
+                    lambda: braintrace.matmul(x_row, self.w_b.value),
+                )
+                self.h.value = leak * self.h.value + jnp.tanh(drive)
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(
+        factory=factory, etp_param_keys=(('w_a',), ('w_b',)), plain_param_keys=()
+    )
