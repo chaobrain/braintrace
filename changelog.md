@@ -18,9 +18,14 @@
   excluded when only ETP primitives appeared inside).
 - **Semantics note**: on the canonicalized graph **both branches execute
   every step** and the dead branch's value is discarded by `select_n`.
-  Guarded partial operations (e.g. a `cond` protecting a `sqrt` domain) can
-  produce NaN/Inf in the dead branch; the value is discarded and gradients
-  are not contaminated (whole outputs are selected, not multiplied).
+  Values and forward-mode derivatives are unaffected by dead-branch
+  NaN/Inf. **Reverse-mode gradients are not**: if the dead branch's local
+  Jacobian is NaN/Inf (e.g. a `cond` protecting a `sqrt` domain), its VJP
+  multiplies the exact-zero cotangent by that Jacobian (`0 * nan = nan`)
+  and contaminates gradients of shared inputs — the classic single-`where`
+  pitfall. Keep such domain-guard conds opaque
+  (`ControlFlowPolicy(cond='opaque')`) or guard the operand inside the
+  branch.
 - **Gates**: conds that touch no ETP primitive, weight, or hidden state
   stay opaque at zero cost. Conds with effects or containing `while`/`scan`
   in a branch are never converted; an ETP-relevant one that is skipped this
