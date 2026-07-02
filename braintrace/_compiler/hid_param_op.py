@@ -41,6 +41,7 @@ from typing import TYPE_CHECKING
 from typing import (
     Any,
     Dict,
+    FrozenSet,
     Iterable,
     List,
     NamedTuple,
@@ -676,6 +677,7 @@ def _scan_jaxpr_for_etp_eqns(
     *,
     inside_control_flow: bool = False,
     policy: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
 ) -> List[JaxprEqn]:
     """Walk the Jaxpr and return all equations whose primitive is ETP.
 
@@ -686,7 +688,10 @@ def _scan_jaxpr_for_etp_eqns(
     (``etp_in_control_flow='error'``) they raise ``NotImplementedError``
     after an ERROR-level record, because the weight would otherwise
     silently drop out of online learning; ``'exclude'`` restores the loud
-    WARNING + exclusion.
+    WARNING + exclusion. Scan equations whose ``id()`` is in
+    ``descended_scan_eqn_ids`` were rewritten by structured scan descent
+    (Phase 4); their bodies are analyzed separately and are skipped here
+    without any diagnostic.
     """
     etp_eqns: List[JaxprEqn] = []
     for eqn in jaxpr.eqns:
@@ -741,6 +746,7 @@ def _scan_jaxpr_for_etp_eqns(
             inner_etp = _scan_jaxpr_for_etp_eqns(
                 inner_jaxpr, inside_control_flow=inside_control_flow,
                 policy=policy,
+                descended_scan_eqn_ids=descended_scan_eqn_ids,
             )
             if inner_etp:
                 emit(
@@ -762,6 +768,11 @@ def _scan_jaxpr_for_etp_eqns(
                     )},
                 )
         elif is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn):
+            # A descended scan's body relations are registered by the
+            # scan-descent pass; do not re-flag its ETP eqns as
+            # PRIMITIVE_INSIDE_CONTROL_FLOW.
+            if id(eqn) in descended_scan_eqn_ids:
+                continue
             for sub_jaxpr in _control_flow_subjaxprs(eqn):
                 _scan_jaxpr_for_etp_eqns(
                     sub_jaxpr, inside_control_flow=True, policy=policy,
@@ -799,6 +810,7 @@ def find_hidden_param_op_relations_from_jaxpr(
     hid_path_to_group: Dict[Path, HiddenGroup],
     weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     **_ignored,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
@@ -834,7 +846,10 @@ def find_hidden_param_op_relations_from_jaxpr(
         for ov, p in outvar_to_hidden_path.items()
     }
 
-    etp_eqns = _scan_jaxpr_for_etp_eqns(jaxpr, policy=control_flow)
+    etp_eqns = _scan_jaxpr_for_etp_eqns(
+        jaxpr, policy=control_flow,
+        descended_scan_eqn_ids=descended_scan_eqn_ids,
+    )
     relations: List[HiddenParamOpRelation] = []
 
     for eqn in etp_eqns:
@@ -1092,6 +1107,7 @@ def _emit_no_relation_diag(
 def find_hidden_param_op_relations_from_minfo(
     minfo: ModuleInfo,
     hid_path_to_group: Dict[Path, HiddenGroup],
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
 ) -> Sequence[HiddenParamOpRelation]:
     """Find ETP relations from a ``ModuleInfo``.
 
@@ -1104,6 +1120,10 @@ def find_hidden_param_op_relations_from_minfo(
         The model information.
     hid_path_to_group : dict
         Mapping from each hidden-state path to its :class:`HiddenGroup`.
+    descended_scan_eqn_ids : frozenset of int, default ``frozenset()``
+        ``id()`` values of scan equations rewritten by structured scan descent
+        (Phase 4); those equations are skipped by the relation walker (their
+        body relations are registered by the scan-descent pass).
 
     Returns
     -------
@@ -1139,6 +1159,7 @@ def find_hidden_param_op_relations_from_minfo(
         hid_path_to_group=hid_path_to_group,
         weight_path_to_invars=weight_path_to_invars,
         control_flow=minfo.control_flow,
+        descended_scan_eqn_ids=descended_scan_eqn_ids,
     )
 
 

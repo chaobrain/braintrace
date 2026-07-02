@@ -52,6 +52,7 @@ from braintrace._compatible_imports import (
 )
 from braintrace._op import is_etp_primitive
 from .canonicalize import ControlFlowPolicy
+from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .jaxpr_graph import _sub_closed_jaxprs
 
 __all__ = []
@@ -405,3 +406,97 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
         relations=final_relations,
         stacked_outer_vars=[stacked[v] for v in hoist],
     )
+
+
+def apply_scan_descent(minfo) -> Tuple['ModuleInfo', List[ScanDescentBundle]]:
+    """Descend every eligible top-level scan in ``minfo`` and rewrite its jaxpr.
+
+    Walks the top-level equations of ``minfo.jaxpr``; for each ETP-relevant
+    ``scan`` that passes the v1 restrictions (:func:`_descent_blockers`), the
+    equation is analyzed and rewritten via :func:`analyze_and_rewrite_scan`
+    and a ``SCAN_DESCENT_APPLIED`` diagnostic is emitted. Scans that are
+    blocked *and* too long to unroll get a ``SCAN_DESCENT_SKIPPED`` warning
+    (short scans are the unroller's business; no diagnostic here).
+
+    Parameters
+    ----------
+    minfo : ModuleInfo
+        The module info produced by ``extract_module_info``.
+
+    Returns
+    -------
+    tuple
+        ``(minfo, bundles)``. When ``minfo.control_flow.scan_descent`` is not
+        ``'auto'`` or nothing was descended, the *original* ``minfo`` is
+        returned unchanged with an empty bundle list. Otherwise the returned
+        ``ModuleInfo`` holds a rebuilt ``closed_jaxpr`` whose descended scan
+        equations are the bundles' ``new_eqn`` objects (every other eqn and
+        every pre-existing ``Var`` keeps its identity).
+    """
+    policy: ControlFlowPolicy = minfo.control_flow
+    if policy.scan_descent != 'auto':
+        return minfo, []
+
+    weight_invars = set(minfo.weight_invars)
+    bundles: List[ScanDescentBundle] = []
+    new_eqns: List[JaxprEqn] = []
+    for eqn in minfo.jaxpr.eqns:
+        if not (
+            is_scan_primitive(eqn)
+            and _is_etp_relevant(eqn.params['jaxpr'].jaxpr, eqn, weight_invars)
+        ):
+            new_eqns.append(eqn)
+            continue
+        blocker = _descent_blockers(eqn, policy, weight_invars)
+        if blocker is not None:
+            if eqn.params['length'] > policy.scan_unroll_limit:
+                emit(
+                    kind=DiagnosticKind.SCAN_DESCENT_SKIPPED,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'Structured scan descent was requested '
+                        f"(scan_descent='auto') but this scan cannot be "
+                        f'descended: {blocker}. The existing control-flow '
+                        f'restrictions apply to it.'
+                    ),
+                    context={'blocker': blocker,
+                             'length': eqn.params['length']},
+                )
+            new_eqns.append(eqn)
+            continue
+        bundle = analyze_and_rewrite_scan(eqn, minfo)
+        if bundle is None:
+            # no hidden state in the carry: nothing to descend; the walkers
+            # keep their existing behavior for this equation.
+            new_eqns.append(eqn)
+            continue
+        bundles.append(bundle)
+        new_eqns.append(bundle.new_eqn)
+        emit(
+            kind=DiagnosticKind.SCAN_DESCENT_APPLIED,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'Applied structured descent to a length-'
+                f'{bundle.info.length} scan: {len(bundle.relations)} '
+                f'relation(s) and {len(bundle.groups)} hidden group(s) '
+                f'registered from its body.'
+            ),
+            hidden_paths=tuple(
+                p for g in bundle.groups for p in g.hidden_paths
+            ),
+            context={'length': bundle.info.length},
+        )
+
+    if not bundles:
+        return minfo, []
+    old = minfo.jaxpr
+    new_jaxpr = Jaxpr(
+        constvars=old.constvars,
+        invars=old.invars,
+        outvars=old.outvars,
+        eqns=new_eqns,
+        effects=old.effects,
+        debug_info=old.debug_info,
+    )
+    new_closed = ClosedJaxpr(new_jaxpr, minfo.closed_jaxpr.consts)
+    return minfo._replace(closed_jaxpr=new_closed), bundles

@@ -43,6 +43,7 @@ from .hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     HiddenPerturbation,
 )
+from .scan_descent import apply_scan_descent
 from .module_info import (
     extract_module_info,
     ModuleInfo,
@@ -375,18 +376,71 @@ def compile_etrace_graph(
         assert isinstance(model_args, tuple)
         minfo = extract_module_info(model, *model_args, control_flow=control_flow)
 
+        # ---   structured scan descent (Phase 4): analyze eligible scans   --- #
+        #
+        # Each descended scan is rewritten to emit stacked per-substep values
+        # as extra ys; its body-discovered hidden groups / relations are
+        # merged below, and the rewritten equations are exempted (by
+        # ``id(eqn)``) from the flat walkers.
+        minfo, descent_bundles = apply_scan_descent(minfo)
+        descended_eqn_ids = frozenset(
+            b.info.scan_eqn_id for b in descent_bundles
+        )
+        descended_paths = frozenset(
+            p for b in descent_bundles for g in b.groups for p in g.hidden_paths
+        )
+
         # ---       evaluating the relationship for hidden-to-hidden        --- #
         hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(
-            minfo, include_recurrent_mixing=include_recurrent_mixing
+            minfo, include_recurrent_mixing=include_recurrent_mixing,
+            descended_scan_eqn_ids=descended_eqn_ids,
+            descended_hidden_paths=descended_paths,
         )
+
+        # merge the descended groups after the flat ones, re-indexing them to
+        # their final positions, and re-point the bundle relations at the
+        # re-indexed group objects (relations reference groups by identity).
+        hidden_groups = list(hidden_groups)
+        descended_relations = []
+        for bundle in descent_bundles:
+            group_remap = {}
+            for g in bundle.groups:
+                final_group = g._replace(index=len(hidden_groups))
+                group_remap[id(g)] = final_group
+                hidden_groups.append(final_group)
+                for path in final_group.hidden_paths:
+                    hid_path_to_group[path] = final_group
+            for r in bundle.relations:
+                descended_relations.append(r._replace(
+                    hidden_groups=[
+                        group_remap.get(id(g), g) for g in r.hidden_groups
+                    ],
+                ))
         order_hidden_group_index(hidden_groups)
 
         # ---       evaluating the jaxpr for (hidden, param, op) relationships      --- #
 
-        hidden_param_op_relations = find_hidden_param_op_relations_from_minfo(
+        hidden_param_op_relations = list(find_hidden_param_op_relations_from_minfo(
             minfo=minfo,
             hid_path_to_group=hid_path_to_group,
-        )
+            descended_scan_eqn_ids=descended_eqn_ids,
+        ))
+
+        # v1 restriction: an *outer* relation may not target a hidden state
+        # whose group lives inside a descended scan — the per-substep trace
+        # fold has no slot for a once-per-outer-step injection.
+        for relation in hidden_param_op_relations:
+            blocked = [g for g in relation.hidden_groups if g.descent is not None]
+            if blocked:
+                blocked_paths = [p for g in blocked for p in g.hidden_paths]
+                raise NotImplementedError(
+                    f'An ETP relation outside a descended scan targets hidden '
+                    f'state(s) {blocked_paths} carried by that scan. This is '
+                    f'not supported by structured scan descent (v1): move the '
+                    f'operation inside the scan body, restructure the model, '
+                    f"or set ControlFlowPolicy(scan_descent='off')."
+                )
+        hidden_param_op_relations += descended_relations
 
         # ---      Rewrite the jaxpr for computing the needed variables      --- #
 
@@ -399,15 +453,22 @@ def compile_etrace_graph(
         #   5. the hidden-hidden transition variables   ===>  for computing the hidden-hidden jacobian
         #
 
+        # Descended relations/groups reference *body*-scoped vars; their
+        # runtime values arrive through the scan's stacked ys instead, so
+        # they are excluded from the flat hoisting lists below.
+
         # all weight x (deduplicate while preserving insertion order)
         out_wx_jaxvars = list(dict.fromkeys(
             relation.x_var for relation in hidden_param_op_relations
             if relation.x_var is not None
+            and relation.control_flow_context is None
         ))
 
         # all y-to-hidden vars (deduplicate while preserving insertion order)
         out_wy2hid_jaxvars_dict: dict = dict()
         for relation in hidden_param_op_relations:
+            if relation.control_flow_context is not None:
+                continue
             for hpo_jaxpr in relation.y_to_hidden_group_jaxprs:
                 for v in hpo_jaxpr.invars + hpo_jaxpr.constvars:
                     out_wy2hid_jaxvars_dict[v] = None
@@ -416,6 +477,8 @@ def compile_etrace_graph(
         # hidden-hidden transition vars (deduplicate while preserving insertion order)
         hid2hid_jaxvars_dict: dict = dict()
         for group in hidden_groups:
+            if group.descent is not None:
+                continue
             for v in group.hidden_invars:
                 hid2hid_jaxvars_dict[v] = None
             for v in group.transition_jaxpr_constvars:
@@ -428,7 +491,9 @@ def compile_etrace_graph(
             minfo.jaxpr.outvars[minfo.num_var_out:] +  # all state variables
             out_wx_jaxvars +  # all weight x
             out_wy2hid_jaxvars +  # all y-to-hidden invars
-            hid2hid_jaxvars  # all hidden-hidden transition vars
+            hid2hid_jaxvars +  # all hidden-hidden transition vars
+            # stacked per-substep values of every descended scan
+            [v for b in descent_bundles for v in b.stacked_outer_vars]
         )
         temp_outvars = list(dict.fromkeys(
             v for v in all_vars if v not in original_outvars
@@ -440,7 +505,11 @@ def compile_etrace_graph(
         # ---               add perturbations to the hidden states                  --- #
         # --- new jaxpr with hidden state perturbations for computing the residuals --- #
 
-        hidden_perturb = add_hidden_perturbation_from_minfo(minfo) if include_hidden_perturb else None
+        hidden_perturb = (
+            add_hidden_perturbation_from_minfo(
+                minfo, descended_scan_eqn_ids=descended_eqn_ids)
+            if include_hidden_perturb else None
+        )
 
         # ---              return the compiled graph               --- #
 

@@ -46,7 +46,7 @@
 
 from itertools import combinations
 from typing import TYPE_CHECKING
-from typing import List, Dict, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
+from typing import List, Dict, FrozenSet, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
 
 import brainstate
 import brainunit as u
@@ -913,6 +913,10 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         path_to_state: The mapping from the hidden state path to the state.
         control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
             opaque control-flow handling (see ``base.check_unsupported_op``).
+        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten by
+            structured scan descent; those equations are skipped by this walker.
+        descended_hidden_paths: Hidden-state paths covered by descended scan
+            bodies; excluded from the zero-recurrence fallback grouping.
     """
     __module__ = 'braintrace'
 
@@ -926,10 +930,20 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         path_to_state: Dict[Path, brainstate.HiddenState],
         include_recurrent_mixing: bool = False,
         control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+        descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+        descended_hidden_paths: FrozenSet[Path] = frozenset(),
     ):
         # the jaxpr of the original model, assuming that the model is well-defined,
         # see the doc for the model which can be online learning compiled.
         self.jaxpr = jaxpr
+
+        # Structured scan descent (Phase 4): scan equations already analyzed
+        # by ``scan_descent.apply_scan_descent`` (keyed by ``id(eqn)``) are
+        # skipped entirely, and the hidden paths their body groups cover are
+        # excluded from the zero-recurrence fallback (their groups are merged
+        # into the outer graph by ``compile_etrace_graph``).
+        self.descended_scan_eqn_ids = descended_scan_eqn_ids
+        self.descended_hidden_paths = descended_hidden_paths
 
         # whether the recurrent ETP mixing primitives (``etp_mv``/``etp_mm``/
         # ``etp_conv``) are *traced into* the hidden-to-hidden transition jaxpr
@@ -976,6 +990,15 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # reset the temporal data structures
         self.active_tracers = dict()
         return hid_groups, hid_path_to_group
+
+    def _eval_scan(self, eqn: JaxprEqn) -> None:
+        # A descended scan is fully handled by scan-descent analysis: its
+        # hidden groups are registered from the body (re-scoped to the outer
+        # carry vars) and merged by ``compile_etrace_graph``, so the equation
+        # must be neither rejected nor traced as an opaque transition here.
+        if id(eqn) in self.descended_scan_eqn_ids:
+            return
+        super()._eval_scan(eqn)
 
     def _eval_eqn(self, eqn: JaxprEqn) -> None:
         """
@@ -1314,6 +1337,11 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         for outvar in self.hidden_outvar_to_invar:
             if outvar in covered_outvars:
                 continue
+            # Hidden states carried by a descended scan get their group from
+            # the scan-body analysis (merged downstream); a zero-recurrence
+            # fallback here would shadow it.
+            if self.outvar_to_hidden_path[outvar] in self.descended_hidden_paths:
+                continue
             invar = self.hidden_outvar_to_invar[outvar]
             # ``h^t = outvar`` (a constvar): no eqns, output does not depend on the
             # ``h^{t-1}`` invar, so the recurrent Jacobian is exactly zero.
@@ -1570,6 +1598,8 @@ def find_hidden_groups_from_jaxpr(
     path_to_state: Dict[Path, brainstate.State],
     include_recurrent_mixing: bool = False,
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    descended_hidden_paths: FrozenSet[Path] = frozenset(),
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """
     Find hidden groups from the jaxpr.
@@ -1600,6 +1630,10 @@ def find_hidden_groups_from_jaxpr(
             opaque control-flow equations touching hidden states are handled
             (``'opaque-fwd'`` keeps a weight-free while/scan/cond as an opaque
             forward node; ``'error'`` raises as before Phase 3).
+        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten by
+            structured scan descent (Phase 4); skipped by this walker.
+        descended_hidden_paths: Hidden-state paths covered by descended scan
+            bodies; excluded from the zero-recurrence fallback grouping.
 
     Returns:
         A tuple containing:
@@ -1619,6 +1653,8 @@ def find_hidden_groups_from_jaxpr(
         path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),  # type: ignore[redundant-cast]
         include_recurrent_mixing=include_recurrent_mixing,
         control_flow=control_flow,
+        descended_scan_eqn_ids=descended_scan_eqn_ids,
+        descended_hidden_paths=descended_hidden_paths,
     )
     hidden_groups, hid_path_to_group = evaluator.compile()
     return hidden_groups, brainstate.util.PrettyDict(hid_path_to_group)
@@ -1627,6 +1663,8 @@ def find_hidden_groups_from_jaxpr(
 def find_hidden_groups_from_minfo(
     minfo: ModuleInfo,
     include_recurrent_mixing: bool = False,
+    descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    descended_hidden_paths: FrozenSet[Path] = frozenset(),
 ):
     """Find the hidden groups from the model information.
 
@@ -1637,6 +1675,12 @@ def find_hidden_groups_from_minfo(
     include_recurrent_mixing : bool, default False
         Whether to trace recurrent ETP mixing primitives into the transition
         jaxpr. See :func:`find_hidden_groups_from_jaxpr` for the full semantics.
+    descended_scan_eqn_ids : frozenset of int, default ``frozenset()``
+        ``id()`` values of scan equations rewritten by structured scan descent
+        (Phase 4); those equations are skipped by the hidden-group walker.
+    descended_hidden_paths : frozenset, default ``frozenset()``
+        Hidden-state paths covered by descended scan bodies; excluded from the
+        zero-recurrence fallback grouping.
 
     Returns
     -------
@@ -1661,6 +1705,8 @@ def find_hidden_groups_from_minfo(
         path_to_state=minfo.retrieved_model_states,
         include_recurrent_mixing=include_recurrent_mixing,
         control_flow=minfo.control_flow,
+        descended_scan_eqn_ids=descended_scan_eqn_ids,
+        descended_hidden_paths=descended_hidden_paths,
     )
     return hidden_groups, hid_path_to_group
 

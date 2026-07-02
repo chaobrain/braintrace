@@ -282,3 +282,123 @@ class TestAnalyzeAndRewriteScan:
                    for r in bundle.relations)
         # tied weight: both relations route the SAME param via distinct y_vars
         assert bundle.relations[0].y_var is not bundle.relations[1].y_var
+
+
+DESCENT_POLICY = ControlFlowPolicy(scan_unroll_limit=4, scan_descent='auto')
+
+
+def _make_snn_net(loops, n_rec=4):
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            with brainstate.random.seed_context(0):
+                self.w = brainstate.ParamState(
+                    0.1 * brainstate.random.randn(n_rec, n_rec))
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+        def update(self, x):
+            x_row = x.reshape(1, -1)
+
+            def substep(_):
+                self.h.value = 0.9 * self.h.value + jnp.tanh(
+                    braintrace.matmul(x_row, self.w.value))
+                return self.h.value
+
+            return brainstate.transform.for_loop(substep, jnp.arange(loops))[-1]
+
+    net = Net()
+    brainstate.nn.init_all_states(net, batch_size=1)
+    return net
+
+
+class TestApplyScanDescentPipeline:
+    def test_long_scan_compiles_with_descent(self):
+        from braintrace._compiler.graph import compile_etrace_graph
+        from braintrace._compiler.diagnostics import DiagnosticKind
+        net = _make_snn_net(loops=40)
+        graph = compile_etrace_graph(
+            net, jnp.ones((4,), dtype='float32'), control_flow=DESCENT_POLICY)
+        rels = [r for r in graph.hidden_param_op_relations
+                if r.control_flow_context is not None]
+        grps = [g for g in graph.hidden_groups if g.descent is not None]
+        assert len(rels) == 1 and len(grps) == 1
+        assert [g.index for g in graph.hidden_groups] == list(
+            range(len(graph.hidden_groups)))
+        assert any(d.kind is DiagnosticKind.SCAN_DESCENT_APPLIED
+                   for d in graph.diagnostics)
+        # stacked temps are hoisted: every mapped outer var is a jaxpr outvar
+        m = rels[0].control_flow_context.scan.stacked_var_map
+        outvars = set(graph.module_info.jaxpr.outvars)
+        assert all(sv in outvars for sv in m.values())
+
+    def test_mixing_body_compiles_with_two_descended_relations(self):
+        from braintrace._compiler.graph import compile_etrace_graph
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 3)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    self.h.value = jax.nn.tanh(
+                        braintrace.matmul(x_row, self.w.value)
+                        + braintrace.matmul(self.h.value, self.w.value))
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        graph = compile_etrace_graph(
+            net, jnp.ones((3,), dtype='float32'), control_flow=DESCENT_POLICY)
+        rels = [r for r in graph.hidden_param_op_relations
+                if r.control_flow_context is not None]
+        assert len(rels) == 2
+
+    def test_policy_off_preserves_old_error(self):
+        net = _make_snn_net(loops=40)
+        algo = braintrace.D_RTRL(net, control_flow=ControlFlowPolicy(
+            scan_unroll_limit=4, scan_descent='off'))
+        with pytest.raises(NotImplementedError):
+            algo.compile_graph(jnp.ones((4,), dtype='float32'))
+
+    def test_algorithm_gate_blocks_descended_graph_part1(self):
+        net = _make_snn_net(loops=40)
+        algo = braintrace.D_RTRL(net, control_flow=DESCENT_POLICY)
+        with pytest.raises(NotImplementedError, match='scan descent'):
+            algo.compile_graph(jnp.ones((4,), dtype='float32'))
+
+    def test_outer_relation_into_descended_group_raises(self):
+        from braintrace._compiler.graph import compile_etrace_graph
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w_in = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                # outer ETP relation whose y reaches ``h`` through the scan
+                drive = braintrace.matmul(x.reshape(1, -1), self.w_in.value)
+                self.h.value = self.h.value * 0.5 + drive
+
+                def substep(_):
+                    self.h.value = 0.9 * self.h.value + jnp.tanh(
+                        braintrace.matmul(drive, self.w.value))
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        with pytest.raises(NotImplementedError, match='descended scan'):
+            compile_etrace_graph(
+                net, jnp.ones((3,), dtype='float32'),
+                control_flow=DESCENT_POLICY)

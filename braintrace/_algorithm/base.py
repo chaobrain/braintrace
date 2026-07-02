@@ -272,6 +272,26 @@ class ETraceAlgorithm(brainstate.nn.Module):
             # --- the model etrace graph -- #
             self.graph_executor.compile_graph(*args)
 
+            # Structured scan descent (Phase 4): relations discovered inside
+            # a descended scan body need a per-substep trace fold that only
+            # algorithms declaring ``_supports_scan_descent = True`` provide.
+            # Gate here — after the graph is built, before any trace state is
+            # initialized against it.
+            if (
+                any(
+                    r.control_flow_context is not None
+                    for r in self.graph.hidden_param_op_relations
+                )
+                and not getattr(self, '_supports_scan_descent', False)
+            ):
+                raise NotImplementedError(
+                    f'{type(self).__name__} does not support structured scan '
+                    f'descent yet (an ETP relation was discovered inside a '
+                    f'scan body). Use an algorithm that supports scan '
+                    f'descent, or set '
+                    f"ControlFlowPolicy(scan_descent='off')."
+                )
+
             # --- the initialization of the states --- #
             self.init_etrace_state(*args)
 
