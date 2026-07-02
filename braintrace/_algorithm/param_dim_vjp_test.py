@@ -612,7 +612,7 @@ class TestInstantSolveDrtrlDispatch:
     per-primitive registries.
 
     A primitive whose trace structure differs from its parameter structure
-    (LoRA, and later conv) registers both rules; every other primitive is
+    (LoRA and conv) registers both rules; every other primitive is
     unregistered and must take the historical code path byte-identically.
     The tests here exercise the *dispatch scaffolding* itself by temporarily
     registering rules for the dense ``mm`` primitive that replicate the
@@ -629,7 +629,9 @@ class TestInstantSolveDrtrlDispatch:
         )
 
     def test_accessors_default_none_for_legacy_primitives(self):
-        """Dense / elemwise / sparse / conv register neither optional rule."""
+        """Dense / elemwise / sparse register neither optional rule; conv
+        (per-position kernel trace) and LoRA (effective-weight trace)
+        register both."""
         from braintrace._op import (
             etp_conv_p, etp_elemwise_p, etp_mm_p, etp_mv_p,
             etp_sp_mm_p, etp_sp_mv_p,
@@ -638,9 +640,11 @@ class TestInstantSolveDrtrlDispatch:
             get_instant_drtrl_rule, get_solve_drtrl_rule,
         )
         for prim in (etp_mm_p, etp_mv_p, etp_elemwise_p,
-                     etp_sp_mm_p, etp_sp_mv_p, etp_conv_p):
+                     etp_sp_mm_p, etp_sp_mv_p):
             assert get_instant_drtrl_rule(prim) is None
             assert get_solve_drtrl_rule(prim) is None
+        assert get_instant_drtrl_rule(etp_conv_p) is not None
+        assert get_solve_drtrl_rule(etp_conv_p) is not None
 
     def test_registered_rules_replicating_legacy_are_identical(self):
         """Routing through the new dispatch with rules that replicate the
