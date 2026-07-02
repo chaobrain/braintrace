@@ -146,3 +146,90 @@ class TestJAXRules:
         g = jax.grad(lambda ww: grouped_matmul(x, ww).sum())(w)
         # d/dw[g,k,n] sum(y) = sum_b x[b,g,k] = 5
         np.testing.assert_allclose(g, jnp.full((2, 3, 4), 5.0), atol=1e-6)
+
+
+from braintrace._op import (
+    ETP_RULES_INIT_DRTRL,
+    ETP_RULES_INIT_PP,
+    ETP_RULES_XY_TO_DW,
+    ETP_RULES_YW_TO_W,
+)
+from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
+
+
+class TestGmmEtpRules:
+    B, G, K, N, A = 5, 2, 3, 4, 2   # batch, groups, in, out, n_state
+
+    def test_yw_to_w_broadcasts_hidden_over_in_axis(self):
+        brainstate.random.seed(10)
+        hd = brainstate.random.randn(self.B, self.G, self.N)
+        tr = {'weight': brainstate.random.randn(self.B, self.G, self.K, self.N),
+              'bias': brainstate.random.randn(self.B, self.G, self.N)}
+        out = ETP_RULES_YW_TO_W[etp_gmm_p](hd, tr, has_bias=True)
+        np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, :, None, :], atol=1e-6)
+        np.testing.assert_allclose(out['bias'], tr['bias'] * hd, atol=1e-6)
+
+    def test_yw_to_w_grad_context_batch_stripped(self):
+        brainstate.random.seed(11)
+        hd = brainstate.random.randn(self.G, self.N)
+        tr = {'weight': brainstate.random.randn(self.G, self.K, self.N)}
+        out = ETP_RULES_YW_TO_W[etp_gmm_p](hd, tr, has_bias=False)
+        np.testing.assert_allclose(out['weight'], tr['weight'] * hd[:, None, :], atol=1e-6)
+
+    def test_xy_to_dw_matches_vjp_plain(self):
+        brainstate.random.seed(12)
+        x = brainstate.random.randn(self.B, self.G, self.K)
+        hd = brainstate.random.randn(self.B, self.G, self.N)
+        weights = {'weight': brainstate.random.randn(self.G, self.K, self.N),
+                   'bias': brainstate.random.randn(self.G, self.N)}
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_gmm_p],
+            impl=lambda wd: jnp.einsum('bgk,gkn->bgn', x, wd['weight']) + wd['bias'],
+            x=x, hidden_dim=hd, weights=weights, params={'has_bias': True},
+        )
+
+    def test_xy_to_dw_matches_vjp_with_weight_fn(self):
+        brainstate.random.seed(13)
+        x = brainstate.random.randn(self.B, self.G, self.K)
+        hd = brainstate.random.randn(self.B, self.G, self.N)
+        weights = {'weight': brainstate.random.randn(self.G, self.K, self.N)}
+        fn = lambda ww: jnp.tanh(ww)
+        assert_xy_to_dw_matches_vjp(
+            rule=ETP_RULES_XY_TO_DW[etp_gmm_p],
+            impl=lambda wd: jnp.einsum('bgk,gkn->bgn', x, fn(wd['weight'])),
+            x=x, hidden_dim=hd, weights=weights,
+            params={'has_bias': False, 'weight_fn': fn},
+        )
+
+    def test_init_drtrl_shapes_and_dtype(self):
+        out = ETP_RULES_INIT_DRTRL[etp_gmm_p](
+            _fake_var((self.B, self.G, self.K), jnp.bfloat16),
+            _fake_var((self.B, self.G, self.N), jnp.bfloat16),
+            {'weight': _fake_var((self.G, self.K, self.N), jnp.bfloat16),
+             'bias': _fake_var((self.G, self.N), jnp.bfloat16)},
+            self.A,
+        )
+        assert out['weight'].shape == (self.B, self.G, self.K, self.N, self.A)
+        assert out['weight'].dtype == jnp.bfloat16
+        assert out['bias'].shape == (self.B, self.G, self.N, self.A)
+        assert out['bias'].dtype == jnp.bfloat16
+
+    def test_init_drtrl_dtype_promotes_across_operands(self):
+        """Trace dtype is jnp.result_type over x/y/weight avals, not just weight."""
+        out = ETP_RULES_INIT_DRTRL[etp_gmm_p](
+            _fake_var((self.B, self.G, self.K), jnp.float32),
+            _fake_var((self.B, self.G, self.N), jnp.float32),
+            {'weight': _fake_var((self.G, self.K, self.N), jnp.bfloat16)},
+            self.A,
+        )
+        assert out['weight'].dtype == jnp.float32
+
+    def test_init_pp_shape_and_dtype(self):
+        out = ETP_RULES_INIT_PP[etp_gmm_p](
+            _fake_var((self.B, self.G, self.K)),
+            _fake_var((self.B, self.G, self.N), jnp.bfloat16),
+            {'weight': _fake_var((self.G, self.K, self.N))},
+            self.A,
+        )
+        assert out.shape == (self.B, self.G, self.N, self.A)
+        assert out.dtype == jnp.bfloat16

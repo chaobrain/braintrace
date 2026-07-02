@@ -81,12 +81,87 @@ def _gmm_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return base
 
 
+def _gmm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+                 weight_fn: WeightFn | None = None,
+                 bias_fn: WeightFn | None = None) -> dict[str, Any]:
+    r"""Batched ``yw_to_w`` — the dense broadcast with one extra group axis.
+
+    ``∂y[b,g,n]/∂W[g',k,n'] = δ_gg' δ_nn' x[b,g,k]``, so the y→W chain
+    factor is ``1`` on the matching ``(g, n)`` slot and ``hidden_dim`` is
+    broadcast over the ``in`` axis (``axis=-2``), exactly as in dense
+    ``_mm_yw_to_w``. Contexts: scan ``(B,G,N)/(B,G,K,N)``; grad ``(G,N)/(G,K,N)``.
+    """
+    out = {'weight': trace['weight'] * jnp.expand_dims(hidden_dim, axis=-2)}
+    if has_bias:
+        out['bias'] = trace['bias'] * hidden_dim
+    return out
+
+
+def _gmm_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
+                  has_bias: bool = False, weight_fn: WeightFn | None = None,
+                  bias_fn: WeightFn | None = None) -> dict[str, Any]:
+    r"""Batched ``xy_to_dw`` — instantaneous hidden-to-weight Jacobian via one
+    fused dict-valued ``jax.vjp`` (transforms auto-composed, gradient w.r.t.
+    the **raw** weights)."""
+
+    def _fwd(w_dict: dict[str, Any]) -> Any:
+        w = w_dict['weight']
+        if weight_fn is not None:
+            w = weight_fn(w)
+        y = jnp.einsum('...gk,gkn->...gn', x, w)
+        if has_bias:
+            b = w_dict['bias']
+            if bias_fn is not None:
+                b = bias_fn(b)
+            y = y + b
+        return u.get_mantissa(y)
+
+    _, vjp_fn = jax.vjp(_fwd, weights)
+    return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])
+
+
+def _gmm_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                    num_hidden_state: int) -> dict[str, Any]:
+    r"""D-RTRL weight-shaped trace: ``ε_W (B, G, K, N, n)``, ``ε_b (B, G, N, n)``.
+
+    The trace dtype is derived from the participating x/y/weight avals via
+    :func:`jax.numpy.result_type` (dense ``_mm_init_drtrl`` idiom).
+    """
+    batch = x_var.aval.shape[0]
+    dtype = jnp.result_type(
+        x_var.aval.dtype, y_var.aval.dtype,
+        *(v.aval.dtype for v in weight_vars.values()),
+    )
+    out = {
+        'weight': jnp.zeros(
+            (batch, *weight_vars['weight'].aval.shape, num_hidden_state), dtype=dtype
+        )
+    }
+    if 'bias' in weight_vars:
+        out['bias'] = jnp.zeros(
+            (batch, *weight_vars['bias'].aval.shape, num_hidden_state), dtype=dtype
+        )
+    return out
+
+
+def _gmm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
+                 num_hidden_state: int) -> Any:
+    r"""pp-prop output-shaped df trace: ``ε_f (B, G, N, n)``."""
+    return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
+
+
 etp_gmm_p = register_primitive(
     'etp_gmm',
     _etp_grouped_matmul_impl,
     batched=True,
     trainable_invars_fn=_gmm_trainable_invars,
     x_invar_index=0,
+)
+etp_gmm_p.register_etp_rules(
+    yw_to_w=_gmm_yw_to_w,
+    xy_to_dw=_gmm_xy_to_dw,
+    init_drtrl=_gmm_init_drtrl,
+    init_pp=_gmm_init_pp,
 )
 
 
