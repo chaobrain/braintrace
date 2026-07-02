@@ -37,6 +37,7 @@ The scenarios target the three core principles stated in ``CLAUDE.md``:
 import warnings
 
 import brainstate
+import jax
 import jax.numpy as jnp
 import pytest
 
@@ -1369,3 +1370,98 @@ class TestCategoryR_ComplexModuleGraphs:
                 ]
 
             assert build() == build()
+
+
+# ---------------------------------------------------------------------------
+# Category S — While-hidden opaque forward (Phase 3)
+# ---------------------------------------------------------------------------
+
+from braintrace._compiler.scenario_catalog import (
+    WhileSettleRNN,
+    WhileSettleTwinRNN,
+)
+
+
+class TestCategoryS_WhileHiddenOpaqueFwd:
+    """A **weight-free** ``lax.while_loop`` reads and updates the hidden
+    state (``WhileSettleRNN``). Under the default policy
+    (``while_hidden='opaque-fwd'``) the compiler keeps the loop as an opaque
+    forward node: the ``win`` relation is registered with the while on its
+    ``y``-to-hidden tail, hidden-to-hidden Jacobians switch to forward mode,
+    and the perturbation pass detaches the loop's inputs with
+    ``stop_gradient`` so the perturbed jaxpr stays reverse-traceable.
+
+    Learning-signal correctness note (recorded from ``vjp_base.py``): the
+    single-step VJP path consumes ONLY the perturbation cotangents
+    (``dg_hid_perturb_or_dl2h``) as the learning signal; the residual
+    hidden-input cotangent (``dg_last_hiddens``) is consumed only by the
+    multi-step branch. Detaching the while's inputs in the perturbed jaxpr
+    therefore does not alter the single-step learning signal — ``dL/dε``
+    stays exact because the ``h = fresh + ε`` add sits outside the detach.
+    """
+
+    def _build(self, **compile_kwargs):
+        model = WhileSettleRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        x = brainstate.random.rand(3)
+        graph = compile_etrace_graph(model, x, **compile_kwargs)
+        return model, x, graph
+
+    def test_compiles_with_single_relation_through_while(self):
+        model, x, graph = self._build()
+        assert _relation_set(graph) == {(('win',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+        prim_names = {
+            eqn.primitive.name
+            for jaxpr in rel.y_to_hidden_group_jaxprs
+            for eqn in jaxpr.eqns
+        }
+        assert 'while' in prim_names
+
+    def test_opaque_fwd_diagnostic_emitted(self):
+        _, _, graph = self._build()
+        kinds = [r.kind for r in graph.diagnostics]
+        assert DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD in kinds
+
+    def test_perturbed_jaxpr_detaches_while_inputs(self):
+        _, _, graph = self._build()
+        assert graph.hidden_perturb is not None
+        names = [
+            eqn.primitive.name
+            for eqn in graph.hidden_perturb.perturb_jaxpr.jaxpr.eqns
+        ]
+        assert 'while' in names
+        assert 'stop_gradient' in names
+
+    def test_error_policy_escape_hatch(self):
+        model = WhileSettleRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        x = brainstate.random.rand(3)
+        with pytest.raises(NotImplementedError):
+            compile_etrace_graph(
+                model, x,
+                control_flow=braintrace.ControlFlowPolicy(while_hidden='error'),
+            )
+
+    def test_compiled_values_match_hand_composed_twin(self):
+        model, x, graph = self._build()
+        twin = WhileSettleTwinRNN(3, 4)
+        brainstate.nn.init_all_states(twin)
+        twin.win.value = model.win.value
+
+        out, _, _, _ = graph.module_info.jaxpr_call(x)
+        expected = twin.update(x)
+        out_leaves = jax.tree.leaves(out)
+        assert len(out_leaves) == 1
+        assert jnp.allclose(out_leaves[0], expected, atol=1e-6)
+
+    def test_compile_is_deterministic(self):
+        def build():
+            _, _, g = self._build()
+            return [
+                (r.path, tuple(r.connected_hidden_paths))
+                for r in g.hidden_param_op_relations
+            ]
+
+        assert build() == build()

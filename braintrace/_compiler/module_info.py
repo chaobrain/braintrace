@@ -505,10 +505,16 @@ def extract_module_info(
     control_flow : ControlFlowPolicy or None, optional
         Policy governing control-flow canonicalization (``cond``
         if-conversion and inner-``scan`` unrolling; see
-        :func:`~braintrace._compiler.canonicalize.canonicalize_control_flow`).
-        ``None`` (default) uses the default policy, which converts every
-        ETP-relevant ``cond`` and unrolls every ETP-relevant ``scan`` of
-        static length at most 16.
+        :func:`~braintrace._compiler.canonicalize.canonicalize_control_flow`)
+        and downstream handling of un-flattened control flow. ``None``
+        (default) uses the default policy, which converts every ETP-relevant
+        ``cond``, unrolls every ETP-relevant ``scan`` of static length at
+        most 16, keeps weight-free ``while`` loops that touch hidden state as
+        opaque forward nodes (``while_hidden='opaque-fwd'``), and raises on
+        ETP primitives left inside a control-flow body
+        (``etp_in_control_flow='error'``). The policy is stored on the
+        returned :class:`ModuleInfo` (``minfo.control_flow``) so later
+        compiler passes apply the same rules.
     **model_kwargs
         The keyword arguments of the model.
 
