@@ -22,6 +22,7 @@ module. The submodule layout is:
 * :mod:`._primitive` — :class:`ETPPrimitive` + :func:`register_primitive`
 * :mod:`.dense` — ``etp_mm_p``, ``etp_mv_p``, :func:`matmul`
 * :mod:`.grouped` — ``etp_gmm_p``, ``etp_gmv_p``, :func:`grouped_matmul`
+* :mod:`.einsum` — ``etp_einsum_p``, :func:`einsum`
 * :mod:`.elemwise` — ``etp_elemwise_p``, :func:`element_wise`
 * :mod:`.embedding` — ``etp_emb_p``, ``etp_emb_v_p``, :func:`embedding`
 * :mod:`.conv` — ``etp_conv_p``, :func:`conv`
@@ -61,6 +62,7 @@ from ._registries import (
 from .conv import _etp_conv_impl
 from .conv import conv, etp_conv_p
 from .dense import etp_mm_p, etp_mv_p, matmul
+from .einsum import einsum, etp_einsum_p
 from .elemwise import element_wise, etp_elemwise_p
 from .embedding import embedding, etp_emb_p, etp_emb_v_p
 from .grouped import etp_gmm_p, etp_gmv_p, grouped_matmul
@@ -102,6 +104,7 @@ __all__ = [
     'etp_gmv_p',
     'etp_emb_p',
     'etp_emb_v_p',
+    'etp_einsum_p',
     'etp_elemwise_p',
     'etp_conv_p',
     'etp_sp_mm_p',
@@ -113,6 +116,7 @@ __all__ = [
     'matmul',
     'grouped_matmul',
     'embedding',
+    'einsum',
     'element_wise',
     'conv',
     'sparse_matmul',

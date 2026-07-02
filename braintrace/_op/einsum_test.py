@@ -242,3 +242,19 @@ class TestEinsumEtpRules:
             {'weight': _fake_var((2, 3, 4))}, 2)
         assert pp.shape == (5, 2, 4, 2)
         assert pp.dtype == jnp.bfloat16
+
+
+class TestPublicExports:
+
+    def test_top_level_exports(self):
+        assert braintrace.einsum is einsum
+        assert 'einsum' in braintrace.__all__
+
+    def test_op_package_exports(self):
+        import braintrace._op as op
+        for name in ('etp_einsum_p', 'einsum'):
+            assert name in op.__all__
+
+    def test_matmul_rank_guard_points_to_einsum(self):
+        with pytest.raises(ValueError, match='einsum'):
+            braintrace.matmul(jnp.ones((5, 2, 3)), jnp.ones((3, 4)))
