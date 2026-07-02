@@ -34,6 +34,35 @@ from braintrace._etrace_model_test import (
 )
 
 
+class TestControlFlowPolicyThreading:
+    """``extract_module_info`` resolves the control-flow policy once and the
+    returned ``ModuleInfo`` carries it, so downstream passes (hidden groups,
+    relations, perturbation) consult the same policy the canonicalizer used."""
+
+    def _minfo(self, **kwargs):
+        gru = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(gru)
+        inputs = brainstate.random.rand(3)
+        return braintrace.extract_module_info(gru, inputs, **kwargs)
+
+    def test_default_policy_stored(self):
+        from braintrace._compiler import DEFAULT_CONTROL_FLOW_POLICY
+        minfo = self._minfo()
+        assert minfo.control_flow is DEFAULT_CONTROL_FLOW_POLICY
+
+    def test_custom_policy_round_trips(self):
+        policy = braintrace.ControlFlowPolicy(
+            cond='opaque', while_hidden='error', etp_in_control_flow='exclude',
+        )
+        minfo = self._minfo(control_flow=policy)
+        assert minfo.control_flow is policy
+
+    def test_add_jaxpr_outs_preserves_policy(self):
+        policy = braintrace.ControlFlowPolicy(while_hidden='error')
+        minfo = self._minfo(control_flow=policy)
+        assert minfo.add_jaxpr_outs([]).control_flow is policy
+
+
 class Test_extract_model_info:
     @pytest.mark.parametrize(
         "cls",

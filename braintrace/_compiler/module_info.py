@@ -247,6 +247,11 @@ class ModuleInfo(NamedTuple):
         Number of original output variables.
     num_var_state : int
         Number of state-variable outputs.
+    control_flow : ControlFlowPolicy
+        The control-flow policy the canonicalizer ran with. Downstream
+        passes (hidden-group discovery, relation discovery, hidden
+        perturbation) consult this same policy so opaque control-flow
+        handling is consistent across the whole compilation.
 
     See Also
     --------
@@ -293,6 +298,9 @@ class ModuleInfo(NamedTuple):
     # output
     num_var_out: int  # number of original output variables
     num_var_state: int  # number of state variable outputs
+
+    # control-flow policy the canonicalizer ran with
+    control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY
 
     @property
     def jaxpr(self) -> Jaxpr:
@@ -647,12 +655,13 @@ def extract_module_info(
     # equation's original outvars and never touch the jaxpr's invars/outvars,
     # so every Var-identity table built above stays valid; only the equation
     # list (and consts) change.
+    policy = control_flow if control_flow is not None else DEFAULT_CONTROL_FLOW_POLICY
     closed_jaxpr = canonicalize_control_flow(
         closed_jaxpr,
         weight_invars=set(weight_invars),
         hidden_invars=set(hidden_path_to_invar.values()),
         hidden_outvars=set(hidden_path_to_outvar.values()),
-        policy=control_flow if control_flow is not None else DEFAULT_CONTROL_FLOW_POLICY,
+        policy=policy,
     )
 
     return ModuleInfo(
@@ -684,4 +693,7 @@ def extract_module_info(
         # output parameters
         num_var_out=num_out,
         num_var_state=len(jaxpr.outvars[num_out:]),
+
+        # control-flow policy
+        control_flow=policy,
     )
