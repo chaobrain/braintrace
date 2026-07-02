@@ -28,13 +28,20 @@ equation by classifying each weight/output axis letter:
 The batched equation form is required: the leading ``x``/``y`` letter is the
 batch axis and must not appear in ``w_spec``.
 
-Shared-axis equations are currently rejected at the user API
-(:data:`_SHARED_AXES_SUPPORTED` is ``False``): the sum-then-broadcast
-treatment is the scheme conv used for spatial axes *before* the ETP audit
-established it was inexact and rewrote conv with a per-position kernel
-trace (``ETP_RULES_INSTANT_DRTRL`` / ``ETP_RULES_SOLVE_DRTRL``). The gate
-opens only if the BPTT oracle proves exactness for einsum's case — see the
-phase-3 plan, Task 6.
+Shared-axis equations are supported, oracle-proven exact for D-RTRL **when
+the hidden state carries the shared axes** (its shape equals the einsum
+output's, e.g. a ``(B, T, N)`` hidden fed by ``'btk,kn->btn'``): the BPTT
+oracle confirms element-wise equality both for t-diagonal tails and for
+tails that mix positions (each ``h[t]`` also seeing a mean over all ``t``).
+This differs from pre-audit conv's inexact spatial sum: here every hidden
+unit keeps its own trace column, so no per-position structure is lost.
+When the hidden state does *not* carry the shared axis (output positions
+collapse into the same hidden units — the conv-analog case), the
+hidden-shaped cotangent cannot express per-position structure and the
+algorithm fails loudly at compile time with a cotangent-shape error;
+supporting it would need a per-position trace via
+``ETP_RULES_INSTANT_DRTRL`` / ``ETP_RULES_SOLVE_DRTRL``, the pattern conv
+uses.
 """
 
 from __future__ import annotations
@@ -52,9 +59,6 @@ __all__ = [
     'etp_einsum_p',
     'einsum',
 ]
-
-_SHARED_AXES_SUPPORTED = False
-
 
 class EinsumSpec(NamedTuple):
     """Parsed, classified form of an ETP einsum equation."""
@@ -153,8 +157,8 @@ def _einsum_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, equation: str,
     r"""Propagate ``∂h/∂y`` through the weight-shaped trace, mechanically.
 
     Diagonal letters broadcast; shared letters are summed out of
-    ``hidden_dim`` first (deferred reduction, the pre-audit conv scheme —
-    which is why shared-axis equations stay gated at the user API);
+    ``hidden_dim`` first (oracle-proven exact when the hidden state carries
+    the shared axes — see the module docstring for the supported regime);
     contracted letters are free trace axes. The broadcast-multiply is one
     letter-aligned ``jnp.einsum`` whose output spec equals the trace spec,
     so no manual transpose/reshape logic is needed.
@@ -249,7 +253,7 @@ def einsum(
     axis classification (see the module docstring): weight axes present in
     the output broadcast (*diagonal*), weight axes consumed by ``x`` are free
     trace axes (*contracted*), and output axes absent from the weight are
-    *shared* (currently gated off, see Raises).
+    *shared* (supported when the hidden state carries them, see Notes).
 
     Parameters
     ----------
@@ -282,12 +286,6 @@ def einsum(
     ValueError
         If the equation violates the v1 restrictions, or if ``x`` /
         ``weight`` rank does not match the equation.
-    NotImplementedError
-        If the equation has shared axes (output axes absent from the weight
-        spec, e.g. ``'btk,kn->btn'``): their sum-then-broadcast trace
-        propagation is not exact (the same defect the ETP audit fixed in
-        conv with per-position kernel traces), so they stay gated until a
-        per-position trace lands.
 
     See Also
     --------
@@ -299,6 +297,16 @@ def einsum(
     There is no bias parameter: compose with a plain add (a plain-add
     parameter is deliberately excluded from ETP by the selection principle)
     or use :func:`matmul` / :func:`grouped_matmul`, which carry one.
+
+    Shared-axis equations (output axes absent from the weight spec, e.g.
+    the ``t`` in ``'btk,kn->btn'``) are exact for D-RTRL when the hidden
+    state fed by the output **carries the shared axes** (e.g. a
+    ``(B, T, N)`` hidden state) — proven against the BPTT oracle. If the
+    output's shared-axis positions instead collapse into a smaller hidden
+    state (e.g. ``rec.sum(axis=1)`` into a ``(B, N)`` hidden), online
+    learning fails loudly at compile time with a cotangent-shape error:
+    the per-position structure required for the weight gradient cannot be
+    recovered from a hidden-shaped learning signal.
 
     Examples
     --------
@@ -317,13 +325,6 @@ def einsum(
         (5, 2, 4)
     """
     spec = parse_etp_einsum(equation)
-    if spec.shared and not _SHARED_AXES_SUPPORTED:
-        raise NotImplementedError(
-            f'einsum equations with output axes absent from the weight spec '
-            f'(shared axes {spec.shared!r}) are not yet supported for ETP '
-            f'online learning: {equation!r}. Supported today: equations whose '
-            'non-batch output axes all appear in the weight spec.'
-        )
     if getattr(x, 'ndim', None) != len(spec.x_spec):
         raise ValueError(
             f'x has rank {getattr(x, "ndim", None)} but the equation expects '

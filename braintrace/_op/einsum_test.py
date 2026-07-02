@@ -107,9 +107,12 @@ class TestForwardCorrectness:
         got = einsum('bk,kn->bn', x, w, weight_fn=lambda ww: ww ** 2)
         np.testing.assert_allclose(got, jnp.einsum('bk,kn->bn', x, w ** 2), atol=1e-5)
 
-    def test_shared_axis_equation_gated(self):
-        with pytest.raises(NotImplementedError):
-            einsum('btk,kn->btn', jnp.ones((5, 2, 3)), jnp.ones((3, 4)))
+    def test_shared_axis_equation_forward(self):
+        brainstate.random.seed(2)
+        x = brainstate.random.randn(5, 2, 3)
+        w = brainstate.random.randn(3, 4)
+        got = einsum('btk,kn->btn', x, w)
+        np.testing.assert_allclose(got, jnp.einsum('btk,kn->btn', x, w), atol=1e-5)
 
     def test_rank_mismatch_rejected(self):
         with pytest.raises(ValueError):
@@ -191,9 +194,9 @@ class TestEinsumEtpRules:
         np.testing.assert_allclose(got['weight'], want, atol=1e-6)
 
     def test_yw_to_w_shared_axis_sums_hidden(self):
-        """Rule-level contract for shared axes (API gate notwithstanding):
-        hd is summed over 't' then broadcast — the pre-audit conv scheme,
-        pinned here as the rule's defined behaviour while the gate is closed."""
+        """Rule-level contract for shared axes: hd is summed over 't' then
+        broadcast — oracle-proven exact when the hidden state carries the
+        shared axes (see TestSharedAxisOracle)."""
         brainstate.random.seed(14)
         hd = brainstate.random.randn(5, 2, 4)              # (b, t, n)
         tr = {'weight': brainstate.random.randn(5, 3, 4)}  # (b, k, n)
@@ -372,3 +375,122 @@ class TestEinsumOracle:
                 m, decay_or_rank=0.9, vjp_method='multi-step'))
         assert_direction_aligned(
             approx, bptt, min_cosine=0.9, min_sign_agreement=0.8, keys=[('w',)])
+
+
+def _shared_axis_rnn_factory(T2=2, N=3, n_in=3, seed=0):
+    """Recurrence through 'btk,kn->btn' — the weight is reused across the
+    t axis (shared), the conv-like case. The hidden state is kept rank-3
+    ``(1, T2, N)`` so the einsum relation is actually discovered (see
+    :func:`_per_head_rnn_factory`)."""
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                k = jax.random.PRNGKey
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed), (N, N)))
+                self.win = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed + 1), (n_in, T2 * N)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, T2, N)))
+
+            def update(self, x):
+                rec = braintrace.einsum('btk,kn->btn', self.h.value, self.w.value)
+                inp = (x @ self.win.value).reshape(1, T2, N)
+                self.h.value = jax.nn.tanh(inp + rec)
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+class TestSharedAxisOracle:
+
+    def test_d_rtrl_multistep_matches_bptt_shared_axis(self):
+        factory = _shared_axis_rnn_factory()
+        inputs = _seq_inputs(seed=45)
+        # Non-vacuity guard: the shared-axis model must compile to an
+        # etp_einsum relation, otherwise the comparison below proves nothing.
+        rels = braintrace.find_hidden_param_op_relations_from_module(
+            factory(), inputs[0])
+        assert [r.primitive.name for r in rels].count('etp_einsum') == 1
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_gate_is_open(self):
+        y = braintrace.einsum('btk,kn->btn', jnp.ones((5, 2, 3)), jnp.ones((3, 4)))
+        assert y.shape == (5, 2, 4)
+
+    def test_d_rtrl_exact_with_cross_position_mixing_tail(self):
+        """Shared-axis exactness is not an artifact of a t-diagonal tail:
+        even when every h[t] also sees the mean over all t positions (the
+        conv-like cross-position mixing), D-RTRL matches BPTT exactly."""
+        T2, N, n_in = 2, 3, 3
+
+        def factory():
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    k = jax.random.PRNGKey
+                    self.w = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(0), (N, N)))
+                    self.win = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(1), (n_in, T2 * N)))
+                    self.h = brainstate.HiddenState(jnp.zeros((1, T2, N)))
+
+                def update(self, x):
+                    rec = braintrace.einsum('btk,kn->btn', self.h.value, self.w.value)
+                    rec = rec + rec.mean(axis=1, keepdims=True)
+                    inp = (x @ self.win.value).reshape(1, T2, N)
+                    self.h.value = jax.nn.tanh(inp + rec)
+                    return self.h.value
+
+            return Net()
+
+        inputs = _seq_inputs(seed=46)
+        rels = braintrace.find_hidden_param_op_relations_from_module(
+            factory(), inputs[0])
+        assert [r.primitive.name for r in rels].count('etp_einsum') == 1
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_collapsing_hidden_state_fails_loudly(self):
+        """When the hidden state does NOT carry the shared axis (y's t
+        positions collapse into the same hidden units, the conv-analog
+        case), the algorithm must fail loudly at compile time — the
+        hidden-shaped cotangent cannot express per-position structure, so
+        a silent sum-then-broadcast gradient would be wrong."""
+        T2, N, n_in = 2, 3, 3
+
+        def factory():
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    k = jax.random.PRNGKey
+                    self.w = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(0), (N, N)))
+                    self.win = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(1), (n_in, N)))
+                    self.h = brainstate.HiddenState(jnp.zeros((1, N)))
+
+                def update(self, x):
+                    xs = jnp.stack(
+                        [self.h.value * (0.5 + t) for t in range(T2)], axis=1)
+                    rec = braintrace.einsum('btk,kn->btn', xs, self.w.value)
+                    self.h.value = jax.nn.tanh(x @ self.win.value + rec.sum(axis=1))
+                    return self.h.value
+
+            return Net()
+
+        inputs = _seq_inputs(seed=47)
+        with pytest.raises(ValueError):
+            online_param_gradients(
+                factory, inputs,
+                algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
