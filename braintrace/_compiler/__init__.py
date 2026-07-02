@@ -19,6 +19,11 @@ from braintrace._compiler.base import (
     find_element_exist_in_the_set,
     find_matched_vars,
 )
+from braintrace._compiler.canonicalize import (
+    ControlFlowPolicy,
+    DEFAULT_CONTROL_FLOW_POLICY,
+    if_convert_conds,
+)
 from braintrace._compiler.diagnostics import (
     CompilationRecord,
     DiagnosticKind,
