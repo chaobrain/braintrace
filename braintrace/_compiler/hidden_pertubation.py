@@ -237,11 +237,16 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         perturbed jaxpr (JAX has no transpose rule for ``while``, so an
         undetached loop would make the VJP of the perturbed step
         untraceable). The perturbation add ``h = fresh + p`` stays *outside*
-        the detach, so per-step learning signals ``dL/dp`` are exact.
-        Consequence: any *reverse-mode* path through the loop body within
-        the same step contributes zero — temporal credit through the loop
-        is carried instead by the forward-computed hidden-to-hidden
-        Jacobian ``D^t`` (see ``hidden_group.jacfwd_last_dim``).
+        the detach, so the loop's *own* hidden group keeps an exact per-step
+        learning signal ``dL/dp``. Consequence: any *reverse-mode* path
+        through the loop body within the same step contributes zero — the
+        loop's temporal credit is carried instead by the forward-computed
+        hidden-to-hidden Jacobian ``D^t`` (see
+        ``hidden_group.jacfwd_last_dim``), but a parameter or *other* hidden
+        group whose only same-step path to the loss crosses the loop (e.g.
+        an upstream layer feeding the loop) receives a ZERO learning signal.
+        A WARNING-level ``CONTROL_FLOW_OPAQUE_FWD`` diagnostic
+        (``site='perturbation'``) records every detach.
     """
     __module__ = 'braintrace'
 
@@ -418,12 +423,19 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             n_detached += 1
         emit(
             kind=DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD,
-            level=DiagnosticLevel.INFO,
+            level=DiagnosticLevel.WARNING,
             message=(
                 'Detached the inputs of a hidden-producing while loop in the '
-                'perturbed jaxpr: reverse-mode signals THROUGH the loop are '
-                'zero there (temporal credit flows via the forward-computed '
-                'hidden-to-hidden Jacobian instead).'
+                'perturbed jaxpr: same-step reverse-mode signals THROUGH the '
+                'loop are zero there. The loop\'s own hidden-state learning '
+                'signal stays exact and its temporal credit flows via the '
+                'forward-computed hidden-to-hidden Jacobian, but any '
+                'parameter or other hidden group whose only same-step path '
+                'to the loss crosses this loop receives a ZERO learning '
+                'signal (e.g. the weights of an upstream layer feeding the '
+                'loop). Move such parameters\' influence out of the loop '
+                'inputs, or avoid stacking trainable layers behind a '
+                'while-hidden layer.'
             ),
             context={'site': 'perturbation', 'n_detached': n_detached},
         )

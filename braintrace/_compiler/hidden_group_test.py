@@ -1322,6 +1322,37 @@ class WhileInputProjCell(brainstate.nn.Module):
         return h_new
 
 
+class WhileJitMixingCell(brainstate.nn.Module):
+    """Same recurrent mixing as ``WhileMixingCell`` but hidden behind a
+    ``jax.jit``-wrapped helper inside the while body: the guard must descend
+    the call-like sub-jaxpr, or the mixing would silently survive as a
+    "diagonal" transition with wrong per-position Jacobians."""
+
+    def __init__(self, n, k=2):
+        super().__init__()
+        self.k = k
+        self.R = 0.1 * brainstate.random.randn(n, n)
+        self.h = brainstate.HiddenState(jnp.zeros(n))
+
+    def init_state(self, *args, **kwargs):
+        self.h.value = jnp.zeros_like(self.h.value)
+
+    def update(self, x):
+        h_prev = self.h.value
+        mix = jax.jit(lambda h: jnp.tanh(h @ self.R + x))
+
+        def cond_fn(s):
+            return s[0] < self.k
+
+        def body_fn(s):
+            i, h = s
+            return i + 1, mix(h)
+
+        _, h_new = jax.lax.while_loop(cond_fn, body_fn, (0, h_prev))
+        self.h.value = h_new
+        return h_new
+
+
 def _constvals_for(group, x):
     """Values for ``group.transition_jaxpr_constvars``: the float vector
     matching ``x``'s shape gets ``x``; every other constvar (e.g. the loop
@@ -1541,3 +1572,22 @@ class TestWhileRecurrentMixingGuard:
         assert 'while' in names
         kinds = [r.kind for r in reporter.records()]
         assert DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
+
+    def test_jit_wrapped_mixing_in_body_is_still_a_boundary(self):
+        """Regression: mixing behind a ``jax.jit`` call inside the while body
+        must not evade the guard (a missed boundary means the transition is
+        kept as position-diagonal and ``diagonal_jacobian`` silently returns
+        Jacobian row sums instead of the true diagonal)."""
+        cell = WhileJitMixingCell(4)
+        brainstate.nn.init_all_states(cell)
+        x = brainstate.random.rand(4)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                groups, _pg = find_hidden_groups_from_module(cell, x)
+        assert len(groups) == 1
+        group = groups[0]
+        # zero-recurrence fallback, exactly like the un-jitted mixing cell
+        assert list(group.transition_jaxpr.eqns) == []
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING in kinds

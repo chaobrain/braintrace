@@ -1396,8 +1396,11 @@ class TestCategoryS_WhileHiddenOpaqueFwd:
     (``dg_hid_perturb_or_dl2h``) as the learning signal; the residual
     hidden-input cotangent (``dg_last_hiddens``) is consumed only by the
     multi-step branch. Detaching the while's inputs in the perturbed jaxpr
-    therefore does not alter the single-step learning signal — ``dL/dε``
-    stays exact because the ``h = fresh + ε`` add sits outside the detach.
+    therefore keeps the loop's OWN hidden group's single-step signal exact —
+    ``dL/dε`` is unaffected because the ``h = fresh + ε`` add sits outside
+    the detach. Scope caveat: a parameter or *other* hidden group whose only
+    same-step path to the loss crosses the loop gets a zero signal (pinned
+    in ``_algorithm/tests/while_support_test.py``).
     """
 
     def _build(self, **compile_kwargs):

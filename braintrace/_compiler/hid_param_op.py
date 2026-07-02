@@ -678,6 +678,9 @@ def _scan_jaxpr_for_etp_eqns(
     for eqn in jaxpr.eqns:
         if is_etp_primitive(eqn.primitive):
             if inside_control_flow:
+                # Use-site validation (project precedent): a bogus knob value
+                # only surfaces when an ETP eqn is actually found inside
+                # control flow — models without such eqns never read it.
                 if policy.etp_in_control_flow not in ('error', 'exclude'):
                     raise ValueError(
                         f"policy.etp_in_control_flow must be 'error' or "

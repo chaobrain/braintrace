@@ -22,17 +22,24 @@
   perturbation pass rewires every hidden-producing `while` to consume
   `stop_gradient` copies of its inputs in the *perturbed jaxpr only*; the
   `h = fresh + ε` add stays outside the detach, so the single-step learning
-  signal (taken exclusively from the perturbation cotangents) is exact.
-  Verified: D-RTRL single-step gradients on a while-settle model match its
-  hand-composed no-`while` twin element-wise, and the twin matches the BPTT
-  oracle. `vjp_method='multi-step'` on a `while`-hidden model still raises
-  JAX's reverse-through-`while_loop` `ValueError` (documented limitation —
-  use the default single-step path).
-- **A weight used through an ETP primitive inside a `while` is now a hard,
-  actionable error** (`WEIGHT_IN_WHILE` ERROR diagnostic +
-  `NotImplementedError`): restructure the loop, use a fixed-length
-  scan/`for_loop` (which the compiler unrolls), or apply the weight through
-  a plain (non-ETP) op to exclude it from ETP.
+  signal of the loop's **own** hidden group (taken exclusively from the
+  perturbation cotangents) is exact. Verified: D-RTRL single-step gradients
+  on a while-settle model match its hand-composed no-`while` twin
+  element-wise, and the twin matches the BPTT oracle.
+  **Limitation:** the detach zeroes every same-step reverse path *through*
+  the loop, so a parameter or other hidden group whose only same-step path
+  to the loss crosses the loop — e.g. the weights of an upstream layer
+  feeding a while-hidden layer — receives a **zero** learning signal (a
+  WARNING-level `CONTROL_FLOW_OPAQUE_FWD` diagnostic records each detach;
+  the zero-upstream-gradient behavior is pinned by test).
+  `vjp_method='multi-step'` on a `while`-hidden model still raises JAX's
+  reverse-through-`while_loop` `ValueError` (documented limitation — use
+  the default single-step path).
+- **A weight used inside a `while` is now a hard, actionable error**
+  (`WEIGHT_IN_WHILE` ERROR diagnostic + `NotImplementedError`): move the
+  weight application outside the loop so the loop consumes only its result
+  (subject to the same-step limitation above), or use a fixed-length
+  scan/`for_loop` (which the compiler unrolls).
 - **Breaking: ETP primitives left inside an un-flattened `scan`/`while`/
   `cond` body now raise** instead of being silently warned-and-excluded
   (`etp_in_control_flow='error'`, the new default). Pass

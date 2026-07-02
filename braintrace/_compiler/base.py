@@ -137,10 +137,14 @@ def check_unsupported_op(
             guidance = (
                 'Weight state used inside a while loop; while bodies cannot '
                 'participate in online learning (a data-dependent trip count '
-                'admits no fixed per-iteration decomposition). Restructure '
-                'the loop, use a fixed-length scan/for_loop (which the '
-                'compiler unrolls), or apply the weight through a plain '
-                '(non-ETP) op to exclude it from ETP.'
+                'admits no fixed per-iteration decomposition). Move the '
+                'weight application outside the loop so the loop consumes '
+                'only its result, or use a fixed-length scan/for_loop (which '
+                'the compiler unrolls). Note that a hidden-producing while '
+                'drops same-step reverse-mode credit through its inputs: a '
+                'parameter whose only same-step path to the loss crosses the '
+                'loop receives a zero learning signal (see the while-hidden '
+                'limitation in the changelog).'
             )
             emit(
                 kind=DiagnosticKind.WEIGHT_IN_WHILE,

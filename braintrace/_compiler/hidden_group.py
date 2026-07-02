@@ -507,6 +507,18 @@ def block_diagonal_last_dim(
     return u.math.reshape(block, (*varshape, num_state, num_state))
 
 
+def _param_subjaxprs(eqn: JaxprEqn) -> List[Jaxpr]:
+    """Every jaxpr-valued param of an equation (ClosedJaxpr unwrapped;
+    tuple/list params such as cond ``branches`` flattened)."""
+    found: List[Jaxpr] = []
+    for val in eqn.params.values():
+        for item in (val if isinstance(val, (tuple, list)) else (val,)):
+            sub = getattr(item, 'jaxpr', item)
+            if isinstance(sub, Jaxpr):
+                found.append(sub)
+    return found
+
+
 def _transition_contains_while(jaxpr: Jaxpr) -> bool:
     """Whether *jaxpr* (descending sub-jaxprs) contains a ``while`` equation.
 
@@ -516,15 +528,9 @@ def _transition_contains_while(jaxpr: Jaxpr) -> bool:
     for eqn in jaxpr.eqns:
         if is_while_primitive(eqn):
             return True
-        for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr', 'call_jaxpr'):
-            sub = eqn.params.get(key)
-            if sub is not None and _transition_contains_while(getattr(sub, 'jaxpr', sub)):
+        for sub in _param_subjaxprs(eqn):
+            if _transition_contains_while(sub):
                 return True
-        branches = eqn.params.get('branches')
-        if branches is not None:
-            for b in branches:
-                if _transition_contains_while(getattr(b, 'jaxpr', b)):
-                    return True
     return False
 
 
@@ -546,9 +552,8 @@ def _map_positions_to_subjaxpr_seeds(
     *carry, *xs]`` positionally identical to ``body.invars``; ``cond`` invars
     are ``[pred, *operands]`` with each branch taking the operands.
     """
-    name = eqn.primitive.name
     results: List[Tuple[Jaxpr, List[Var], Dict[Var, Var]]] = []
-    if name == 'while':
+    if is_while_primitive(eqn):
         cn = eqn.params['cond_nconsts']
         bn = eqn.params['body_nconsts']
         body = eqn.params['body_jaxpr'].jaxpr
@@ -565,7 +570,7 @@ def _map_positions_to_subjaxpr_seeds(
                 feedback[ov] = body.invars[bn + c]
         if seeds:
             results.append((body, seeds, feedback))
-    elif name == 'scan':
+    elif is_scan_primitive(eqn):
         body = eqn.params['jaxpr'].jaxpr
         num_consts = eqn.params['num_consts']
         num_carry = eqn.params['num_carry']
@@ -577,7 +582,7 @@ def _map_positions_to_subjaxpr_seeds(
                 feedback[ov] = body.invars[num_consts + c]
         if seeds:
             results.append((body, seeds, feedback))
-    elif name == 'cond':
+    elif is_cond_primitive(eqn):
         for branch in eqn.params['branches']:
             b = getattr(branch, 'jaxpr', branch)
             seeds = [b.invars[j - 1] for j in positions if j >= 1]
@@ -597,9 +602,15 @@ def _jaxpr_mixes_from(
     Runs a forward reachability sweep from the seed variables, returning
     ``True`` as soon as a ``_RECURRENT_WEIGHT_MIXING_PRIMITIVES`` equation
     consumes a reachable value; nested control flow is descended with the
-    same position mapping. The sweep is repeated until the carry feedback
-    (loop outvar fed back as next-iteration invar) adds no new seeds, so
-    mixing that only appears after the first loop iteration is still found.
+    same position mapping. Call-like equations (``jit``/``pjit``, ``remat``,
+    ``custom_jvp_call``/``custom_vjp_call``) are descended positionally, so a
+    ``jax.jit``-wrapped helper inside a loop body cannot hide mixing; any
+    other equation carrying a body jaxpr whose arity does not match is
+    conservatively reported as mixing (degrading to the zero-recurrence
+    fallback plus a warning, never to a silently wrong Jacobian). The sweep
+    is repeated until the carry feedback (loop outvar fed back as
+    next-iteration invar) adds no new seeds, so mixing that only appears
+    after the first loop iteration is still found.
     """
     seed_set = set(seeds)
     while True:
@@ -616,6 +627,13 @@ def _jaxpr_mixes_from(
             if is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn):
                 for sub, sub_seeds, sub_fb in _map_positions_to_subjaxpr_seeds(eqn, hit):
                     if _jaxpr_mixes_from(sub, sub_seeds, sub_fb):
+                        return True
+            else:
+                for sub in _param_subjaxprs(eqn):
+                    if len(sub.invars) != len(eqn.invars):
+                        return True  # unknown invar mapping: assume mixing
+                    sub_seeds = [sub.invars[j] for j in hit]
+                    if _jaxpr_mixes_from(sub, sub_seeds, {}):
                         return True
             reachable.update(v for v in eqn.outvars if isinstance(v, Var))
         new_seeds = set(seed_set)

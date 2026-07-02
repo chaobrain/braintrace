@@ -37,10 +37,19 @@ oracle. That anchors the primary assertion above to ground truth.
   (``etp_in_control_flow='error'``).
 - ``vjp_method='multi-step'`` on the while model hits JAX's structural
   reverse-through-``while_loop`` ``ValueError`` — the documented limitation;
-  the single-step path is the supported one (its learning signal comes
-  exclusively from the perturbation cotangents, which the detach keeps
-  exact).
+  the single-step path is the supported one (the loop's own hidden group's
+  learning signal comes exclusively from the perturbation cotangents, which
+  the detach keeps exact).
+- **Detach scope limitation (pinned as documented behavior):** the detach
+  zeroes every same-step reverse path *through* the loop, so an upstream
+  trainable layer whose only path to the loss crosses a while-hidden layer
+  receives an exactly-zero learning signal — its gradient is zero while the
+  twin's is not. Stacking trainable layers behind a while-hidden layer is
+  therefore unsupported for upstream credit; the compile emits a
+  WARNING-level ``CONTROL_FLOW_OPAQUE_FWD`` diagnostic for each detach.
 """
+
+import warnings
 
 import brainstate
 import jax
@@ -177,3 +186,71 @@ def test_multistep_vjp_on_while_model_raises_reverse_through_while():
             spec.factory, inputs,
             algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'),
         )
+
+
+# --- documented limitation: upstream layer behind a while-hidden layer ----------
+
+class _StackedWhileNet(brainstate.nn.Module):
+    """Layer 1: tanh RNN (ETP ``w1``) feeding layer 2: while-settle (ETP
+    ``w2``). ``while_layer=False`` replaces the loop with its hand-composed
+    ``k``-fold twin; the same seed gives both variants identical weights."""
+
+    def __init__(self, n_in: int = 3, n_rec: int = 4, k: int = 3,
+                 decay: float = 0.8, while_layer: bool = True):
+        super().__init__()
+        self.k = k
+        self.decay = decay
+        self.while_layer = while_layer
+        with brainstate.random.seed_context(2):
+            self.w1 = brainstate.ParamState(0.1 * brainstate.random.randn(n_in, n_rec))
+            self.w2 = brainstate.ParamState(0.1 * brainstate.random.randn(n_rec, n_rec))
+        self.h1 = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+        self.h2 = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+    def update(self, x):
+        x_row = x.reshape(1, -1)
+        self.h1.value = jnp.tanh(
+            braintrace.matmul(x_row, self.w1.value) + 0.5 * self.h1.value
+        )
+        pre = braintrace.matmul(self.h1.value, self.w2.value) + self.decay * self.h2.value
+        h_prev = self.h2.value
+        if self.while_layer:
+            def body(s):
+                i, h = s
+                return i + 1, h + 0.5 * jnp.tanh(pre - h)
+
+            _, h_new = jax.lax.while_loop(lambda s: s[0] < self.k, body, (0, h_prev))
+        else:
+            h_new = h_prev
+            for _ in range(self.k):
+                h_new = h_new + 0.5 * jnp.tanh(pre - h_new)
+        self.h2.value = h_new
+        return h_new
+
+
+def test_upstream_layer_gradient_is_zero_behind_while_DOCUMENTED_LIMITATION():
+    """The perturbation detach zeroes every same-step reverse path THROUGH the
+    loop: the upstream layer's weight ``w1`` (whose only path to the loss
+    crosses the while) gets an exactly-zero gradient, while the twin's is
+    substantially nonzero. The while layer's own weight ``w2`` still matches
+    the twin exactly. This is the documented while-hidden limitation, not an
+    approximation — a WARNING-level CONTROL_FLOW_OPAQUE_FWD diagnostic is
+    emitted at compile time for each detach."""
+    inputs = _inputs(6, 3)
+
+    def grads(while_layer):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            return online_param_gradients_singlestep_naive(
+                lambda: _StackedWhileNet(while_layer=while_layer),
+                inputs,
+                algo_factory=braintrace.D_RTRL,
+            )
+
+    g_while = grads(True)
+    g_twin = grads(False)
+    # the while layer's own weight: exact match with the twin
+    assert_param_gradients_close(g_while, g_twin, atol=ATOL_EQUIV, keys=[('w2',)])
+    # the upstream weight: exactly zero under the while model, nonzero in the twin
+    assert bool(jnp.all(jnp.asarray(g_while[('w1',)]) == 0))
+    assert float(jnp.max(jnp.abs(jnp.asarray(g_twin[('w1',)])))) > 1e-4
