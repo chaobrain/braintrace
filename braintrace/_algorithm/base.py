@@ -81,8 +81,13 @@ class ETraceAlgorithm(brainstate.nn.Module):
         The other states.
     is_compiled : bool
         Whether the etrace algorithm has been compiled.
-    running_index : brainstate.ParamState[int]
-        The running index.
+    running_index : brainstate.LongTermState[int]
+        Zero-based count of previously-completed ``update()`` calls: it reads
+        ``0`` during the first call, ``1`` during the second, and so on --
+        i.e. the value used *inside* a given ``update()`` is the
+        pre-increment count, not the 1-based call number. It is incremented
+        by one immediately after each ``update()`` completes, and reset back
+        to ``0`` by ``reset_state()``.
     """
     __module__ = 'braintrace'
 

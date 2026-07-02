@@ -202,7 +202,9 @@ def _elemwise_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     Args:
         x_var: Unused (``x_invar_index=None``).
         y_var: Output variable descriptor with shape.
-        weight_vars: Dict with key 'weight' (unused in body).
+        weight_vars: Dict with key 'weight'. Only its dtype is consulted
+            (unused otherwise); falls back to ``y_var``'s dtype alone when
+            ``None`` (e.g. direct unit tests).
         num_hidden_state: Number of hidden states :math:`n_{\text{state}}`.
         group: The owning :class:`HiddenGroup`. When supplied, its (possibly
             batched) ``varshape`` is used for the trace leading axes; falls back
@@ -210,9 +212,22 @@ def _elemwise_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
 
     Returns:
         ``{'weight': zeros(*leading_shape, n_state)}``.
+
+    Notes
+    -----
+    The trace dtype is derived from the weight leaf and ``y_var`` (the
+    hidden-group output) via :func:`jax.numpy.result_type` rather than left
+    to ``jnp.zeros``' default (which silently follows the global x64 flag
+    instead of the operands' actual dtype). ``x_var`` is unused here
+    (``x_invar_index=None`` for this primitive), so it is excluded from the
+    dtype computation.
     """
     leading = tuple(group.varshape) if group is not None else tuple(y_var.aval.shape)
-    return {'weight': jnp.zeros((*leading, num_hidden_state))}
+    dtype = (
+        jnp.result_type(y_var.aval.dtype, weight_vars['weight'].aval.dtype)
+        if weight_vars is not None else y_var.aval.dtype
+    )
+    return {'weight': jnp.zeros((*leading, num_hidden_state), dtype=dtype)}
 
 
 def _elemwise_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],

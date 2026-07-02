@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 
 from braintrace._typing import ArrayLike
+from ._common import extract_y_target
 from .param_dim_vjp import ParamDimVjpAlgorithm
 
 __all__ = ['OSTTP']
@@ -176,7 +177,19 @@ class OSTTP(ParamDimVjpAlgorithm):
                 )
 
     def update(self, x: ArrayLike, y_target: ArrayLike | None = None) -> Any:
-        """Call ``super().update(x)`` after stashing ``y_target`` for the hook."""
+        """Call ``super().update(x)`` after stashing ``y_target`` for ``_get_update_aux``.
+
+        The stash is read back synchronously by :meth:`_get_update_aux`
+        (called at the very start of the base class's ``update()``, before
+        any custom_vjp tracing happens) and threaded from there into
+        ``_true_update_fun`` as a genuine argument. This is required because
+        outer transforms (e.g. ``brainstate.transform.grad``) may stage the
+        forward trace and only invoke the custom_vjp fwd/bwd rules *after*
+        this Python-level call has already returned -- by then any
+        instance-attribute stash read directly inside ``_update_fn_fwd`` or
+        ``_update_fn_bwd`` would already see ``None``. Threading the value as
+        a real traced argument sidesteps that timing problem entirely.
+        """
         if self.target_timing == 'per-step' and y_target is None:
             raise ValueError(
                 "OSTTP(target_timing='per-step') requires y_target at every update() call."
@@ -187,9 +200,20 @@ class OSTTP(ParamDimVjpAlgorithm):
         finally:
             self._current_y_target = None
 
+    def _get_update_aux(self) -> Any:
+        """Supply ``y_target`` as the per-call auxiliary data (see base class)."""
+        return self._current_y_target
+
     def _compute_learning_signal(self, dl_autodiff: Any, args: Any) -> Any:
-        """Replace reverse-AD ``dL/dh`` with ``B_l @ y_target`` per HiddenGroup."""
-        y_target = self._current_y_target
+        """Replace reverse-AD ``dL/dh`` with ``B_l @ y_target`` per HiddenGroup.
+
+        ``args`` here is ``(x, y_target)`` -- the base class appends the
+        auxiliary data returned by :meth:`_get_update_aux` to the model's own
+        forward arguments before invoking this hook (see
+        ``ETraceVjpAlgorithm._update_fn_bwd``); :func:`extract_y_target`
+        pulls ``y_target`` from the trailing position.
+        """
+        y_target = extract_y_target(args)
         if y_target is None:
             # target_timing='sequence-end' with no y_target: zero out so traces
             # accumulate without emitting a weight update this step.

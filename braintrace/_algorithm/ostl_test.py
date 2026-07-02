@@ -282,3 +282,118 @@ def test_docstring_ostl_feedforward_compile_example_runs():
     assert y.shape == (1,)
     assert bool(jnp.all(jnp.isfinite(y)))
     assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+# ---------------------------------------------------------------------------
+# M3: OSTLRecurrent ("with-H") is gradient-equivalent to BPTT only when the
+# hidden-to-hidden Jacobian is block-diagonal (no cross-hidden-unit mixing
+# other than through the traced ETP recurrent weight). The per-parameter
+# D-RTRL trace machinery it inherits (``ParamDimVjpAlgorithm`` with
+# ``_include_recurrent_mixing=True``) discounts the weight trace by only the
+# per-position *diagonal block* of the recurrent Jacobian
+# (``HiddenGroup.diagonal_jacobian`` -> ``block_diagonal_last_dim``), so any
+# genuine cross-unit coupling that is not itself an ETP weight (e.g. a
+# ``jnp.roll`` mixing term) is dropped and the gradient departs from BPTT.
+# ---------------------------------------------------------------------------
+
+def _diagonal_recurrent_factory(n_in=3, n_rec=3, seed=0):
+    """Exactly block-diagonal hidden update: ``h_t = 0.5 * h_{t-1} + drive``.
+
+    The only path from ``h_{t-1}`` to ``h_t`` is the scalar leak (diagonal)
+    plus the traced ETP recurrent weight, so the D-RTRL diagonal
+    approximation is exact here.
+    """
+
+    def factory():
+        brainstate.random.seed(seed)
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(0.1 * brainstate.random.randn(n_in, n_rec))
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                drive = braintrace.matmul(x, self.w.value)
+                self.h.value = 0.5 * self.h.value + drive
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+def _off_block_diagonal_factory(n_in=3, n_rec=3, seed=0):
+    """Off-block-diagonal hidden update: adds a cross-hidden-unit
+    ``jnp.roll`` mixing term, so ``d h^t[p] / d h^{t-1}[q]`` is non-zero for
+    some ``p != q`` -- and that coupling is not carried by any ETP weight.
+    """
+
+    def factory():
+        brainstate.random.seed(seed)
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(0.1 * brainstate.random.randn(n_in, n_rec))
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                drive = braintrace.matmul(x, self.w.value)
+                self.h.value = (
+                    0.5 * self.h.value + drive
+                    + 0.1 * jnp.roll(self.h.value, 1, axis=-1)
+                )
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+def _ostl_recurrent_rel_err(factory, xs):
+    """Max relative error between the BPTT oracle and OSTLRecurrent's
+    single-step-naive online gradient, for the (single) ETP weight ``w``."""
+    from braintrace._algorithm.oracle import (
+        bptt_param_gradients,
+        online_param_gradients_singlestep_naive,
+    )
+
+    g_bptt = bptt_param_gradients(factory, xs)
+    g_online = online_param_gradients_singlestep_naive(
+        factory, xs,
+        algo_factory=lambda m: OSTLRecurrent(m, vjp_method='single-step'),
+    )
+    key = next(iter(g_bptt))
+    a = jnp.asarray(g_bptt[key])
+    b = jnp.asarray(g_online[key])
+    denom = jnp.maximum(jnp.abs(a).max(), 1e-12)
+    return float(jnp.abs(a - b).max() / denom)
+
+
+class TestOSTLRecurrentVsBPTT(unittest.TestCase):
+    """Pins the corrected M3 claim.
+
+    ``OSTLRecurrent`` matches BPTT exactly when the recurrent Jacobian is
+    block-diagonal, and is a genuine approximation (diverges from BPTT) once
+    hidden units mix through anything other than the traced ETP weight.
+    """
+
+    def test_exact_diagonal_model_matches_bptt(self):
+        with brainstate.environ.context(precision=64):
+            factory = _diagonal_recurrent_factory()
+            brainstate.random.seed(42)
+            xs = 0.3 * brainstate.random.randn(4, 1, 3)
+            rel = _ostl_recurrent_rel_err(factory, xs)
+        assert rel < 1e-10, f'expected an exact match on a diagonal model, got rel={rel:.3e}'
+
+    def test_off_block_diagonal_model_diverges_from_bptt(self):
+        with brainstate.environ.context(precision=64):
+            factory = _off_block_diagonal_factory()
+            brainstate.random.seed(42)
+            xs = 0.3 * brainstate.random.randn(4, 1, 3)
+            rel = _ostl_recurrent_rel_err(factory, xs)
+        assert rel > 1e-6, (
+            f'expected OSTLRecurrent to diverge from BPTT once the hidden '
+            f'update has off-block-diagonal mixing, got rel={rel:.3e}'
+        )

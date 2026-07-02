@@ -270,6 +270,147 @@ class TestGradientCorrectness:
 
 
 # ---------------------------------------------------------------------------
+# H2 regression: the trace_dtype init gate must mirror the runtime fast-path
+# predicate (fast_solve AND fp is not None AND fp.applicable(eqn_params)).
+# ---------------------------------------------------------------------------
+
+def _leaky_weight_fn_model(n_in=3, n_h=4, seed=3):
+    """Leaky integrator driven by a dense ETP matmul with an active
+    ``weight_fn`` transform hook.
+
+    ``weight_fn=jnp.tanh`` makes ``fp.applicable(eqn_params)`` return
+    ``False`` at runtime (see ``_dense_fast_applicable``), even though a
+    fast-path bundle is registered for ``etp_mm_p``. ``w`` reaches every
+    future hidden state through the leaky carry, so it is a genuine ETP
+    relation (mirrors ``oracle_models.leaky_linear``).
+    """
+    brainstate.random.seed(seed)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(brainstate.random.randn(n_in, n_h) * 0.2)
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_h)))
+
+        def update(self, x):
+            drive = braintrace.matmul(x, self.w.value, weight_fn=jnp.tanh)
+            self.h.value = 0.5 * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+class TestTraceDtypeGateMatchesRuntimePredicate:
+    """Before the fix, ``_init_param_dim_state`` cast the trace to
+    ``trace_dtype`` whenever ``get_fast_path_rules(primitive) is not None`` —
+    i.e. whenever a bundle *existed* for the primitive — regardless of
+    whether the runtime predicate (``fast_solve and fp is not None and
+    fp.applicable(eqn_params)``) would actually select the fast path. With
+    ``trace_dtype=jnp.bfloat16`` and a ``weight_fn`` on a dense op (or with
+    ``fast_solve=False``), the scan carry was allocated bfloat16 at init but
+    the legacy (non-fast) update emitted float32, raising a
+    ``jax.lax.scan`` carry-dtype ``TypeError``.
+    """
+
+    @staticmethod
+    def _run(*, fast_solve):
+        model = _leaky_weight_fn_model()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        inputs = brainstate.random.randn(4, 1, 3)  # (T, B=1, n_in)
+        algo = ParamDimVjpAlgorithm(
+            model, vjp_method='multi-step',
+            fast_solve=fast_solve, trace_dtype=jnp.bfloat16,
+        )
+        algo.compile_graph(inputs[0])
+        algo.init_etrace_state()
+
+        weights = model.states(brainstate.ParamState)
+
+        def loss(inp):
+            return algo(braintrace.MultiStepData(inp)).sum()
+
+        grads = brainstate.transform.grad(loss, weights)(inputs)
+        leaves = jax.tree.leaves(grads)
+        assert leaves
+        for leaf in leaves:
+            assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
+
+    def test_fast_solve_true_with_weight_fn_runs(self):
+        # fp exists for etp_mm_p, but weight_fn makes fp.applicable False ->
+        # use_fast is False at runtime despite fast_solve=True.
+        self._run(fast_solve=True)
+
+    def test_fast_solve_false_runs(self):
+        # fast_solve=False alone also disagrees with the old init gate
+        # (which only checked "does a fast-path bundle exist").
+        self._run(fast_solve=False)
+
+
+def _leaky_plain_model(n_in=3, n_h=4, seed=3):
+    """Leaky integrator driven by a *plain* dense ETP matmul — no
+    ``weight_fn``/``bias_fn`` hook at all.
+
+    Unlike ``_leaky_weight_fn_model``, nothing here makes
+    ``fp.applicable(eqn_params)`` return ``False`` on its own: per
+    ``_dense_fast_applicable``, the dense fast path for ``etp_mm_p`` is
+    genuinely applicable to this equation. That isolates the ``fast_solve``
+    conjunct of the init-gate predicate — with ``fast_solve=False``, the
+    *only* way ``use_fast`` can come out ``False`` is if ``fast_solve`` is
+    actually being consulted (as opposed to a test that also relies on
+    ``fp.applicable`` being ``False`` for an unrelated reason).
+    """
+    brainstate.random.seed(seed)
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(brainstate.random.randn(n_in, n_h) * 0.2)
+            self.h = brainstate.HiddenState(jnp.zeros((1, n_h)))
+
+        def update(self, x):
+            drive = braintrace.matmul(x, self.w.value)
+            self.h.value = 0.5 * self.h.value + drive
+            return self.h.value
+
+    return Net()
+
+
+class TestFastSolveConjunctIsolated:
+    """Regression test for the review finding on
+    ``TestTraceDtypeGateMatchesRuntimePredicate``: that class's
+    ``test_fast_solve_false_runs`` reused the ``weight_fn=jnp.tanh`` model,
+    which already makes ``fp.applicable(...)`` False on its own — so that
+    test would pass even if the implementation dropped the ``fast_solve``
+    conjunct from the init-gate predicate entirely. This test uses a model
+    with no ``weight_fn``/``bias_fn`` (``fp.applicable`` is True), so
+    ``fast_solve=False`` is the *only* thing that can make ``use_fast``
+    False in the init gate.
+    """
+
+    def test_fast_solve_false_no_weight_fn_runs(self):
+        model = _leaky_plain_model()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        inputs = brainstate.random.randn(4, 1, 3)  # (T, B=1, n_in)
+        algo = D_RTRL(
+            model, vjp_method='multi-step',
+            fast_solve=False, trace_dtype=jnp.bfloat16,
+        )
+        algo.compile_graph(inputs[0])
+        algo.init_etrace_state()
+
+        weights = model.states(brainstate.ParamState)
+
+        def loss(inp):
+            return algo(braintrace.MultiStepData(inp)).sum()
+
+        grads = brainstate.transform.grad(loss, weights)(inputs)
+        leaves = jax.tree.leaves(grads)
+        assert leaves
+        for leaf in leaves:
+            assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
+
+
+# ---------------------------------------------------------------------------
 # RNN-cell sweep — finite gradients across the public cell zoo
 # ---------------------------------------------------------------------------
 
@@ -367,6 +508,9 @@ def _accumulate_online_grads(model, algo_ctor, inputs, targets, batched):
     @brainstate.transform.jit
     def run(inputs, targets):
         if batched:
+            # ``mode`` was a dead kwarg (never forwarded; batching is detected
+            # from the batched states created by ``init_all_states``) and the
+            # constructors no longer swallow unknown kwargs.
             online = algo_ctor(model)
             brainstate.nn.init_all_states(model, batch_size=inputs.shape[1])
         else:
@@ -457,3 +601,121 @@ def test_docstring_compile_example_runs():
     assert y.shape == (1,)
     assert bool(jnp.all(jnp.isfinite(y)))
     assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Optional instant_drtrl / solve_drtrl per-primitive dispatch
+# ---------------------------------------------------------------------------
+
+class TestInstantSolveDrtrlDispatch:
+    """Dispatch contract of the optional ``instant_drtrl`` / ``solve_drtrl``
+    per-primitive registries.
+
+    A primitive whose trace structure differs from its parameter structure
+    (LoRA and conv) registers both rules; every other primitive is
+    unregistered and must take the historical code path byte-identically.
+    The tests here exercise the *dispatch scaffolding* itself by temporarily
+    registering rules for the dense ``mm`` primitive that replicate the
+    legacy behavior — the LoRA oracle tests in ``lora_test.py`` cover the
+    real registered rules end-to-end.
+    """
+
+    def _grads(self, spec, inputs, **algo_kwargs):
+        return oracle.online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(
+                m, vjp_method='multi-step', **algo_kwargs
+            ),
+        )
+
+    def test_accessors_default_none_for_legacy_primitives(self):
+        """Dense / elemwise / sparse register neither optional rule; conv
+        (per-position kernel trace) and LoRA (effective-weight trace)
+        register both."""
+        from braintrace._op import (
+            etp_conv_p, etp_elemwise_p, etp_mm_p, etp_mv_p,
+            etp_sp_mm_p, etp_sp_mv_p,
+        )
+        from braintrace._op._registries import (
+            get_instant_drtrl_rule, get_solve_drtrl_rule,
+        )
+        for prim in (etp_mm_p, etp_mv_p, etp_elemwise_p,
+                     etp_sp_mm_p, etp_sp_mv_p):
+            assert get_instant_drtrl_rule(prim) is None
+            assert get_solve_drtrl_rule(prim) is None
+        assert get_instant_drtrl_rule(etp_conv_p) is not None
+        assert get_solve_drtrl_rule(etp_conv_p) is not None
+
+    def test_registered_rules_replicating_legacy_are_identical(self):
+        """Routing through the new dispatch with rules that replicate the
+        legacy ``xy_to_dw`` / ``yw_to_w`` behavior must reproduce the same
+        gradients — proving the ``weights_dict`` plumbing and the batch /
+        num_state vmap scaffolding are wired consistently."""
+        from braintrace._op import (
+            ETP_RULES_XY_TO_DW, ETP_RULES_YW_TO_W, etp_mm_p,
+        )
+        from braintrace._op._registries import (
+            ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL,
+        )
+
+        spec = om.leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
+        brainstate.random.seed(1)
+        inputs = brainstate.random.randn(5, 3).astype('float32')
+
+        xy_rule = ETP_RULES_XY_TO_DW[etp_mm_p]
+        yw_rule = ETP_RULES_YW_TO_W[etp_mm_p]
+        seen_weight_keys = []
+
+        def instant(x, df, weights, **params):
+            return xy_rule(x, df, weights, **params)
+
+        def solve(dg_hidden, trace, weights, **params):
+            # Executed at trace time: record the weights_dict the dispatch
+            # built for this relation.
+            seen_weight_keys.append(tuple(sorted(weights.keys())))
+            return yw_rule(dg_hidden, trace, **params)
+
+        # ``fast_solve=False`` so the rule path (not the closed-form fast
+        # path) is what runs, exercising both new dispatch sites.
+        baseline = self._grads(spec, inputs, fast_solve=False)
+        try:
+            ETP_RULES_INSTANT_DRTRL[etp_mm_p] = instant
+            ETP_RULES_SOLVE_DRTRL[etp_mm_p] = solve
+            routed = self._grads(spec, inputs, fast_solve=False)
+        finally:
+            ETP_RULES_INSTANT_DRTRL.pop(etp_mm_p, None)
+            ETP_RULES_SOLVE_DRTRL.pop(etp_mm_p, None)
+
+        assert seen_weight_keys and all(
+            keys == ('weight',) for keys in seen_weight_keys
+        ), f'solve rule saw unexpected weights_dict keys: {seen_weight_keys}'
+        oracle.assert_param_gradients_close(routed, baseline, atol=0.0, rtol=0.0)
+
+    def test_fast_path_precedence_over_registered_rules(self):
+        """With ``fast_solve=True`` a fast-path primitive must keep using the
+        closed-form kernels even when the optional rules are registered: the
+        gradients stay identical and the rules are never invoked."""
+        from braintrace._op import etp_mm_p
+        from braintrace._op._registries import (
+            ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL,
+        )
+
+        spec = om.leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
+        brainstate.random.seed(2)
+        inputs = brainstate.random.randn(5, 3).astype('float32')
+
+        def _must_not_run(*args, **kwargs):
+            raise AssertionError(
+                'instant/solve drtrl rule invoked despite the fast path'
+            )
+
+        baseline = self._grads(spec, inputs, fast_solve=True)
+        try:
+            ETP_RULES_INSTANT_DRTRL[etp_mm_p] = _must_not_run
+            ETP_RULES_SOLVE_DRTRL[etp_mm_p] = _must_not_run
+            routed = self._grads(spec, inputs, fast_solve=True)
+        finally:
+            ETP_RULES_INSTANT_DRTRL.pop(etp_mm_p, None)
+            ETP_RULES_SOLVE_DRTRL.pop(etp_mm_p, None)
+
+        oracle.assert_param_gradients_close(routed, baseline, atol=0.0, rtol=0.0)
