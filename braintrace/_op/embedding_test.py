@@ -207,3 +207,15 @@ class TestEmbEtpRules:
             {'weight': _fake_var((self.V, self.D), jnp.float16)}, self.A)
         assert drtrl['weight'].shape == (self.V, self.D, self.A)
         assert drtrl['weight'].dtype == jnp.float16
+
+
+class TestPublicExports:
+
+    def test_top_level_exports(self):
+        assert braintrace.embedding is embedding
+        assert 'embedding' in braintrace.__all__
+
+    def test_op_package_exports(self):
+        import braintrace._op as op
+        for name in ('etp_emb_p', 'etp_emb_v_p', 'embedding'):
+            assert name in op.__all__

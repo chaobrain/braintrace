@@ -117,6 +117,7 @@ from ._op import (
     ETPPrimitive,
     matmul,
     grouped_matmul,
+    embedding,
     element_wise,
     conv,
     sparse_matmul,
@@ -171,6 +172,7 @@ __all__ = [
     # ETP primitives (user API)
     'matmul',
     'grouped_matmul',
+    'embedding',
     'element_wise',
     'conv',
     'sparse_matmul',

@@ -23,6 +23,7 @@ module. The submodule layout is:
 * :mod:`.dense` — ``etp_mm_p``, ``etp_mv_p``, :func:`matmul`
 * :mod:`.grouped` — ``etp_gmm_p``, ``etp_gmv_p``, :func:`grouped_matmul`
 * :mod:`.elemwise` — ``etp_elemwise_p``, :func:`element_wise`
+* :mod:`.embedding` — ``etp_emb_p``, ``etp_emb_v_p``, :func:`embedding`
 * :mod:`.conv` — ``etp_conv_p``, :func:`conv`
 * :mod:`.sparse` — ``etp_sp_mm_p``, ``etp_sp_mv_p``, :func:`sparse_matmul`
 * :mod:`.lora` — ``etp_lora_mm_p``, ``etp_lora_mv_p``, :func:`lora_matmul`
@@ -59,6 +60,7 @@ from .conv import _etp_conv_impl
 from .conv import conv, etp_conv_p
 from .dense import etp_mm_p, etp_mv_p, matmul
 from .elemwise import element_wise, etp_elemwise_p
+from .embedding import embedding, etp_emb_p, etp_emb_v_p
 from .grouped import etp_gmm_p, etp_gmv_p, grouped_matmul
 from .lora import etp_lora_mm_p, etp_lora_mv_p, lora_matmul
 from .sparse import etp_sp_mm_p, etp_sp_mv_p, sparse_matmul
@@ -94,6 +96,8 @@ __all__ = [
     'etp_mv_p',
     'etp_gmm_p',
     'etp_gmv_p',
+    'etp_emb_p',
+    'etp_emb_v_p',
     'etp_elemwise_p',
     'etp_conv_p',
     'etp_sp_mm_p',
@@ -104,6 +108,7 @@ __all__ = [
     # user API
     'matmul',
     'grouped_matmul',
+    'embedding',
     'element_wise',
     'conv',
     'sparse_matmul',

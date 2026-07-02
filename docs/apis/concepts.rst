@@ -37,6 +37,7 @@ input rank.
 
    matmul
    grouped_matmul
+   embedding
    element_wise
    conv
    sparse_matmul
