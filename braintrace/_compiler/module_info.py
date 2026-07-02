@@ -249,9 +249,14 @@ class ModuleInfo(NamedTuple):
         Number of state-variable outputs.
     control_flow : ControlFlowPolicy
         The control-flow policy the canonicalizer ran with. Downstream
-        passes (hidden-group discovery, relation discovery, hidden
-        perturbation) consult this same policy so opaque control-flow
-        handling is consistent across the whole compilation.
+        passes (structured scan descent, hidden-group discovery, relation
+        discovery, hidden perturbation) consult this same policy so opaque
+        control-flow handling is consistent across the whole compilation.
+
+        See Also
+        --------
+        braintrace._compiler.scan_descent : Structured descent of
+            ETP-relevant scans above the unroll limit (Phase 4).
 
     See Also
     --------

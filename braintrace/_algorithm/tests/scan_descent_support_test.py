@@ -276,3 +276,12 @@ class TestDescentCorrectness:
         np.testing.assert_allclose(np.asarray(g_ys[('w',)]), 0.0, atol=0.0)
         g_carry = self._one_step_grads(DESCEND(), carry_readout=True)
         assert float(np.linalg.norm(np.asarray(g_carry[('w',)]))) > 1.0
+
+
+def test_default_policy_descends_long_scans():
+    """Phase 4 default: an over-limit ETP scan compiles without any policy."""
+    net = make_snn_scan_net(loops=40)
+    algo = braintrace.D_RTRL(net, vjp_method='multi-step')
+    algo.compile_graph(jnp.ones((4,), dtype='float32'))
+    assert any(r.control_flow_context is not None
+               for r in algo.graph.hidden_param_op_relations)

@@ -115,12 +115,12 @@ class ControlFlowPolicy:
         plus exclusion of the weight from ETP relations.
     scan_descent : str, optional
         How ETP-relevant scans too long to unroll are handled. ``'auto'``
-        rewrites the scan for structured descent: relations and hidden
-        groups are discovered inside the body and the eligibility trace is
-        folded over the substep axis (see
-        ``braintrace._compiler.scan_descent``). ``'off'`` (default)
-        preserves the pre-Phase-4 behavior: the scan stays opaque and
-        compilation fails on the existing control-flow restrictions.
+        (default) rewrites the scan for structured descent: relations and
+        hidden groups are discovered inside the body and the eligibility
+        trace is folded over the substep axis (see
+        ``braintrace._compiler.scan_descent``). ``'off'`` preserves the
+        pre-Phase-4 behavior: the scan stays opaque and compilation fails
+        on the existing control-flow restrictions.
 
     Notes
     -----
@@ -162,7 +162,7 @@ class ControlFlowPolicy:
     scan_unroll_limit: int = 16
     while_hidden: str = 'opaque-fwd'
     etp_in_control_flow: str = 'error'
-    scan_descent: str = 'off'
+    scan_descent: str = 'auto'
 
     def __post_init__(self):
         if self.scan_descent not in ('auto', 'off'):
@@ -885,18 +885,38 @@ def _unroll_scans_once(
         if bad is not None:
             if id(eqn) not in skip_warned:
                 skip_warned.add(id(eqn))
-                emit(
-                    kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
-                    level=DiagnosticLevel.WARNING,
-                    message=(
-                        f'An ETP-relevant scan ({reason}) was NOT unrolled '
-                        f'because {bad}; it stays opaque and the existing '
-                        f'control-flow restrictions apply. Raise '
-                        f'ControlFlowPolicy.scan_unroll_limit or restructure '
-                        f'the loop if its weights should learn online.'
-                    ),
-                    context={'reason': bad, 'relevance': reason},
+                over_limit = (
+                    policy.scan_unroll_limit > 0
+                    and eqn.params['length'] > policy.scan_unroll_limit
                 )
+                if over_limit and policy.scan_descent == 'auto':
+                    # An over-limit scan is no longer a dead end: the
+                    # scan-descent pass (Phase 4) picks it up downstream.
+                    emit(
+                        kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
+                        level=DiagnosticLevel.INFO,
+                        message=(
+                            f'An ETP-relevant scan ({reason}) was NOT '
+                            f'unrolled because {bad}; structured scan '
+                            f'descent will handle it (see '
+                            f'ControlFlowPolicy.scan_descent).'
+                        ),
+                        context={'reason': bad, 'relevance': reason},
+                    )
+                else:
+                    emit(
+                        kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
+                        level=DiagnosticLevel.WARNING,
+                        message=(
+                            f'An ETP-relevant scan ({reason}) was NOT '
+                            f'unrolled because {bad}; it stays opaque and '
+                            f'the existing control-flow restrictions apply. '
+                            f'Raise ControlFlowPolicy.scan_unroll_limit or '
+                            f'restructure the loop if its weights should '
+                            f'learn online.'
+                        ),
+                        context={'reason': bad, 'relevance': reason},
+                    )
             new_eqns.append(eqn)
             continue
         num_prefix = eqn.params['num_consts'] + eqn.params['num_carry']

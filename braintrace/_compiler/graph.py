@@ -326,6 +326,14 @@ def compile_etrace_graph(
           behavior (weights inside ``cond`` raise ``NotImplementedError``);
         - unrolls every ETP-relevant ``scan`` of static length at most
           ``scan_unroll_limit`` (default 16);
+        - applies **structured scan descent** (``scan_descent='auto'``) to
+          ETP-relevant scans *above* the unroll limit: relations and hidden
+          groups are discovered inside the scan body, the equation is
+          rewritten to emit stacked per-substep values as extra ys, and the
+          eligibility trace is folded over the substep axis at runtime —
+          compile size stays independent of the scan length. Pass
+          ``ControlFlowPolicy(scan_descent='off')`` to restore the
+          pre-Phase-4 error. See :mod:`braintrace._compiler.scan_descent`;
         - keeps a **weight-free** ``while`` that reads/updates hidden state
           as an opaque forward node (``while_hidden='opaque-fwd'``):
           hidden-to-hidden Jacobians for groups whose transition crosses the

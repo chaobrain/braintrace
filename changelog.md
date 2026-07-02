@@ -5,6 +5,60 @@
 
 ### Highlights
 
+#### New: structured scan descent — long ETP scans compile and learn online (Phase 4)
+
+- **A third compile path for ETP-relevant `scan`s above the unroll limit.**
+  Previously an ETP-relevant `lax.scan`/`for_loop` whose static length
+  exceeded `ControlFlowPolicy.scan_unroll_limit` was a dead end
+  (`NotImplementedError`). Under the new default
+  `ControlFlowPolicy(scan_descent='auto')`, the compiler *descends* such a
+  scan: relations and hidden groups are discovered inside the scan body
+  with the same flat finders, the equation is rewritten to emit stacked
+  per-substep values as extra ys (leading substep axis `L`), and the graph
+  executor computes stacked per-substep Jacobians by vmapping over that
+  axis — the compiled program stays a single scan equation, so compile size
+  is independent of the loop length (an `L=100` inner loop compiles in
+  under 60 equations). A `SCAN_DESCENT_APPLIED` INFO diagnostic records
+  each descent; blocked scans get `SCAN_DESCENT_SKIPPED`. Set
+  `ControlFlowPolicy(scan_descent='off')` to restore the pre-Phase-4 error.
+- **Param-dim algorithms fold the eligibility trace over the substep
+  axis.** `D_RTRL` (the `ParamDimVjpAlgorithm` family) applies its trace
+  update per substep with an inner `jax.lax.scan`
+  (`eps <- D_tau * eps + x_tau (x) df_tau`), declaring
+  `_supports_scan_descent = True`. The fold is values-only and
+  stop-gradient'd — never differentiated, so no checkpointing is needed.
+  The learning signal stays one-per-outer-step (`(*varshape, num_state)`;
+  the SNN learning-signal axis contract is unchanged). The io-dim family
+  (`pp_prop` / `ES_D_RTRL`) and other algorithms without the flag reject
+  descended graphs with an actionable `NotImplementedError` at
+  `compile_graph`.
+- **Exactness contract (pinned by oracle tests).** For diagonal-recurrence
+  bodies (elementwise hidden-to-hidden substep path — the SNN class),
+  descended D-RTRL is exact: whole-sequence, chunked (3-step and 1-step
+  chunks, where the gradient depends on the folded trace at every chunk
+  boundary), and one-step single-step gradients all match BPTT / the
+  unrolled twin element-wise, including a two-hidden-state
+  (`num_state == 2`) group through the fold. For bodies that mix the hidden
+  state through an ETP matmul, whole-sequence multi-step gradients remain
+  BPTT-exact; chunked gradients approximate cross-substep credit (the same
+  approximation class as the unroll path — documented divergence).
+- **Algorithm-level `control_flow` kwarg.** `D_RTRL`, `pp_prop`
+  (`IODimVjpAlgorithm`), `OTPE`, and `OTTT` now accept
+  `control_flow=ControlFlowPolicy(...)` and thread it through their graph
+  executors into compilation.
+- **v1 restrictions** (each blocks descent for that scan, with a
+  diagnostic): reverse scans, nested control flow inside the body,
+  trainable weights scanned over as xs, and an *outer* ETP relation
+  targeting a hidden state carried by a descended scan (raises with
+  restructuring guidance). `jit` bodies nested inside control-flow
+  equations are now inlined during extraction so descent sees a flat body.
+- **Single-step readout limitation.** The per-step hidden perturbation is
+  added to a descended scan's *carry* outvar; a loss that reads the hidden
+  state through the scan's stacked ys (e.g. `for_loop(...)[-1]`) bypasses
+  it, dropping the same-step learning signal (pinned by test; parallels
+  the Phase 3 while-hidden limitation). Read the state after the loop
+  (`self.h.value`) instead — multi-step VJP is unaffected either way.
+
 #### New: `while`-loop policy — weight-free opaque-forward support (Phase 3)
 
 - **Weight-free `lax.while_loop`s that read/update hidden state now

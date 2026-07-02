@@ -367,11 +367,16 @@ class TestApplyScanDescentPipeline:
         with pytest.raises(NotImplementedError):
             algo.compile_graph(jnp.ones((4,), dtype='float32'))
 
-    def test_algorithm_gate_blocks_descended_graph_part1(self):
+    def test_algorithm_gate_admits_supporting_algorithm(self):
+        """Part 1 pinned this call as gate-blocked; since the Part 2 substep
+        fold landed, ``D_RTRL`` declares ``_supports_scan_descent`` and the
+        gate admits the descended graph. The io-dim family remains blocked —
+        pinned in ``scan_descent_support_test.test_io_dim_algorithm_still_gated``."""
         net = _make_snn_net(loops=40)
         algo = braintrace.D_RTRL(net, control_flow=DESCENT_POLICY)
-        with pytest.raises(NotImplementedError, match='scan descent'):
-            algo.compile_graph(jnp.ones((4,), dtype='float32'))
+        algo.compile_graph(jnp.ones((4,), dtype='float32'))
+        assert any(r.control_flow_context is not None
+                   for r in algo.graph.hidden_param_op_relations)
 
     def test_outer_relation_into_descended_group_raises(self):
         from braintrace._compiler.graph import compile_etrace_graph
