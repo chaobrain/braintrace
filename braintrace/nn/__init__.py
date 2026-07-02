@@ -27,6 +27,7 @@ The exported building blocks fall into four groups:
 
 - **Linear maps** — :class:`Linear`, :class:`GroupedLinear`, :class:`SignedWLinear`,
   :class:`ScaledWSLinear`, :class:`SparseLinear`, :class:`LoRA`.
+- **Embeddings** — :class:`Embedding`.
 - **Convolutions** — :class:`Conv1d`, :class:`Conv2d`, :class:`Conv3d`.
 - **Read-outs** — :class:`LeakyRateReadout`.
 - **Recurrent cells** — :class:`ValinaRNNCell`, :class:`GRUCell`,
@@ -45,6 +46,7 @@ from __future__ import annotations
 from typing import Any
 
 from ._conv import Conv1d, Conv2d, Conv3d
+from ._embedding import Embedding
 from ._linear import Linear, GroupedLinear, SignedWLinear, ScaledWSLinear, SparseLinear, LoRA
 from ._readout import LeakyRateReadout
 from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
@@ -54,6 +56,8 @@ __all__ = [
     'Conv1d', 'Conv2d', 'Conv3d',
     # linear
     'Linear', 'GroupedLinear', 'SignedWLinear', 'ScaledWSLinear', 'SparseLinear', 'LoRA',
+    # embedding
+    'Embedding',
     # readout
     'LeakyRateReadout',
     # rnn

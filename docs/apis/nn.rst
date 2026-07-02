@@ -36,6 +36,17 @@ Linear Layers
    LoRA
 
 
+Embedding Layers
+----------------
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   Embedding
+
+
 Convolutional Layers
 --------------------
 
