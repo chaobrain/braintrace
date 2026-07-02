@@ -242,3 +242,166 @@ def add_scan_ys(
         outvars=list(eqn.outvars) + [stacked[v] for v in extra],
     )
     return new_eqn, stacked
+
+
+class ScanDescentBundle(NamedTuple):
+    """Everything :func:`analyze_and_rewrite_scan` produced for one scan.
+
+    ``groups``/``relations`` carry their descent context
+    (:class:`GroupDescent`/:class:`RelationDescent`); group ``index`` values
+    are body-local (0-based) and are re-assigned when the bundle is merged
+    into the outer graph.
+    """
+
+    info: ScanDescentInfo
+    new_eqn: JaxprEqn
+    groups: List['HiddenGroup']
+    relations: List['HiddenParamOpRelation']
+    stacked_outer_vars: List[Var]
+    """Ordered values of ``info.stacked_var_map`` — the fresh outer vars to
+    hoist as jaxpr outputs."""
+
+
+def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle]:
+    """Analyze one descendable scan and rebuild it with stacked ys.
+
+    Runs the flat hidden-group / relation finders on the scan *body* (with
+    body-scoped hidden/weight maps derived from the carry/const positions),
+    hoists every body value the executor will need as extra stacked ys via
+    :func:`add_scan_ys`, and re-scopes the discovered groups so their
+    ``hidden_invars``/``hidden_outvars`` are the scan's outer carry vars.
+
+    Parameters
+    ----------
+    eqn : JaxprEqn
+        A scan equation for which :func:`_descent_blockers` returned ``None``.
+    minfo : ModuleInfo
+        The enclosing module info (supplies the outer hidden/weight maps).
+
+    Returns
+    -------
+    ScanDescentBundle or None
+        ``None`` when the scan carries no hidden state (nothing to descend).
+    """
+    from .hid_param_op import find_hidden_param_op_relations_from_jaxpr
+    from .hidden_group import find_hidden_groups_from_jaxpr
+    from .jaxpr_graph import inline_jit_calls
+
+    policy = minfo.control_flow
+    body_closed = inline_jit_calls(eqn.params['jaxpr'])
+    body = body_closed.jaxpr
+    num_consts = eqn.params['num_consts']
+    num_carry = eqn.params['num_carry']
+
+    # ---- outer<->body position maps ---------------------------------------
+    # scan invars [*consts, *carry, *xs] are positionally identical to
+    # body.invars; outvars are [*carry, *ys].
+    carry_hidden: Dict[int, 'Path'] = {}
+    for c in range(num_carry):
+        path = minfo.outvar_to_hidden_path.get(eqn.outvars[c])
+        if path is not None:
+            carry_hidden[c] = path
+    if not carry_hidden:
+        return None
+
+    # ---- body-scope maps ---------------------------------------------------
+    body_invar_to_hidden_path = {
+        body.invars[num_consts + c]: p for c, p in carry_hidden.items()
+    }
+    body_outvar_to_hidden_path = {
+        body.outvars[c]: p for c, p in carry_hidden.items()
+    }
+    body_hidden_outvar_to_invar = {
+        body.outvars[c]: body.invars[num_consts + c]
+        for c in carry_hidden
+    }
+    body_invar_to_weight_path: Dict[Var, 'Path'] = {}
+    body_weight_path_to_invars: Dict['Path', List[Var]] = {}
+    for bv, ov in zip(body.invars, eqn.invars):
+        if not isinstance(ov, Var):
+            continue
+        wp = minfo.invar_to_weight_path.get(ov)
+        if wp is not None:
+            body_invar_to_weight_path[bv] = wp
+            body_weight_path_to_invars.setdefault(wp, []).append(bv)
+    path_to_state = minfo.retrieved_model_states
+
+    # ---- reuse the flat finders on the body --------------------------------
+    body_groups, body_hid_path_to_group = find_hidden_groups_from_jaxpr(
+        body,
+        hidden_outvar_to_invar=body_hidden_outvar_to_invar,
+        weight_invars=set(body_invar_to_weight_path),
+        invar_to_hidden_path=body_invar_to_hidden_path,
+        outvar_to_hidden_path=body_outvar_to_hidden_path,
+        path_to_state=path_to_state,
+        include_recurrent_mixing=False,
+        control_flow=policy,
+    )
+    body_relations = find_hidden_param_op_relations_from_jaxpr(
+        body,
+        invar_to_weight_path=body_invar_to_weight_path,
+        path_to_state=path_to_state,
+        outvar_to_hidden_path=body_outvar_to_hidden_path,
+        hid_path_to_group=body_hid_path_to_group,
+        weight_path_to_invars=body_weight_path_to_invars,
+        control_flow=policy,
+    )
+
+    # ---- assemble the hoist list (ordered dedup, body vars) ----------------
+    hoist: Dict[Var, None] = {}
+    for r in body_relations:
+        if r.x_var is not None:
+            hoist[r.x_var] = None
+        for j in r.y_to_hidden_group_jaxprs:
+            for v in list(j.invars) + list(j.constvars):
+                hoist[v] = None
+    for g in body_groups:
+        for v in list(g.hidden_invars) + list(g.transition_jaxpr_constvars):
+            hoist[v] = None
+    hoist = list(hoist)
+
+    # ---- rewrite the eqn ----------------------------------------------------
+    inlined_eqn = eqn if body_closed is eqn.params['jaxpr'] else eqn.replace(
+        params={**eqn.params, 'jaxpr': body_closed})
+    new_eqn, stacked = add_scan_ys(inlined_eqn, hoist)
+    info = ScanDescentInfo(
+        length=eqn.params['length'],
+        num_consts=num_consts,
+        num_carry=num_carry,
+        body_jaxpr=body,
+        stacked_var_map=stacked,
+        scan_eqn_id=id(new_eqn),
+    )
+
+    # ---- re-scope groups to outer hidden vars -------------------------------
+    path_to_carry = {p: c for c, p in carry_hidden.items()}
+    final_groups = []
+    for g in body_groups:
+        outer_invars = [eqn.invars[num_consts + path_to_carry[p]]
+                        for p in g.hidden_paths]
+        outer_outvars = [eqn.outvars[path_to_carry[p]] for p in g.hidden_paths]
+        final_groups.append(g._replace(
+            hidden_invars=outer_invars,
+            hidden_outvars=outer_outvars,
+            descent=GroupDescent(scan=info,
+                                 body_hidden_invars=list(g.hidden_invars)),
+        ))
+
+    # ---- patch relations: point at final groups + attach context ------------
+    by_paths = {tuple(g.hidden_paths): g for g in final_groups}
+    final_relations = [
+        r._replace(
+            hidden_groups=[by_paths[tuple(g.hidden_paths)]
+                           for g in r.hidden_groups],
+            control_flow_context=RelationDescent(scan=info),
+        )
+        for r in body_relations
+    ]
+
+    return ScanDescentBundle(
+        info=info,
+        new_eqn=new_eqn,
+        groups=final_groups,
+        relations=final_relations,
+        stacked_outer_vars=[stacked[v] for v in hoist],
+    )

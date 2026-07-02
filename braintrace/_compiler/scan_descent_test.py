@@ -200,3 +200,85 @@ class TestDescentContextTypes:
             'stacked_var_map', 'scan_eqn_id')
         assert GroupDescent._fields == ('scan', 'body_hidden_invars')
         assert RelationDescent._fields == ('scan',)
+
+
+class TestAnalyzeAndRewriteScan:
+    def _analyze(self, loops):
+        eqn, minfo = _scan_model_jaxpr(loops)
+        from braintrace._compiler.scan_descent import analyze_and_rewrite_scan
+        return analyze_and_rewrite_scan(eqn, minfo), minfo
+
+    def test_snn_body_yields_one_group_one_relation(self):
+        bundle, minfo = self._analyze(loops=8)
+        assert bundle is not None
+        assert len(bundle.groups) == 1
+        g = bundle.groups[0]
+        assert g.descent is not None
+        assert g.num_state == 1
+        # outer-facing hidden vars are the scan carry vars, known to minfo
+        assert g.hidden_outvars[0] in minfo.outvar_to_hidden_path
+        assert g.hidden_invars[0] in minfo.invar_to_hidden_path
+        # body-scoped transition: one substep, invars == descent.body_hidden_invars
+        assert list(g.transition_jaxpr.invars) == list(g.descent.body_hidden_invars)
+
+        assert len(bundle.relations) == 1
+        r = bundle.relations[0]
+        assert r.control_flow_context is not None
+        assert r.trainable_paths['weight'] == ('w',)
+        assert r.hidden_groups[0] is g
+        # everything the executor needs is in the stacked map
+        m = bundle.info.stacked_var_map
+        assert r.x_var in m and r.y_var in m
+        for j in r.y_to_hidden_group_jaxprs:
+            assert all(v in m for v in j.constvars)
+        assert all(v in m for v in g.descent.body_hidden_invars)
+        assert all(v in m for v in g.transition_jaxpr_constvars)
+        # stacked avals carry the substep axis
+        L = bundle.info.length
+        assert L == 8
+        assert all(m[v].aval.shape[0] == L for v in m)
+        # the rewritten eqn's outvars extend the original with the stacked vars
+        assert list(bundle.new_eqn.outvars[-len(bundle.stacked_outer_vars):]) \
+            == list(bundle.stacked_outer_vars)
+        assert bundle.info.scan_eqn_id == id(bundle.new_eqn)
+
+    def test_mixing_body_registers_both_relations(self):
+        """Body ``h = tanh(x@w + h@w)`` (scan_body_rnn shape): within ONE
+        substep neither matmul's output crosses another ETP op before the
+        carry hidden (the tail add/tanh is non-parametric), so BOTH register
+        as body-scoped relations."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 3)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    self.h.value = jax.nn.tanh(
+                        braintrace.matmul(x_row, self.w.value)
+                        + braintrace.matmul(self.h.value, self.w.value))
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(8))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        from braintrace._compiler.scan_descent import analyze_and_rewrite_scan
+        minfo = extract_module_info(
+            net, jnp.ones((3,), dtype='float32'),
+            control_flow=ControlFlowPolicy(scan_unroll_limit=4,
+                                           scan_descent='off'))
+        eqn = next(e for e in minfo.jaxpr.eqns if is_scan_primitive(e))
+        bundle = analyze_and_rewrite_scan(eqn, minfo)
+        assert bundle is not None
+        assert len(bundle.groups) == 1
+        assert len(bundle.relations) == 2
+        assert all(r.control_flow_context is not None
+                   for r in bundle.relations)
+        # tied weight: both relations route the SAME param via distinct y_vars
+        assert bundle.relations[0].y_var is not bundle.relations[1].y_var
