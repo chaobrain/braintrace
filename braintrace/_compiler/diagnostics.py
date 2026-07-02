@@ -112,8 +112,13 @@ class DiagnosticKind(str, Enum):
     # ``SCAN_DESCENT_SKIPPED``: descent was requested (policy ``'auto'``) but
     # a v1 restriction blocked it; the existing control-flow restrictions
     # apply (WARNING).
+    # ``SCAN_DESCENT_NO_RELATIONS``: a descended scan consumes weight
+    # state(s) that produce no ETP relation (plain-op usage inside the
+    # body), so those weights do not learn online. Pre-descent this scan
+    # was a hard error, so the exclusion is surfaced loudly (WARNING).
     SCAN_DESCENT_APPLIED = 'scan_descent_applied'
     SCAN_DESCENT_SKIPPED = 'scan_descent_skipped'
+    SCAN_DESCENT_NO_RELATIONS = 'scan_descent_no_relations'
 
     # Opaque control flow touching weights / hidden states (Phase 3)
     #

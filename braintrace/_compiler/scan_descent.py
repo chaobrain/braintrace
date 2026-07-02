@@ -46,6 +46,12 @@ Jacobian extraction and the trace update see the substep axis.
    (``self.h.value``) to route the output through the perturbed carry.
    Multi-step VJP is unaffected. This parallels the Phase-3 while-hidden
    same-step limitation.
+
+.. note:: Body analysis always runs in the default "without recurrence"
+   grouping mode (``include_recurrent_mixing=False``), independent of the
+   outer ``compile_etrace_graph(include_recurrent_mixing=...)`` flag: the
+   per-substep trace fold consumes diagonal Jacobians, so tracing recurrent
+   ETP mixing into a body transition has no consumer.
 """
 
 from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
@@ -61,11 +67,20 @@ from braintrace._compatible_imports import (
     new_var,
 )
 from braintrace._op import is_etp_primitive
+from braintrace._typing import Path
 from .canonicalize import ControlFlowPolicy
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .jaxpr_graph import _sub_closed_jaxprs
 
-__all__ = []
+__all__ = [
+    'GroupDescent',
+    'RelationDescent',
+    'ScanDescentBundle',
+    'ScanDescentInfo',
+    'add_scan_ys',
+    'analyze_and_rewrite_scan',
+    'apply_scan_descent',
+]
 
 
 class ScanDescentInfo(NamedTuple):
@@ -307,13 +322,42 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
     # ---- outer<->body position maps ---------------------------------------
     # scan invars [*consts, *carry, *xs] are positionally identical to
     # body.invars; outvars are [*carry, *ys].
-    carry_hidden: Dict[int, 'Path'] = {}
+    carry_hidden: Dict[int, Path] = {}
     for c in range(num_carry):
         path = minfo.outvar_to_hidden_path.get(eqn.outvars[c])
         if path is not None:
             carry_hidden[c] = path
     if not carry_hidden:
         return None
+
+    # v1 guard: every hidden carry must be initialized from the *pristine*
+    # step-entry hidden invar. If the model transforms the hidden state
+    # between step entry and the scan (e.g. ``h.value = h.value * 0.5``
+    # before the loop), that outer segment of the per-step transition is
+    # invisible to the substep fold and the folded eligibility trace would
+    # be silently wrong. Skip descent; the scan then hits the existing loud
+    # control-flow restrictions.
+    for c, path in carry_hidden.items():
+        init_invar = eqn.invars[num_consts + c]
+        if not (
+            isinstance(init_invar, Var)
+            and minfo.invar_to_hidden_path.get(init_invar) == path
+        ):
+            emit(
+                kind=DiagnosticKind.SCAN_DESCENT_SKIPPED,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'Structured scan descent was skipped for a scan '
+                    f'carrying hidden state {path}: the carry is initialized '
+                    f'from a transformed value, not the step-entry hidden '
+                    f'state, so part of the per-step transition lies outside '
+                    f'the scan and the folded eligibility trace would be '
+                    f'wrong. Move the pre-scan update into the scan body, or '
+                    f"set ControlFlowPolicy(scan_descent='off')."
+                ),
+                hidden_paths=(path,),
+            )
+            return None
 
     # ---- body-scope maps ---------------------------------------------------
     body_invar_to_hidden_path = {
@@ -326,8 +370,8 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
         body.outvars[c]: body.invars[num_consts + c]
         for c in carry_hidden
     }
-    body_invar_to_weight_path: Dict[Var, 'Path'] = {}
-    body_weight_path_to_invars: Dict['Path', List[Var]] = {}
+    body_invar_to_weight_path: Dict[Var, Path] = {}
+    body_weight_path_to_invars: Dict[Path, List[Var]] = {}
     for bv, ov in zip(body.invars, eqn.invars):
         if not isinstance(ov, Var):
             continue
@@ -357,6 +401,31 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
         weight_path_to_invars=body_weight_path_to_invars,
         control_flow=policy,
     )
+
+    # A weight consumed by this scan but routed through no ETP primitive
+    # (plain-op usage) does not learn online — the primitive-based selection
+    # principle, same as at the flat level. Pre-descent this whole scan was
+    # a hard error, so surface the flip loudly instead of silently.
+    covered_paths = {
+        wp for r in body_relations for wp in r.trainable_paths.values()
+    }
+    missing = [wp for wp in body_weight_path_to_invars
+               if wp not in covered_paths]
+    if missing:
+        emit(
+            kind=DiagnosticKind.SCAN_DESCENT_NO_RELATIONS,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'Weight state(s) {missing} are consumed by a descended '
+                f'scan but produce no ETP relation (they are used through '
+                f'plain ops, not ETP primitives), so they will NOT '
+                f'participate in online learning. Route them through an ETP '
+                f'op (e.g. braintrace.matmul) inside the scan body if they '
+                f'should learn, or ignore this warning if the exclusion is '
+                f'deliberate.'
+            ),
+            context={'weight_paths': tuple(missing)},
+        )
 
     # ---- assemble the hoist list (ordered dedup, body vars) ----------------
     hoist: Dict[Var, None] = {}
@@ -494,7 +563,13 @@ def apply_scan_descent(minfo) -> Tuple['ModuleInfo', List[ScanDescentBundle]]:
             hidden_paths=tuple(
                 p for g in bundle.groups for p in g.hidden_paths
             ),
-            context={'length': bundle.info.length},
+            context={
+                'length': bundle.info.length,
+                'weight_paths': tuple(sorted({
+                    wp for r in bundle.relations
+                    for wp in r.trainable_paths.values()
+                })),
+            },
         )
 
     if not bundles:

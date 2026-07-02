@@ -379,6 +379,9 @@ class TestApplyScanDescentPipeline:
                    for r in algo.graph.hidden_param_op_relations)
 
     def test_outer_relation_into_descended_group_raises(self):
+        """The carry init stays pristine (so the scan descends), but an
+        outer ETP relation's ``y`` reaches the carried hidden state through
+        the scan's consts — the v1 outer-injection guard must reject it."""
         from braintrace._compiler.graph import compile_etrace_graph
 
         class Net(brainstate.nn.Module):
@@ -391,7 +394,6 @@ class TestApplyScanDescentPipeline:
             def update(self, x):
                 # outer ETP relation whose y reaches ``h`` through the scan
                 drive = braintrace.matmul(x.reshape(1, -1), self.w_in.value)
-                self.h.value = self.h.value * 0.5 + drive
 
                 def substep(_):
                     self.h.value = 0.9 * self.h.value + jnp.tanh(
@@ -407,3 +409,76 @@ class TestApplyScanDescentPipeline:
             compile_etrace_graph(
                 net, jnp.ones((3,), dtype='float32'),
                 control_flow=DESCENT_POLICY)
+
+    def test_pre_scan_hidden_transform_blocks_descent(self):
+        """A hidden state transformed between step entry and the scan
+        (``h *= 0.5`` before the loop) puts part of the per-step transition
+        outside the scan body; descending anyway would fold a silently
+        wrong trace (review finding: chunked gradients off by O(1) vs
+        BPTT). Descent must skip loudly and the pre-descent hard error
+        must fire."""
+        from braintrace._compiler.graph import compile_etrace_graph
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+                self.h.value = self.h.value * 0.5
+
+                def substep(_):
+                    self.h.value = 0.9 * self.h.value + jnp.tanh(
+                        braintrace.matmul(x_row, self.w.value))
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        with pytest.warns(UserWarning, match='transformed value'):
+            with pytest.raises(NotImplementedError, match='within a scan'):
+                compile_etrace_graph(
+                    net, jnp.ones((4,), dtype='float32'),
+                    control_flow=DESCENT_POLICY)
+
+    def test_plain_op_weight_in_body_warns_and_excludes(self):
+        """A weight consumed by a descended scan only through plain (non-
+        ETP) ops is excluded from online learning — the primitive-based
+        selection principle — but the exclusion must be loud, because
+        pre-descent this scan was a hard error."""
+        from braintrace._compiler.graph import compile_etrace_graph
+        from braintrace._compiler.diagnostics import DiagnosticKind
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    # plain matmul: deliberately NOT an ETP primitive
+                    self.h.value = 0.9 * self.h.value + jnp.tanh(
+                        x_row @ self.w.value)
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        with pytest.warns(UserWarning, match='no ETP relation'):
+            graph = compile_etrace_graph(
+                net, jnp.ones((4,), dtype='float32'),
+                control_flow=DESCENT_POLICY)
+        assert any(d.kind is DiagnosticKind.SCAN_DESCENT_NO_RELATIONS
+                   for d in graph.diagnostics)
+        assert len(graph.hidden_param_op_relations) == 0
+        assert sum(1 for g in graph.hidden_groups
+                   if g.descent is not None) == 1

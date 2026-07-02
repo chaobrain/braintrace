@@ -885,10 +885,11 @@ def _unroll_scans_once(
         if bad is not None:
             if id(eqn) not in skip_warned:
                 skip_warned.add(id(eqn))
-                over_limit = (
-                    policy.scan_unroll_limit > 0
-                    and eqn.params['length'] > policy.scan_unroll_limit
-                )
+                # Matches the descent-eligibility rule in
+                # ``scan_descent._descent_blockers``: any positive-length
+                # scan beyond the limit descends, including when unrolling
+                # is disabled entirely (limit <= 0).
+                over_limit = eqn.params['length'] > policy.scan_unroll_limit
                 if over_limit and policy.scan_descent == 'auto':
                     # An over-limit scan is no longer a dead end: the
                     # scan-descent pass (Phase 4) picks it up downstream.

@@ -139,6 +139,72 @@ class TestSubstepFold:
         with pytest.raises(NotImplementedError, match='scan descent'):
             algo.compile_graph(jnp.ones((4,), dtype='float32'))
 
+    def test_orphan_descended_group_still_gated(self):
+        """A body whose only weight is used through plain ops descends with
+        a hidden group but ZERO relations; the group's Jacobians still carry
+        the substep axis, so non-supporting algorithms must be gated on
+        groups too, not just relations."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    # plain matmul: no ETP relation is produced
+                    self.h.value = 0.9 * self.h.value + jnp.tanh(
+                        x_row @ self.w.value)
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        algo = braintrace.pp_prop(net, decay_or_rank=16,
+                                  vjp_method='multi-step',
+                                  control_flow=DESCEND())
+        with pytest.warns(UserWarning, match='no ETP relation'):
+            with pytest.raises(NotImplementedError, match='scan descent'):
+                algo.compile_graph(jnp.ones((4,), dtype='float32'))
+
+    def test_orphan_descended_group_runs_under_d_rtrl(self):
+        """Same plain-op-weight body under a supporting algorithm: compiles
+        (with the exclusion warning), holds no traces for the excluded
+        weight, and a forward update executes despite the substep axis on
+        the orphan group's Jacobians."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    self.h.value = 0.9 * self.h.value + jnp.tanh(
+                        x_row @ self.w.value)
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        algo = braintrace.D_RTRL(net, vjp_method='multi-step',
+                                 control_flow=DESCEND())
+        with pytest.warns(UserWarning, match='no ETP relation'):
+            algo.compile_graph(jnp.ones((4,), dtype='float32'))
+        assert len(algo.etrace_bwg) == 0
+        out = algo.update(jnp.ones((4,), dtype='float32'))
+        assert jnp.shape(out) == (1, 4)
+
 
 from braintrace._algorithm.oracle import (
     assert_param_gradients_close,
