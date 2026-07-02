@@ -174,6 +174,83 @@ class TestJITAndJVP:
         np.testing.assert_allclose(g, 5.0)
 
 
+class TestIntBoolPrimalZeroTangent:
+    """Symbolic-zero tangents for int/bool primals must be materialized with
+    JAX's ``float0`` tangent dtype, not the primal's own dtype.
+
+    A non-inexact (int/bool) primal's *real* tangent type in JAX is the
+    zero-sized ``float0`` dtype. The auto-derived ``_jvp`` in
+    ``register_primitive`` used to instantiate ``ad.Zero`` tangents as
+    ``jnp.zeros(pr.shape, pr.dtype)`` unconditionally, which produced an
+    ``int32``/``bool`` tangent array for such primals. Passing that array
+    into ``jax.jvp`` alongside an int/bool primal raises a ``TypeError``
+    because JAX requires the tangent dtype to be exactly ``float0`` in that
+    case. This matters in practice whenever an ETP op consumes an integer
+    or boolean input (e.g. spike counts, masks) while only some *other*
+    input (e.g. the weight) is being differentiated.
+    """
+
+    def test_jvp_int_primal_zero_tangent_does_not_raise(self):
+        p = register_primitive(_fresh_name('int_zero'), lambda x, y: x * y)
+
+        # Differentiate only wrt the float `y` — the int `x`'s tangent is
+        # symbolic zero and must be materialized as float0, not int32.
+        def f(y):
+            x = jnp.asarray(3, dtype=jnp.int32)
+            return p.bind(x, y)
+
+        primal, tangent = jax.jvp(f, (jnp.asarray(2.0),), (jnp.asarray(1.0),))
+        np.testing.assert_allclose(primal, 6.0)
+        np.testing.assert_allclose(tangent, 3.0)  # d(x*y)/dy = x = 3
+
+    def test_jvp_bool_primal_zero_tangent_does_not_raise(self):
+        p = register_primitive(
+            _fresh_name('bool_zero'),
+            lambda mask, y: jnp.where(mask, y, 0.0),
+        )
+
+        def f(y):
+            mask = jnp.asarray(True)
+            return p.bind(mask, y)
+
+        primal, tangent = jax.jvp(f, (jnp.asarray(2.0),), (jnp.asarray(1.0),))
+        np.testing.assert_allclose(primal, 2.0)
+        np.testing.assert_allclose(tangent, 1.0)
+
+    def test_grad_int_primal_matches_float_cast(self):
+        """``jax.grad`` through an ETP op with an int input must agree with
+        the gradient computed from the float-cast version of that input."""
+        import braintrace
+
+        x_int = jnp.ones((2, 3), dtype=jnp.int32)
+        w = jnp.ones((3, 4))
+
+        def loss(w, x):
+            return braintrace.matmul(x, w).sum()
+
+        g_int = jax.grad(loss, argnums=0)(w, x_int)
+        g_float = jax.grad(loss, argnums=0)(w, x_int.astype(jnp.float32))
+
+        assert jnp.all(jnp.isfinite(g_int))
+        np.testing.assert_allclose(g_int, g_float)
+
+    def test_grad_bool_primal_matches_float_cast(self):
+        """Same contract, for a boolean ETP input."""
+        import braintrace
+
+        x_bool = jnp.ones((2, 3), dtype=bool)
+        w = jnp.ones((3, 4))
+
+        def loss(w, x):
+            return braintrace.matmul(x, w).sum()
+
+        g_bool = jax.grad(loss, argnums=0)(w, x_bool)
+        g_float = jax.grad(loss, argnums=0)(w, x_bool.astype(jnp.float32))
+
+        assert jnp.all(jnp.isfinite(g_bool))
+        np.testing.assert_allclose(g_bool, g_float)
+
+
 class TestVmap:
 
     def test_vmap_in_axes_zero(self):
