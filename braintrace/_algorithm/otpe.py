@@ -34,12 +34,17 @@ from typing import Any, Dict, Optional
 import brainstate
 import jax.numpy as jnp
 
-from braintrace._op import is_batched_primitive
+from braintrace._op import etp_mm_p, etp_mv_p, is_batched_primitive
 from braintrace._misc import etrace_df_key
 from ._common import _route_grads_by_path, _update_dict
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = ['OTPE']
+
+# OTPE's per-parameter leaky trace only reduces correctly for dense matmul
+# relations. LoRA, sparse, conv, and element-wise (no x_var) relations are
+# excluded -- see the compile-time guard in `init_etrace_state`.
+_SUPPORTED_PRIMITIVES = frozenset({etp_mm_p, etp_mv_p})
 
 
 class OTPE(ETraceVjpAlgorithm):
@@ -111,7 +116,11 @@ class OTPE(ETraceVjpAlgorithm):
         Name of the algorithm instance.
     vjp_method : str, optional
         Forwarded to the base algorithm. Only ``'single-step'`` is supported by
-        OTPE v1; multi-step inputs raise :class:`NotImplementedError`.
+        OTPE v1 -- its trace update and weight-gradient formulas are derived
+        one step at a time. ``vjp_method='multi-step'`` is rejected with
+        :class:`ValueError` at construction; multi-step *inputs* (i.e. calling
+        the compiled learner with :class:`~braintrace.MultiStepData`) raise
+        :class:`NotImplementedError` instead, at call time.
 
     Limitations
     -----------
@@ -154,10 +163,16 @@ class OTPE(ETraceVjpAlgorithm):
     ------
     ValueError
         If ``mode`` is not ``'full'`` or ``'approx'``, if ``leak`` is not in
-        :math:`(0, 1)`, if a weight-to-hidden relation reaches more than one
-        HiddenGroup (OTPE v1 requires one-hop per-layer relations), or (at
-        :meth:`compile_graph`) if a trained connection projects into a hidden
-        group with ``num_state > 1``.
+        :math:`(0, 1)`, if ``vjp_method`` is not ``'single-step'``, if a
+        weight-to-hidden relation reaches more than one HiddenGroup (OTPE v1
+        requires one-hop per-layer relations), or (at :meth:`compile_graph`)
+        if a trained connection projects into a hidden group with
+        ``num_state > 1``.
+    NotImplementedError
+        At :meth:`compile_graph`, if a trained connection is routed through a
+        primitive other than dense ``matmul`` (batched or unbatched) -- e.g.
+        LoRA, sparse, or convolutional relations, whose weight-gradient chain
+        rule does not reduce to OTPE's per-parameter leaky trace.
 
     Examples
     --------
@@ -205,6 +220,13 @@ class OTPE(ETraceVjpAlgorithm):
             raise ValueError(f"mode must be 'full' or 'approx'; got {mode!r}")
         if not (0.0 < float(leak) < 1.0):
             raise ValueError(f'leak must be in (0, 1); got {leak}')
+        if vjp_method != 'single-step':
+            raise ValueError(
+                f"OTPE v1 only supports vjp_method='single-step': its trace "
+                f"update and weight-gradient formulas are derived one step at "
+                f"a time and have no multi-step form; got "
+                f"vjp_method={vjp_method!r}."
+            )
         super().__init__(model, name=name, vjp_method=vjp_method)
         self.mode = mode
         self.leak = float(leak)
@@ -212,60 +234,100 @@ class OTPE(ETraceVjpAlgorithm):
         self._R_hat: Dict[int, brainstate.ShortTermState] = {}
         self._R_hat_x: Dict[int, brainstate.ShortTermState] = {}
         self._R_hat_g: Dict[int, brainstate.ShortTermState] = {}
+        self._R_hat_bias: Dict[int, brainstate.ShortTermState] = {}
+        self._rid_is_batched: Dict[int, bool] = {}
 
     def compile_graph(self, *args: Any) -> None:
+        # `super().compile_graph()` builds the graph, calls `init_etrace_state`,
+        # and -- only once both succeed -- sets `self.is_compiled = True`. The
+        # validation below runs *after* that flag is already True, so any
+        # failure here must explicitly reset it (finding M6); otherwise a
+        # failed compile would leave `is_compiled` stuck True and silently
+        # short-circuit a later, valid `compile_graph` call (the base class's
+        # `if not self.is_compiled:` guard would treat it as already compiled).
         super().compile_graph(*args)
-        if self.mode == 'approx':
-            n_groups = len(self.graph.hidden_groups)
-            if n_groups > 1:
-                warnings.warn(
-                    "OTPE(mode='approx') bias compounds with network depth; "
-                    "consider F-OTPE or mode='full'.",
-                    UserWarning,
-                )
-        # Invariant: each relation maps to exactly one HiddenGroup in OTPE v1.
-        for rel in self.graph.hidden_param_op_relations:
-            if len(rel.hidden_groups) != 1:
-                raise ValueError(
-                    f'OTPE requires per-layer one-hop weight-to-hidden relations; '
-                    f'found relation reaching {len(rel.hidden_groups)} groups.'
-                )
-            # OTPE's derivation assumes a single scalar membrane state per neuron
-            # (the LIF case). A hidden group bundling several states (e.g. ALIF's
-            # membrane potential plus adaptation variable) cannot be handled: the
-            # leaky scalar estimate cannot assign per-state credit, and collapsing
-            # the num_state axis with a sum has no theoretical basis (see the
-            # *Limitations* section of the class docstring).
-            group = rel.hidden_groups[0]
-            if group.num_state > 1:
-                raise ValueError(
-                    f'OTPE only supports hidden groups with num_state == 1 '
-                    f'(single-state LIF-like neurons), but a trained connection '
-                    f'projects into a group with num_state == {group.num_state}. '
-                    f'Multi-state neurons (e.g. ALIF with an adaptation variable) '
-                    f'are outside the regime where OTPE is derived.'
-                )
+        try:
+            if self.mode == 'approx':
+                n_groups = len(self.graph.hidden_groups)
+                if n_groups > 1:
+                    warnings.warn(
+                        "OTPE(mode='approx') (F-OTPE) adds an extra outer-product "
+                        "approximation whose bias compounds with network depth; "
+                        "mode='full' reduces (but does not eliminate) this "
+                        "depth-dependent bias -- see the Limitations section of "
+                        "the class docstring.",
+                        UserWarning,
+                    )
+            # Invariant: each relation maps to exactly one HiddenGroup in OTPE v1.
+            for rel in self.graph.hidden_param_op_relations:
+                if len(rel.hidden_groups) != 1:
+                    raise ValueError(
+                        f'OTPE requires per-layer one-hop weight-to-hidden relations; '
+                        f'found relation reaching {len(rel.hidden_groups)} groups.'
+                    )
+                # OTPE's derivation assumes a single scalar membrane state per neuron
+                # (the LIF case). A hidden group bundling several states (e.g. ALIF's
+                # membrane potential plus adaptation variable) cannot be handled: the
+                # leaky scalar estimate cannot assign per-state credit, and collapsing
+                # the num_state axis with a sum has no theoretical basis (see the
+                # *Limitations* section of the class docstring).
+                group = rel.hidden_groups[0]
+                if group.num_state > 1:
+                    raise ValueError(
+                        f'OTPE only supports hidden groups with num_state == 1 '
+                        f'(single-state LIF-like neurons), but a trained connection '
+                        f'projects into a group with num_state == {group.num_state}. '
+                        f'Multi-state neurons (e.g. ALIF with an adaptation variable) '
+                        f'are outside the regime where OTPE is derived.'
+                    )
+        except Exception:
+            self.is_compiled = False
+            raise
 
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         self._R_hat = {}
         self._R_hat_x = {}
         self._R_hat_g = {}
+        self._R_hat_bias = {}
+        self._rid_is_batched = {}
         for rel in self.graph.hidden_param_op_relations:
+            if rel.primitive not in _SUPPORTED_PRIMITIVES:
+                raise NotImplementedError(
+                    f'OTPE only supports dense matmul relations (etp_mm/etp_mv); '
+                    f'got a trained connection routed through primitive '
+                    f'{rel.primitive.name!r}. LoRA, sparse, convolutional, and '
+                    f'element-wise relations do not reduce to OTPE\'s '
+                    f'per-parameter leaky trace and are unsupported.'
+                )
+            if rel.x_var is None:
+                # Unreachable given the primitive guard above (both etp_mm and
+                # etp_mv always carry an x_var); kept as an explicit, message-
+                # bearing guard rather than a bare assert (see finding N3).
+                raise ValueError(
+                    f'OTPE requires a relation with an explicit presynaptic '
+                    f'input (x_var), but the relation for primitive '
+                    f'{rel.primitive.name!r} has none.'
+                )
             rid = id(rel.y_var)
-            assert rel.x_var is not None  # non-elemwise primitives always have an x_var
             in_shape = rel.x_var.aval.shape
             out_shape = rel.y_var.aval.shape
+            batched = is_batched_primitive(rel.primitive)
+            self._rid_is_batched[rid] = batched
             if self.mode == 'full':
                 weight_key = next(iter(rel.trainable_vars))
                 weight_var = rel.trainable_vars[weight_key]
                 weight_shape = weight_var.aval.shape
-                if is_batched_primitive(rel.primitive):
+                if batched:
                     shape = (in_shape[0], *weight_shape)
                 else:
                     shape = weight_shape
                 self._R_hat[rid] = brainstate.ShortTermState(
                     jnp.zeros(shape, dtype=jnp.float32)
                 )
+                if 'bias' in rel.trainable_vars:
+                    self._R_hat_bias[rid] = brainstate.ShortTermState(
+                        jnp.zeros(out_shape, dtype=jnp.float32)
+                    )
             else:
                 self._R_hat_x[rid] = brainstate.ShortTermState(
                     jnp.zeros(in_shape, dtype=jnp.float32)
@@ -277,18 +339,28 @@ class OTPE(ETraceVjpAlgorithm):
     def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
         self.running_index.value = 0
 
-        def _rezero(state: Any) -> None:
+        def _rezero(rid: int, state: Any) -> None:
             shape = state.value.shape
-            new_shape = (batch_size, *shape[1:]) if batch_size is not None else shape
+            if batch_size is not None and self._rid_is_batched.get(rid, False):
+                new_shape = (batch_size, *shape[1:])
+            else:
+                # Unbatched relations (etp_mv) have no batch axis in their
+                # trace; `batch_size` does not apply to them, and reusing the
+                # stored shape as-is (rather than assuming shape[0] is a batch
+                # axis) avoids corrupting it -- see finding M4.
+                new_shape = shape
             state.value = jnp.zeros(new_shape, dtype=state.value.dtype)
 
-        for store in (self._R_hat, self._R_hat_x, self._R_hat_g):
-            for r in store.values():
-                _rezero(r)
+        for store in (self._R_hat, self._R_hat_x, self._R_hat_g, self._R_hat_bias):
+            for rid, r in store.items():
+                _rezero(rid, r)
 
     def _get_etrace_data(self) -> Any:
         if self.mode == 'full':
-            return {rid: r.value for rid, r in self._R_hat.items()}
+            return (
+                {rid: r.value for rid, r in self._R_hat.items()},
+                {rid: r.value for rid, r in self._R_hat_bias.items()},
+            )
         return (
             {rid: r.value for rid, r in self._R_hat_x.items()},
             {rid: r.value for rid, r in self._R_hat_g.items()},
@@ -296,8 +368,11 @@ class OTPE(ETraceVjpAlgorithm):
 
     def _assign_etrace_data(self, vals: Any) -> None:
         if self.mode == 'full':
-            for rid, v in vals.items():
+            vals_R, vals_bias = vals
+            for rid, v in vals_R.items():
                 self._R_hat[rid].value = v
+            for rid, v in vals_bias.items():
+                self._R_hat_bias[rid].value = v
         else:
             vals_x, vals_g = vals
             for rid, v in vals_x.items():
@@ -309,14 +384,23 @@ class OTPE(ETraceVjpAlgorithm):
         self, running_index: Any, hist_vals: Any,
         hid2weight_jac: Any, hid2hid_jac: Any, weight_vals: Any, input_is_multi_step: Any,
     ) -> Any:
-        """``R_hat ← λ·R_hat + ∂s/∂θ_local``. Ignores ``hid2hid_jac``."""
+        """``R_hat ← λ·R_hat + ∂s/∂θ_local``. Ignores ``hid2hid_jac``.
+
+        The bias companion trace ``R_hat_bias`` follows the same recursion
+        with the presynaptic input dropped (bias's local Jacobian has no ``x``
+        factor): ``R_hat_bias ← λ·R_hat_bias + df``, identical in form to
+        ``_R_hat_g`` (which the ``'approx'`` mode already maintains for its own
+        outer-product factorization).
+        """
         if input_is_multi_step:
             raise NotImplementedError('OTPE v1 supports single-step only')
         xs = hid2weight_jac[0]
         dfs = hid2weight_jac[1]
 
         if self.mode == 'full':
+            hist_R, hist_bias = hist_vals
             new_R = {}
+            new_bias = {}
             for rel in self.graph.hidden_param_op_relations:
                 rid = id(rel.y_var)
                 group = rel.hidden_groups[0]
@@ -327,13 +411,15 @@ class OTPE(ETraceVjpAlgorithm):
                     local = jnp.einsum('bi,bo->bio', x, df_proj)
                 else:
                     local = jnp.einsum('i,o->io', x, df_proj)
-                updated = self.leak * hist_vals[rid] + local
+                updated = self.leak * hist_R[rid] + local
                 if self.trace_clip_abs is not None:
                     updated = jnp.clip(
                         updated, -self.trace_clip_abs, self.trace_clip_abs
                     )
                 new_R[rid] = updated
-            return new_R
+                if rid in hist_bias:
+                    new_bias[rid] = self.leak * hist_bias[rid] + df_proj
+            return (new_R, new_bias)
         else:
             new_Rx = {}
             new_Rg = {}
@@ -353,16 +439,22 @@ class OTPE(ETraceVjpAlgorithm):
     ) -> Any:
         dG = {path: None for path in self.param_states}
         if self.mode == 'full':
+            R_map, Rbias_map = etrace_at_t
             for rel in self.graph.hidden_param_op_relations:
                 rid = id(rel.y_var)
-                R = etrace_at_t[rid]
+                R = R_map[rid]
                 group = rel.hidden_groups[0]
                 L = dl_to_hidden_groups[group.index].sum(axis=-1)
+                per_key = {}
                 if is_batched_primitive(rel.primitive):
-                    dw = jnp.einsum('bo,bio->io', L, R)
+                    per_key['weight'] = jnp.einsum('bo,bio->io', L, R)
+                    if 'bias' in rel.trainable_vars:
+                        per_key['bias'] = jnp.einsum('bo,bo->o', L, Rbias_map[rid])
                 else:
-                    dw = jnp.einsum('o,io->io', L, R)
-                _route_grads_by_path(rel, {'weight': dw}, weight_vals, dG)
+                    per_key['weight'] = jnp.einsum('o,io->io', L, R)
+                    if 'bias' in rel.trainable_vars:
+                        per_key['bias'] = L * Rbias_map[rid]
+                _route_grads_by_path(rel, per_key, weight_vals, dG)
         else:
             Rx_map, Rg_map = etrace_at_t
             for rel in self.graph.hidden_param_op_relations:
@@ -371,11 +463,20 @@ class OTPE(ETraceVjpAlgorithm):
                 L = dl_to_hidden_groups[group.index].sum(axis=-1)
                 Rx = Rx_map[rid]
                 Rg = Rg_map[rid]
+                Lg = L * Rg
+                per_key = {}
                 if is_batched_primitive(rel.primitive):
-                    dw = jnp.einsum('bi,bo->io', Rx, L * Rg)
+                    per_key['weight'] = jnp.einsum('bi,bo->io', Rx, Lg)
+                    if 'bias' in rel.trainable_vars:
+                        # Bias has no "in" dimension: sum the per-batch-row
+                        # contributions directly (matches the 'b' contraction
+                        # the weight einsum performs above).
+                        per_key['bias'] = Lg.sum(axis=0)
                 else:
-                    dw = jnp.einsum('i,o->io', Rx, L * Rg)
-                _route_grads_by_path(rel, {'weight': dw}, weight_vals, dG)
+                    per_key['weight'] = jnp.einsum('i,o->io', Rx, Lg)
+                    if 'bias' in rel.trainable_vars:
+                        per_key['bias'] = Lg
+                _route_grads_by_path(rel, per_key, weight_vals, dG)
 
         for path, dg in dl_to_nonetws_at_t.items():
             _update_dict(dG, path, dg)
