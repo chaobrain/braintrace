@@ -346,3 +346,151 @@ class TestPublicExports:
         assert op.grouped_matmul is grouped_matmul
         for name in ('etp_gmm_p', 'etp_gmv_p', 'grouped_matmul'):
             assert name in op.__all__
+
+
+from braintrace._algorithm.oracle import (
+    assert_direction_aligned,
+    assert_param_gradients_close,
+    bptt_param_gradients,
+    online_param_gradients,
+)
+
+
+def _grouped_tanh_rnn_factory(G=2, K=3, n_in=3, seed=0):
+    """tanh RNN whose recurrence is a block-diagonal grouped_matmul.
+
+    ``w (G, K, K)`` is the ETP recurrent weight; ``win`` is a plain input
+    projection (excluded from ETP). Hidden state is flat ``(1, G*K)``;
+    reshapes around the grouped op are plain JAX ops on the y→h path.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                k = jax.random.PRNGKey
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed), (G, K, K)))
+                self.win = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed + 1), (n_in, G * K)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, G * K)))
+
+            def update(self, x):
+                inp = x @ self.win.value
+                rec = braintrace.grouped_matmul(
+                    self.h.value.reshape(1, G, K), self.w.value)
+                self.h.value = jax.nn.tanh(inp + rec.reshape(1, G * K))
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+def _seq_inputs(T=6, n_in=3, seed=42):
+    brainstate.random.seed(seed)
+    return brainstate.random.randn(T, n_in)
+
+
+class TestGroupedOracle:
+
+    def test_d_rtrl_multistep_matches_bptt(self):
+        factory = _grouped_tanh_rnn_factory()
+        inputs = _seq_inputs()
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'),
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_d_rtrl_multistep_matches_bptt_with_bias(self):
+        G, K, n_in = 2, 3, 3
+
+        def factory():
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    k = jax.random.PRNGKey
+                    self.w = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(0), (G, K, K)))
+                    self.b = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(1), (G, K)))
+                    self.win = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(2), (n_in, G * K)))
+                    self.h = brainstate.HiddenState(jnp.zeros((1, G * K)))
+
+                def update(self, x):
+                    rec = braintrace.grouped_matmul(
+                        self.h.value.reshape(1, G, K), self.w.value, self.b.value)
+                    self.h.value = jax.nn.tanh(x @ self.win.value + rec.reshape(1, G * K))
+                    return self.h.value
+
+            return Net()
+
+        inputs = _seq_inputs(seed=43)
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'),
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_d_rtrl_with_weight_fn_matches_bptt(self):
+        """weight_fn forces the generic rule path (fast path gated off)."""
+        G, K, n_in = 2, 3, 3
+
+        def factory():
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    k = jax.random.PRNGKey
+                    self.w = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(0), (G, K, K)))
+                    self.win = brainstate.ParamState(
+                        0.1 * jax.random.normal(k(1), (n_in, G * K)))
+                    self.h = brainstate.HiddenState(jnp.zeros((1, G * K)))
+
+                def update(self, x):
+                    rec = braintrace.grouped_matmul(
+                        self.h.value.reshape(1, G, K), self.w.value,
+                        weight_fn=jnp.tanh)
+                    self.h.value = jax.nn.tanh(x @ self.win.value + rec.reshape(1, G * K))
+                    return self.h.value
+
+            return Net()
+
+        inputs = _seq_inputs(seed=44)
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'),
+        )
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_fast_and_legacy_solve_parity(self):
+        factory = _grouped_tanh_rnn_factory()
+        inputs = _seq_inputs()
+        fast = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(
+                m, vjp_method='multi-step', fast_solve=True))
+        legacy = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(
+                m, vjp_method='multi-step', fast_solve=False))
+        assert_param_gradients_close(fast, legacy, atol=1e-5)
+
+    def test_pp_prop_direction_aligned_with_bptt(self):
+        factory = _grouped_tanh_rnn_factory()
+        inputs = _seq_inputs()
+        bptt = bptt_param_gradients(factory, inputs)
+        approx = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.pp_prop(
+                m, decay_or_rank=0.9, vjp_method='multi-step'),
+        )
+        assert_direction_aligned(
+            approx, bptt, min_cosine=0.9, min_sign_agreement=0.8,
+            keys=[('w',)],
+        )
