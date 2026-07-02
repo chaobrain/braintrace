@@ -21,6 +21,7 @@ import jax.numpy as jnp
 
 import braintrace
 from braintrace._algorithm.e_prop import EProp
+from braintrace._algorithm.oracle_models import two_state_rnn
 
 
 def _lsnn_like():
@@ -58,14 +59,18 @@ class TestEPropConstruction(unittest.TestCase):
         x = jnp.ones((1, 3))
         algo.compile_graph(x)
         algo.init_etrace_state()
-        assert len(algo._kappa_filters) == len(algo.graph.hidden_param_op_relations)
+        # One trace-filter state per raw-trace key (matching etrace_bwg's own
+        # key space), not per hidden_param_op_relation -- those only happen
+        # to coincide (1-to-1) on this trivial single-weight, single-group model.
+        assert len(algo._trace_filters) == len(algo.etrace_bwg)
+        assert len(algo._trace_filters) > 0
 
     def test_kappa_filter_skipped_when_zero(self):
         algo = EProp(_lsnn_like(), kappa_filter_decay=0.0)
         x = jnp.ones((1, 3))
         algo.compile_graph(x)
         algo.init_etrace_state()
-        assert len(algo._kappa_filters) == 0
+        assert len(algo._trace_filters) == 0
 
 
 class TestEPropKappaApplied(unittest.TestCase):
@@ -94,18 +99,27 @@ class TestEPropKappaApplied(unittest.TestCase):
         assert jnp.allclose(g_drtrl, g_eprop, atol=1e-6)
 
     def test_kappa_nonzero_differs_from_zero(self):
+        """κ only accumulates history (``bar_e^t = kappa*bar_e^{t-1} + e^t``),
+        so its effect is invisible on the very first backward-invoking step
+        (bar_e^{t-1} starts at zero) and only shows up once a *second*
+        backward step carries forward non-trivial filter history.
+        """
+
         def compute(kappa):
             net = _lsnn_like()
             algo = EProp(net, kappa_filter_decay=kappa)
             x = jnp.ones((1, 3))
             algo.compile_graph(x)
             algo.init_etrace_state()
-            algo.update(x)
 
             def loss(x_):
                 out = algo.update(x_)
                 return (out ** 2).sum()
 
+            # First backward-invoking step primes the trace-filter history.
+            brainstate.transform.grad(
+                loss, algo.param_states, return_value=True
+            )(x)
             grads, _ = brainstate.transform.grad(
                 loss, algo.param_states, return_value=True
             )(x)
@@ -137,6 +151,219 @@ class TestEPropRandomFeedback(unittest.TestCase):
         g_sym = compute('symmetric')
         g_rnd = compute('random', random_feedback_key=jax.random.PRNGKey(123))
         assert not jnp.allclose(g_sym, g_rnd, atol=1e-4)
+
+
+class TestEPropNumStateIsolation(unittest.TestCase):
+    """H4: the kappa filter must not sum across the trailing ``num_state``
+    axis and broadcast the sum back -- each hidden-state channel of a
+    multi-state HiddenGroup must be filtered independently.
+    """
+
+    def _run(self, fast_solve):
+        spec = two_state_rnn(n_in=3, n_rec=3, seed=0)
+        net = spec.factory()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        algo = EProp(net, kappa_filter_decay=0.9, fast_solve=fast_solve)
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        def loss(x_):
+            # `update` only returns `v` (state 0); `a` (state 1) only
+            # influences the loss indirectly through the *next* step's `v`,
+            # so the two channels are state-asymmetric.
+            out = algo.update(x_)
+            return (out ** 2).sum()
+
+        # Two backward-invoking steps so the (kappa > 0) filter history is
+        # non-trivial in both channels.
+        brainstate.transform.grad(loss, algo.param_states, return_value=True)(x)
+        brainstate.transform.grad(loss, algo.param_states, return_value=True)(x)
+        return algo
+
+    def test_runs_without_shape_error_both_paths(self):
+        # Legacy path (fast_solve=False) shape-errors today (H4); fast path
+        # silently contaminates state 1 with state 0's sum. Both must simply
+        # run to completion post-fix.
+        self._run(fast_solve=False)
+        self._run(fast_solve=True)
+
+    def test_per_state_channels_are_not_contaminated(self):
+        for fast_solve in (False, True):
+            algo = self._run(fast_solve=fast_solve)
+            assert len(algo._trace_filters) == 1
+            flt = next(iter(algo._trace_filters.values()))
+            w = flt.value['weight']
+            assert w.shape[-1] == 2  # num_state == 2 (v, a)
+            channel_0, channel_1 = w[..., 0], w[..., 1]
+            assert not jnp.allclose(channel_0, channel_1, atol=1e-4), (
+                f'fast_solve={fast_solve}: per-state channels are identical -- '
+                'looks like a summed-then-broadcast contamination.'
+            )
+
+
+class TestEPropFilterSemantics(unittest.TestCase):
+    """M1: kappa must filter the *eligibility trace*
+    (``bar_e^t = kappa*bar_e^{t-1} + e^t``), not the learning signal. The two
+    orderings give different gradients whenever the learning signal varies in
+    time, which this hand-computed 2-step reference exercises via a
+    sign-flipping loss coefficient over a constant trace.
+    """
+
+    def test_kappa_zero_matches_unfiltered(self):
+        """Regression anchor: kappa=0 must reduce to the unfiltered algorithm."""
+        with brainstate.environ.context(precision=64):
+            def make():
+                class Net(brainstate.nn.Module):
+                    def __init__(self):
+                        super().__init__()
+                        self.w = brainstate.ParamState(jnp.array([[1.0]]))
+                        self.h = brainstate.HiddenState(jnp.zeros((1, 1)))
+
+                    def update(self, x):
+                        self.h.value = braintrace.matmul(x, self.w.value)
+                        return self.h.value
+
+                net = Net()
+                brainstate.nn.init_all_states(net, batch_size=1)
+                return net
+
+            def compute(kappa):
+                net = make()
+                algo = EProp(net, kappa_filter_decay=kappa)
+                x = jnp.array([[2.0]])
+                algo.compile_graph(x)
+                algo.init_etrace_state()
+
+                def loss(x_):
+                    out = algo.update(x_)
+                    return (out ** 2).sum()
+
+                grads, _ = brainstate.transform.grad(
+                    loss, algo.param_states, return_value=True
+                )(x)
+                return grads[next(iter(grads))]
+
+            g_unfiltered = compute(0.0)
+            # kappa=0.0 takes the `kappa_filter_decay > 0.0` branch's *else*
+            # path (no filters allocated at all), so this is a genuine
+            # code-path regression anchor, not just a numerically-tiny kappa.
+            assert jnp.allclose(g_unfiltered, jnp.array([[8.0]]), atol=1e-10)
+
+    def test_hand_computed_two_step_filtered_trace_reference(self):
+        """No-recurrence toy model: ``h_t = matmul(x, w)`` with constant
+        ``x = [[2.0]]``, so the raw eligibility trace ``e^t = 2.0`` every
+        step. With ``kappa=0.5`` and loss coefficients ``+1`` then ``-1``:
+
+            bar_e^1 = 0.5*0 + 2.0 = 2.0;  g1 = (+1)*bar_e^1 =  2.0
+            bar_e^2 = 0.5*2.0 + 2.0 = 3.0; g2 = (-1)*bar_e^2 = -3.0
+            total = g1 + g2 = -1.0
+
+        (The old signal-filtering ordering would instead filter the
+        already-scaled learning signal and produce a different total.)
+        """
+        with brainstate.environ.context(precision=64):
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.w = brainstate.ParamState(jnp.array([[1.0]]))
+                    self.h = brainstate.HiddenState(jnp.zeros((1, 1)))
+
+                def update(self, x):
+                    self.h.value = braintrace.matmul(x, self.w.value)
+                    return self.h.value
+
+            net = Net()
+            brainstate.nn.init_all_states(net, batch_size=1)
+            algo = EProp(net, kappa_filter_decay=0.5)
+            x = jnp.array([[2.0]])
+            algo.compile_graph(x)
+            algo.init_etrace_state()
+
+            def grad_with_coeff(coeff):
+                def loss(x_):
+                    out = algo.update(x_)
+                    return (coeff * out).sum()
+
+                grads, _ = brainstate.transform.grad(
+                    loss, algo.param_states, return_value=True
+                )(x)
+                return grads[next(iter(grads))]
+
+            g1 = grad_with_coeff(1.0)
+            g2 = grad_with_coeff(-1.0)
+            assert jnp.allclose(g1, jnp.array([[2.0]]), atol=1e-10)
+            assert jnp.allclose(g2, jnp.array([[-3.0]]), atol=1e-10)
+            assert jnp.allclose(g1 + g2, jnp.array([[-1.0]]), atol=1e-10)
+
+
+class TestEPropRandomFeedbackInvariance(unittest.TestCase):
+    """M2: 'random feedback' must remove weight-transport (independence from
+    the readout weights' *magnitude*), while still depending on the
+    ``brainstate.random`` seed used to draw the fixed projection matrix.
+    """
+
+    @staticmethod
+    def _readout_net(readout_scale):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
+                )
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+                # Plain (non-ETP) readout matrix -- only its *scale* matters
+                # for this test, so it is not wrapped in a ParamState.
+                self.w_out = readout_scale * jax.random.normal(
+                    jax.random.PRNGKey(1), (3, 3)
+                )
+
+            def update(self, x):
+                self.h.value = jax.nn.tanh(
+                    braintrace.matmul(self.h.value + x, self.w.value)
+                )
+                return self.h.value @ self.w_out
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        return net
+
+    def _compute(self, feedback, readout_scale, seed=None):
+        net = self._readout_net(readout_scale)
+        if feedback == 'random':
+            brainstate.random.seed(seed)
+            key = brainstate.random.split_key()
+            algo = EProp(net, feedback='random', random_feedback_key=key)
+        else:
+            algo = EProp(net, feedback='symmetric')
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        def loss(x_):
+            out = algo.update(x_)
+            return (out ** 2).sum()
+
+        grads, _ = brainstate.transform.grad(
+            loss, algo.param_states, return_value=True
+        )(x)
+        return grads[next(iter(grads))]
+
+    def test_symmetric_feedback_scales_with_readout_weights(self):
+        # Sanity check that the readout-scale knob is actually meaningful.
+        g_small = self._compute('symmetric', readout_scale=1.0)
+        g_large = self._compute('symmetric', readout_scale=5.0)
+        assert not jnp.allclose(g_small, g_large, atol=1e-4)
+
+    def test_random_feedback_invariant_to_readout_scale(self):
+        g_small = self._compute('random', readout_scale=1.0, seed=7)
+        g_large = self._compute('random', readout_scale=5.0, seed=7)
+        assert jnp.allclose(g_small, g_large, atol=1e-3)
+
+    def test_random_feedback_depends_on_seed(self):
+        g_seed1 = self._compute('random', readout_scale=1.0, seed=1)
+        g_seed2 = self._compute('random', readout_scale=1.0, seed=2)
+        assert not jnp.allclose(g_seed1, g_seed2, atol=1e-4)
 
 
 class FakeLIF(brainstate.HiddenState):
