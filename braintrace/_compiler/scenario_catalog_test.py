@@ -38,10 +38,12 @@ import warnings
 
 import brainstate
 import jax.numpy as jnp
+import pytest
 
 import braintrace
 from braintrace import (
     DiagnosticKind,
+    DiagnosticLevel,
     compile_etrace_graph,
 )
 from braintrace._op import (
@@ -979,25 +981,54 @@ class TestCategoryN_ControlFlow:
         kinds = [r.kind for r in graph.diagnostics]
         assert DiagnosticKind.SCAN_UNROLLED in kinds
 
-    def test_scan_body_etp_emits_diagnostic(self):
+    def test_scan_body_etp_default_policy_raises(self):
+        """Default policy (``etp_in_control_flow='error'``): an ETP primitive
+        inside an unflattened scan body is a hard error — its weight would
+        otherwise silently drop out of online learning. An ERROR-level
+        record is emitted before raising."""
         jaxpr = make_scan_body_etp_jaxpr(3, 4)
 
+        with diagnostic_context() as reporter:
+            with pytest.raises(NotImplementedError) as exc_info:
+                _scan_jaxpr_for_etp_eqns(jaxpr)
+
+        msg = str(exc_info.value)
+        assert 'scan/while/cond' in msg
+        assert "etp_in_control_flow='exclude'" in msg
+        records = [
+            r for r in reporter.records()
+            if r.kind is DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW
+        ]
+        assert len(records) == 1
+        assert records[0].level is DiagnosticLevel.ERROR
+
+    def test_scan_body_etp_exclude_policy_warns_and_drops(self):
+        """``etp_in_control_flow='exclude'`` pins the pre-Phase-3 behavior:
+        a WARNING record and exclusion (no bubbling up), no raise."""
+        jaxpr = make_scan_body_etp_jaxpr(3, 4)
+        policy = braintrace.ControlFlowPolicy(etp_in_control_flow='exclude')
+
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
             with diagnostic_context() as reporter:
-                top = _scan_jaxpr_for_etp_eqns(jaxpr)
+                top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
         assert top == [], 'ETP inside scan body must NOT bubble up'
-        kinds = [r.kind for r in reporter.records()]
-        assert DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW in kinds
+        records = [
+            r for r in reporter.records()
+            if r.kind is DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW
+        ]
+        assert len(records) == 1
+        assert records[0].level is DiagnosticLevel.WARNING
 
-    def test_cond_branches_etp_emits_diagnostic_per_branch(self):
+    def test_cond_branches_etp_exclude_policy_diagnostic_per_branch(self):
         jaxpr = make_cond_branches_etp_jaxpr(3, 4)
+        policy = braintrace.ControlFlowPolicy(etp_in_control_flow='exclude')
 
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
             with diagnostic_context() as reporter:
-                top = _scan_jaxpr_for_etp_eqns(jaxpr)
+                top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
         assert top == []
         n_cf = sum(
@@ -1009,17 +1040,48 @@ class TestCategoryN_ControlFlow:
             f'got {n_cf}'
         )
 
-    def test_while_body_etp_emits_diagnostic(self):
+    def test_cond_branches_etp_default_policy_raises(self):
+        jaxpr = make_cond_branches_etp_jaxpr(3, 4)
+        with diagnostic_context():
+            with pytest.raises(NotImplementedError):
+                _scan_jaxpr_for_etp_eqns(jaxpr)
+
+    def test_while_body_etp_default_policy_raises(self):
+        """The weight of an ETP op inside a while body reaches the loop as an
+        already-processed value (not a tracked weight invar), so
+        ``check_unsupported_op`` cannot catch it — the relation scanner is
+        the last line of defence and must raise by default."""
         jaxpr = make_while_body_etp_jaxpr(4, 4)
+
+        with diagnostic_context() as reporter:
+            with pytest.raises(NotImplementedError):
+                _scan_jaxpr_for_etp_eqns(jaxpr)
+
+        records = [
+            r for r in reporter.records()
+            if r.kind is DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW
+        ]
+        assert len(records) == 1
+        assert records[0].level is DiagnosticLevel.ERROR
+
+    def test_while_body_etp_exclude_policy_warns_and_drops(self):
+        jaxpr = make_while_body_etp_jaxpr(4, 4)
+        policy = braintrace.ControlFlowPolicy(etp_in_control_flow='exclude')
 
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
             with diagnostic_context() as reporter:
-                top = _scan_jaxpr_for_etp_eqns(jaxpr)
+                top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
         assert top == []
         kinds = [r.kind for r in reporter.records()]
         assert DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW in kinds
+
+    def test_bogus_etp_in_control_flow_raises_value_error(self):
+        jaxpr = make_while_body_etp_jaxpr(4, 4)
+        policy = braintrace.ControlFlowPolicy(etp_in_control_flow='bogus')
+        with pytest.raises(ValueError, match='etp_in_control_flow'):
+            _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
 
 # ---------------------------------------------------------------------------

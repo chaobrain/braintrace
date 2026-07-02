@@ -70,6 +70,7 @@ from braintrace._op import (
     is_etp_enable_gradient_primitive,
 )
 from braintrace._misc import git_issue_addr
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from braintrace._typing import (
     Path,
     HiddenOutVar,
@@ -660,20 +661,48 @@ def _scan_jaxpr_for_etp_eqns(
     jaxpr: Jaxpr,
     *,
     inside_control_flow: bool = False,
+    policy: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
 ) -> List[JaxprEqn]:
     """Walk the Jaxpr and return all equations whose primitive is ETP.
 
-    Descends into ``jit``/``pjit`` (transparently) and emits diagnostics
-    when ETP primitives are found inside control-flow primitives
-    (``scan``/``while``/``cond``). Control-flow ETP primitives are *not*
+    Descends into ``jit``/``pjit`` (transparently). ETP primitives found
+    inside control-flow primitives (``scan``/``while``/``cond``) are *not*
     returned to the main relation pass — their semantics (carry vars,
-    branch unification) are not yet fully supported and a structured
-    diagnostic is emitted so users can locate them.
+    branch unification) are not supported. Under the default policy
+    (``etp_in_control_flow='error'``) they raise ``NotImplementedError``
+    after an ERROR-level record, because the weight would otherwise
+    silently drop out of online learning; ``'exclude'`` restores the loud
+    WARNING + exclusion.
     """
     etp_eqns: List[JaxprEqn] = []
     for eqn in jaxpr.eqns:
         if is_etp_primitive(eqn.primitive):
             if inside_control_flow:
+                if policy.etp_in_control_flow not in ('error', 'exclude'):
+                    raise ValueError(
+                        f"policy.etp_in_control_flow must be 'error' or "
+                        f"'exclude', got {policy.etp_in_control_flow!r}."
+                    )
+                if policy.etp_in_control_flow == 'error':
+                    message = (
+                        f'ETP primitive {eqn.primitive.name} found inside a '
+                        f'scan/while/cond body that the compiler could not '
+                        f'flatten. Its weight would silently drop out of '
+                        f'online learning. Restructure the loop, use a '
+                        f'fixed-length scan/for_loop within the unroll '
+                        f'limit, use a plain (non-ETP) op to exclude the '
+                        f'weight, or set '
+                        f"ControlFlowPolicy(etp_in_control_flow='exclude') "
+                        f'to restore the warning-and-exclude behavior.'
+                    )
+                    emit(
+                        kind=DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW,
+                        level=DiagnosticLevel.ERROR,
+                        also_warn=False,
+                        message=message,
+                        primitive=eqn.primitive,
+                    )
+                    raise NotImplementedError(message)
                 emit(
                     kind=DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW,
                     level=DiagnosticLevel.WARNING,
@@ -694,6 +723,7 @@ def _scan_jaxpr_for_etp_eqns(
             inner_jaxpr = eqn.params['jaxpr'].jaxpr
             inner_etp = _scan_jaxpr_for_etp_eqns(
                 inner_jaxpr, inside_control_flow=inside_control_flow,
+                policy=policy,
             )
             if inner_etp:
                 emit(
@@ -717,7 +747,7 @@ def _scan_jaxpr_for_etp_eqns(
         elif is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn):
             for sub_jaxpr in _control_flow_subjaxprs(eqn):
                 _scan_jaxpr_for_etp_eqns(
-                    sub_jaxpr, inside_control_flow=True,
+                    sub_jaxpr, inside_control_flow=True, policy=policy,
                 )
     return etp_eqns
 
@@ -751,6 +781,7 @@ def find_hidden_param_op_relations_from_jaxpr(
     outvar_to_hidden_path: Dict[HiddenOutVar, Path],
     hid_path_to_group: Dict[Path, HiddenGroup],
     weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
+    control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     **_ignored,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
@@ -786,7 +817,7 @@ def find_hidden_param_op_relations_from_jaxpr(
         for ov, p in outvar_to_hidden_path.items()
     }
 
-    etp_eqns = _scan_jaxpr_for_etp_eqns(jaxpr)
+    etp_eqns = _scan_jaxpr_for_etp_eqns(jaxpr, policy=control_flow)
     relations: List[HiddenParamOpRelation] = []
 
     for eqn in etp_eqns:
@@ -1090,6 +1121,7 @@ def find_hidden_param_op_relations_from_minfo(
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         hid_path_to_group=hid_path_to_group,
         weight_path_to_invars=weight_path_to_invars,
+        control_flow=minfo.control_flow,
     )
 
 
