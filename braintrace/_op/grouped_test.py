@@ -333,3 +333,16 @@ class TestGroupedFastPath:
             folded['weight'], jnp.einsum('bgna,bgkna->gkn', dl, tr['weight']), atol=1e-5)
         np.testing.assert_allclose(
             folded['bias'], jnp.einsum('bgna,bgna->gn', dl, tr['bias']), atol=1e-5)
+
+
+class TestPublicExports:
+
+    def test_top_level_exports(self):
+        assert braintrace.grouped_matmul is grouped_matmul
+        assert 'grouped_matmul' in braintrace.__all__
+
+    def test_op_package_exports(self):
+        import braintrace._op as op
+        assert op.grouped_matmul is grouped_matmul
+        for name in ('etp_gmm_p', 'etp_gmv_p', 'grouped_matmul'):
+            assert name in op.__all__

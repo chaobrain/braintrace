@@ -36,6 +36,7 @@ input rank.
    :template: classtemplate.rst
 
    matmul
+   grouped_matmul
    element_wise
    conv
    sparse_matmul
