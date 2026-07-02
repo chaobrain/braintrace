@@ -62,17 +62,8 @@ def _compiled_algo(net, policy, **kw):
     return algo
 
 
-@pytest.fixture
-def allow_descent(monkeypatch):
-    """Task-9 shim: bypass the Part-1 algorithm gate until the param-dim
-    substep fold lands (Task 10 sets ``_supports_scan_descent = True`` for
-    real and this fixture becomes a no-op)."""
-    monkeypatch.setattr(braintrace.D_RTRL, '_supports_scan_descent', True,
-                        raising=False)
-
-
 class TestStackedJacobians:
-    def test_descended_diag_is_decay_identity_per_substep(self, allow_descent):
+    def test_descended_diag_is_decay_identity_per_substep(self):
         L, decay = 8, 0.9
         algo = _compiled_algo(make_snn_scan_net(loops=L, decay=decay), DESCEND())
         executor = algo.graph_executor
@@ -85,7 +76,7 @@ class TestStackedJacobians:
         # body h-path is `decay * h` -> D_tau == decay exactly, every substep
         np.testing.assert_allclose(np.asarray(diag), decay, atol=1e-6)
 
-    def test_descended_df_matches_manual_tanh_prime(self, allow_descent):
+    def test_descended_df_matches_manual_tanh_prime(self):
         L = 8
         net = make_snn_scan_net(loops=L)
         algo = _compiled_algo(net, DESCEND())
@@ -108,3 +99,35 @@ class TestStackedJacobians:
             np.asarray(df_stack[0, ..., 0]), np.asarray(expect), atol=1e-5)
         np.testing.assert_allclose(
             np.asarray(df_stack[-1, ..., 0]), np.asarray(expect), atol=1e-5)
+
+
+class TestSubstepFold:
+    def test_descended_trace_equals_sum_of_unrolled_traces(self):
+        """Replay == unroll-in-time: after identical multi-step drives, the
+        descended model's single trace equals the elementwise SUM of the
+        unrolled twin's per-substep-relation traces (diagonal body, L=8)."""
+        L = 8
+        inputs = jnp.asarray(
+            np.random.RandomState(7).randn(3, 4).astype('float32'))
+
+        algo_d = _compiled_algo(make_snn_scan_net(loops=L, seed=0), DESCEND())
+        algo_u = _compiled_algo(make_snn_scan_net(loops=L, seed=0), UNROLL())
+        for algo in (algo_d, algo_u):
+            algo(braintrace.MultiStepData(inputs))
+
+        d_entries = list(algo_d.etrace_bwg.values())
+        u_entries = list(algo_u.etrace_bwg.values())
+        assert len(d_entries) == 1 and len(u_entries) == L
+
+        d_val = d_entries[0].value['weight']
+        u_sum = sum(e.value['weight'] for e in u_entries)
+        np.testing.assert_allclose(
+            np.asarray(d_val), np.asarray(u_sum), atol=1e-6)
+
+    def test_io_dim_algorithm_still_gated(self):
+        net = make_snn_scan_net(loops=40)
+        algo = braintrace.pp_prop(net, decay_or_rank=16,
+                                  vjp_method='multi-step',
+                                  control_flow=DESCEND())
+        with pytest.raises(NotImplementedError, match='scan descent'):
+            algo.compile_graph(jnp.ones((4,), dtype='float32'))
