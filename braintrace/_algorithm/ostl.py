@@ -51,7 +51,7 @@ __all__ = ['OSTLRecurrent', 'OSTLFeedforward']
 
 
 class OSTLRecurrent(ParamDimVjpAlgorithm):
-    r"""OSTL 'with-H' regime — RTRL-exact single-layer factorization.
+    r"""OSTL 'with-H' regime — single-layer factorization, RTRL-exact only for block-diagonal hidden-to-hidden Jacobians.
 
     OSTL derives an online rule by cleanly separating the gradient into a
     *temporal* eligibility trace and a *spatial* learning signal. The 'with-H'
