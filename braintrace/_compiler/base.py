@@ -114,16 +114,17 @@ def check_unsupported_op(
         in an unsupported manner.
     """
     # checking whether the weight variables are used in the equation
-    # Note: with the primitive-based system, weight vars inside JIT are
-    # handled by backward tracing in the compiler, so we only warn.
+    # Note: user ``jax.jit`` boundaries are inlined at extraction time
+    # (see ``jaxpr_graph.inline_jit_calls``), so reaching this check means
+    # a weight is used inside a genuinely opaque region (scan/while/cond).
     invar = find_element_exist_in_the_set(eqn.invars, self.weight_invars)
     if invar is not None:
         emit(
             kind=DiagnosticKind.WEIGHT_IN_CONTROL_FLOW,
-            level=DiagnosticLevel.WARNING,
+            level=DiagnosticLevel.ERROR,
             message=(
-                f'Weight state found inside a {op_name} function. '
-                f'The primitive-based compiler handles this via backward tracing.'
+                f'Weight state used inside a {op_name} region; the ETrace '
+                f'compiler cannot trace through it and compilation fails.'
             ),
             context={'op_name': op_name, 'invar': invar},
         )

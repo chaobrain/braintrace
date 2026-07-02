@@ -709,6 +709,7 @@ from braintrace._compiler.scenario_catalog import (
     SharedTiedWeightRNN,
     MixedBatchedRNN,
     PartialPathRNN,
+    NestedJitRNN,
     make_scan_body_etp_jaxpr,
     make_cond_branches_etp_jaxpr,
     make_while_body_etp_jaxpr,
@@ -1017,3 +1018,48 @@ class TestCategoryG_StructuralSmoke:
             'No relation had its y_var available as a temp — '
             'the compiler is not emitting the y values it registered.'
         )
+
+
+# ---------------------------------------------------------------------------
+# Category O — Nested jit boundary
+# ---------------------------------------------------------------------------
+
+class TestCategoryO_NestedJit:
+    """The ETP matmul lives inside a user ``jax.jit`` function. The
+    compiler inlines the jit body at extraction time, so the relation
+    must be found exactly as for the plain :class:`UnbatchedMvRNN` —
+    same relation set, same primitive identity, executable transition."""
+
+    def test_jit_wrapped_matmul_registers_relation(self):
+        model = NestedJitRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        assert _relation_set(graph) == {(('w',), ('h',))}
+        rel = graph.hidden_param_op_relations[0]
+        assert rel.primitive is etp_mv_p
+
+    def test_jit_wrapped_matmul_transition_executes(self):
+        model = NestedJitRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        inp = brainstate.random.rand(3)
+
+        graph = _compile(model, inp)
+
+        _, _, _, temps = graph.module_info.jaxpr_call(inp)
+        rel = graph.hidden_param_op_relations[0]
+        y_val = temps[rel.y_var]
+        vals = rel.y_to_hidden_groups(y_val, temps, concat_hidden_vals=True)
+        assert len(vals) == len(rel.hidden_groups)
+        for v, group in zip(vals, rel.hidden_groups):
+            assert v.shape[:len(group.varshape)] == tuple(group.varshape)
+
+    def test_jit_compile_twice_same_order(self):
+        def build():
+            model = NestedJitRNN(3, 4)
+            brainstate.nn.init_all_states(model)
+            return _relation_set(_compile(model, brainstate.random.rand(3)))
+
+        assert build() == build()

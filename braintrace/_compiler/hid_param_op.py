@@ -651,11 +651,15 @@ def _scan_jaxpr_for_etp_eqns(
                     kind=DiagnosticKind.PRIMITIVE_INSIDE_NESTED_JIT,
                     level=DiagnosticLevel.WARNING,
                     message=(
-                        'Found ETP primitives inside a nested jit/pjit. '
-                        'This is currently handled by tracing through the '
-                        'outer jaxpr. If you see incorrect results, please '
-                        'avoid wrapping individual ETP calls in jax.jit. '
-                        f'Report issues at {git_issue_addr}.'
+                        'Found ETP primitives inside a jit/pjit call that was '
+                        'not inlined before relation analysis. These '
+                        'primitives are NOT registered as relations. The '
+                        'standard pipeline (extract_module_info / '
+                        'compile_etrace_graph) inlines user jit bodies before '
+                        'analysis; when running the relation pass on a raw '
+                        'jaxpr, apply '
+                        'braintrace._compiler.jaxpr_graph.inline_jit_calls '
+                        f'first. Report issues at {git_issue_addr}.'
                     ),
                     context={'inner_primitives': tuple(
                         e.primitive for e in inner_etp
