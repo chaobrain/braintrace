@@ -36,6 +36,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import brainunit as u
+import pytest
 
 import braintrace
 from braintrace._op import (
@@ -118,6 +119,43 @@ class TestAutoDispatch:
         )(x, B, A)
         assert any(eqn.primitive is etp_lora_mm_p for eqn in jaxpr.jaxpr.eqns)
         assert not any(eqn.primitive is etp_lora_mv_p for eqn in jaxpr.jaxpr.eqns)
+
+
+# ---------------------------------------------------------------------------
+# Rank guard (M5) — mirrors the dense ``matmul`` guard: every ETP trace rule
+# assumes a (batch, in) layout, so rank>2 ``x`` must be rejected rather than
+# silently running through ``etp_lora_mm_p``.
+# ---------------------------------------------------------------------------
+
+class TestRankGuard:
+
+    def test_rank3_input_raises_valueerror(self):
+        x = jnp.ones((2, 5, 3))
+        B = jnp.ones((3, 2))
+        A = jnp.ones((2, 4))
+        with pytest.raises(ValueError, match=r'ndim'):
+            lora_matmul(x, B, A)
+
+    def test_rank4_input_raises_valueerror(self):
+        x = jnp.ones((2, 5, 6, 3))
+        B = jnp.ones((3, 2))
+        A = jnp.ones((2, 4))
+        with pytest.raises(ValueError, match=r'ndim'):
+            lora_matmul(x, B, A)
+
+    def test_rank1_input_still_accepted(self):
+        x = jnp.ones((3,))
+        B = jnp.ones((3, 2))
+        A = jnp.ones((2, 4))
+        out = lora_matmul(x, B, A)
+        np.testing.assert_allclose(out, x @ B @ A)
+
+    def test_rank2_input_still_accepted(self):
+        x = jnp.ones((2, 3))
+        B = jnp.ones((3, 2))
+        A = jnp.ones((2, 4))
+        out = lora_matmul(x, B, A)
+        np.testing.assert_allclose(out, x @ B @ A)
 
 
 # ---------------------------------------------------------------------------

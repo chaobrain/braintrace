@@ -22,7 +22,11 @@ inherits the full, separately-tested machinery of an existing VJP algorithm —
 branching:
 
 - :class:`OSTLRecurrent` ('with-H') keeps ``H`` and is RTRL-exact for a single
-  recurrent layer (per-parameter D-RTRL trace, O(P·H)).
+  recurrent layer *whose hidden-to-hidden Jacobian is block-diagonal* (i.e. the
+  only path from one hidden unit to another is through a traced ETP recurrent
+  weight, not e.g. a hand-written mixing term) — per-parameter D-RTRL trace,
+  O(P·H). Genuine cross-hidden-unit coupling outside the traced weight is
+  dropped, so the rule is then only an approximation to BPTT.
 - :class:`OSTLFeedforward` ('without-H') drops ``H``; the temporal term vanishes
   and the update reduces to pp_prop with negligible decay (feedforward SNN).
 
@@ -52,8 +56,7 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     OSTL derives an online rule by cleanly separating the gradient into a
     *temporal* eligibility trace and a *spatial* learning signal. The 'with-H'
     regime retains the hidden-to-hidden Jacobian, so the trace carries the full
-    temporal term and the rule is gradient-equivalent to BPTT for a single
-    recurrent layer:
+    temporal term:
 
     .. math::
 
@@ -68,6 +71,22 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     the state-to-output Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
     This is exactly the per-parameter D-RTRL trace (memory :math:`O(P\cdot H)`),
     so the class delegates entirely to :class:`~braintrace.ParamDimVjpAlgorithm`.
+
+    **Accuracy caveat.** The D-RTRL trace machinery underlying this class only
+    ever retains the per-position *block-diagonal* of :math:`\mathbf{D}^t`
+    (:func:`HiddenGroup.diagonal_jacobian`, via ``block_diagonal_last_dim``):
+    cross-hidden-unit terms :math:`\partial h^t_p / \partial h^{t-1}_q` for
+    :math:`p \ne q` are retained only insofar as they flow through a *traced
+    ETP weight* (e.g. a recurrent :func:`~braintrace.matmul`); any other
+    hidden-to-hidden mixing (e.g. a hand-written convolution/roll/mixing term
+    not expressed as an ETP op) is *not* captured. Consequently the rule is
+    gradient-equivalent to BPTT only when the hidden-to-hidden Jacobian is
+    (effectively) block-diagonal in this sense — for a single recurrent layer
+    whose only cross-unit coupling is the traced ETP recurrent weight, the two
+    coincide to machine precision. If some other part of the model couples
+    hidden units directly (bypassing the traced weight), the two diverge; see
+    ``TestOSTLRecurrentVsBPTT`` in ``ostl_test.py`` for a worked example of both
+    regimes.
 
     Parameters
     ----------
