@@ -12,8 +12,8 @@
   runs at extraction time (after user-`jit` inlining) and rewrites every
   ETP-relevant `cond` equation into the inlined bodies of *all* branches
   followed by one `select_n` per output. `select_n`'s index semantics and
-  JVP match `cond` exactly, so values and Jacobians — and therefore exact
-  algorithms such as D-RTRL — are unchanged. Weights used inside `cond`
+  JVP match `cond` exactly, so for finite branches values and Jacobians —
+  and therefore exact algorithms such as D-RTRL — are unchanged. Weights used inside `cond`
   branches previously raised `NotImplementedError` (or were silently
   excluded when only ETP primitives appeared inside).
 - **Semantics note**: on the canonicalized graph **both branches execute

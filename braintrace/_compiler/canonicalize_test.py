@@ -367,6 +367,42 @@ class TestIfConvertConds:
         kinds = [r.kind for r in reporter.records()]
         assert DiagnosticKind.COND_CONVERSION_SKIPPED in kinds
 
+    def test_skipped_cond_warns_once_across_fixpoint_iterations(self):
+        # A convertible cond hiding another cond inside a jit forces >= 2
+        # fixpoint iterations; the unsafe cond must be reported once, not
+        # once per iteration.
+        @jax.jit
+        def jitted(a, w):
+            return jax.lax.cond(
+                jnp.max(a) > 2.,
+                lambda: braintrace.matmul(a, w),
+                lambda: a * 5.,
+            )
+
+        def f(x, w):
+            unsafe = jax.lax.cond(
+                jnp.sum(x) > 1.,
+                lambda: jax.lax.while_loop(
+                    lambda v: jnp.sum(v) < 10., lambda v: v + 1., x),
+                lambda: braintrace.matmul(x, w),
+            )
+            safe = jax.lax.cond(
+                jnp.sum(x) > 0.,
+                lambda: jitted(x, w),
+                lambda: x * 2.,
+            )
+            return unsafe + safe
+
+        closed = jax.make_jaxpr(f)(jnp.ones(3), jnp.eye(3))
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning, match='NOT if-converted'):
+                _convert(closed)
+        n_skip = sum(
+            r.kind is DiagnosticKind.COND_CONVERSION_SKIPPED
+            for r in reporter.records()
+        )
+        assert n_skip == 1
+
     def test_conversion_emits_info_diagnostic(self):
         _, closed, x, w = self._etp_cond_jaxpr()
         with diagnostic_context() as reporter:

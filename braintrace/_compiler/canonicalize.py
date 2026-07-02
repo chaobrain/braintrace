@@ -227,14 +227,18 @@ def if_convert_conds(
     # Fixpoint loop: converting a cond can surface user ``jit`` equations
     # from its branches, and their inlined bodies can expose further conds.
     # Each iteration converts what is visible, then flattens surfaced jits;
-    # nesting depth is finite, so this terminates.
+    # nesting depth is finite, so this terminates. ``skip_warned`` carries
+    # the equations already reported as skipped, so a relevant-but-unsafe
+    # cond warns once, not once per iteration.
     result = closed_jaxpr
+    skip_warned: set = set()
     while True:
         converted, n_converted = _convert_conds_once(
             result,
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
             hidden_outvars=hidden_outvars,
+            skip_warned=skip_warned,
         )
         if n_converted == 0:
             return result
@@ -247,6 +251,7 @@ def _convert_conds_once(
     weight_invars: Container[Var],
     hidden_invars: Container[Var],
     hidden_outvars: Container[Var],
+    skip_warned: set,
 ):
     """One conversion sweep over the top-level equations.
 
@@ -375,16 +380,18 @@ def _convert_conds_once(
                         },
                     )
                     return
-                emit(
-                    kind=DiagnosticKind.COND_CONVERSION_SKIPPED,
-                    level=DiagnosticLevel.WARNING,
-                    message=(
-                        f'An ETP-relevant cond ({reason}) was NOT '
-                        f'if-converted because {bad}; it stays opaque and '
-                        f'the existing control-flow restrictions apply.'
-                    ),
-                    context={'reason': bad, 'relevance': reason},
-                )
+                if id(eqn) not in skip_warned:
+                    skip_warned.add(id(eqn))
+                    emit(
+                        kind=DiagnosticKind.COND_CONVERSION_SKIPPED,
+                        level=DiagnosticLevel.WARNING,
+                        message=(
+                            f'An ETP-relevant cond ({reason}) was NOT '
+                            f'if-converted because {bad}; it stays opaque and '
+                            f'the existing control-flow restrictions apply.'
+                        ),
+                        context={'reason': bad, 'relevance': reason},
+                    )
             # Not converted: keep the cond eqn (resolved when inside a branch).
             if subst is None:
                 new_eqns.append(eqn)
