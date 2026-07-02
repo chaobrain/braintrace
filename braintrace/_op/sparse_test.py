@@ -49,7 +49,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     etp_sp_mm_p,
     etp_sp_mv_p,
     sparse_matmul,
@@ -217,13 +217,13 @@ class TestBrainunit:
 
 
 # ---------------------------------------------------------------------------
-# ETP rules — yw_to_w / xy_to_dw / init_*
+# ETP rules — dt_to_t / xy_to_dw / init_*
 # ---------------------------------------------------------------------------
 
 class TestSpMmEtpRules:
 
-    def test_yw_to_w_via_stub(self):
-        rule = ETP_RULES_YW_TO_W[etp_sp_mm_p]
+    def test_dt_to_t_via_stub(self):
+        rule = ETP_RULES_DT_TO_T[etp_sp_mm_p]
         stub = _StubSparseMat(jnp.zeros((3, 4)))
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
         # trace is now a dict {'weight': ...}
@@ -232,8 +232,8 @@ class TestSpMmEtpRules:
         # stub.yw_to_w_transposed broadcasts hidden over rows.
         np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
 
-    def test_yw_to_w_with_bias(self):
-        rule = ETP_RULES_YW_TO_W[etp_sp_mm_p]
+    def test_dt_to_t_with_bias(self):
+        rule = ETP_RULES_DT_TO_T[etp_sp_mm_p]
         stub = _StubSparseMat(jnp.zeros((3, 4)))
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
         trace = {'weight': jnp.ones((3, 4)), 'bias': jnp.ones(4)}
@@ -303,8 +303,8 @@ class TestSpMmEtpRules:
 
 class TestSpMvEtpRules:
 
-    def test_yw_to_w_via_stub(self):
-        rule = ETP_RULES_YW_TO_W[etp_sp_mv_p]
+    def test_dt_to_t_via_stub(self):
+        rule = ETP_RULES_DT_TO_T[etp_sp_mv_p]
         stub = _StubSparseMat(jnp.zeros((3, 4)))
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
         # trace is now a dict {'weight': ...}
@@ -312,8 +312,8 @@ class TestSpMvEtpRules:
         out = rule(hidden, trace, sparse_mat=stub)
         np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
 
-    def test_yw_to_w_with_bias(self):
-        rule = ETP_RULES_YW_TO_W[etp_sp_mv_p]
+    def test_dt_to_t_with_bias(self):
+        rule = ETP_RULES_DT_TO_T[etp_sp_mv_p]
         stub = _StubSparseMat(jnp.zeros((3, 4)))
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])
         trace = {'weight': jnp.ones((3, 4)), 'bias': jnp.ones(4)}
@@ -686,7 +686,7 @@ class TestStockCSRHashable:
 
 
 class TestBatchedSparseDRTRLOracle:
-    """C3: ``_sp_mm_yw_to_w`` (the ``etp_sp_mm_p`` D-RTRL trace-recurrence rule)
+    """C3: ``_sp_mm_dt_to_t`` (the ``etp_sp_mm_p`` D-RTRL trace-recurrence rule)
     is handed a leading batch axis -- ``hidden_dim: (batch, out)``,
     ``trace['weight']: (batch, nnz)`` -- straight from the online-trace update.
     ``brainevent``'s ``yw_to_w_transposed`` kernel only accepts 1-D operands, so
@@ -755,7 +755,7 @@ class TestBatchedSparseDRTRLOracle:
 
 
 # ---------------------------------------------------------------------------
-# Audit Task 11 (T3): first-principles ``yw_to_w`` from ``jax.jacobian``
+# Audit Task 11 (T3): first-principles ``dt_to_t`` from ``jax.jacobian``
 # ---------------------------------------------------------------------------
 
 def _sparse_row_col_of_nnz(csr):
@@ -779,8 +779,8 @@ def _random_masked_csr(mask: np.ndarray, seed: int):
     return brainevent.CSR.fromdense(dense)
 
 
-class TestYwToWFirstPrinciplesFromJacobian:
-    """Derive ``_sp_mv_yw_to_w`` / ``_sp_mm_yw_to_w`` from ``jax.jacobian`` of
+class TestDtToTFirstPrinciplesFromJacobian:
+    """Derive ``_sp_mv_dt_to_t`` / ``_sp_mm_dt_to_t`` from ``jax.jacobian`` of
     the primitive's own forward on a real, non-diagonal :class:`brainevent.CSR`.
 
     For ``y = x @ W`` with ``W`` sparse, ``partial y_o / partial data_k`` is
@@ -803,8 +803,8 @@ class TestYwToWFirstPrinciplesFromJacobian:
             [1, 1, 0, 0],
         ], dtype=bool)  # (in=3, out=4), deliberately non-diagonal/non-square
 
-    def test_mv_yw_to_w_matches_jacobian_contraction(self):
-        from braintrace._op.sparse import _sp_mv_yw_to_w
+    def test_mv_dt_to_t_matches_jacobian_contraction(self):
+        from braintrace._op.sparse import _sp_mv_dt_to_t
         csr = self._random_masked_csr_mv()
         n_in, n_out = csr.shape
         row_of_nnz, col_of_nnz = _sparse_row_col_of_nnz(csr)
@@ -836,14 +836,14 @@ class TestYwToWFirstPrinciplesFromJacobian:
         ref_w = trace_w * g[col_of_nnz]
         ref_b = trace_b * g
 
-        out = _sp_mv_yw_to_w(
+        out = _sp_mv_dt_to_t(
             g, {'weight': trace_w, 'bias': trace_b}, sparse_mat=csr, has_bias=True,
         )
         np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
         np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
 
-    def test_mm_yw_to_w_matches_jacobian_contraction(self):
-        from braintrace._op.sparse import _sp_mm_yw_to_w
+    def test_mm_dt_to_t_matches_jacobian_contraction(self):
+        from braintrace._op.sparse import _sp_mm_dt_to_t
         csr = self._random_masked_csr_mm()
         n_in, n_out = csr.shape
         row_of_nnz, col_of_nnz = _sparse_row_col_of_nnz(csr)
@@ -873,7 +873,7 @@ class TestYwToWFirstPrinciplesFromJacobian:
         ref_w = trace_w * g[:, col_of_nnz]
         ref_b = trace_b * g
 
-        out = _sp_mm_yw_to_w(
+        out = _sp_mm_dt_to_t(
             g, {'weight': trace_w, 'bias': trace_b}, sparse_mat=csr, has_bias=True,
         )
         np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)

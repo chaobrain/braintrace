@@ -16,7 +16,7 @@
 r""":class:`ETPPrimitive` and :func:`register_primitive`.
 
 Each ETP primitive is a JAX :class:`~jax.core.Primitive` subclass with
-four ETP-specific rule slots (``yw_to_w``, ``xy_to_dw``, ``init_drtrl``,
+four ETP-specific rule slots (``dt_to_t``, ``xy_to_dw``, ``init_drtrl``,
 ``init_pp``). All standard JAX rules — ``impl``, ``abstract_eval``,
 MLIR lowering, JVP, transpose, batching — are auto-derived from a single
 implementation function via :func:`register_primitive`.
@@ -42,7 +42,7 @@ from ._registries import (
     ETP_RULES_INIT_PP,
     ETP_RULES_PP_X_REPR,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     ETP_TRAINABLE_INVARS_FNS,
     ETP_X_INVAR_INDICES,
     ETP_Y_OUTVAR_INDICES,
@@ -85,7 +85,7 @@ class ETPPrimitive(Primitive):
         (2, 4)
     """
 
-    def register_yw_to_w(self, fn: Callable[..., Any]) -> None:
+    def register_dt_to_t(self, fn: Callable[..., Any]) -> None:
         """Install a D-RTRL trace propagation rule.
 
         Parameters
@@ -93,7 +93,7 @@ class ETPPrimitive(Primitive):
         fn : Callable
             Rule with signature ``(hidden_dim, trace, **params) -> trace``.
         """
-        ETP_RULES_YW_TO_W[self] = fn
+        ETP_RULES_DT_TO_T[self] = fn
 
     def register_xy_to_dw(self, fn: Callable[..., Any]) -> None:
         """Install a weight-gradient rule.
@@ -130,7 +130,7 @@ class ETPPrimitive(Primitive):
     def register_etp_rules(
         self,
         *,
-        yw_to_w: Callable[..., Any] | None = None,
+        dt_to_t: Callable[..., Any] | None = None,
         xy_to_dw: Callable[..., Any] | None = None,
         init_drtrl: Callable[..., Any] | None = None,
         init_pp: Callable[..., Any] | None = None,
@@ -143,7 +143,7 @@ class ETPPrimitive(Primitive):
 
         Parameters
         ----------
-        yw_to_w : Callable, optional
+        dt_to_t : Callable, optional
             D-RTRL trace propagation rule. Default ``None``.
         xy_to_dw : Callable, optional
             Weight-gradient rule. Default ``None``.
@@ -155,7 +155,7 @@ class ETPPrimitive(Primitive):
             Closed-form param-dim D-RTRL fast-path kernel bundle (instant /
             recurrent / solve kernels plus the ``applicable`` gate). Registered
             into :data:`ETP_FAST_PATH_RULES`. Supplied only by primitives with
-            an elementwise ``yw_to_w`` rule (mm / mv / elemwise); ``None``
+            an elementwise ``dt_to_t`` rule (mm / mv / elemwise); ``None``
             leaves the primitive without a fast path. Default ``None``.
         pp_x_repr : Callable, optional
             IO-dim x-trace representation rule
@@ -165,8 +165,8 @@ class ETPPrimitive(Primitive):
             one-hot encoding of its integer indices); ``None`` leaves the
             IO-dim trace filtering the raw ``x``. Default ``None``.
         """
-        if yw_to_w is not None:
-            ETP_RULES_YW_TO_W[self] = yw_to_w
+        if dt_to_t is not None:
+            ETP_RULES_DT_TO_T[self] = dt_to_t
         if xy_to_dw is not None:
             ETP_RULES_XY_TO_DW[self] = xy_to_dw
         if init_drtrl is not None:

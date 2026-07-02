@@ -21,7 +21,7 @@ batching — are auto-derived from a single Python ``impl_fn``. These
 tests register a fresh primitive per scenario and verify that ``jit``,
 ``grad``, ``vmap``, ``jvp`` all work without any additional plumbing.
 
-The four ETP rule registration helpers (`register_yw_to_w`,
+The four ETP rule registration helpers (`register_dt_to_t`,
 `register_xy_to_dw`, `register_init_drtrl`, `register_init_pp`,
 `register_etp_rules`) are exercised with both the per-rule and bulk
 APIs.
@@ -43,7 +43,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     GRADIENT_ENABLED_PRIMITIVES,
     ETPPrimitive,
     register_primitive,
@@ -274,16 +274,16 @@ class TestVmap:
 
 class TestRegisterPerRuleAPI:
 
-    def test_register_yw_to_w(self):
+    def test_register_dt_to_t(self):
         p = register_primitive(_fresh_name('yw'), lambda x: x)
         marker = object()
 
         def _rule(hidden_dim, trace, **params):
             return marker
 
-        p.register_yw_to_w(_rule)
-        assert ETP_RULES_YW_TO_W[p] is _rule
-        assert ETP_RULES_YW_TO_W[p](None, None) is marker
+        p.register_dt_to_t(_rule)
+        assert ETP_RULES_DT_TO_T[p] is _rule
+        assert ETP_RULES_DT_TO_T[p](None, None) is marker
 
     def test_register_xy_to_dw(self):
         p = register_primitive(_fresh_name('xy'), lambda x: x)
@@ -318,8 +318,8 @@ class TestRegisterEtpRulesBulk:
     def test_register_all_four(self):
         p = register_primitive(_fresh_name('bulk'), lambda x: x)
         a, b, c, d = (lambda *x, **k: i for i in range(4))
-        p.register_etp_rules(yw_to_w=a, xy_to_dw=b, init_drtrl=c, init_pp=d)
-        assert ETP_RULES_YW_TO_W[p] is a
+        p.register_etp_rules(dt_to_t=a, xy_to_dw=b, init_drtrl=c, init_pp=d)
+        assert ETP_RULES_DT_TO_T[p] is a
         assert ETP_RULES_XY_TO_DW[p] is b
         assert ETP_RULES_INIT_DRTRL[p] is c
         assert ETP_RULES_INIT_PP[p] is d
@@ -327,9 +327,9 @@ class TestRegisterEtpRulesBulk:
     def test_register_partial_skips_none(self):
         p = register_primitive(_fresh_name('partial'), lambda x: x)
         rule = lambda hidden_dim, trace, **params: None
-        # Only yw_to_w is supplied — the other three must remain absent.
-        p.register_etp_rules(yw_to_w=rule)
-        assert ETP_RULES_YW_TO_W[p] is rule
+        # Only dt_to_t is supplied — the other three must remain absent.
+        p.register_etp_rules(dt_to_t=rule)
+        assert ETP_RULES_DT_TO_T[p] is rule
         assert p not in ETP_RULES_XY_TO_DW
         assert p not in ETP_RULES_INIT_DRTRL
         assert p not in ETP_RULES_INIT_PP
@@ -340,10 +340,10 @@ class TestRegisterEtpRulesBulk:
         p = register_primitive(_fresh_name('overwrite'), lambda x: x)
         rule_a = lambda *a, **k: 'a'
         rule_b = lambda *a, **k: 'b'
-        p.register_yw_to_w(rule_a)
-        assert ETP_RULES_YW_TO_W[p] is rule_a
-        p.register_yw_to_w(rule_b)
-        assert ETP_RULES_YW_TO_W[p] is rule_b
+        p.register_dt_to_t(rule_a)
+        assert ETP_RULES_DT_TO_T[p] is rule_a
+        p.register_dt_to_t(rule_b)
+        assert ETP_RULES_DT_TO_T[p] is rule_b
 
 
 class TestPrimitiveNameAndRepr:

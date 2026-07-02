@@ -153,7 +153,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
 )
 from braintrace._op.dense import etp_mm_p
 from braintrace._op.grouped import etp_gmm_p
@@ -162,45 +162,45 @@ from braintrace._op.op_rule_oracle import assert_xy_to_dw_matches_vjp
 
 class TestEinsumEtpRules:
 
-    def test_yw_to_w_matches_dense_rule(self):
+    def test_dt_to_t_matches_dense_rule(self):
         brainstate.random.seed(10)
         hd = brainstate.random.randn(5, 4)
         tr = {'weight': brainstate.random.randn(5, 3, 4)}
-        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bk,kn->bn')
-        want = ETP_RULES_YW_TO_W[etp_mm_p](hd, dict(tr), has_bias=False)
+        got = ETP_RULES_DT_TO_T[etp_einsum_p](hd, tr, equation='bk,kn->bn')
+        want = ETP_RULES_DT_TO_T[etp_mm_p](hd, dict(tr), has_bias=False)
         np.testing.assert_allclose(got['weight'], want['weight'], atol=1e-6)
 
-    def test_yw_to_w_matches_grouped_rule(self):
+    def test_dt_to_t_matches_grouped_rule(self):
         brainstate.random.seed(11)
         hd = brainstate.random.randn(5, 2, 4)
         tr = {'weight': brainstate.random.randn(5, 2, 3, 4)}
-        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bgk,gkn->bgn')
-        want = ETP_RULES_YW_TO_W[etp_gmm_p](hd, dict(tr), has_bias=False)
+        got = ETP_RULES_DT_TO_T[etp_einsum_p](hd, tr, equation='bgk,gkn->bgn')
+        want = ETP_RULES_DT_TO_T[etp_gmm_p](hd, dict(tr), has_bias=False)
         np.testing.assert_allclose(got['weight'], want['weight'], atol=1e-6)
 
-    def test_yw_to_w_grad_context_batch_stripped(self):
+    def test_dt_to_t_grad_context_batch_stripped(self):
         brainstate.random.seed(12)
         hd = brainstate.random.randn(4)                    # (n,) — batch stripped
         tr = {'weight': brainstate.random.randn(3, 4)}     # (k, n)
-        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bk,kn->bn')
+        got = ETP_RULES_DT_TO_T[etp_einsum_p](hd, tr, equation='bk,kn->bn')
         np.testing.assert_allclose(got['weight'], tr['weight'] * hd[None, :], atol=1e-6)
 
-    def test_yw_to_w_per_head_diagonal_axes(self):
+    def test_dt_to_t_per_head_diagonal_axes(self):
         brainstate.random.seed(13)
         hd = brainstate.random.randn(5, 2, 4)              # (b, h, e)
         tr = {'weight': brainstate.random.randn(5, 2, 3, 4)}  # (b, h, d, e)
-        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='bhd,hde->bhe')
+        got = ETP_RULES_DT_TO_T[etp_einsum_p](hd, tr, equation='bhd,hde->bhe')
         want = tr['weight'] * hd[:, :, None, :]
         np.testing.assert_allclose(got['weight'], want, atol=1e-6)
 
-    def test_yw_to_w_shared_axis_sums_hidden(self):
+    def test_dt_to_t_shared_axis_sums_hidden(self):
         """Rule-level contract for shared axes: hd is summed over 't' then
         broadcast — oracle-proven exact when the hidden state carries the
         shared axes (see TestSharedAxisOracle)."""
         brainstate.random.seed(14)
         hd = brainstate.random.randn(5, 2, 4)              # (b, t, n)
         tr = {'weight': brainstate.random.randn(5, 3, 4)}  # (b, k, n)
-        got = ETP_RULES_YW_TO_W[etp_einsum_p](hd, tr, equation='btk,kn->btn')
+        got = ETP_RULES_DT_TO_T[etp_einsum_p](hd, tr, equation='btk,kn->btn')
         want = tr['weight'] * hd.sum(axis=1)[:, None, :]
         np.testing.assert_allclose(got['weight'], want, atol=1e-5)
 

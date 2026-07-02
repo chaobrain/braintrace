@@ -152,7 +152,7 @@ etp_einsum_p = register_primitive(
 )
 
 
-def _einsum_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, equation: str,
+def _einsum_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, equation: str,
                     weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Propagate ``∂h/∂y`` through the weight-shaped trace, mechanically.
 
@@ -228,7 +228,7 @@ def _einsum_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
 
 
 etp_einsum_p.register_etp_rules(
-    yw_to_w=_einsum_yw_to_w,
+    dt_to_t=_einsum_dt_to_t,
     xy_to_dw=_einsum_xy_to_dw,
     init_drtrl=_einsum_init_drtrl,
     init_pp=_einsum_init_pp,

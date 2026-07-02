@@ -30,7 +30,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     GRADIENT_ENABLED_PRIMITIVES,
     etp_conv_p,
     etp_elemwise_p,
@@ -82,9 +82,9 @@ class TestETPPrimitivesMembership:
 class TestRuleDictsPopulated:
     """Every shipped primitive has all four ETP rules registered."""
 
-    def test_yw_to_w_for_every_shipped(self):
+    def test_dt_to_t_for_every_shipped(self):
         for prim in _ALL_SHIPPED:
-            assert prim in ETP_RULES_YW_TO_W, prim.name
+            assert prim in ETP_RULES_DT_TO_T, prim.name
 
     def test_xy_to_dw_for_every_shipped(self):
         for prim in _ALL_SHIPPED:
@@ -161,7 +161,7 @@ class TestRegistriesAreSharedAcrossImports:
 
     def test_shim_and_package_share_rule_dicts(self):
         from braintrace import _op as legacy
-        assert legacy.ETP_RULES_YW_TO_W is ETP_RULES_YW_TO_W
+        assert legacy.ETP_RULES_DT_TO_T is ETP_RULES_DT_TO_T
         assert legacy.ETP_RULES_XY_TO_DW is ETP_RULES_XY_TO_DW
         assert legacy.ETP_RULES_INIT_DRTRL is ETP_RULES_INIT_DRTRL
         assert legacy.ETP_RULES_INIT_PP is ETP_RULES_INIT_PP
@@ -175,7 +175,7 @@ class TestRegistriesAreSharedAcrossImports:
 def test_get_fast_path_rules_none_for_sparse_conv_lora():
     """Primitives without a closed-form fast path return ``None``.
 
-    Only the elementwise-``yw_to_w`` primitives (mm / mv / elemwise) register
+    Only the elementwise-``dt_to_t`` primitives (mm / mv / elemwise) register
     a :class:`FastPathRules` bundle. Conv / sparse / LoRA primitives have
     non-elementwise rules and so must not appear in the fast-path registry.
     """

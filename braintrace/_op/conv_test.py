@@ -44,7 +44,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     conv,
     etp_conv_p,
 )
@@ -203,8 +203,8 @@ class TestJAXRules:
 
 class TestConvEtpRules:
 
-    def test_yw_to_w_broadcasts_hidden_no_bias(self):
-        rule = ETP_RULES_YW_TO_W[etp_conv_p]
+    def test_dt_to_t_broadcasts_hidden_no_bias(self):
+        rule = ETP_RULES_DT_TO_T[etp_conv_p]
         # Simulate the scan/etrace-update (recurrence) call — batch retained.
         # 1-D NHC-HIO conv: kernel (H_k=3, in_ch=4, out_ch=4), output (N, H_out=6, C=4).
         # hidden_dim (the per-position D^t factor) has the full batched output
@@ -225,8 +225,8 @@ class TestConvEtpRules:
         expected = w_trace * hidden[:, :, None, None, :]
         np.testing.assert_allclose(out['weight'], expected)
 
-    def test_yw_to_w_broadcasts_hidden_with_bias(self):
-        rule = ETP_RULES_YW_TO_W[etp_conv_p]
+    def test_dt_to_t_broadcasts_hidden_with_bias(self):
+        rule = ETP_RULES_DT_TO_T[etp_conv_p]
         # Recurrence context for 1-D conv NHC-HIO.
         # hidden_dim = (batch=1, H_out=6, out_ch=4).
         # trace['weight'] = (batch=1, H_out=6, H_k=3, in_ch=4, out_ch=4).
@@ -248,10 +248,10 @@ class TestConvEtpRules:
         assert out['bias'].shape == (1, 6, 4)
         np.testing.assert_allclose(out['bias'], b_trace * hidden)
 
-    def test_yw_to_w_default_nch_layout(self):
+    def test_dt_to_t_default_nch_layout(self):
         """Default (NCH/OIH) layout: hd must be transposed to (batch, s, k)
         and its channel aligned to the kernel's out-channel axis (0 in OIH)."""
-        rule = ETP_RULES_YW_TO_W[etp_conv_p]
+        rule = ETP_RULES_DT_TO_T[etp_conv_p]
         batch, c_out, length = 1, 3, 8
         brainstate.random.seed(2)
         hidden = brainstate.random.randn(batch, c_out, length)      # NCH
@@ -285,7 +285,7 @@ class TestConvEtpRules:
         """xy_to_dw returns both 'weight' and 'bias' gradients when has_bias=True.
 
         The bias 'gradient' is the cotangent (hidden_dim) itself — same shape as y.
-        No spatial summation: that is deferred to _conv_yw_to_w.
+        No spatial summation: that is deferred to _conv_dt_to_t.
         """
         rule = ETP_RULES_XY_TO_DW[etp_conv_p]
         x = jnp.ones((1, 3, 8))

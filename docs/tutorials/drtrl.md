@@ -28,7 +28,7 @@ Compared with BPTT, D-RTRL:
 - **ETP primitive**: `matmul`, `sparse_matmul`, `lora_matmul`, `conv`,
   `element_wise`. Plain `x @ w` is **excluded** — use it to freeze.
 - **compile_graph**: one jaxpr walk discovers ETP uses, builds the trace graph.
-- **Jacobian rules**: per-primitive `yw_to_w`, `xy_to_dw`, `init_drtrl`.
+- **Jacobian rules**: per-primitive `dt_to_t`, `xy_to_dw`, `init_drtrl`.
 
 ## 3. Minimal example — integrator
 

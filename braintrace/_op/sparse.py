@@ -47,7 +47,7 @@ frozen.
   :math:`\operatorname{diag}(\mathbf{D}_f^t)\otimes \mathbf{x}^t` term
   for D-RTRL, projected onto the sparse support.
 
-* ``yw_to_w(hidden_dim, trace)`` — propagation of
+* ``dt_to_t(hidden_dim, trace)`` — propagation of
   :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}`. For the weight data,
   delegates to ``sparse_mat.yw_to_w_transposed``: this contracts
   ``hidden_dim`` along ``out`` and restricts to the sparse pattern in a
@@ -85,7 +85,7 @@ and ``bias_fn`` (adds ``bias_fn(b)``). The forward impl and
 :func:`_sp_xy_to_dw` apply them; the eligibility trace and gradient are
 always taken w.r.t. the **raw** weight data / bias, so the transform
 Jacobian :math:`f'` enters *only* through ``xy_to_dw`` via :func:`jax.vjp`.
-The ``yw_to_w`` rule and the trace initialisers are transform-free and stay
+The ``dt_to_t`` rule and the trace initialisers are transform-free and stay
 exact (they operate on :math:`\partial h / \partial w_{\text{raw}}`).
 
 These primitives have **no fast path** — they always use the generic rule
@@ -147,7 +147,7 @@ def _unwrap_sparse_mat(sparse_mat: Any) -> Any:
     ``sparse_matmul`` binds a ``_HashableSparseMat`` wrapper (see above) so the
     equation parameter is hashable. Every consumer of ``params['sparse_mat']``
     (the forward impl -- and therefore also the auto-derived abstract-eval,
-    lowering, JVP and batching rules -- plus the ``yw_to_w``/``xy_to_dw`` ETP
+    lowering, JVP and batching rules -- plus the ``dt_to_t``/``xy_to_dw`` ETP
     rules) must unwrap it before calling the sparse-matrix protocol methods.
 
     Direct (non-``sparse_matmul``) call sites -- e.g. the rule-level unit
@@ -195,11 +195,11 @@ def _sp_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
 # etp_sp_mm_p — batched
 # ---------------------------------------------------------------------------
 
-def _sp_mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+def _sp_mm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
                    sparse_mat: brainevent.DataRepresentation | None = None,
                    has_bias: bool = False, weight_fn: WeightFn | None = None,
                    bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Batched sparse ``yw_to_w`` — propagate :math:`\partial h / \partial y`
+    r"""Batched sparse ``dt_to_t`` — propagate :math:`\partial h / \partial y`
     through the nnz-shaped D-RTRL trace.
 
     **Role in D-RTRL.** Implements the :math:`y \to w_{\text{data}}` chain
@@ -354,11 +354,11 @@ def _sp_mm_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
 # etp_sp_mv_p — unbatched
 # ---------------------------------------------------------------------------
 
-def _sp_mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+def _sp_mv_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
                    sparse_mat: brainevent.DataRepresentation | None = None,
                    has_bias: bool = False, weight_fn: WeightFn | None = None,
                    bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Unbatched sparse ``yw_to_w`` — identical algebra to the batched case
+    r"""Unbatched sparse ``dt_to_t`` — identical algebra to the batched case
     with no batch axis.
 
     Propagates :math:`\partial h / \partial y` through the sparse pattern:
@@ -434,7 +434,7 @@ etp_sp_mm_p = register_primitive(
     x_invar_index=0,
 )
 etp_sp_mm_p.register_etp_rules(
-    yw_to_w=_sp_mm_yw_to_w,
+    dt_to_t=_sp_mm_dt_to_t,
     xy_to_dw=_sp_xy_to_dw,
     init_drtrl=_sp_mm_init_drtrl,
     init_pp=_sp_mm_init_pp,
@@ -448,7 +448,7 @@ etp_sp_mv_p = register_primitive(
     x_invar_index=0,
 )
 etp_sp_mv_p.register_etp_rules(
-    yw_to_w=_sp_mv_yw_to_w,
+    dt_to_t=_sp_mv_dt_to_t,
     xy_to_dw=_sp_xy_to_dw,
     init_drtrl=_sp_mv_init_drtrl,
     init_pp=_sp_mv_init_pp,

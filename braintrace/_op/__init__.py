@@ -44,7 +44,7 @@ from ._registries import (
     ETP_RULES_INIT_PP,
     ETP_RULES_PP_X_REPR,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     ETP_TRAINABLE_INVARS_FNS,
     ETP_X_INVAR_INDICES,
     ETP_Y_OUTVAR_INDICES,
@@ -76,7 +76,7 @@ __all__ = [
 
     # registries + flag helpers
     'ETP_PRIMITIVES',
-    'ETP_RULES_YW_TO_W',
+    'ETP_RULES_DT_TO_T',
     'ETP_RULES_XY_TO_DW',
     'ETP_RULES_INIT_DRTRL',
     'ETP_RULES_INIT_PP',

@@ -43,7 +43,7 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_XY_TO_DW,
-    ETP_RULES_YW_TO_W,
+    ETP_RULES_DT_TO_T,
     etp_lora_mm_p,
     etp_lora_mv_p,
     lora_matmul,
@@ -237,8 +237,8 @@ class TestJAXRules:
 
 class TestLoraMmEtpRules:
 
-    def test_yw_to_w_pytree_structure(self):
-        """``yw_to_w`` broadcasts ``hidden`` across the leading matrix axis of
+    def test_dt_to_t_pytree_structure(self):
+        """``dt_to_t`` broadcasts ``hidden`` across the leading matrix axis of
         BOTH traces via ``expand_dims(hidden, axis=-2)``: the ``'lora_b'``
         entry is the effective-weight trace ``(in, out)`` (dense-style
         recurrence), the ``'lora_a'`` entry the factor trace ``(rank, out)``.
@@ -247,7 +247,7 @@ class TestLoraMmEtpRules:
           * ``(out,)`` — per-slice context (batch stripped by the algorithm's vmap)
           * ``(batch, out)`` — as called from ``_update_param_dim_etrace_scan_fn``
         """
-        rule = ETP_RULES_YW_TO_W[etp_lora_mm_p]
+        rule = ETP_RULES_DT_TO_T[etp_lora_mm_p]
 
         # Test 1: slice context — hidden=(out=4,)
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out=4,)
@@ -330,11 +330,11 @@ class TestLoraMmEtpRules:
 
 class TestLoraMvEtpRules:
 
-    def test_yw_to_w_pytree_structure(self):
+    def test_dt_to_t_pytree_structure(self):
         """mv-variant: ``expand_dims(hidden, axis=-2)`` broadcasts ``hidden``
         along the output axis of BOTH the effective-weight trace ``(in, out)``
         and the ``(rank, out)`` A-trace."""
-        rule = ETP_RULES_YW_TO_W[etp_lora_mv_p]
+        rule = ETP_RULES_DT_TO_T[etp_lora_mv_p]
         hidden = jnp.array([1.0, 2.0, 3.0, 4.0])  # (out=4,)
         trace_W = jnp.ones((3, 4))  # effective-weight trace (in=3, out=4)
         trace_A = jnp.ones((2, 4))  # (rank=2, out=4)
@@ -485,7 +485,7 @@ class TestLoRAOnlineLearningExact:
     and every parameter gradient must match a BPTT oracle element-wise
     (``rel < 1e-10`` in float64). This covers the audit finding that
     ``lora_b`` gradients were wrong even at T=1 (rel err ~4) because the
-    B-factor trace was propagated unchanged through ``yw_to_w``.
+    B-factor trace was propagated unchanged through ``dt_to_t``.
     """
 
     LEAK = 0.5
@@ -645,7 +645,7 @@ class TestInstantSolveDrtrlFirstPrinciplesFromJacobian:
     instantaneous term — those are chained back only at solve time). Since
     ``y = x @ W_eff`` is exactly the dense-matmul forward, its Jacobian
     ``dy_o/dW_eff[i, o']`` is diagonal in the two "out" indices — the same
-    structural fact exploited by :mod:`dense`'s ``yw_to_w``. This test
+    structural fact exploited by :mod:`dense`'s ``dt_to_t``. This test
     builds that Jacobian via ``jax.jacobian`` on the *unscaled, untransformed*
     effective weight, confirms the diagonal structure, and checks the
     rule's ``'lora_b'`` output against the raw-Jacobian contraction for a

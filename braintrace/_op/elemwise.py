@@ -49,7 +49,7 @@ primitive when composing Jacobians).
   instantaneous :math:`\operatorname{diag}(\mathbf{D}_f^t)\otimes 1` for
   D-RTRL (no :math:`x` factor since the op has no separate input).
 
-* ``yw_to_w(hidden_dim, trace)`` — elementwise product
+* ``dt_to_t(hidden_dim, trace)`` — elementwise product
   :math:`\epsilon^t = (\partial h/\partial y) \odot \epsilon^{t-1}`.
   The primitive is *diagonal*, so broadcasting is trivial: both trace
   and ``hidden_dim`` share the same shape.
@@ -68,7 +68,7 @@ The primitive accepts a single optional elementwise transform hook,
 is no ``x`` input and no bias for this op). The eligibility trace and
 gradient are taken w.r.t. the **raw** weight, so the transform Jacobian
 :math:`f'` enters *only* through :func:`_elemwise_xy_to_dw` via
-:func:`jax.vjp`; the ``yw_to_w`` rule does **not** apply :math:`f'`.
+:func:`jax.vjp`; the ``dt_to_t`` rule does **not** apply :math:`f'`.
 
 **Fast path**
 
@@ -105,7 +105,7 @@ def _elem_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return {'weight': 0}
 
 
-def _elemwise_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *,
+def _elemwise_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
                       weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Diagonal trace propagation for an identity-like op.
 
@@ -373,7 +373,7 @@ etp_elemwise_p = register_primitive(
     x_invar_index=None,
 )
 etp_elemwise_p.register_etp_rules(
-    yw_to_w=_elemwise_yw_to_w,
+    dt_to_t=_elemwise_dt_to_t,
     xy_to_dw=_elemwise_xy_to_dw,
     init_drtrl=_elemwise_init_drtrl,
     init_pp=_elemwise_init_pp,

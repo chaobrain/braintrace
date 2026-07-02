@@ -38,7 +38,7 @@ compiler:
 * ``y_outvar_index`` — position of the output ``y`` in ``eqn.outvars``.
 
 The call populates the four global rule registries
-(:data:`ETP_RULES_YW_TO_W`, :data:`ETP_RULES_XY_TO_DW`,
+(:data:`ETP_RULES_DT_TO_T`, :data:`ETP_RULES_XY_TO_DW`,
 :data:`ETP_RULES_INIT_DRTRL`, :data:`ETP_RULES_INIT_PP`) and returns a
 fully-functional :class:`ETPPrimitive`.
 
@@ -78,7 +78,7 @@ algorithms look up the rule for a primitive at compile time.
    * - Registry
      - Signature
      - Purpose
-   * - ``ETP_RULES_YW_TO_W``
+   * - ``ETP_RULES_DT_TO_T``
      - ``(hidden_dim, trace, **params) -> trace``
      - D-RTRL trace propagation: combine an upstream hidden-state Jacobian
        factor with the trace through the current weight.
@@ -120,8 +120,8 @@ Registration example
    )
 
    # Rules can be registered one-by-one, or in a single call via
-   # ``register_etp_rules(yw_to_w=..., xy_to_dw=..., ...)``.
-   my_p.register_yw_to_w(
+   # ``register_etp_rules(dt_to_t=..., xy_to_dw=..., ...)``.
+   my_p.register_dt_to_t(
        lambda hidden, trace, **params: trace * hidden[None, :]
    )
    my_p.register_xy_to_dw(

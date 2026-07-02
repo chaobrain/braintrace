@@ -46,7 +46,7 @@ by D-RTRL and ES-D-RTRL (pp-prop). For a primitive producing output
       \boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}
                                      + \operatorname{diag}(\mathbf{D}_f^t) \otimes \mathbf{x}^t
 
-* ``yw_to_w(hidden_dim, trace)`` — multiplies the weight-shaped trace
+* ``dt_to_t(hidden_dim, trace)`` — multiplies the weight-shaped trace
   :math:`\boldsymbol{\epsilon}^{t-1}` elementwise by
   :math:`\partial h / \partial y` (supplied as ``hidden_dim``). This
   realises the :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}` term
@@ -82,7 +82,7 @@ Both primitives accept two optional elementwise transform hooks in their
 :func:`_mv_xy_to_dw` rules apply them; the eligibility trace and gradient
 are always taken w.r.t. the **raw** weight/bias, so the transform Jacobian
 :math:`f'` enters *only* through ``xy_to_dw`` via :func:`jax.vjp`. The
-``yw_to_w`` rule does **not** apply :math:`f'`.
+``dt_to_t`` rule does **not** apply :math:`f'`.
 
 Both hooks are threaded through ``eqn.params``, which JAX treats as a
 *static* (hashed-by-identity) part of the equation. Two textually identical
@@ -150,10 +150,10 @@ def _mm_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return base
 
 
-def _mm_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+def _mm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
                 weight_fn: WeightFn | None = None,
                 bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Batched ``yw_to_w`` — propagate :math:`\partial h / \partial y`
+    r"""Batched ``dt_to_t`` — propagate :math:`\partial h / \partial y`
     through a weight-shaped D-RTRL trace.
 
     **Role in D-RTRL.** Implements the multiplicative step inside
@@ -462,7 +462,7 @@ etp_mm_p = register_primitive(
     x_invar_index=0,
 )
 etp_mm_p.register_etp_rules(
-    yw_to_w=_mm_yw_to_w,
+    dt_to_t=_mm_dt_to_t,
     xy_to_dw=_mm_xy_to_dw,
     init_drtrl=_mm_init_drtrl,
     init_pp=_mm_init_pp,
@@ -482,10 +482,10 @@ def _mv_trainable_invars(params: dict[str, Any]) -> dict[str, int]:
     return base
 
 
-def _mv_yw_to_w(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
+def _mv_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *, has_bias: bool = False,
                 weight_fn: WeightFn | None = None,
                 bias_fn: WeightFn | None = None) -> dict[str, Any]:
-    r"""Unbatched ``yw_to_w`` — same algebra as the batched case, no batch axis.
+    r"""Unbatched ``dt_to_t`` — same algebra as the batched case, no batch axis.
 
     **Role in D-RTRL.** Realises the :math:`y \to W` chain factor within
     :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}`; since
@@ -606,7 +606,7 @@ etp_mv_p = register_primitive(
     x_invar_index=0,
 )
 etp_mv_p.register_etp_rules(
-    yw_to_w=_mv_yw_to_w,
+    dt_to_t=_mv_dt_to_t,
     xy_to_dw=_mv_xy_to_dw,
     init_drtrl=_mv_init_drtrl,
     init_pp=_mv_init_pp,

@@ -648,11 +648,11 @@ class TestInstantSolveDrtrlDispatch:
 
     def test_registered_rules_replicating_legacy_are_identical(self):
         """Routing through the new dispatch with rules that replicate the
-        legacy ``xy_to_dw`` / ``yw_to_w`` behavior must reproduce the same
+        legacy ``xy_to_dw`` / ``dt_to_t`` behavior must reproduce the same
         gradients — proving the ``weights_dict`` plumbing and the batch /
         num_state vmap scaffolding are wired consistently."""
         from braintrace._op import (
-            ETP_RULES_XY_TO_DW, ETP_RULES_YW_TO_W, etp_mm_p,
+            ETP_RULES_XY_TO_DW, ETP_RULES_DT_TO_T, etp_mm_p,
         )
         from braintrace._op._registries import (
             ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL,
@@ -663,7 +663,7 @@ class TestInstantSolveDrtrlDispatch:
         inputs = brainstate.random.randn(5, 3).astype('float32')
 
         xy_rule = ETP_RULES_XY_TO_DW[etp_mm_p]
-        yw_rule = ETP_RULES_YW_TO_W[etp_mm_p]
+        yw_rule = ETP_RULES_DT_TO_T[etp_mm_p]
         seen_weight_keys = []
 
         def instant(x, df, weights, **params):
