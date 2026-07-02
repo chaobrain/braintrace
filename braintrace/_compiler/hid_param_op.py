@@ -80,6 +80,7 @@ from .diagnostics import (
     emit,
 )
 from .hidden_group import HiddenGroup, find_hidden_groups_from_minfo
+from .jaxpr_graph import build_consumer_map, build_producer_map, forward_closure
 from .module_info import ModuleInfo, extract_module_info
 
 __all__ = [
@@ -245,29 +246,6 @@ class HiddenParamOpRelation(NamedTuple):
 
 
 HiddenParamOpRelation.__module__ = 'braintrace'
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers — producer / consumer maps
-# ---------------------------------------------------------------------------
-
-def _build_producer_map(jaxpr: Jaxpr) -> Dict[Var, JaxprEqn]:
-    """Map each variable to the equation that produces it."""
-    producers: Dict[Var, JaxprEqn] = {}
-    for eqn in jaxpr.eqns:
-        for v in eqn.outvars:
-            producers[v] = eqn
-    return producers
-
-
-def _build_consumer_map(jaxpr: Jaxpr) -> Dict[Var, List[JaxprEqn]]:
-    """Map each variable to the equations that consume it."""
-    consumers: Dict[Var, List[JaxprEqn]] = {}
-    for eqn in jaxpr.eqns:
-        for v in eqn.invars:
-            if isinstance(v, Var):
-                consumers.setdefault(v, []).append(eqn)
-    return consumers
 
 
 # ---------------------------------------------------------------------------
@@ -723,8 +701,8 @@ def find_hidden_param_op_relations_from_jaxpr(
     **_ignored,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
-    producers = _build_producer_map(jaxpr)
-    consumers = _build_consumer_map(jaxpr)
+    producers = build_producer_map(jaxpr)
+    consumers = build_consumer_map(jaxpr)
     hidden_outvar_set: Set[Var] = set(outvar_to_hidden_path.keys())
     weight_trace_cache: Dict[Var, Optional[Tuple[Path, Tuple[Primitive, ...]]]] = {}
 
