@@ -1,6 +1,23 @@
 # Release Notes
 
 
+## UNRELEASED
+
+### Highlights
+
+#### New: vmap identity preservation (operator layer)
+
+- **vmap identity preservation (operator layer)**: `jax.vmap` over an
+  unbatched ETP op (`matmul`, `lora_matmul`, `sparse_matmul` with vector
+  input) now re-binds the batched ETP primitive (`etp_mm` / `etp_lora_mm` /
+  `etp_sp_mm`) instead of decomposing into standard JAX ops. Models that
+  vmap per-sample ETP operations inside `update()` now compile with full
+  eligibility-trace relations. When promotion is impossible (batched
+  weights, `etp_conv`, nested vmap), the op decomposes as before but emits
+  a `UserWarning` instead of silently dropping the parameter from online
+  learning.
+
+
 ## Version 0.2.3
 
 This release adds optional, shape-preserving parameter-transform hooks to the

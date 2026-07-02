@@ -19,6 +19,8 @@ from pprint import pprint
 
 import brainstate
 import brainunit as u
+import jax
+import jax.numpy as jnp
 
 import braintrace
 from braintrace._etrace_model_test import (
@@ -335,3 +337,82 @@ class TestCompileGraphSNN(unittest.TestCase):
 
 class TestStateConsistency(unittest.TestCase):
     pass
+
+
+class TestVmappedModelCompilation:
+    """A model applying `jax.vmap` over a per-sample ETP op inside update()
+    must compile identically to the natively batched model (spec Phase 0)."""
+
+    B, N_IN, N_REC = 4, 3, 8
+
+    class _NativeCell(brainstate.nn.Module):
+        def __init__(self, n_in, n_rec):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                brainstate.random.randn(n_in + n_rec, n_rec) * 0.1)
+
+        def init_state(self, batch_size=None, **kw):
+            n_rec = self.w.value.shape[1]
+            self.h = brainstate.HiddenState(jnp.zeros((batch_size, n_rec)))
+
+        def update(self, x):
+            xh = jnp.concatenate([x, self.h.value], axis=-1)
+            self.h.value = jnp.tanh(braintrace.matmul(xh, self.w.value))
+            return self.h.value
+
+    class _VmappedCell(brainstate.nn.Module):
+        def __init__(self, n_in, n_rec):
+            super().__init__()
+            self.w = brainstate.ParamState(
+                brainstate.random.randn(n_in + n_rec, n_rec) * 0.1)
+
+        def init_state(self, batch_size=None, **kw):
+            n_rec = self.w.value.shape[1]
+            self.h = brainstate.HiddenState(jnp.zeros((batch_size, n_rec)))
+
+        def update(self, x):
+            xh = jnp.concatenate([x, self.h.value], axis=-1)
+            y = jax.vmap(lambda row: braintrace.matmul(row, self.w.value))(xh)
+            self.h.value = jnp.tanh(y)
+            return self.h.value
+
+    def _graph_for(self, cell_cls):
+        cell = cell_cls(self.N_IN, self.N_REC)
+        brainstate.nn.init_all_states(cell, batch_size=self.B)
+        x = brainstate.random.randn(self.B, self.N_IN)
+        return braintrace.compile_etrace_graph(cell, x)
+
+    def test_vmapped_cell_relation_parity_with_native(self):
+        from braintrace._op.dense import etp_mm_p
+        g_native = self._graph_for(self._NativeCell)
+        g_vmapped = self._graph_for(self._VmappedCell)
+        assert len(g_native.hidden_param_op_relations) == 1
+        assert len(g_vmapped.hidden_param_op_relations) == 1
+        assert g_vmapped.hidden_param_op_relations[0].primitive is etp_mm_p
+        assert (g_vmapped.hidden_param_op_relations[0].primitive
+                is g_native.hidden_param_op_relations[0].primitive)
+
+    def test_vmapped_cell_drtrl_gradient_parity_with_native(self):
+        def build_and_grads(cell_cls):
+            with brainstate.random.seed_context(42):
+                model = cell_cls(self.N_IN, self.N_REC)
+            learner = braintrace.compile(
+                model, braintrace.D_RTRL,
+                jnp.zeros((self.B, self.N_IN)), batch_size=self.B)
+            weights = model.states(brainstate.ParamState)
+            with brainstate.random.seed_context(7):
+                xs = brainstate.random.randn(5, self.B, self.N_IN)
+
+            def total_loss(xs):
+                def step(carry, x):
+                    out = learner(x)
+                    return carry, jnp.mean(jnp.asarray(out) ** 2)
+                _, ls = brainstate.transform.scan(step, None, xs)
+                return jnp.sum(ls)
+
+            return brainstate.transform.grad(total_loss, weights)(xs)
+
+        g_native = build_and_grads(self._NativeCell)
+        g_vmapped = build_and_grads(self._VmappedCell)
+        for a, b in zip(jax.tree.leaves(g_native), jax.tree.leaves(g_vmapped)):
+            assert jnp.allclose(a, b, atol=1e-5), (a - b)
