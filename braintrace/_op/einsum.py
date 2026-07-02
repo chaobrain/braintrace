@@ -179,13 +179,24 @@ def _einsum_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
                      equation: str,
                      weight_fn: WeightFn | None = None) -> dict[str, Any]:
     r"""Instantaneous ``∂h/∂W`` via the dict-valued VJP of the contraction
-    (transforms auto-composed; gradient w.r.t. the **raw** weight)."""
+    (transforms auto-composed; gradient w.r.t. the **raw** weight).
+
+    Rank-adaptive: the D-RTRL instantaneous path vmaps this rule over the
+    batch axis, so ``x``/``hidden_dim`` may arrive per-sample (one rank
+    short). Replay the equation without its batch letter in that case —
+    an explicit einsum equation is not rank-polymorphic the way ``@`` is.
+    """
+    spec = parse_etp_einsum(equation)
+    if jnp.ndim(x) == len(spec.x_spec) - 1:
+        eq = f'{spec.x_spec[1:]},{spec.w_spec}->{spec.y_spec[1:]}'
+    else:
+        eq = equation
 
     def _fwd(w_dict: dict[str, Any]) -> Any:
         w = w_dict['weight']
         if weight_fn is not None:
             w = weight_fn(w)
-        return u.get_mantissa(jnp.einsum(equation, x, w))
+        return u.get_mantissa(jnp.einsum(eq, x, w))
 
     _, vjp_fn = jax.vjp(_fwd, weights)
     return jax.tree.map(u.get_mantissa, vjp_fn(hidden_dim)[0])

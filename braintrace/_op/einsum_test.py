@@ -258,3 +258,117 @@ class TestPublicExports:
     def test_matmul_rank_guard_points_to_einsum(self):
         with pytest.raises(ValueError, match='einsum'):
             braintrace.matmul(jnp.ones((5, 2, 3)), jnp.ones((3, 4)))
+
+
+from braintrace._algorithm.oracle import (
+    assert_direction_aligned,
+    assert_param_gradients_close,
+    bptt_param_gradients,
+    online_param_gradients,
+)
+
+
+def _per_head_rnn_factory(H=2, E=3, n_in=3, seed=0):
+    """tanh RNN whose recurrence is a per-head contraction 'bhd,hde->bhe'
+    (each head has its own E×E mixing matrix).
+
+    The hidden state is kept rank-3 ``(1, H, E)``: the compiler requires the
+    einsum output to be broadcast-compatible with the hidden state, so a flat
+    ``(1, H*E)`` hidden fed by a reshaped einsum output silently severs the
+    relation (the weight degrades to non-temporal and the oracle comparison
+    becomes vacuous)."""
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                k = jax.random.PRNGKey
+                self.w = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed), (H, E, E)))
+                self.win = brainstate.ParamState(
+                    0.1 * jax.random.normal(k(seed + 1), (n_in, H * E)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, H, E)))
+
+            def update(self, x):
+                rec = braintrace.einsum('bhd,hde->bhe', self.h.value, self.w.value)
+                inp = (x @ self.win.value).reshape(1, H, E)
+                self.h.value = jax.nn.tanh(inp + rec)
+                return self.h.value
+
+        return Net()
+
+    return factory
+
+
+def _seq_inputs(T=6, n_in=3, seed=42):
+    brainstate.random.seed(seed)
+    return brainstate.random.randn(T, n_in)
+
+
+class TestEinsumOracle:
+
+    def test_per_head_model_produces_einsum_relation(self):
+        """Guard against vacuous oracle passes: the per-head model must
+        actually compile to an etp_einsum relation (a broadcast-incompatible
+        hidden state silently drops it to a non-temporal parameter)."""
+        net = _per_head_rnn_factory()()
+        rels = braintrace.find_hidden_param_op_relations_from_module(
+            net, _seq_inputs()[0])
+        assert [r.primitive.name for r in rels].count('etp_einsum') == 1
+
+    def test_d_rtrl_multistep_matches_bptt_per_head(self):
+        factory = _per_head_rnn_factory()
+        inputs = _seq_inputs()
+        bptt = bptt_param_gradients(factory, inputs)
+        online = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(online, bptt, atol=1e-4)
+
+    def test_d_rtrl_dense_equation_matches_bespoke_matmul_model(self):
+        """The same tanh RNN built once with einsum('bk,kn->bn') and once
+        with braintrace.matmul must produce identical online gradients."""
+        n_rec, n_in, seed = 4, 3, 0
+
+        def make_factory(use_einsum):
+            def factory():
+                class Net(brainstate.nn.Module):
+                    def __init__(self):
+                        super().__init__()
+                        k = jax.random.PRNGKey
+                        self.w = brainstate.ParamState(
+                            0.1 * jax.random.normal(k(seed), (n_rec, n_rec)))
+                        self.win = brainstate.ParamState(
+                            0.1 * jax.random.normal(k(seed + 1), (n_in, n_rec)))
+                        self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+                    def update(self, x):
+                        if use_einsum:
+                            rec = braintrace.einsum('bk,kn->bn', self.h.value, self.w.value)
+                        else:
+                            rec = braintrace.matmul(self.h.value, self.w.value)
+                        self.h.value = jax.nn.tanh(x @ self.win.value + rec)
+                        return self.h.value
+
+                return Net()
+            return factory
+
+        inputs = _seq_inputs(seed=43)
+        g_einsum = online_param_gradients(
+            make_factory(True), inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        g_matmul = online_param_gradients(
+            make_factory(False), inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(g_einsum, g_matmul, atol=1e-6)
+
+    def test_pp_prop_direction_aligned(self):
+        factory = _per_head_rnn_factory()
+        inputs = _seq_inputs(seed=44)
+        bptt = bptt_param_gradients(factory, inputs)
+        approx = online_param_gradients(
+            factory, inputs,
+            algo_factory=lambda m: braintrace.pp_prop(
+                m, decay_or_rank=0.9, vjp_method='multi-step'))
+        assert_direction_aligned(
+            approx, bptt, min_cosine=0.9, min_sign_agreement=0.8, keys=[('w',)])
