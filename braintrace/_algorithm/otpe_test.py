@@ -72,12 +72,9 @@ def _lora_net():
     class Net(brainstate.nn.Module):
         def __init__(self):
             super().__init__()
-            self.B = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 2))
-            )
-            self.A = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(1), (2, 3))
-            )
+            brainstate.random.seed(0)
+            self.B = brainstate.ParamState(0.1 * brainstate.random.normal(size=(3, 2)))
+            self.A = brainstate.ParamState(0.1 * brainstate.random.normal(size=(2, 3)))
             self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
         def update(self, x):
@@ -99,9 +96,8 @@ def _bias_net():
     class Net(brainstate.nn.Module):
         def __init__(self):
             super().__init__()
-            self.w = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
-            )
+            brainstate.random.seed(0)
+            self.w = brainstate.ParamState(0.1 * brainstate.random.normal(size=(3, 3)))
             self.b = brainstate.ParamState(jnp.zeros(3))
             self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
@@ -123,9 +119,8 @@ def _unbatched_net():
     class Net(brainstate.nn.Module):
         def __init__(self):
             super().__init__()
-            self.w = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
-            )
+            brainstate.random.seed(0)
+            self.w = brainstate.ParamState(0.1 * brainstate.random.normal(size=(3, 3)))
             self.v = brainstate.HiddenState(jnp.zeros((3,)))
 
         def update(self, x):
@@ -164,10 +159,29 @@ class TestOTPEConstruction(unittest.TestCase):
             OTPE(_otpe_net_single_layer(), leak=0.9, vjp_method='multi-step')
 
     def test_num_state_gt_one_raises(self):
-        """Multi-state hidden groups are outside OTPE's LIF regime."""
+        """Multi-state hidden groups are outside OTPE's LIF regime.
+
+        M6: unlike the `NotImplementedError` in
+        `TestOTPEUnsupportedRelationGuard` (which fires inside
+        `init_etrace_state`, *before* `base.compile_graph` ever sets
+        `is_compiled = True`), this `ValueError` fires in OTPE's own
+        post-`super().compile_graph()` validation -- i.e. *after* the base
+        class has already set `is_compiled = True`. That validation's
+        try/except must explicitly reset the flag on failure, or a failed
+        compile would leave `is_compiled` stuck `True` and the base class's
+        `if not self.is_compiled:` guard would silently skip re-validation
+        (and `init_etrace_state`) on a subsequent `compile_graph` call."""
         algo = OTPE(_two_state_net(), leak=0.9)
+        x = jnp.ones((1, 3))
         with self.assertRaises(ValueError):
-            algo.compile_graph(jnp.ones((1, 3)))
+            algo.compile_graph(x)
+        assert algo.is_compiled is False
+
+        # A second call on the same (permanently invalid) model must raise
+        # again, not silently pass because `is_compiled` was left True.
+        with self.assertRaises(ValueError):
+            algo.compile_graph(x)
+        assert algo.is_compiled is False
 
     def test_compile_allocates_R_hat(self):
         algo = OTPE(_otpe_net_single_layer(), leak=0.9)

@@ -72,12 +72,9 @@ def _lora_net():
     class Net(brainstate.nn.Module):
         def __init__(self):
             super().__init__()
-            self.B = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 2))
-            )
-            self.A = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(1), (2, 3))
-            )
+            brainstate.random.seed(0)
+            self.B = brainstate.ParamState(0.1 * brainstate.random.normal(size=(3, 2)))
+            self.A = brainstate.ParamState(0.1 * brainstate.random.normal(size=(2, 3)))
             self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
         def update(self, x):
@@ -99,9 +96,8 @@ def _bias_net():
     class Net(brainstate.nn.Module):
         def __init__(self):
             super().__init__()
-            self.w = brainstate.ParamState(
-                0.1 * jax.random.normal(jax.random.PRNGKey(0), (3, 3))
-            )
+            brainstate.random.seed(0)
+            self.w = brainstate.ParamState(0.1 * brainstate.random.normal(size=(3, 3)))
             self.b = brainstate.ParamState(jnp.zeros(3))
             self.v = brainstate.HiddenState(jnp.zeros((1, 3)))
 
