@@ -100,6 +100,9 @@ class DiagnosticKind(str, Enum):
     # Control-flow canonicalization (see _compiler/canonicalize.py)
     COND_IF_CONVERTED = 'cond_if_converted'
     COND_CONVERSION_SKIPPED = 'cond_conversion_skipped'
+    SCAN_UNROLLED = 'scan_unrolled'
+    SCAN_UNROLL_SKIPPED = 'scan_unroll_skipped'
+    RELATION_EXCLUDED_SLICED_WEIGHT = 'relation_excluded_sliced_weight'
 
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'

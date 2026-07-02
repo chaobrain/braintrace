@@ -711,6 +711,7 @@ from braintrace._compiler.scenario_catalog import (
     PartialPathRNN,
     NestedJitRNN,
     CondBranchRNN,
+    ScanBodyRNN,
     make_scan_body_etp_jaxpr,
     make_cond_branches_etp_jaxpr,
     make_while_body_etp_jaxpr,
@@ -942,10 +943,14 @@ class TestCategoryN_ControlFlow:
     surfaces the location for the user.
 
     These tests exercise the *raw scanner* on unprocessed jaxprs. In the
-    full pipeline, ``cond`` never reaches the scanner: ETP-relevant conds
-    are if-converted into inlined branches + ``select_n`` at extraction
-    time (``_compiler/canonicalize.py``), so their weights DO participate
-    as relations — see ``test_cond_branches_full_pipeline_converts``."""
+    full pipeline, ETP-relevant ``cond``/``scan`` equations normally never
+    reach the scanner: conds are if-converted into inlined branches +
+    ``select_n`` and eligible scans are unrolled at extraction time
+    (``_compiler/canonicalize.py``), so their weights DO participate as
+    relations — see ``test_cond_branches_full_pipeline_converts`` and
+    ``test_scan_body_full_pipeline_unrolls``. Only ineligible scans (too
+    long, effectful, while-in-body) and ``while`` still fall through to
+    the scanner."""
 
     def test_cond_branches_full_pipeline_converts(self):
         model = CondBranchRNN(3, 4)
@@ -957,6 +962,22 @@ class TestCategoryN_ControlFlow:
         assert len(graph.hidden_param_op_relations) == 2
         kinds = [r.kind for r in graph.diagnostics]
         assert DiagnosticKind.COND_IF_CONVERTED in kinds
+
+    def test_scan_body_full_pipeline_unrolls(self):
+        model = ScanBodyRNN(4, loops=3)
+        brainstate.nn.init_all_states(model)
+        with warnings.catch_warnings():
+            # Earlier sub-steps' weights are excluded per the
+            # weight->weight->hidden invariant and warn about it.
+            warnings.simplefilter('ignore', UserWarning)
+            graph = compile_etrace_graph(model, jnp.ones(4))
+        names = [eqn.primitive.name for eqn in graph.module_info.jaxpr.eqns]
+        assert 'scan' not in names
+        # Only the final sub-step's two ETP ops are relations; the earlier
+        # sub-steps reach `h` through another trainable ETP op.
+        assert len(graph.hidden_param_op_relations) == 2
+        kinds = [r.kind for r in graph.diagnostics]
+        assert DiagnosticKind.SCAN_UNROLLED in kinds
 
     def test_scan_body_etp_emits_diagnostic(self):
         jaxpr = make_scan_body_etp_jaxpr(3, 4)

@@ -148,7 +148,12 @@ def test_weight_used_inside_scan_raises_not_implemented():
     within a control-flow op. Previously (F-SCAN-WEIGHT) the message construction
     indexed the hidden-path map with the weight var and a KeyError escaped instead;
     the message now renders the weight variable directly, so the intended
-    NotImplementedError surfaces."""
+    NotImplementedError surfaces.
+
+    Since Phase 2 canonicalization, statically short scans are unrolled at
+    extraction time instead of erroring, so this uses a length above
+    ``ControlFlowPolicy.scan_unroll_limit`` to reach the unsupported-op path
+    (after a SCAN_UNROLL_SKIPPED warning)."""
 
     class ScanModel(brainstate.nn.Module):
         def __init__(self):
@@ -160,7 +165,7 @@ def test_weight_used_inside_scan_raises_not_implemented():
         def update(self, x):
             def body(carry, _):
                 return braintrace.matmul(carry, self.w.value), None  # weight inside scan
-            out, _ = jax.lax.scan(body, self.h.value, xs=None, length=2)
+            out, _ = jax.lax.scan(body, self.h.value, xs=None, length=64)
             self.h.value = jax.nn.tanh(out)
             return self.h.value
 
@@ -168,7 +173,8 @@ def test_weight_used_inside_scan_raises_not_implemented():
     brainstate.nn.init_all_states(model, batch_size=1)
     algo = braintrace.D_RTRL(model)
     with pytest.raises(NotImplementedError):
-        algo.compile_graph(jnp.ones((1, 4), dtype='float32'))
+        with pytest.warns(UserWarning, match='NOT unrolled'):
+            algo.compile_graph(jnp.ones((1, 4), dtype='float32'))
 
 
 # --- Task 6: legacy + nn deprecations emit DeprecationWarning ----------------
