@@ -382,6 +382,7 @@ def _solve_param_dim_weight_gradients(
         fp = get_fast_path_rules(relation.primitive)
         use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
 
+        _call_rule_dict: Callable[..., Any]
         if solve_drtrl_rule is not None:
             # Dedicated solve rule (trace structure != parameter structure,
             # e.g. LoRA's effective-weight trace): chain the learning signal
@@ -396,20 +397,24 @@ def _solve_param_dim_weight_gradients(
                 for key in relation.trainable_vars
             }
 
-            def _call_yw_to_w_dict(
+            def _call_solve_drtrl_dict(
                 d: Any, trace_: Any,
                 _rule: Any = solve_drtrl_rule, _params: Any = eqn_params,
                 _weights: Any = weights_dict,
             ) -> Any:
                 return _rule(d, trace_, _weights, **_params)
+
+            _call_rule_dict = _call_solve_drtrl_dict
         else:
             def _call_yw_to_w_dict(d: Any, trace_: Any, _rule: Any = yw_to_w_rule, _params: Any = eqn_params) -> Any:
                 return _rule(d, trace_, **_params)
 
+            _call_rule_dict = _call_yw_to_w_dict
+
         yw_to_w = (
-            jax.vmap(_call_yw_to_w_dict)
+            jax.vmap(_call_rule_dict)
             if batched
-            else _call_yw_to_w_dict
+            else _call_rule_dict
         )
 
         group: HiddenGroup

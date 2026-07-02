@@ -14,8 +14,8 @@
 # ==============================================================================
 
 """Operator-rule correctness: each primitive's xy_to_dw must equal jax.vjp of its
-impl; init_drtrl/init_pp shape contract; lora partial-propagation; multi-primitive
-composition gradients. Fills gaps left by dense_test/elemwise_test."""
+impl; init_drtrl/init_pp shape contract; lora effective-weight trace recurrence;
+multi-primitive composition gradients. Fills gaps left by dense_test/elemwise_test."""
 
 from collections import namedtuple
 
@@ -124,14 +124,20 @@ def test_lora_xy_to_dw_matches_vjp():
     )
 
 
-def test_lora_yw_to_w_leaves_B_trace_unchanged():
-    """yw_to_w propagates hidden through lora_a only; lora_b trace passes through."""
+def test_lora_yw_to_w_scales_both_traces_along_output_axis():
+    """yw_to_w applies the dense ``y -> W`` link to BOTH traces: the
+    ``'lora_b'`` entry is the effective-weight trace ``(in, out)`` for
+    ``W_eff = alpha * b_fn(B) @ a_fn(A)`` and follows the same recurrence as
+    the dense ``mm`` rule (a raw B-shaped trace cannot be discounted along
+    the output axis it lacks — the old pass-through made ``lora_b``
+    gradients wrong even at T=1)."""
     rule = ETP_RULES_YW_TO_W[etp_lora_mm_p]
-    rank, out_dim = 3, 4
+    in_dim, rank, out_dim = 6, 3, 4
     hidden = jnp.arange(1.0, out_dim + 1.0)            # (out,)
-    trace = {'lora_b': jnp.ones((6, rank)), 'lora_a': jnp.ones((rank, out_dim))}
+    trace = {'lora_b': jnp.ones((in_dim, out_dim)), 'lora_a': jnp.ones((rank, out_dim))}
     out = rule(hidden, trace)
-    np.testing.assert_allclose(out['lora_b'], trace['lora_b'])
+    np.testing.assert_allclose(out['lora_b'], trace['lora_b'] * hidden[None, :])
+    np.testing.assert_allclose(out['lora_a'], trace['lora_a'] * hidden[None, :])
 
 
 # --- Task 5: init_drtrl / init_pp shape contract -----------------------------
