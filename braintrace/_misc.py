@@ -21,6 +21,8 @@ from enum import Enum
 from typing import Sequence, Callable, Any
 
 import brainstate
+import jax
+import jax.numpy as jnp
 import jax.tree
 import brainunit as u
 
@@ -372,3 +374,50 @@ class BaseEnum(Enum):
             return cls.get_by_name(item)
         else:
             raise ValueError(f'Cannot find the {cls.__name__} type {item}.')
+
+
+def suffix_products(diag_seq: jax.Array, num_state: int) -> tuple[jax.Array, jax.Array]:
+    r"""Suffix products of a stacked hidden-to-hidden Jacobian sequence.
+
+    For the linear trace recurrence
+    :math:`\boldsymbol{\epsilon}_t = \mathbf{M}_t \boldsymbol{\epsilon}_{t-1} + \mathbf{u}_t`,
+    the chunk-factorized update needs the suffix products
+    :math:`\mathbf{P}_s = \mathbf{M}_{T-1} \cdots \mathbf{M}_{s+1}` (with
+    :math:`\mathbf{P}_{T-1} = \mathbf{I}`) and the full-window product
+    :math:`\mathbf{M}_{T-1} \cdots \mathbf{M}_0`.
+
+    Parameters
+    ----------
+    diag_seq : jax.Array
+        Stacked per-step Jacobians, shape ``(T, ..., S, S)`` with
+        ``S == num_state``. The matrix product acts on the trailing two axes;
+        matrices need not commute — the temporal order is preserved.
+    num_state : int
+        Number of hidden states per group (``S``). ``1`` uses an elementwise
+        ``cumprod`` shortcut; ``> 1`` uses an associative matmul scan.
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(p_seq, m_full)`` with shapes ``(T, ..., S, S)`` and ``(..., S, S)``.
+
+    Notes
+    -----
+    No division is used, so exact-zero decays (e.g. spiking hard resets) are
+    handled exactly. Computed via :func:`jax.lax.associative_scan` over the
+    reversed stack with the operator ``a @ b``, which yields the inclusive
+    left-fold prefixes of the reversed sequence — i.e. the suffix products of
+    the original order.
+    """
+    rev = diag_seq[::-1]
+    if num_state == 1:
+        cum = jnp.cumprod(rev, axis=0)
+        ident = jnp.ones_like(diag_seq[:1])
+    else:
+        cum = jax.lax.associative_scan(
+            lambda a, b: jnp.einsum('...ab,...bc->...ac', a, b), rev, axis=0
+        )
+        eye = jnp.eye(num_state, dtype=diag_seq.dtype)
+        ident = jnp.broadcast_to(eye, diag_seq[:1].shape)
+    p_seq = jnp.concatenate([ident, cum[:-1]], axis=0)[::-1]
+    return p_seq, cum[-1]
