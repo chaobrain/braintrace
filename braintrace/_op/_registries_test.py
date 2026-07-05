@@ -183,6 +183,42 @@ def test_get_fast_path_rules_none_for_sparse_conv_lora():
         assert get_fast_path_rules(prim) is None, prim.name
 
 
+class TestFastPathRulesChunkField:
+    def test_chunk_defaults_none_with_positional_construction(self):
+        from braintrace._op._registries import FastPathRules
+
+        fp = FastPathRules(
+            lambda x, df, has_bias: {},
+            lambda diag, old, n: {},
+            lambda dl, tr, *, fold_batch=False: {},
+            lambda params: True,
+        )
+        assert fp.chunk is None
+
+    def test_chunk_field_settable(self):
+        from braintrace._op._registries import FastPathRules
+
+        marker = object()
+        fp = FastPathRules(
+            lambda x, df, has_bias: {},
+            lambda diag, old, n: {},
+            lambda dl, tr, *, fold_batch=False: {},
+            lambda params: True,
+            marker,
+        )
+        assert fp.chunk is marker
+
+    def test_registered_bundles_expose_chunk(self):
+        # importing the op modules runs primitive registration
+        import braintrace._op.dense  # noqa: F401
+        import braintrace._op.elemwise  # noqa: F401
+        from braintrace._op._registries import ETP_FAST_PATH_RULES
+
+        assert len(ETP_FAST_PATH_RULES) > 0
+        for fp in ETP_FAST_PATH_RULES.values():
+            assert hasattr(fp, 'chunk')
+
+
 class TestBatchedCounterparts:
     def test_lookup_unregistered_returns_none(self):
         p = register_primitive('etp_test_ctr_unreg', lambda x, w: x @ w, batched=False)
