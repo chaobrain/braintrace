@@ -780,6 +780,23 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
           the data input.
+    chunked_trace : bool, optional
+        When ``True`` (default) and the input spans multiple time steps, the
+        eligibility-trace roll over the window is computed in closed form —
+        suffix products of the hidden-to-hidden Jacobians plus a single
+        time-contracting einsum — instead of a per-step scan. Mathematically
+        identical to the per-step roll (up to floating-point reassociation),
+        but converts the dominant per-step elementwise passes over the
+        parameter-sized trace into matmul-class kernels (~an order of
+        magnitude faster on long windows). Relations without a chunk kernel
+        (conv / sparse / LoRA / grouped), descended-scan relations, and
+        relations with an active ``weight_fn`` / ``bias_fn`` transform fall
+        back to the per-step scan automatically. Single-step input is
+        unaffected. Note: chunking stacks the per-step Jacobians
+        (``O(T · B · (I + H))`` memory for a window of length ``T``) instead
+        of fusing the roll into the forward scan; for very long windows either
+        feed the sequence in smaller windows (the trace carries across calls)
+        or set ``chunked_trace=False``.
     control_flow : ControlFlowPolicy, optional
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
