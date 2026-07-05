@@ -719,3 +719,149 @@ class TestInstantSolveDrtrlDispatch:
             ETP_RULES_SOLVE_DRTRL.pop(etp_mm_p, None)
 
         oracle.assert_param_gradients_close(routed, baseline, atol=0.0, rtol=0.0)
+
+
+class _ChunkRNNNet(brainstate.nn.Module):
+    def __init__(self, n_in=3, n_rec=8, n_out=2, w_mask=None):
+        super().__init__()
+        self.cell = braintrace.nn.ValinaRNNCell(n_in, n_rec, activation='tanh')
+        if w_mask is not None:
+            self.readout = braintrace.nn.Linear(n_rec, n_out, w_mask=w_mask)
+        else:
+            self.readout = braintrace.nn.Linear(n_rec, n_out)
+
+    def update(self, x):
+        return self.readout(self.cell(x))
+
+
+class _ChunkGRUNet(brainstate.nn.Module):
+    def __init__(self, n_in=3, n_rec=8, n_out=2):
+        super().__init__()
+        self.cell = braintrace.nn.GRUCell(n_in, n_rec)
+        self.readout = braintrace.nn.Linear(n_rec, n_out)
+
+    def update(self, x):
+        return self.readout(self.cell(x))
+
+
+_CK_B, _CK_T, _CK_NIN, _CK_NOUT = 4, 6, 3, 2
+
+
+def _chunk_make_learner(model_cls, seed=0, **options):
+    brainstate.random.seed(seed)
+    model = model_cls()
+    learner = braintrace.compile(
+        model, 'D_RTRL', jnp.zeros((_CK_B, _CK_NIN)), batch_size=_CK_B,
+        vjp_method='multi-step', **options,
+    )
+    return model, learner
+
+
+def _chunk_make_masked_learner(mask, chunked, seed=0):
+    brainstate.random.seed(seed)
+    model = _ChunkRNNNet(w_mask=mask)
+    learner = braintrace.compile(
+        model, 'D_RTRL', jnp.zeros((_CK_B, _CK_NIN)), batch_size=_CK_B,
+        vjp_method='multi-step', chunked_trace=chunked,
+    )
+    return model, learner
+
+
+def _chunk_trace_leaves_sorted(learner):
+    leaves = []
+    for st in learner.etrace_bwg.values():
+        leaves += jax.tree.leaves(st.value)
+    return sorted(leaves, key=lambda a: str(a.shape))
+
+
+def _chunk_two_window_grads(model, learner, xs1, xs2, ys):
+    weights = model.states(brainstate.ParamState)
+
+    def loss(inp):
+        out = learner(braintrace.MultiStepData(inp))
+        return ((out - ys) ** 2).mean()
+
+    g1 = brainstate.transform.grad(loss, weights)(xs1)
+    g2 = brainstate.transform.grad(loss, weights)(xs2)
+    return g1, g2
+
+
+def _chunk_assert_grads_close(ga, gb, rtol=1e-4, atol=1e-6):
+    la, ta = jax.tree.flatten(ga)
+    lb, tb = jax.tree.flatten(gb)
+    assert ta == tb
+    for a, b in zip(la, lb):
+        assert jnp.allclose(a, b, rtol=rtol, atol=atol), (
+            f'max abs diff {jnp.max(jnp.abs(a - b))}')
+
+
+class TestChunkedTraceEquivalence:
+    def test_trace_values_match_legacy_after_multistep_call(self):
+        brainstate.random.seed(42)
+        xs = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NIN))
+        _, lc = _chunk_make_learner(_ChunkRNNNet, chunked_trace=True)
+        _, ll = _chunk_make_learner(_ChunkRNNNet, chunked_trace=False)
+        lc(braintrace.MultiStepData(xs))
+        ll(braintrace.MultiStepData(xs))
+        for a, b in zip(_chunk_trace_leaves_sorted(lc), _chunk_trace_leaves_sorted(ll)):
+            assert a.shape == b.shape
+            assert jnp.allclose(a, b, rtol=1e-4, atol=1e-6), (
+                f'max abs diff {jnp.max(jnp.abs(a - b))}')
+
+    def test_gru_two_window_gradients_match_legacy(self):
+        brainstate.random.seed(43)
+        xs1 = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NIN))
+        xs2 = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NIN))
+        ys = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NOUT))
+        mc, lc = _chunk_make_learner(_ChunkGRUNet, chunked_trace=True)
+        ml, ll = _chunk_make_learner(_ChunkGRUNet, chunked_trace=False)
+        gc1, gc2 = _chunk_two_window_grads(mc, lc, xs1, xs2, ys)
+        gl1, gl2 = _chunk_two_window_grads(ml, ll, xs1, xs2, ys)
+        _chunk_assert_grads_close(gc1, gl1)
+        # window 2 exposes trace-roll differences (window-1 trace feeds it)
+        _chunk_assert_grads_close(gc2, gl2)
+
+    def test_mixed_partition_masked_readout_matches_legacy(self):
+        # w_mask installs a weight_fn -> fast path not applicable ->
+        # readout relation falls back to the per-step scan while the
+        # cell relations chunk.
+        brainstate.random.seed(44)
+        mask = (brainstate.random.rand(8, _CK_NOUT) > 0.5).astype(jnp.float32)
+        xs1 = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NIN))
+        xs2 = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NIN))
+        ys = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NOUT))
+        mc, lc = _chunk_make_masked_learner(mask, chunked=True)
+        ml, ll = _chunk_make_masked_learner(mask, chunked=False)
+        gc1, gc2 = _chunk_two_window_grads(mc, lc, xs1, xs2, ys)
+        gl1, gl2 = _chunk_two_window_grads(ml, ll, xs1, xs2, ys)
+        _chunk_assert_grads_close(gc1, gl1)
+        _chunk_assert_grads_close(gc2, gl2)
+
+    def test_full_fallback_fast_solve_false_matches_legacy(self):
+        brainstate.random.seed(45)
+        xs = brainstate.random.normal(size=(_CK_T, _CK_B, _CK_NIN))
+        _, la = _chunk_make_learner(
+            _ChunkRNNNet, chunked_trace=True, fast_solve=False)
+        _, lb = _chunk_make_learner(
+            _ChunkRNNNet, chunked_trace=False, fast_solve=False)
+        la(braintrace.MultiStepData(xs))
+        lb(braintrace.MultiStepData(xs))
+        for a, b in zip(_chunk_trace_leaves_sorted(la), _chunk_trace_leaves_sorted(lb)):
+            assert jnp.allclose(a, b, rtol=1e-5, atol=1e-7)
+
+    def test_knob_default_and_threading(self):
+        _, l_default = _chunk_make_learner(_ChunkRNNNet)
+        assert l_default.chunked_trace is True
+        _, l_off = _chunk_make_learner(_ChunkRNNNet, chunked_trace=False)
+        assert l_off.chunked_trace is False
+
+    def test_single_step_input_unaffected(self):
+        brainstate.random.seed(46)
+        x = brainstate.random.normal(size=(_CK_B, _CK_NIN))
+        _, lc = _chunk_make_learner(_ChunkRNNNet, chunked_trace=True)
+        _, ll = _chunk_make_learner(_ChunkRNNNet, chunked_trace=False)
+        oc = lc(x)
+        ol = ll(x)
+        assert jnp.allclose(oc, ol, rtol=1e-6, atol=1e-8)
+        for a, b in zip(_chunk_trace_leaves_sorted(lc), _chunk_trace_leaves_sorted(ll)):
+            assert jnp.allclose(a, b, rtol=1e-6, atol=1e-8)

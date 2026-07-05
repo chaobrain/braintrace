@@ -37,7 +37,7 @@ from braintrace._op._registries import (
     get_instant_drtrl_rule,
     get_solve_drtrl_rule,
 )
-from braintrace._misc import etrace_df_key, etrace_x_key
+from braintrace._misc import etrace_df_key, etrace_x_key, suffix_products
 from braintrace._typing import (
     PyTree,
     WeightID,
@@ -429,6 +429,106 @@ def _apply_relation_step(
     return new_etrace_bwg
 
 
+def _chunk_supported(relation: HiddenParamOpRelation, fast_solve: bool) -> bool:
+    """Whether *relation* can take the chunk-factorized multi-step update.
+
+    Requires a flat (non-descended) relation whose primitive has a registered
+    chunk kernel with an applicable fast path, and no dedicated
+    ``instant_drtrl`` / ``solve_drtrl`` rule (trace structure == parameter
+    structure). Everything else falls back to the per-step scan.
+    """
+    if relation.control_flow_context is not None:
+        return False
+    if not fast_solve:
+        return False
+    if get_instant_drtrl_rule(relation.primitive) is not None:
+        return False
+    if get_solve_drtrl_rule(relation.primitive) is not None:
+        return False
+    fp = get_fast_path_rules(relation.primitive)
+    return (
+        fp is not None
+        and fp.chunk is not None
+        and fp.applicable(relation.eqn_params)
+    )
+
+
+def _update_param_dim_etrace_chunked(
+    hist_etrace_vals: Dict[ETraceWG_Key, PyTree],
+    stacked_jacobians: Tuple[
+        Dict[ETraceX_Key, jax.Array],   # stacked weight x, leading axis T
+        Dict[ETraceDF_Key, jax.Array],  # stacked weight df, leading axis T
+        Sequence[jax.Array],            # stacked hidden-group Jacobians
+    ],
+    hidden_param_op_relations: Any,
+    weight_path_to_vals: Dict[Path, PyTree],
+    fast_solve: bool = True,
+    trace_dtype: Optional[DTypeLike] = None,
+) -> Dict[ETraceWG_Key, PyTree]:
+    """Chunk-factorized multi-step trace update.
+
+    Rolls the eligibility trace over a whole multi-step window in closed form
+    (see ``FastPathRules.chunk`` and :func:`braintrace._misc.suffix_products`)
+    for chunk-eligible relations, and falls back to the historical per-step
+    ``jax.lax.scan`` (:func:`_update_param_dim_etrace_scan_fn`) for the rest —
+    including descended-scan relations. Equal to the per-step roll up to
+    floating-point reassociation.
+    """
+    xs_seq, dfs_seq, diags_seq = stacked_jacobians
+    chunkable = [r for r in hidden_param_op_relations
+                 if _chunk_supported(r, fast_solve)]
+    legacy = [r for r in hidden_param_op_relations
+              if not _chunk_supported(r, fast_solve)]
+
+    new_etrace_bwg: Dict[ETraceWG_Key, PyTree] = dict(hist_etrace_vals)
+
+    # suffix products are per hidden group; share them across relations
+    p_cache: Dict[int, Tuple[jax.Array, jax.Array]] = {}
+    relation: HiddenParamOpRelation
+    for relation in chunkable:
+        fp = get_fast_path_rules(relation.primitive)
+        assert fp is not None and fp.chunk is not None  # _chunk_supported
+        x_seq = (
+            None if relation.x_var is None
+            else _cast_to_dtype(xs_seq[etrace_x_key(relation.x_var)], trace_dtype)
+        )
+        group: HiddenGroup
+        for group in relation.hidden_groups:
+            gi = group.index
+            if gi not in p_cache:
+                p_seq, m_full = suffix_products(diags_seq[gi], group.num_state)
+                p_cache[gi] = (
+                    _cast_to_dtype(p_seq, trace_dtype),
+                    _cast_to_dtype(m_full, trace_dtype),
+                )
+            p_seq, m_full = p_cache[gi]
+            df_seq = _cast_to_dtype(
+                dfs_seq[etrace_df_key(relation.y_var, gi)], trace_dtype
+            )
+            w_key = (id(relation.y_var), gi)
+            new_etrace_bwg[w_key] = fp.chunk(
+                x_seq, df_seq, p_seq, m_full,
+                hist_etrace_vals[w_key], group.num_state,
+            )
+
+    if legacy:
+        scan_fn = partial(
+            _update_param_dim_etrace_scan_fn,
+            weight_path_to_vals=weight_path_to_vals,
+            hidden_param_op_relations=legacy,
+            fast_solve=fast_solve,
+            trace_dtype=trace_dtype,
+        )
+        legacy_keys = {
+            (id(r.y_var), g.index) for r in legacy for g in r.hidden_groups
+        }
+        sub_hist = {k: hist_etrace_vals[k] for k in legacy_keys}
+        sub_new = jax.lax.scan(scan_fn, sub_hist, stacked_jacobians)[0]
+        new_etrace_bwg.update(sub_new)
+
+    return new_etrace_bwg
+
+
 def _solve_param_dim_weight_gradients(
     hist_etrace_data: Dict[ETraceWG_Key, PyTree],  # the history etrace data
     dG_weights: Dict[Path, dG_Weight],  # weight gradients
@@ -794,6 +894,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         trace_dtype: Optional[DTypeLike] = None,
+        chunked_trace: bool = True,
         control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method,
@@ -813,6 +914,12 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         # produces native-precision arrays and a mismatched scan-carry dtype
         # would raise at trace time.
         self.trace_dtype = trace_dtype
+        # ``chunked_trace=True`` computes the multi-step trace roll in closed
+        # form (chunk factorization) instead of a per-step scan. Identical to
+        # the per-step roll up to floating-point reassociation; relations
+        # without a chunk kernel fall back automatically. Single-step input is
+        # unaffected.
+        self.chunked_trace = chunked_trace
 
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the eligibility trace states of the etrace algorithm.
@@ -934,13 +1041,13 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         for x, val in etrace_vals.items():
             self.etrace_bwg[x].value = val
 
-    def _make_etrace_stepper(self, weight_vals: Dict[Path, PyTree]) -> Callable:
-        """Build the per-step D-RTRL eligibility-trace stepper.
+    def _make_scan_fn(self, weight_vals: Dict[Path, PyTree]) -> Callable:
+        """Build the per-step D-RTRL eligibility-trace stepper (scan body).
 
-        Returns the ``partial`` of :func:`_update_param_dim_etrace_scan_fn` that
-        serves as the body of the trace scan. Exposing it lets the graph executor
-        fuse the roll into its over-time scan for multi-step input (see the
-        base-class :meth:`_make_etrace_stepper`).
+        Returns the ``partial`` of :func:`_update_param_dim_etrace_scan_fn`
+        used both as the fused in-scan stepper (see
+        :meth:`_make_etrace_stepper`) and as the body of
+        :meth:`_update_etrace_data`'s own trace scan.
         """
         return partial(
             _update_param_dim_etrace_scan_fn,
@@ -949,6 +1056,20 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             fast_solve=self.fast_solve,
             trace_dtype=self.trace_dtype,
         )
+
+    def _make_etrace_stepper(self, weight_vals: Dict[Path, PyTree]) -> Optional[Callable]:
+        """Per-step stepper for in-scan fusion, or ``None`` under chunking.
+
+        When ``chunked_trace`` is disabled, returns the per-step scan body so
+        the graph executor fuses the roll into its over-time scan (see the
+        base-class :meth:`_make_etrace_stepper`). When ``chunked_trace`` is
+        enabled, returns ``None`` so the executor stacks the per-step
+        Jacobians, which :meth:`_update_etrace_data` then consumes in closed
+        form (:func:`_update_param_dim_etrace_chunked`).
+        """
+        if self.chunked_trace:
+            return None
+        return self._make_scan_fn(weight_vals)
 
     def _update_etrace_data(
         self,
@@ -988,27 +1109,33 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
                 same structure as hist_etrace_vals but containing new values for the current timestep.
         """
 
-        scan_fn = self._make_etrace_stepper(weight_vals)
+        jacobians = (
+            hid2weight_jac_single_or_multi_times[0],
+            hid2weight_jac_single_or_multi_times[1],
+            hid2hid_jac_single_or_multi_times,
+        )
 
         if input_is_multi_step:
-            new_etrace = jax.lax.scan(
-                scan_fn,
-                hist_etrace_vals,
-                (
-                    hid2weight_jac_single_or_multi_times[0],
-                    hid2weight_jac_single_or_multi_times[1],
-                    hid2hid_jac_single_or_multi_times,
+            if self.chunked_trace:
+                new_etrace = _update_param_dim_etrace_chunked(
+                    hist_etrace_vals,
+                    jacobians,
+                    self.graph.hidden_param_op_relations,
+                    weight_vals,
+                    fast_solve=self.fast_solve,
+                    trace_dtype=self.trace_dtype,
                 )
-            )[0]
+            else:
+                new_etrace = jax.lax.scan(
+                    self._make_scan_fn(weight_vals),
+                    hist_etrace_vals,
+                    jacobians,
+                )[0]
 
         else:
-            new_etrace = scan_fn(
+            new_etrace = self._make_scan_fn(weight_vals)(
                 hist_etrace_vals,
-                (
-                    hid2weight_jac_single_or_multi_times[0],
-                    hid2weight_jac_single_or_multi_times[1],
-                    hid2hid_jac_single_or_multi_times,
-                )
+                jacobians,
             )[0]
 
         return new_etrace
