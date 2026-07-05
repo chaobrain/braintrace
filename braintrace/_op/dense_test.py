@@ -887,3 +887,70 @@ class TestDtToTFirstPrinciplesFromJacobian:
         out = _mv_dt_to_t(g, {'weight': trace_w, 'bias': trace_b}, has_bias=True)
         np.testing.assert_allclose(out['weight'], ref_w, atol=1e-10)
         np.testing.assert_allclose(out['bias'], ref_b, atol=1e-10)
+
+
+class TestDenseFastChunk:
+    def _imports(self):
+        from braintrace._misc import suffix_products
+        from braintrace._op.dense import (
+            _DENSE_FAST_PATH,
+            _dense_fast_instant,
+            _dense_fast_recurrent,
+        )
+        return suffix_products, _DENSE_FAST_PATH, _dense_fast_instant, _dense_fast_recurrent
+
+    def _roll_reference(self, x_seq, df_seq, diag_seq, init_bwg, num_state, has_bias):
+        _, _, instant, recurrent = self._imports()
+        bwg = init_bwg
+        for t in range(df_seq.shape[0]):
+            inst = instant(x_seq[t], df_seq[t], has_bias)
+            rec = recurrent(diag_seq[t], bwg, num_state)
+            bwg = jax.tree.map(jnp.add, rec, inst)
+        return bwg
+
+    @pytest.mark.parametrize('num_state', [1, 2])
+    def test_mm_matches_per_step_roll(self, num_state):
+        suffix_products, fast_path, _, _ = self._imports()
+        brainstate.random.seed(0)
+        T, B, I, O, S = 13, 4, 5, 6, num_state
+        x = brainstate.random.normal(size=(T, B, I))
+        df = brainstate.random.normal(size=(T, B, O, S))
+        diag = brainstate.random.uniform(0.3, 1.0, (T, B, O, S, S))
+        diag = diag.at[3].set(0.0)  # zero-decay step
+        init = {
+            'weight': brainstate.random.normal(size=(B, I, O, S)),
+            'bias': brainstate.random.normal(size=(B, O, S)),
+        }
+        ref = self._roll_reference(x, df, diag, init, S, has_bias=True)
+        p_seq, m_full = suffix_products(diag, S)
+        got = fast_path.chunk(x, df, p_seq, m_full, init, S)
+        assert set(got) == {'weight', 'bias'}
+        assert jnp.allclose(got['weight'], ref['weight'], rtol=1e-4, atol=1e-6)
+        assert jnp.allclose(got['bias'], ref['bias'], rtol=1e-4, atol=1e-6)
+
+    @pytest.mark.parametrize('num_state', [1, 3])
+    def test_mv_matches_per_step_roll(self, num_state):
+        suffix_products, fast_path, _, _ = self._imports()
+        brainstate.random.seed(1)
+        T, I, O, S = 9, 5, 6, num_state
+        x = brainstate.random.normal(size=(T, I))
+        df = brainstate.random.normal(size=(T, O, S))
+        diag = brainstate.random.uniform(0.3, 1.0, (T, O, S, S))
+        init = {'weight': brainstate.random.normal(size=(I, O, S))}
+        ref = self._roll_reference(x, df, diag, init, S, has_bias=False)
+        p_seq, m_full = suffix_products(diag, S)
+        got = fast_path.chunk(x, df, p_seq, m_full, init, S)
+        assert jnp.allclose(got['weight'], ref['weight'], rtol=1e-4, atol=1e-6)
+
+    def test_t1_equals_single_step(self):
+        suffix_products, fast_path, _, _ = self._imports()
+        brainstate.random.seed(2)
+        T, B, I, O, S = 1, 2, 3, 4, 1
+        x = brainstate.random.normal(size=(T, B, I))
+        df = brainstate.random.normal(size=(T, B, O, S))
+        diag = brainstate.random.uniform(0.3, 1.0, (T, B, O, S, S))
+        init = {'weight': brainstate.random.normal(size=(B, I, O, S))}
+        ref = self._roll_reference(x, df, diag, init, S, has_bias=False)
+        p_seq, m_full = suffix_products(diag, S)
+        got = fast_path.chunk(x, df, p_seq, m_full, init, S)
+        assert jnp.allclose(got['weight'], ref['weight'], rtol=1e-5, atol=1e-7)
