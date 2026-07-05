@@ -450,3 +450,36 @@ class TestDtToTFirstPrinciplesFromJacobian:
         ref = g * trace
         out = _elemwise_dt_to_t(g, {'weight': trace})
         np.testing.assert_allclose(out['weight'], ref, atol=1e-10)
+
+
+class TestElemwiseFastChunk:
+    @pytest.mark.parametrize('num_state', [1, 2])
+    def test_matches_per_step_roll(self, num_state):
+        import brainstate
+
+        from braintrace._misc import suffix_products
+        from braintrace._op._registries import get_fast_path_rules
+        from braintrace._op.elemwise import (
+            _elemwise_fast_instant,
+            _elemwise_fast_recurrent,
+            etp_elemwise_p,
+        )
+
+        brainstate.random.seed(0)
+        T, S = 11, num_state
+        shape = (4, 5)  # group varshape
+        df = brainstate.random.normal(size=(T, *shape, S))
+        diag = brainstate.random.uniform(0.3, 1.0, (T, *shape, S, S))
+        diag = diag.at[2].set(0.0)  # zero-decay step
+        init = {'weight': brainstate.random.normal(size=(*shape, S))}
+
+        bwg = init
+        for t in range(T):
+            inst = _elemwise_fast_instant(None, df[t], False)
+            rec = _elemwise_fast_recurrent(diag[t], bwg, S)
+            bwg = jax.tree.map(jnp.add, rec, inst)
+
+        p_seq, m_full = suffix_products(diag, S)
+        fp = get_fast_path_rules(etp_elemwise_p)
+        got = fp.chunk(None, df, p_seq, m_full, init, S)
+        assert jnp.allclose(got['weight'], bwg['weight'], rtol=1e-4, atol=1e-6)

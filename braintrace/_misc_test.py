@@ -161,3 +161,56 @@ class TestBaseEnum:
     def test_get_rejects_other_types(self):
         with pytest.raises(ValueError):
             _Color.get(123)
+
+
+from braintrace._misc import suffix_products
+
+
+def _naive_suffix(diag_seq):
+    T = diag_seq.shape[0]
+    S = diag_seq.shape[-1]
+    eye = jnp.broadcast_to(jnp.eye(S, dtype=diag_seq.dtype), diag_seq.shape[1:])
+    ps = []
+    for s in range(T):
+        acc = eye
+        for r in range(T - 1, s, -1):
+            acc = jnp.einsum('...ab,...bc->...ac', acc, diag_seq[r])
+        ps.append(acc)
+    full = jnp.einsum('...ab,...bc->...ac', ps[0], diag_seq[0])
+    return jnp.stack(ps), full
+
+
+class TestSuffixProducts:
+    def test_s1_matches_naive(self):
+        brainstate.random.seed(0)
+        d = brainstate.random.uniform(0.3, 1.0, (5, 2, 3, 1, 1))
+        p, full = suffix_products(d, num_state=1)
+        p_ref, full_ref = _naive_suffix(d)
+        assert p.shape == d.shape
+        assert jnp.allclose(p, p_ref, rtol=1e-5, atol=1e-7)
+        assert jnp.allclose(full, full_ref, rtol=1e-5, atol=1e-7)
+
+    def test_s3_noncommuting_matches_naive(self):
+        brainstate.random.seed(1)
+        d = brainstate.random.normal(size=(7, 2, 4, 3, 3)) * 0.5
+        p, full = suffix_products(d, num_state=3)
+        p_ref, full_ref = _naive_suffix(d)
+        assert jnp.allclose(p, p_ref, rtol=1e-4, atol=1e-6)
+        assert jnp.allclose(full, full_ref, rtol=1e-4, atol=1e-6)
+
+    def test_zero_decay_step(self):
+        brainstate.random.seed(2)
+        d = brainstate.random.uniform(0.3, 1.0, (6, 2, 1, 1))
+        d = d.at[3].set(0.0)  # hard reset mid-window
+        p, full = suffix_products(d, num_state=1)
+        p_ref, full_ref = _naive_suffix(d)
+        assert jnp.allclose(p, p_ref, rtol=1e-5, atol=1e-7)
+        assert jnp.allclose(full, full_ref, rtol=1e-5, atol=1e-7)
+
+    def test_t1_gives_identity_suffix(self):
+        brainstate.random.seed(3)
+        d = brainstate.random.normal(size=(1, 4, 2, 2))
+        p, full = suffix_products(d, num_state=2)
+        eye = jnp.broadcast_to(jnp.eye(2), d[0].shape)
+        assert jnp.allclose(p[0], eye)
+        assert jnp.allclose(full, d[0])

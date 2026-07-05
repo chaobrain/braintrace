@@ -195,7 +195,10 @@ def compile(
 
     *Per algorithm:*
 
-    - ``'D_RTRL'`` — ``vjp_method``, ``fast_solve``, ``trace_dtype``, ``name``.
+    - ``'D_RTRL'`` — ``vjp_method``, ``fast_solve``, ``trace_dtype``,
+      ``chunked_trace`` (bool, default ``True``: closed-form multi-step trace
+      roll via chunk factorization; see :class:`ParamDimVjpAlgorithm`),
+      ``name``.
     - ``'es_d_rtrl'`` / ``'pp_prop'`` — ``decay_or_rank`` (**required**: float in
       (0, 1) ⇒ decay, or int ≥ 1 ⇒ rank), ``vjp_method``, ``fast_solve``,
       ``name``.

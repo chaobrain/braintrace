@@ -253,12 +253,24 @@ class FastPathRules(NamedTuple):
         transform factor, so a primitive carrying an active transform hook
         (``weight_fn`` / ``bias_fn``) must report ``False`` and fall back to
         the rule path.
+    chunk : Callable, optional
+        Chunk-factorized multi-step trace update (closed form over a window).
+        Signature ``(x_seq, df_seq, p_seq, m_full, old_bwg, num_state) -> dict``
+        where ``x_seq`` is the stacked input ``(T, ..., in)`` (``None`` for
+        primitives without an ``x`` carrier), ``df_seq`` the stacked
+        state-to-output Jacobian ``(T, ..., out, S)``, ``p_seq`` the suffix
+        products of the hidden-to-hidden Jacobians ``(T, ..., S, S)``
+        (``p_seq[T-1]`` is the identity), ``m_full`` the full-window product
+        ``(..., S, S)``, and ``old_bwg`` the window-entry trace dict. ``None``
+        (default) means the primitive has no chunk kernel and multi-step
+        chunking falls back to the per-step scan for its relations.
     """
 
     instant: Callable
     recurrent: Callable
     solve: Callable
     applicable: Callable
+    chunk: Optional[Callable] = None
 
 
 ETP_FAST_PATH_RULES: Dict[Primitive, FastPathRules] = {}

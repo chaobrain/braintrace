@@ -422,6 +422,69 @@ def _dense_fast_solve(diag_like: ArrayLike, etrace_data: dict[str, Any], *, fold
     return out
 
 
+def _dense_fast_chunk(
+    x_seq: ArrayLike,
+    df_seq: ArrayLike,
+    p_seq: jax.Array,
+    m_full: jax.Array,
+    old_bwg: dict[str, Any],
+    num_state: int,
+) -> dict[str, Any]:
+    r"""Chunk-factorized multi-step trace update (closed form over a window).
+
+    Parameters
+    ----------
+    x_seq : ArrayLike
+        Stacked presynaptic input, shape ``(T, ..., in)`` (``(T, B, in)`` for
+        mm, ``(T, in)`` for mv).
+    df_seq : ArrayLike
+        Stacked state-to-output Jacobian, shape ``(T, ..., out, num_state)``.
+    p_seq : jax.Array
+        Suffix products of the hidden-to-hidden Jacobians,
+        shape ``(T, ..., out, num_state, num_state)``; ``p_seq[T-1]`` is the
+        identity (see :func:`braintrace._misc.suffix_products`).
+    m_full : jax.Array
+        Full-window Jacobian product, shape ``(..., out, num_state, num_state)``.
+    old_bwg : dict
+        Window-entry trace dict; ``'weight'`` shape ``(..., in, out, num_state)``
+        and optional ``'bias'`` shape ``(..., out, num_state)``.
+    num_state : int
+        Number of hidden states per group.
+
+    Returns
+    -------
+    dict
+        The window-exit trace dict, same structure as ``old_bwg``.
+
+    Notes
+    -----
+    Implements, per hidden unit ``k`` (with :math:`\mathbf{P}_s` the suffix
+    product and :math:`\mathbf{M}` the full-window product):
+
+    .. math::
+
+        \boldsymbol{\epsilon}_{T-1} = \mathbf{M}\,\boldsymbol{\epsilon}_{-1}
+        + \sum_s \mathbf{x}_s \otimes (\mathbf{P}_s \, \mathbf{df}_s)
+
+    Equal to ``T`` applications of ``instant``/``recurrent`` up to
+    floating-point reassociation. The time-contracting einsum uses
+    ``Precision.HIGHEST`` so fp32 results stay at reassociation-level
+    deviation (no TF32).
+    """
+    if num_state == 1:
+        pdf = p_seq[..., 0] * df_seq
+    else:
+        pdf = jnp.einsum('t...ab,t...b->t...a', p_seq, df_seq)
+    out = _dense_fast_recurrent(m_full, old_bwg, num_state)
+    out['weight'] = out['weight'] + jnp.einsum(
+        't...i,t...ka->...ika', x_seq, pdf,
+        precision=jax.lax.Precision.HIGHEST,
+    )
+    if 'bias' in out:
+        out['bias'] = out['bias'] + pdf.sum(axis=0)
+    return out
+
+
 def _dense_fast_applicable(eqn_params: dict[str, Any]) -> bool:
     r"""Gate: is the dense fast path valid for this equation?
 
@@ -451,6 +514,7 @@ _DENSE_FAST_PATH = FastPathRules(
     _dense_fast_recurrent,
     _dense_fast_solve,
     _dense_fast_applicable,
+    _dense_fast_chunk,
 )
 
 

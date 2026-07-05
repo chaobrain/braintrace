@@ -341,6 +341,48 @@ def _elemwise_fast_solve(diag_like: ArrayLike, etrace_data: dict[str, Any], *, f
     return {'weight': jnp.einsum(spec, diag_like, etrace_data['weight'])}
 
 
+def _elemwise_fast_chunk(
+    x_seq: Any,
+    df_seq: ArrayLike,
+    p_seq: jax.Array,
+    m_full: jax.Array,
+    old_bwg: dict[str, Any],
+    num_state: int,
+) -> dict[str, Any]:
+    r"""Chunk-factorized multi-step trace update for the diagonal identity op.
+
+    Parameters
+    ----------
+    x_seq : Any
+        Unused (the elemwise op has no ``x`` input). Accepted for a uniform
+        chunk-kernel signature.
+    df_seq : ArrayLike
+        Stacked state-to-output Jacobian, shape ``(T, ..., num_state)``.
+    p_seq : jax.Array
+        Suffix products of the hidden-to-hidden Jacobians, shape
+        ``(T, ..., num_state, num_state)``; ``p_seq[T-1]`` is the identity.
+    m_full : jax.Array
+        Full-window Jacobian product, shape ``(..., num_state, num_state)``.
+    old_bwg : dict
+        Window-entry trace dict; ``'weight'`` shape ``(..., num_state)``.
+    num_state : int
+        Number of hidden states per group.
+
+    Returns
+    -------
+    dict
+        ``{'weight': M_full · ε_{-1} + Σ_s P_s · df_s}`` — equal to ``T``
+        applications of ``instant``/``recurrent`` up to floating-point
+        reassociation.
+    """
+    if num_state == 1:
+        pdf = p_seq[..., 0] * df_seq
+    else:
+        pdf = jnp.einsum('t...ab,t...b->t...a', p_seq, df_seq)
+    out = _elemwise_fast_recurrent(m_full, old_bwg, num_state)
+    return {'weight': out['weight'] + pdf.sum(axis=0)}
+
+
 def _elemwise_fast_applicable(eqn_params: dict[str, Any]) -> bool:
     r"""Gate: is the elemwise fast path valid for this equation?
 
@@ -382,6 +424,7 @@ etp_elemwise_p.register_etp_rules(
         _elemwise_fast_recurrent,
         _elemwise_fast_solve,
         _elemwise_fast_applicable,
+        _elemwise_fast_chunk,
     ),
 )
 
