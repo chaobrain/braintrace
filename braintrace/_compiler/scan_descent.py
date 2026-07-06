@@ -54,7 +54,7 @@ Jacobian extraction and the trace update see the substep axis.
    ETP mixing into a body transition has no consumer.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, TYPE_CHECKING
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
@@ -71,6 +71,11 @@ from braintrace._typing import Path
 from .canonicalize import ControlFlowPolicy
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .jaxpr_graph import _sub_closed_jaxprs
+
+if TYPE_CHECKING:
+    from .hid_param_op import HiddenParamOpRelation
+    from .hidden_group import HiddenGroup
+    from .module_info import ModuleInfo
 
 __all__ = [
     'GroupDescent',
@@ -428,17 +433,17 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
         )
 
     # ---- assemble the hoist list (ordered dedup, body vars) ----------------
-    hoist: Dict[Var, None] = {}
+    hoist_seen: Dict[Var, None] = {}
     for r in body_relations:
         if r.x_var is not None:
-            hoist[r.x_var] = None
+            hoist_seen[r.x_var] = None
         for j in r.y_to_hidden_group_jaxprs:
             for v in list(j.invars) + list(j.constvars):
-                hoist[v] = None
+                hoist_seen[v] = None
     for g in body_groups:
         for v in list(g.hidden_invars) + list(g.transition_jaxpr_constvars):
-            hoist[v] = None
-    hoist = list(hoist)
+            hoist_seen[v] = None
+    hoist: List[Var] = list(hoist_seen)
 
     # ---- rewrite the eqn ----------------------------------------------------
     inlined_eqn = eqn if body_closed is eqn.params['jaxpr'] else eqn.replace(

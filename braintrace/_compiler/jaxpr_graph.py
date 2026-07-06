@@ -271,7 +271,7 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
                 fresh_outvars = [new_var('', v.aval) for v in eqn.outvars]
                 for ov, fresh in zip(eqn.outvars, fresh_outvars):
                     local[ov] = fresh
-                replace_kwargs = dict(
+                replace_kwargs: Dict[str, Any] = dict(
                     invars=[res(v) for v in eqn.invars],
                     outvars=fresh_outvars,
                 )

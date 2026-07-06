@@ -51,7 +51,7 @@ from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
 from braintrace._compatible_imports import Var
-from braintrace._compiler import ControlFlowPolicy, compile_etrace_graph, HiddenGroup
+from braintrace._compiler import ControlFlowPolicy, compile_etrace_graph, HiddenGroup, HiddenParamOpRelation
 from braintrace._input_data import (
     get_single_step_data,
     split_input_data_types,
@@ -307,10 +307,15 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     for v in j.constvars))
                 c_stacks = tuple(intermediate_values[m[v]] for v in cvars)
 
-                def _one_substep(y_t, c_ts, _rel=relation, _cvars=cvars):
+                def _one_substep(
+                    y_t: jax.Array,
+                    c_ts: Tuple[jax.Array, ...],
+                    _rel: HiddenParamOpRelation = relation,
+                    _cvars: list[Var] = cvars,
+                ) -> Tuple[jax.Array, ...]:
                     env = dict(zip(_cvars, c_ts))
 
-                    def _y2h(y_val):
+                    def _y2h(y_val: jax.Array) -> Any:
                         return _rel.y_to_hidden_groups(
                             y_val, env, concat_hidden_vals=True)
 
@@ -395,7 +400,11 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     intermediate_values[m[v]]
                     for v in group.transition_jaxpr_constvars)
 
-                def _one_substep(h_ts, c_ts, _g=group):
+                def _one_substep(
+                    h_ts: Tuple[jax.Array, ...],
+                    c_ts: Tuple[jax.Array, ...],
+                    _g: HiddenGroup = group,
+                ) -> Any:
                     return _g.diagonal_jacobian(list(h_ts), list(c_ts))
 
                 hid2hid_jacobian.append(jax.vmap(_one_substep)(h_stacks, c_stacks))

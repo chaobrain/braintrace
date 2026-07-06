@@ -235,7 +235,11 @@ def _update_param_dim_etrace_scan_fn(
             {i: hid_group_jacobians[i] for i in g_idx},  # (L, ...)
         )
 
-        def _substep(carry, sliced, _rels=rels):
+        def _substep(
+            carry: Dict[ETraceWG_Key, jax.Array],
+            sliced: Any,
+            _rels: Any = rels,
+        ) -> Tuple[Dict[ETraceWG_Key, jax.Array], None]:
             xs_t, dfs_t, diags_t = sliced
             carry = {**carry, **_apply_relation_step(
                 carry, xs_t, dfs_t, diags_t, _rels,

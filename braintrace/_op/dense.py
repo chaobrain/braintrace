@@ -768,8 +768,8 @@ def matmul(
     if x.ndim > 2:  # type: ignore[union-attr]
         raise ValueError(
             f'matmul() supports x.ndim of 1 (unbatched `(in_features,)`) or 2 '
-            f'(batched `(batch, in_features)`); got x.ndim={x.ndim} '
-            f'(shape={x.shape}). Every ETP trace rule for etp_mm_p / etp_mv_p '
+            f'(batched `(batch, in_features)`); got x.ndim={x.ndim} '  # type: ignore[union-attr]
+            f'(shape={x.shape}). Every ETP trace rule for etp_mm_p / etp_mv_p '  # type: ignore[union-attr]
             f'assumes one of those two layouts, so higher-rank inputs (e.g. '
             f'`(batch, time, in_features)`) are not supported -- reshape/vmap '
             f'over the extra axes before calling matmul(), or use '
