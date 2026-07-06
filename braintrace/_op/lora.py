@@ -652,8 +652,8 @@ def lora_matmul(
     if x.ndim > 2:  # type: ignore[union-attr]
         raise ValueError(
             f'lora_matmul() supports x.ndim of 1 (unbatched `(in_features,)`) or 2 '
-            f'(batched `(batch, in_features)`); got x.ndim={x.ndim} '
-            f'(shape={x.shape}). Every ETP trace rule for etp_lora_mm_p / '
+            f'(batched `(batch, in_features)`); got x.ndim={x.ndim} '  # type: ignore[union-attr]
+            f'(shape={x.shape}). Every ETP trace rule for etp_lora_mm_p / '  # type: ignore[union-attr]
             f'etp_lora_mv_p assumes one of those two layouts, so higher-rank '
             f'inputs (e.g. `(batch, time, in_features)`) are not supported -- '
             f'reshape/vmap over the extra axes before calling lora_matmul().'

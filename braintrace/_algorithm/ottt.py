@@ -270,7 +270,7 @@ class OTTT(ETraceVjpAlgorithm):
             # The bias companion trace has no batch axis: bias's local
             # Jacobian dy/db = 1 is identical for every batch row, so it is
             # always a scalar regardless of `batch_size`.
-            self._bias_trace.value = jnp.zeros((), dtype=self._bias_trace.value.dtype)
+            self._bias_trace.value = jnp.zeros((), dtype=self._bias_trace.value.dtype)  # type: ignore[attr-defined]
 
     def _get_etrace_data(self) -> Any:
         d = {rid: t.value for rid, t in self._pre_traces.items()}

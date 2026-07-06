@@ -36,7 +36,7 @@ __all__ = [
 ]
 
 
-def _fold_leading_axes(x: ArrayLike):
+def _fold_leading_axes(x: ArrayLike) -> tuple[ArrayLike, Callable[[ArrayLike], ArrayLike]]:
     """Fold all leading axes of ``x`` into a single batch axis.
 
     The rank-guarded ETP ops (:func:`braintrace.matmul`,
@@ -66,11 +66,11 @@ def _fold_leading_axes(x: ArrayLike):
     """
     if x.ndim <= 2:  # type: ignore[union-attr]  # scalars never reach here: callers feed (..., in_size)
         return x, lambda y: y
-    lead_shape = x.shape[:-1]
-    x2 = u.math.reshape(x, (-1, x.shape[-1]))
+    lead_shape = x.shape[:-1]  # type: ignore[union-attr]
+    x2 = u.math.reshape(x, (-1, x.shape[-1]))  # type: ignore[union-attr]
 
     def unfold(y: ArrayLike) -> ArrayLike:
-        return u.math.reshape(y, (*lead_shape, y.shape[-1]))
+        return u.math.reshape(y, (*lead_shape, y.shape[-1]))  # type: ignore[union-attr]
 
     return x2, unfold
 
