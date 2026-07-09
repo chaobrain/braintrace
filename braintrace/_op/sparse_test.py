@@ -21,9 +21,9 @@ implementing the methods used by the ETP rules:
 
 * ``with_data(weight_data)`` — substitute new non-zero values into the
   structure, returning a sparse-matmul-able object.
-* ``yw_to_w_transposed(hidden_dim, trace)`` — apply the transposed
+* ``dt2t_transposed(hidden_dim, trace)`` — apply the transposed
   pattern when propagating the trace.
-* ``yw_to_w(hidden_dim, trace)`` — the non-transposed counterpart.
+* ``dt2t(hidden_dim, trace)`` — the non-transposed counterpart.
 
 For end-to-end forward correctness a real :class:`brainevent.CSR` works.
 For rule-level and compile/gradient tests a tiny stub *subclassing*
@@ -73,7 +73,7 @@ class _StubSparseMat(brainevent.DataRepresentation):
     Backed by a dense matrix internally; ``with_data`` rebuilds the dense
     form by reshaping the flat data vector into the original shape.
 
-    ``yw_to_w_transposed`` is called by the D-RTRL executor with
+    ``dt2t_transposed`` is called by the D-RTRL executor with
     ``trace`` having the same shape as the weight data (i.e. ``(nnz,)``
     per vmap step). For this stub, all non-zeros are in a specific pattern
     so the transposed application just multiplies each nnz-entry by the
@@ -94,7 +94,7 @@ class _StubSparseMat(brainevent.DataRepresentation):
     def with_data(self, data: jnp.ndarray) -> jnp.ndarray:
         return data.reshape(self._template.shape)
 
-    def yw_to_w_transposed(self, hidden_dim, trace):
+    def dt2t_transposed(self, hidden_dim, trace):
         if trace.ndim == 1:
             # Called by the executor per-vmap step: trace is (nnz,),
             # hidden_dim is (out_dim,) or scalar.
@@ -108,10 +108,10 @@ class _StubSparseMat(brainevent.DataRepresentation):
         # pass trace in the old full-matrix form.
         return trace * jnp.expand_dims(hidden_dim, axis=0)
 
-    def yw_to_w(self, hidden_dim, trace):
+    def dt2t(self, hidden_dim, trace):
         # Non-transposed counterpart; the diagonal stub is symmetric so it
         # delegates. Present to complete the DataRepresentation protocol.
-        return self.yw_to_w_transposed(hidden_dim, trace)
+        return self.dt2t_transposed(hidden_dim, trace)
 
 
 def _csr_from_dense(dense: jnp.ndarray):
@@ -229,7 +229,7 @@ class TestSpMmEtpRules:
         # trace is now a dict {'weight': ...}
         trace = {'weight': jnp.ones((3, 4))}
         out = rule(hidden, trace, sparse_mat=stub)
-        # stub.yw_to_w_transposed broadcasts hidden over rows.
+        # stub.dt2t_transposed broadcasts hidden over rows.
         np.testing.assert_allclose(out['weight'], jnp.ones((3, 4)) * hidden[None, :])
 
     def test_dt_to_t_with_bias(self):
@@ -357,7 +357,7 @@ class TestSparseMMBiasGradient:
     Uses a hashable stub sparse matrix (backed by a dense 3×4 identity-like
     template) so the test does not depend on brainunit.CSR being hashable in JAX.
     The stub's ``with_data`` reconstructs the dense matrix from the flat data
-    vector (one value per non-zero), and ``yw_to_w_transposed`` applies the
+    vector (one value per non-zero), and ``dt2t_transposed`` applies the
     transposed pattern.
     """
 
@@ -387,7 +387,7 @@ class TestSparseMMBiasGradient:
                 # Substitute flat data vector back into the dense template.
                 return dense_template.at[rows, cols].set(data)
 
-            def yw_to_w_transposed(self, hidden_dim, trace):
+            def dt2t_transposed(self, hidden_dim, trace):
                 # Per D-RTRL executor call: trace is (nnz,), hidden_dim is (out,).
                 # For a diagonal matrix col_i == i, so:
                 #   e^t_i = hidden_dim[col_i] * trace_i = hidden_dim[i] * trace_i.
@@ -396,8 +396,8 @@ class TestSparseMMBiasGradient:
                 n = trace.shape[0]
                 return trace * hidden_dim[:n]
 
-            def yw_to_w(self, hidden_dim, trace):
-                return self.yw_to_w_transposed(hidden_dim, trace)
+            def dt2t(self, hidden_dim, trace):
+                return self.dt2t_transposed(hidden_dim, trace)
 
         sparse_mat = _HashableStub()
         nnz = dim
@@ -489,14 +489,14 @@ class TestRuntimeTypeCheck:
         np.testing.assert_allclose(out, jnp.ones(3) @ (jnp.eye(3) * 2.0))
 
     def test_rejects_brainunit_sparse(self):
-        """A brainunit (saiunit) sparse matrix lacks ``yw_to_w_transposed`` and is rejected."""
+        """A brainunit (saiunit) sparse matrix lacks ``dt2t_transposed`` and is rejected."""
         bu_csr = u.sparse.CSR.fromdense(jnp.eye(3))
         assert not isinstance(bu_csr, brainevent.DataRepresentation)
         with pytest.raises(TypeError, match='brainevent.DataRepresentation'):
             sparse_matmul(jnp.ones(3), bu_csr.data, sparse_mat=bu_csr)
 
     def test_rejects_plain_array(self):
-        with pytest.raises(TypeError, match='yw_to_w_transposed'):
+        with pytest.raises(TypeError, match='dt2t_transposed'):
             sparse_matmul(jnp.ones(3), jnp.ones(3), sparse_mat=jnp.eye(3))
 
     def test_rejects_duck_typed_non_subclass(self):
@@ -506,10 +506,10 @@ class TestRuntimeTypeCheck:
             def with_data(self, data):
                 return data
 
-            def yw_to_w_transposed(self, hidden_dim, trace):
+            def dt2t_transposed(self, hidden_dim, trace):
                 return trace
 
-            def yw_to_w(self, hidden_dim, trace):
+            def dt2t(self, hidden_dim, trace):
                 return trace
 
         with pytest.raises(TypeError, match='brainevent.DataRepresentation'):
@@ -689,7 +689,7 @@ class TestBatchedSparseDRTRLOracle:
     """C3: ``_sp_mm_dt_to_t`` (the ``etp_sp_mm_p`` D-RTRL trace-recurrence rule)
     is handed a leading batch axis -- ``hidden_dim: (batch, out)``,
     ``trace['weight']: (batch, nnz)`` -- straight from the online-trace update.
-    ``brainevent``'s ``yw_to_w_transposed`` kernel only accepts 1-D operands, so
+    ``brainevent``'s ``dt2t_transposed`` kernel only accepts 1-D operands, so
     the rule must ``jax.vmap`` internally rather than handing it the batched
     arrays directly. Exactly-diagonal recurrence: D-RTRL (an *exact* algorithm)
     must match the BPTT oracle element-wise for a batch > 1 model.
@@ -761,7 +761,7 @@ class TestBatchedSparseDRTRLOracle:
 def _sparse_row_col_of_nnz(csr):
     """Derive per-nnz (row, col) indices directly from CSR structure.
 
-    Built independently of ``yw_to_w_transposed`` so it can serve as ground
+    Built independently of ``dt2t_transposed`` so it can serve as ground
     truth: ``csr.indices`` already *is* the per-nnz column index (standard
     CSR layout), and the per-nnz row index is recovered from ``indptr`` by
     repeating each row index by its nnz count.
@@ -788,7 +788,7 @@ class TestDtToTFirstPrinciplesFromJacobian:
     which case it equals ``x`` at that entry's row — a structural fact
     confirmed here numerically against ``row_of_nnz`` / ``col_of_nnz``
     derived directly from the CSR's own ``indptr`` / ``indices`` (never from
-    ``yw_to_w_transposed``). Because the Jacobian is "diagonal" in this
+    ``dt2t_transposed``). Because the Jacobian is "diagonal" in this
     per-nnz-column sense, the general contraction of a cotangent against it
     reduces to indexing the cotangent by each nnz's column and multiplying
     into the trace — exactly what the production rule computes. Checked
@@ -832,7 +832,7 @@ class TestDtToTFirstPrinciplesFromJacobian:
         # General contraction, specialized by the proven per-column-diagonal
         # structure: each nnz only "sees" the cotangent component at its own
         # column. Built from `col_of_nnz` (raw CSR structure), never from
-        # the rule's own `yw_to_w_transposed` call.
+        # the rule's own `dt2t_transposed` call.
         ref_w = trace_w * g[col_of_nnz]
         ref_b = trace_b * g
 

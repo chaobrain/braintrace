@@ -39,7 +39,7 @@ def _be_csr_from_coo(values, rows, cols, shape):
     """Build a :class:`brainevent.CSR` from COO-style ``(values, rows, cols)``.
 
     ``SparseLinear`` requires a :class:`brainevent.DataRepresentation` (the type
-    that provides the ``yw_to_w_transposed`` online-learning protocol). brainunit
+    that provides the ``dt2t_transposed`` online-learning protocol). brainunit
     ``COO`` does not qualify, so the connectivity is densified and re-encoded as a
     brainevent CSR. These tests assert output shapes only, so duplicate-index
     summation during densification is irrelevant.

@@ -29,9 +29,10 @@ __all__ = [
     'is_scan_primitive',
     'is_while_primitive',
     'is_cond_primitive',
+    'wrap_init',
 ]
 
-from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal
+from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal, wrap_init
 
 try:
     from jax.extend.core import new_jaxpr_eqn

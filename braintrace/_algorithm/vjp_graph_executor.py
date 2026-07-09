@@ -46,11 +46,10 @@ import jax.core
 import jax.numpy as jnp
 import brainunit as u
 from brainstate._compatible_import import get_aval
-from jax.extend import linear_util as lu
 from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
-from braintrace._compatible_imports import Var
+from braintrace._compatible_imports import Var, wrap_init
 from braintrace._compiler import ControlFlowPolicy, compile_etrace_graph, HiddenGroup, HiddenParamOpRelation
 from braintrace._input_data import (
     get_single_step_data,
@@ -885,8 +884,11 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             hid2weight_jac_single_or_multi_steps, hid2hid_jac_single_or_multi_steps = aux
             final_etrace = None
 
-        out_flat, out_tree = jax.tree.flatten(((out_single_or_multi_steps, etrace_state_vals, other_state_vals),))
-        rule, in_tree = jax.api_util.flatten_fun_nokwargs(lu.wrap_init(f_vjp), out_tree)
+        vjp_cotangent_args = ((out_single_or_multi_steps, etrace_state_vals, other_state_vals),)
+        out_flat, out_tree = jax.tree.flatten(vjp_cotangent_args)
+        rule, in_tree = jax.api_util.flatten_fun_nokwargs(
+            wrap_init(f_vjp, vjp_cotangent_args, {}, 'braintrace_vjp_residual'), out_tree
+        )
         out_avals = [get_aval(x).at_least_vspace() for x in out_flat]
         jaxpr, _, consts = pe.trace_to_jaxpr_dynamic(rule, out_avals)
         residual = VjpResiduals(jaxpr, in_tree(), out_tree, consts)
