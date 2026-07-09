@@ -1,9 +1,45 @@
 # Release Notes
 
 
-## UNRELEASED
+## Version 0.2.4
+
+This release makes eligibility-trace online learning work *through* JAX control
+flow. A new compiler canonicalization + descent pipeline lets ETP operations
+inside `vmap`, `cond`, `scan` / `for_loop`, and weight-free `while` bodies
+participate in online learning (Phases 0–4), so recurrent cells built with
+control flow no longer silently drop parameters from the trace graph. The
+operator layer gains three new ETP ops — `grouped_matmul`, `embedding`, and
+`einsum` — each with a matching `braintrace.nn` layer; the D-RTRL multi-step
+trace update is chunk-factorized for a 2.4–4.5× speedup on multi-step windows;
+and a full `_op` / `_algorithm` audit closes 24 correctness findings. The
+compiler itself is now deterministic across processes and transparently inlines
+user `jax.jit` bodies. One internal ETP rule is renamed (see Breaking changes).
 
 ### Highlights
+
+#### New: `grouped_matmul`, `embedding`, and `einsum` ETP operators
+
+- **Three new ETP operators join the operator layer**, each with hand-written
+  ETP rules (`dt_to_t`, `xy_to_dw`, trace initializers), a closed-form D-RTRL
+  fast path where applicable, public exports, and single-step BPTT-oracle
+  coverage:
+  - **`braintrace.grouped_matmul`** — a grouped matmul exposing both batched
+    and unbatched primitives (`etp_gmm` / `etp_gmv`) and a closed-form D-RTRL
+    fast path; D-RTRL matches BPTT element-wise and `pp_prop` is directionally
+    aligned. Wrapped by the new **`braintrace.nn.GroupedLinear`** layer.
+  - **`braintrace.embedding`** — an ETP embedding lookup with a broadcast
+    `dt_to_t` and a scatter-add `xy_to_dw`. Because the input is integer token
+    indices, the IO-dim (`pp_prop` / `ES_D_RTRL`) input trace cannot low-pass
+    the raw indices; a new optional per-primitive `ETP_RULES_PP_X_REPR` registry
+    lets `embedding` filter the linear one-hot representation
+    (`y = onehot(idx) @ T`) instead, and `xy_to_dw` dispatches on the x dtype
+    (integer indices → gather-VJP scatter-add; float one-hot → contraction VJP).
+    Wrapped by the new **`braintrace.nn.Embedding`** layer.
+  - **`braintrace.einsum`** — an equation-parsed ETP einsum with axis
+    classification; diagonal-class and shared-axis equations are D-RTRL
+    BPTT-exact (maxdiff 0.0), while the genuinely lossy regime (output positions
+    collapsing into a smaller hidden state) fails loudly at compile time with a
+    cotangent-shape error rather than silently emitting wrong gradients.
 
 #### New: structured scan descent — long ETP scans compile and learn online (Phase 4)
 
@@ -187,6 +223,72 @@
   learner's execution trace (e.g. conv models), it is expected and benign —
   the eligibility-trace graph was already compiled per-sample before the
   learner was vmapped, so no parameter is dropped.
+
+#### New: user-`jit` inlining and a deterministic compiler
+
+- **ETP operations inside a user `jax.jit` now compile.** `extract_module_info`
+  inlines user `jax.jit` bodies before any analysis, so `jit` boundaries are
+  transparent to hidden-group discovery and relation finding. Previously a
+  weight used inside a `jit` raised `NotImplementedError` and bare ETP
+  primitives were silently skipped (#123).
+- **Deterministic, reproducible compilation.** Hidden-group discovery,
+  transition bookkeeping, and group merging now use insertion-ordered maps and a
+  canonical compiled-state ordering instead of `set`s keyed by object identity,
+  so group membership and ordering are stable across processes. Every built
+  group is validated with `check_consistent_varshape`, and merges emit an
+  INFO-level `HIDDEN_GROUP_MERGED` diagnostic (#123).
+- **Directly-fed fan-out fix.** A single ETP op feeding two independent
+  recurrent states now registers relations to *both* groups — the forward BFS
+  previously locked onto whichever hidden state it reached first and dropped the
+  rest. Relation gating also resolves all keys before excluding a relation, so a
+  constant-weight / `ParamState`-bias matmul still registers with the bias as
+  its trainable key (#123).
+- **Robust perturbation pass.** The single-step perturbation now handles
+  multi-output equations and read-only hidden states (synthesizing the
+  `h^t = h^{t-1} + p` passthrough) and preserves the source jaxpr's effect set,
+  instead of falling through to an unexplained-hidden error (#123).
+
+### Performance
+
+- **Chunk-factorized multi-step D-RTRL trace update.** Multi-step trace updates
+  for `D_RTRL` now factor the per-step decay into suffix products and apply the
+  trace update per chunk instead of step-by-step, giving a **2.4–4.5× speedup**
+  on multi-step windows for the dense (`etp_mm` / `etp_mv`) and elementwise
+  (`etp_elemwise`) kernels. Exposed as a `chunked_trace` knob on `D_RTRL` /
+  `braintrace.compile` (#132).
+
+### Correctness
+
+- **ETP `_op` / `_algorithm` audit — 24 findings closed (4 Critical, 6 High,
+  6 Medium, 8 Minor).** Highlights: exact `conv` (C1) and `lora_matmul` (C2)
+  gradients under param-dim D-RTRL (per-position kernel trace + effective-weight
+  trace, backed by new optional instant / solve D-RTRL rule registries); a fix
+  for the batched sparse D-RTRL crash (C3) via a hashable CSR wrapper; and
+  OSTTP's always-zero learning signal (C4) via `custom_vjp` residual threading.
+  Also resolved: `trace_dtype` gate mismatch, conv bias broadcast, EProp
+  kappa-filter cross-state contamination and random-feedback scale invariance,
+  OTTT / OTPE dropped bias gradients and missing guards, int/bool autodiff
+  guards, rank guards with nn-layer axis folding, and a corrected OSTL exactness
+  claim. Adds a cross-family single-step BPTT oracle suite and first-principles
+  rule tests (`6c7796a`).
+
+### Breaking changes
+
+- **ETP rule rename: `YW_TO_W` → `DT_TO_T`.** The recurrent trace-propagation
+  rule computes `D^t * ε^{t-1}` (the `Dᵗ`-times-previous-trace term of the
+  D-RTRL update), so `DT_TO_T` names it accurately; `YW_TO_W` never matched what
+  the rule computes. Custom primitives that register this rule (via
+  `register_etp_rules` / `register_primitive`) must use the new name. This is
+  unrelated to `brainevent`'s external `DataRepresentation.yw_to_w` /
+  `yw_to_w_transposed` protocol methods, which are untouched (#130).
+
+### Internal
+
+- **`mypy` CI gate repaired.** Cleared 40 accumulated type errors across 8 files
+  (annotation-only, no behavior change), restoring a green `typecheck_and_build`
+  job (#133).
+- Signature cleanups: a readability pass on `_etp_sp_matmul_impl` and removal of
+  unused keyword arguments across several modules.
 
 
 ## Version 0.2.3
