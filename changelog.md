@@ -1,6 +1,25 @@
 # Release Notes
 
 
+## UNRELEASED
+
+### Improvements
+
+- **`sparse_matmul` migrates off brainevent's deprecated trace protocol.**
+  `braintrace._op.sparse` now calls `brainevent.DataRepresentation.dt2t` /
+  `.dt2t_transposed` directly instead of the deprecated `.yw_to_w` /
+  `.yw_to_w_transposed` aliases (brainevent renamed its own trace-propagation
+  protocol to match braintrace's `DT_TO_T` terminology). The minimum
+  `brainevent` version is raised to **0.1.2** (the release that introduces
+  `dt2t`/`dt2t_transposed`) in `pyproject.toml` / `requirements.txt`.
+- **Fixed a JAX-internal `linear_util.wrap_init` `DeprecationWarning`** raised
+  by the single-step VJP residual construction in `vjp_graph_executor.py`.
+  The call now threads a `DebugInfo` object through the ecosystem-standard
+  `brainstate._compatible_import.wrap_init` shim (re-exported as
+  `braintrace._compatible_imports.wrap_init`), matching the pattern already
+  used elsewhere in the `brainstate`/`saiunit` stack. No behavior change.
+
+
 ## Version 0.2.4
 
 This release makes eligibility-trace online learning work *through* JAX control

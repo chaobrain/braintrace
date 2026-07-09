@@ -20,8 +20,8 @@ structure is supplied as a static parameter (``sparse_mat``); only the
 non-zero values flow through the primitive as the ``weight_data`` invar.
 The structure object must be a :class:`brainevent.DataRepresentation`,
 which provides the ETP online-learning protocol: ``with_data`` (substitute
-new data into the structure), ``yw_to_w_transposed`` (apply the transposed
-sparse pattern to a trace) and ``yw_to_w`` (the non-transposed counterpart).
+new data into the structure), ``dt2t_transposed`` (apply the transposed
+sparse pattern to a trace) and ``dt2t`` (the non-transposed counterpart).
 
 **Forward operation**
 
@@ -49,7 +49,7 @@ frozen.
 
 * ``dt_to_t(hidden_dim, trace)`` — propagation of
   :math:`\mathbf{D}^t \boldsymbol{\epsilon}^{t-1}`. For the weight data,
-  delegates to ``sparse_mat.yw_to_w_transposed``: this contracts
+  delegates to ``sparse_mat.dt2t_transposed``: this contracts
   ``hidden_dim`` along ``out`` and restricts to the sparse pattern in a
   single kernel call — equivalent to computing the dense
   :math:`(\partial h/\partial y) \cdot \mathrm{scatter}^{\top}` but only
@@ -207,7 +207,7 @@ def _sp_mm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
     the dense-equivalent :math:`y_j = \sum_i x_i W_{ij}` we would write
     :math:`\partial y_j / \partial W_{ik} = \delta_{jk} x_i`. Restricted
     to the sparse support, only positions with
-    :math:`(i, j) \in \mathrm{pattern}` are kept; ``yw_to_w_transposed``
+    :math:`(i, j) \in \mathrm{pattern}` are kept; ``dt2t_transposed``
     performs the contraction and scatter-restrict in one sparse kernel:
 
     .. math::
@@ -233,7 +233,7 @@ def _sp_mm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
     **Batching (audit C3).** The scan-context call above hands this rule a
     2-D ``hidden_dim``/``trace['weight']`` pair straight from the online
     trace-recurrence update (no outer vmap — unlike the solve context).
-    ``brainevent``'s ``yw_to_w_transposed`` kernel (``csrmv_yw2y_p_call``)
+    ``brainevent``'s ``dt2t_transposed`` kernel (``csrmv_yw2y_p_call``)
     only accepts 1-D operands, so when ``hidden_dim.ndim == 2`` this rule
     ``jax.vmap``\ s the sparse call over the leading batch axis of both
     operands instead of handing it the batched arrays directly.
@@ -243,9 +243,9 @@ def _sp_mm_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
     if hidden_dim.ndim == 2:
         # (batch, out), (batch, nnz) -> vmap the 1-D-only brainevent kernel
         # over the leading batch axis.
-        weight_out = jax.vmap(mat.yw_to_w_transposed)(hidden_dim, weight_trace)
+        weight_out = jax.vmap(mat.dt2t_transposed)(hidden_dim, weight_trace)
     else:
-        weight_out = mat.yw_to_w_transposed(hidden_dim, weight_trace)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+        weight_out = mat.dt2t_transposed(hidden_dim, weight_trace)  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     out = {'weight': weight_out}
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
@@ -376,7 +376,7 @@ def _sp_mv_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
              ``trace['bias']   : (out,)``.
     """
     mat = _unwrap_sparse_mat(sparse_mat)
-    out = {'weight': mat.yw_to_w_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
+    out = {'weight': mat.dt2t_transposed(hidden_dim, trace['weight'])}  # type: ignore[union-attr]  # sparse_mat is always supplied at bind time
     if has_bias:
         out['bias'] = trace['bias'] * hidden_dim
     return out
@@ -482,8 +482,8 @@ def sparse_matmul(
         Sparse-matrix structure (e.g. a :class:`brainevent.CSR`). Must be a
         :class:`brainevent.DataRepresentation`, which implements the ETP
         online-learning protocol: ``with_data`` (substitute new data into the
-        structure), ``yw_to_w_transposed`` (apply the transposed sparse
-        pattern to a trace) and ``yw_to_w`` (its non-transposed counterpart).
+        structure), ``dt2t_transposed`` (apply the transposed sparse
+        pattern to a trace) and ``dt2t`` (its non-transposed counterpart).
         Passing any other object raises :class:`TypeError`.
     bias : ArrayLike or None, optional
         Bias vector. Default ``None``.
@@ -515,7 +515,7 @@ def sparse_matmul(
     if not isinstance(sparse_mat, brainevent.DataRepresentation):
         raise TypeError(
             'sparse_mat must be a brainevent.DataRepresentation providing the '
-            'with_data, yw_to_w_transposed and yw_to_w online-learning protocol '
+            'with_data, dt2t_transposed and dt2t online-learning protocol '
             f'methods, got {type(sparse_mat).__name__!r}.'
         )
     p = etp_sp_mm_p if x.ndim >= 2 else etp_sp_mv_p  # type: ignore[union-attr]  # x is an array here; ArrayLike also admits scalars without .ndim
