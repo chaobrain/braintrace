@@ -18,6 +18,17 @@
   `brainstate._compatible_import.wrap_init` shim (re-exported as
   `braintrace._compatible_imports.wrap_init`), matching the pattern already
   used elsewhere in the `brainstate`/`saiunit` stack. No behavior change.
+- **Fixed stale API references in the documentation notebooks.** Three
+  notebooks (`docs/tutorials/etp_primitives.ipynb`,
+  `docs/tutorials/customizing_primitive_transforms.ipynb`,
+  `docs/advanced/limitations.ipynb`) still referenced braintrace's own
+  pre-#130 `yw_to_w` / `ETP_RULES_YW_TO_W` rule naming instead of the current
+  `dt_to_t` / `ETP_RULES_DT_TO_T`; two executable cells in
+  `etp_primitives.ipynb` raised `ImportError` / `TypeError` if re-run.
+  Incidentally, `etp_primitives.ipynb` and `docs/quickstart/concepts.ipynb`
+  also still called `element_wise(weight, fn=...)`, predating that
+  parameter's rename to `weight_fn`. All affected notebooks were re-executed
+  end-to-end to confirm they now run cleanly.
 
 
 ## Version 0.2.4
