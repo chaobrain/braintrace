@@ -51,12 +51,14 @@ is the state these algorithms carry across time.
    EligibilityTrace
 
 
-D-RTRL — Parameter Dimension (exact)
-------------------------------------
+D-RTRL — Parameter-dimensional estimator
+-----------------------------------------
 
-Decoupled Real-Time Recurrent Learning with a diagonal approximation of the
-hidden-to-hidden Jacobian. Memory complexity :math:`O(B \cdot |\theta|)`, where
-:math:`B` is the batch size and :math:`|\theta|` the number of parameters.
+Diagonal Real-Time Recurrent Learning uses a diagonal approximation of the
+hidden-to-hidden Jacobian. Memory complexity is
+:math:`O(B \cdot |\theta|)`, where :math:`B` is the batch size and
+:math:`|\theta|` the number of parameters. It is not generally
+gradient-equivalent to BPTT outside the assumptions of that approximation.
 
 .. math::
 
@@ -81,13 +83,14 @@ hidden-to-hidden Jacobian. Memory complexity :math:`O(B \cdot |\theta|)`, where
 :class:`ParamDimVjpAlgorithm`.
 
 
-ES-D-RTRL — Input/Output Dimension (exact)
-------------------------------------------
+pp-prop — Input/output-factorized estimator
+-------------------------------------------
 
-The Event-Synchronized D-RTRL algorithm factorizes the eligibility trace into
-input and output components with exponential smoothing, reducing memory to
-:math:`O(B(I + O))`, where :math:`I` and :math:`O` are the input and output
-dimensions.
+``pp_prop`` (historically exposed as ``ES_D_RTRL``) factorizes the eligibility
+trace into input and output components with exponential smoothing, reducing
+memory to :math:`O(B(I + O))`, where :math:`I` and :math:`O` are the input and
+output dimensions. An integer ``decay_or_rank`` value parameterizes the decay;
+it does not allocate multiple rank factors.
 
 .. math::
 

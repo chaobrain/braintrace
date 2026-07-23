@@ -18,7 +18,7 @@ for gate operations.
    Activation, normalization, and pooling layers are intentionally **not**
    re-implemented here. Accessing them through ``braintrace.nn`` (e.g.
    ``braintrace.nn.LayerNorm``) emits a :class:`DeprecationWarning` and forwards
-   to ``brainstate.nn`` / ``brainstate.state``; use those packages directly.
+   to ``brainstate.nn`` / ``brainpy.state``; use those packages directly.
 
 
 Linear Layers
