@@ -39,8 +39,9 @@ downward:
 3. **Graph executor** — :class:`ETraceGraphExecutor` /
    :class:`ETraceVjpGraphExecutor`, which run the forward pass and the
    hidden->weight / hidden->hidden Jacobian computations.
-4. **Algorithms** — online-learning orchestrators: the exact algorithms
-   :class:`D_RTRL` / :func:`pp_prop` / :class:`ES_D_RTRL`, and the SNN family
+4. **Algorithms** — online-learning orchestrators: the compiler-driven
+   estimators :class:`D_RTRL` and :class:`pp_prop` (historically exposed as
+   :class:`ES_D_RTRL`), and the SNN-specific family
    :class:`EProp`, :class:`OSTLRecurrent`, :class:`OSTLFeedforward`,
    :class:`OTPE`, :class:`OTTT`, :class:`OSTTP`.
 

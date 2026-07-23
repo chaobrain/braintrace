@@ -479,9 +479,9 @@ class Trainer(object):
         # kept manual: uses vmap_init_all_states with state_tag='new' and Batching() mode;
         # braintrace.compile uses init_all_states which is incompatible with this vmap state scheme
         if self.args.method == 'expsm_diag':
-            model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, mode=brainstate.mixin.Batching())
+            model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay)
         elif self.args.method == 'diag':
-            model = braintrace.D_RTRL(self.target, mode=brainstate.mixin.Batching())
+            model = braintrace.D_RTRL(self.target)
         else:
             raise ValueError(f'Unknown online learning methods: {self.args.method}.')
 

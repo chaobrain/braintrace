@@ -554,10 +554,11 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         The model function, which receives the input arguments and returns the
         model output.
     decay_or_rank : float or int
-        The exponential smoothing factor for the eligibility trace. If a float,
-        it is the decay factor and should be in the range :math:`(0, 1)`. If an
-        integer, it is the number of approximation ranks for the algorithm and
-        should be greater than 0.
+        Parameterization of the exponential smoothing factor. A float in
+        :math:`(0, 1)` is used directly as the decay. A positive integer
+        :math:`r` is converted to :math:`\alpha=(r-1)/(r+1)`. The integer form
+        does not allocate :math:`r` separate trace factors; both forms use the
+        same input/output-factorized trace structure.
     vjp_method : str, optional
         The method for computing the VJP. It should be either ``"single-step"``
         or ``"multi-step"``.
@@ -610,8 +611,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     the outer product of two exponentially-smoothed *vectors* — one over the
     input dimension and one over the output dimension. Storing the two factors
     instead of the full matrix drops the memory from :math:`O(I\cdot O)` to
-    :math:`O(I+O)` per layer. The decay :math:`\alpha` (equivalently an
-    approximation rank) controls how much temporal history the factored trace
+    :math:`O(I+O)` per layer. The decay :math:`\alpha` (or its integer
+    parameterization) controls how much temporal history the factored trace
     retains; the bias of the exponential estimator is corrected at solve time.
 
     This algorithm has :math:`O(BI+BO)` memory complexity and :math:`O(BIO)`

@@ -200,6 +200,14 @@ def test_nn_forwarded_name_warns():
         _ = nn.LayerNorm
 
 
+def test_nn_forwarded_state_name_warns_and_resolves():
+    import brainpy.state
+    import braintrace.nn as nn
+    with pytest.warns(DeprecationWarning):
+        forwarded = nn.LIF
+    assert forwarded is brainpy.state.LIF
+
+
 def test_nn_unknown_name_raises_attribute_error():
     import braintrace.nn as nn
     with pytest.raises(AttributeError):

@@ -32,8 +32,8 @@ layers built on top.
        Jacobians the algorithms consume.
      - :doc:`compiler`
    * - **Algorithms**
-     - Online-learning orchestrators: the exact D-RTRL / ES-D-RTRL family and
-       the SNN algorithms (EProp, OSTL, OTPE, OTTT, OSTTP).
+     - Online-learning estimators: D-RTRL, pp-prop (historically ES-D-RTRL),
+       and the SNN algorithms (EProp, OSTL, OTPE, OTTT, OSTTP).
      - :doc:`algorithms`
    * - **Layers**
      - Drop-in ``brainstate.nn``-style layers pre-wired through ETP primitives.
