@@ -18,7 +18,7 @@ Online learning for recurrent networks via Eligibility Trace Propagation (ETP).
 4. Bug? Write a test that reproduces it, then fix until the test passes.
 5. Every correction: reflect on the mistake, plan to avoid repeating it.
 6. All updates must be happened on the worktree branch, not main. 
-7. Write spec and plan under `/mnt/d/codes/projects/brainmass/dev/superpowers` as gitignored files before implementation. This makes them available for reference during implementation, but not clutter the repo history.
+7. Write specs and plans under `docs/specs` before implementation.
 8. Tests should >90% coverage, but focus on meaningful tests that cover edge cases and critical paths, not just trivial lines. 
 9. Co-locate tests with the code under test: each module `foo.py` has its tests in a sibling `foo_test.py` (suffix style — never a separate `tests/` directory, never the `test_*.py` prefix). 
 10. **Never drive a model with a bare Python `for`/`while` loop when it runs repeatedly.** Python loops execute op-by-op (dispatch overhead, no fusion) and trace fresh each step; the `brainstate.transform` primitives lower the whole loop into one compiled XLA program, tracing the body only once. Pick by shape of the work:
@@ -158,7 +158,6 @@ backlog of expected-failure / improvement items rather than duplicating it here.
 ## Rules
 
 1. Use `brainstate.random` instead of `jax.random` directly for all random number generation. 
-2. Place superpowers spec and plans in `/mnt/d/codes/projects/braintrace/dev/superpowers` directory.
 
 ## Docstring style (NumPy-doc)
 
