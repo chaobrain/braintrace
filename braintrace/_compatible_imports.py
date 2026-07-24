@@ -37,7 +37,9 @@ from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, Close
 try:
     from jax.extend.core import new_jaxpr_eqn
 except ImportError:  # older JAX exposes it on jax.core only
-    from jax.core import new_jaxpr_eqn
+    # jax.core dropped ``new_jaxpr_eqn`` in JAX 0.11; this fallback only runs on
+    # older JAX, so silence mypy's static attr-defined/no-redef complaints.
+    from jax.core import new_jaxpr_eqn  # type: ignore[attr-defined, no-redef]
 
 try:
     from jax._src.ad_util import stop_gradient_p

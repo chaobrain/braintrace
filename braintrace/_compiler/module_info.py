@@ -350,10 +350,13 @@ class ModuleInfo(NamedTuple):
         )
 
         # closed jaxpr
-        closed_jaxpr = ClosedJaxpr(
-            jaxpr=jaxpr,
-            consts=self.closed_jaxpr.consts,
-        )
+        #
+        # NOTE: pass ``jaxpr`` and ``consts`` positionally. JAX 0.11 merged
+        # ``ClosedJaxpr`` into the unified ``Jaxpr`` whose first parameter is
+        # ``constvars`` (it specially accepts a whole ``Jaxpr``); there is no
+        # ``jaxpr=`` keyword anymore. The positional form works on old and new
+        # JAX alike, matching the other ``ClosedJaxpr(...)`` call sites.
+        closed_jaxpr = ClosedJaxpr(jaxpr, self.closed_jaxpr.consts)
 
         # new instance of `ModuleInfo`
         items = self.dict()
