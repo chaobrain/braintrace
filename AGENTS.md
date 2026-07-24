@@ -18,7 +18,7 @@ Online learning for recurrent networks via Eligibility Trace Propagation (ETP).
 4. Bug? Write a test that reproduces it, then fix until the test passes.
 5. Every correction: reflect on the mistake, plan to avoid repeating it.
 6. All updates must be happened on the worktree branch, not main. 
-7. Write specs and plans under `docs/specs` before implementation.
+7. Write specs under `docs/specs` before implementation.
 8. Tests should >90% coverage, but focus on meaningful tests that cover edge cases and critical paths, not just trivial lines. 
 9. Co-locate tests with the code under test: each module `foo.py` has its tests in a sibling `foo_test.py` (suffix style — never a separate `tests/` directory, never the `test_*.py` prefix). 
 10. **Never drive a model with a bare Python `for`/`while` loop when it runs repeatedly.** Python loops execute op-by-op (dispatch overhead, no fusion) and trace fresh each step; the `brainstate.transform` primitives lower the whole loop into one compiled XLA program, tracing the body only once. Pick by shape of the work:
@@ -28,6 +28,7 @@ Online learning for recurrent networks via Eligibility Trace Propagation (ETP).
     - **Long rollout under autograd (backprop through time)** → `brainstate.transform.checkpointed_for_loop` / `brainstate.transform.checkpointed_scan` — same semantics as above but rematerialize activations on the backward pass (tune `base`) to bound peak memory at the cost of recomputation.
 
     Compose them freely (e.g. `jit` an outer driver that calls a `for_loop`/`scan`). Reach for the checkpointed variants only when reverse-mode gradients through a long simulation would otherwise exhaust memory — otherwise prefer plain `for_loop`/`scan`.
+11. Use `brainstate.random` instead of `jax.random` directly for all random number generation. 
 
 
 ## What this package does
@@ -154,10 +155,6 @@ equivalence coverage). These are enumerated and mapped to concrete improvement
 actions in the test-strategy findings list under `dev/`. Treat that list as the
 backlog of expected-failure / improvement items rather than duplicating it here.
 
-
-## Rules
-
-1. Use `brainstate.random` instead of `jax.random` directly for all random number generation. 
 
 ## Docstring style (NumPy-doc)
 
