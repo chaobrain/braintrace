@@ -29,8 +29,12 @@ __all__ = [
     'is_scan_primitive',
     'is_while_primitive',
     'is_cond_primitive',
+    'scan_num_consts_carry',
+    'scan_params_add_ys',
     'wrap_init',
 ]
+
+from typing import Dict, Tuple
 
 from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal, wrap_init
 
@@ -82,3 +86,63 @@ def is_while_primitive(eqn: JaxprEqn) -> bool:
 
 def is_cond_primitive(eqn: JaxprEqn) -> bool:
     return eqn.primitive.name == 'cond'
+
+
+def scan_num_consts_carry(eqn: JaxprEqn) -> Tuple[int, int]:
+    """Return ``(num_consts, num_carry)`` for a ``scan`` equation.
+
+    JAX < 0.11 stores ``num_consts`` / ``num_carry`` directly in the equation
+    params. JAX 0.11 removed them (part of the "flattree" scan refactor) and
+    instead encodes the ``(consts, carry, xs)`` input split in the ``ft_in``
+    flattree; the counts are the leaf counts of its first two groups. Detection
+    is capability-based (which params exist), so this works across every
+    supported JAX version without a hard-coded version comparison.
+
+    Parameters
+    ----------
+    eqn : JaxprEqn
+        A ``scan`` equation (``is_scan_primitive(eqn)`` must hold).
+
+    Returns
+    -------
+    tuple of int
+        ``(num_consts, num_carry)``.
+    """
+    params = eqn.params
+    if 'num_consts' in params:  # JAX < 0.11
+        return params['num_consts'], params['num_carry']
+    consts, carry, _xs = params['ft_in'].unpack()  # JAX >= 0.11
+    return len(consts), len(carry)
+
+
+def scan_params_add_ys(params: Dict, n_extra: int) -> Dict:
+    """Return ``scan`` params describing ``n_extra`` extra trailing ``ys`` outputs.
+
+    Used when rebuilding a scan whose body gains extra stacked ``ys`` outvars.
+
+    On JAX < 0.11 the number of ``ys`` is implicit (``len(outvars) - num_carry``),
+    so appending outvars needs no param change and ``params`` is returned
+    unchanged. On JAX 0.11 the ``ft_out`` flattree — which records the
+    ``(carry, ys)`` output split — must grow by ``n_extra`` leaves in its ``ys``
+    (second) component; the extra leaves are appended *after* the original ys so
+    the flattree leaf order matches ``[*carry, *original_ys, *extra]``.
+
+    Parameters
+    ----------
+    params : dict
+        The params of a ``scan`` equation (typically ``{**eqn.params, ...}``).
+    n_extra : int
+        Number of extra trailing ``ys`` leaves to describe.
+
+    Returns
+    -------
+    dict
+        Params updated for the extra ``ys`` (the same object when no change is
+        needed).
+    """
+    if n_extra == 0 or 'ft_out' not in params:  # JAX < 0.11, or nothing to add
+        return params
+    from jax._src import flattree as _ft  # only reached on JAX >= 0.11
+    carry_ft, ys_ft = params['ft_out'].unpack()
+    new_ft_out = _ft.pack((carry_ft, _ft.pack((ys_ft, _ft.nones(n_extra)))))
+    return {**params, 'ft_out': new_ft_out}

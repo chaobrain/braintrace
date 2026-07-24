@@ -65,6 +65,8 @@ from braintrace._compatible_imports import (
     is_scan_primitive,
     is_while_primitive,
     new_var,
+    scan_num_consts_carry,
+    scan_params_add_ys,
 )
 from braintrace._op import is_etp_primitive
 from braintrace._typing import Path
@@ -217,8 +219,7 @@ def _descent_blockers(
         if is_scan_primitive(e) or is_while_primitive(e) or is_cond_primitive(e):
             return ('its body contains nested control flow '
                     f'({e.primitive.name}); not supported by descent (v1)')
-    num_consts = eqn.params['num_consts']
-    num_carry = eqn.params['num_carry']
+    num_consts, num_carry = scan_num_consts_carry(eqn)
     for v in eqn.invars[num_consts + num_carry:]:
         if isinstance(v, Var) and v in weight_invars:
             return ('a trainable weight is scanned over as xs (per-iteration '
@@ -248,8 +249,10 @@ def add_scan_ys(
         ``(new_eqn, stacked_var_map)`` where ``stacked_var_map[body_var]`` is
         a fresh outer ``Var`` of aval ``(length, *body_var.aval.shape)``. The
         new eqn keeps the original outvars (by identity) followed by the
-        stacked vars; ``num_consts``/``num_carry``/``length``/``linear`` are
-        unchanged, and the body's eqns/invars keep their identity.
+        stacked vars; the scan's input structure (consts/carry/xs) and
+        ``length`` are unchanged — only the ys/output arity grows — and the
+        body's eqns/invars keep their identity. On JAX 0.11 the output flattree
+        (``ft_out``) is grown to match via :func:`scan_params_add_ys`.
     """
     body_closed = eqn.params['jaxpr']
     body = body_closed.jaxpr
@@ -268,8 +271,11 @@ def add_scan_ys(
         v: new_var('', v.aval.update(shape=(length, *v.aval.shape)))
         for v in extra
     }
+    new_params = scan_params_add_ys(
+        {**eqn.params, 'jaxpr': new_closed}, len(extra)
+    )
     new_eqn = eqn.replace(
-        params={**eqn.params, 'jaxpr': new_closed},
+        params=new_params,
         outvars=list(eqn.outvars) + [stacked[v] for v in extra],
     )
     return new_eqn, stacked
@@ -321,8 +327,7 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
     policy = minfo.control_flow
     body_closed = inline_jit_calls(eqn.params['jaxpr'])
     body = body_closed.jaxpr
-    num_consts = eqn.params['num_consts']
-    num_carry = eqn.params['num_carry']
+    num_consts, num_carry = scan_num_consts_carry(eqn)
 
     # ---- outer<->body position maps ---------------------------------------
     # scan invars [*consts, *carry, *xs] are positionally identical to

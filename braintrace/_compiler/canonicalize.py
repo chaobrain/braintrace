@@ -60,6 +60,7 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     new_jaxpr_eqn,
     new_var,
+    scan_num_consts_carry,
 )
 from braintrace._op import is_etp_primitive
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
@@ -706,8 +707,7 @@ def _unroll_scans_once(
         body_closed = params['jaxpr']
         body = body_closed.jaxpr
         length: int = params['length']
-        num_consts: int = params['num_consts']
-        num_carry: int = params['num_carry']
+        num_consts, num_carry = scan_num_consts_carry(eqn)
         reverse: bool = params['reverse']
 
         const_atoms = list(eqn.invars[:num_consts])
@@ -920,7 +920,8 @@ def _unroll_scans_once(
                     )
             new_eqns.append(eqn)
             continue
-        num_prefix = eqn.params['num_consts'] + eqn.params['num_carry']
+        num_consts, num_carry = scan_num_consts_carry(eqn)
+        num_prefix = num_consts + num_carry
         sliced_weight = [
             v for v in eqn.invars[num_prefix:] if reaches_weight(v)
         ]
@@ -953,15 +954,15 @@ def _unroll_scans_once(
             level=DiagnosticLevel.INFO,
             message=(
                 f'Unrolled a scan of length {eqn.params["length"]} '
-                f'(num_consts={eqn.params["num_consts"]}, '
-                f'num_carry={eqn.params["num_carry"]}, '
+                f'(num_consts={num_consts}, '
+                f'num_carry={num_carry}, '
                 f'reverse={eqn.params["reverse"]}) into flat equations '
                 f'because {reason}.'
             ),
             context={
                 'length': eqn.params['length'],
-                'num_consts': eqn.params['num_consts'],
-                'num_carry': eqn.params['num_carry'],
+                'num_consts': num_consts,
+                'num_carry': num_carry,
                 'reverse': eqn.params['reverse'],
                 'reason': reason,
             },
