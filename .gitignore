@@ -208,7 +208,6 @@ cython_debug/
 /braintrace/etp/CLAUDE.md
 /.claudegitignore
 /.codex
-/AGENTS.md
 /dev/research/
 
 # brainx-sphinx-header build artifacts

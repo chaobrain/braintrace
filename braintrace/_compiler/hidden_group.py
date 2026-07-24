@@ -62,6 +62,7 @@ from braintrace._compatible_imports import (
     is_scan_primitive,
     is_while_primitive,
     is_cond_primitive,
+    scan_num_consts_carry,
 )
 from braintrace._op import is_etp_primitive, is_etp_enable_gradient_primitive
 from braintrace._misc import NotSupportedError
@@ -590,8 +591,7 @@ def _map_positions_to_subjaxpr_seeds(
             results.append((body, seeds, feedback))
     elif is_scan_primitive(eqn):
         body = eqn.params['jaxpr'].jaxpr
-        num_consts = eqn.params['num_consts']
-        num_carry = eqn.params['num_carry']
+        num_consts, num_carry = scan_num_consts_carry(eqn)
         seeds = [body.invars[j] for j in positions]
         feedback = {}
         for c in range(num_carry):
