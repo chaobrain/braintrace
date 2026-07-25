@@ -271,8 +271,10 @@ def test_singlestep_method_rejects_multistep_data():
 
 def test_multistep_method_is_the_exact_path():
     """Cross-reference: multi-step vjp_method is the exact path (proven in Task 3
-    and in oracle_test.py). The naive per-step single-step accumulation diverges
-    (F-SINGLESTEP, oracle_test.py::test_singlestep_naive_matches_bptt_KNOWN_DIVERGENCE).
+    and in oracle_test.py). The naive per-step single-step accumulation does not
+    match BPTT element-wise -- it is only direction-aligned (the former
+    F-SINGLESTEP finding, now asserted positively by
+    oracle_test.py::test_singlestep_naive_directionally_aligned_with_bptt).
     Here we re-confirm multi-step D_RTRL == BPTT to anchor the vjp_method dimension."""
     spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
     inputs = _inputs(6, 3)
