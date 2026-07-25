@@ -23,6 +23,7 @@ and paper-faithful SNN algorithms (EProp, OSTLRecurrent, OSTLFeedforward).
 from __future__ import annotations
 
 from ._common import FixedRandomFeedback, KappaFilter
+from .axes import ETraceConfig
 from .base import ETraceAlgorithm, EligibilityTrace
 from .d_rtrl import D_RTRL
 from .e_prop import EProp
@@ -35,6 +36,8 @@ from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 __all__ = [
+    # axes
+    'ETraceConfig',
     # core
     'ETraceAlgorithm',
     'EligibilityTrace',

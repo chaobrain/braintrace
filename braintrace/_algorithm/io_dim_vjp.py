@@ -65,6 +65,7 @@ from ._common import (
     _update_dict,
 )
 from .base import EligibilityTrace
+from .axes import ETraceConfig
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [
@@ -83,19 +84,26 @@ def _format_decay_and_rank(decay_or_rank: Any) -> Tuple[float, int]:
     is calculated.
 
     Args:
-        decay_or_rank (float or int): The decay factor (a float between 0 and 1) or the
+        decay_or_rank (float or int): The decay factor (a float in ``[0, 1)``) or the
                                       number of approximation ranks (a positive integer).
 
     Returns:
         Tuple[float, int]: A tuple containing the decay factor and the number of approximation ranks.
 
     Raises:
-        ValueError: If the input is neither a float nor an integer, or if the float is not in the range (0, 1),
+        ValueError: If the input is neither a float nor an integer, or if the float is not in the range [0, 1),
                     or if the integer is not greater than 0.
+
+    Notes:
+        The lower bound is inclusive so that ``temporal_recursion='none'`` is
+        expressible as a float. It introduces no new numerical regime: decay 0
+        was already reachable as ``decay_or_rank=1`` (rank 1 -> decay 0), and the
+        bias correction's exponent ``running_index + 1`` is always >= 1, so
+        ``0 ** k`` is 0 and the correction factor is exactly 1.
     """
     # number of approximation rank and the decay factor
     if isinstance(decay_or_rank, float):
-        assert 0 < decay_or_rank < 1, f'The decay should be in (0, 1). While we got {decay_or_rank}. '
+        assert 0 <= decay_or_rank < 1, f'The decay should be in [0, 1). While we got {decay_or_rank}. '
         decay = decay_or_rank  # (num_rank - 1) / (num_rank + 1)
         num_rank = round(2. / (1 - decay) - 1)
     elif isinstance(decay_or_rank, int):
@@ -103,8 +111,37 @@ def _format_decay_and_rank(decay_or_rank: Any) -> Tuple[float, int]:
         num_rank = decay_or_rank
         decay = (num_rank - 1) / (num_rank + 1)  # (num_rank - 1) / (num_rank + 1)
     else:
-        raise ValueError('Please provide "num_rank" (int) or "decay" (float, 0 < decay < 1). ')
+        raise ValueError('Please provide "num_rank" (int) or "decay" (float, 0 <= decay < 1). ')
     return decay, num_rank
+
+
+def _format_decays(decay_or_rank: Any) -> Tuple[float, float]:
+    """Resolve ``decay_or_rank`` to the ``(x-side, f-side)`` decay pair.
+
+    Accepts a scalar (applied to both sides) or an ``(x, f)`` pair, each entry
+    either a float decay in ``[0, 1)`` or an integer rank ``>= 1`` mapping
+    through ``decay = (rank - 1) / (rank + 1)``.
+
+    Args:
+        decay_or_rank: A scalar or a two-entry sequence.
+
+    Returns:
+        Tuple[float, float]: The x-side and f-side decays.
+
+    Raises:
+        ValueError: If a pair does not have exactly two entries, or an entry is
+            out of range.
+    """
+    if isinstance(decay_or_rank, (tuple, list)):
+        if len(decay_or_rank) != 2:
+            raise ValueError(
+                'decay_or_rank as a pair must have exactly two entries '
+                f'(x-side, f-side), got {len(decay_or_rank)}: {decay_or_rank!r}.'
+            )
+        x_side, f_side = decay_or_rank
+    else:
+        x_side = f_side = decay_or_rank
+    return (_format_decay_and_rank(x_side)[0], _format_decay_and_rank(f_side)[0])
 
 
 def _expon_smooth(old: Any, new: Any, decay: Any) -> Any:
@@ -279,16 +316,22 @@ def _update_IO_dim_etrace_scan_fn(
         Sequence[jax.Array],  # the hidden group Jacobians
     ],
     hid_weight_op_relations: Sequence[HiddenParamOpRelation],
-    decay: float,
+    decay_x: float,
+    decay_f: float,
 ) -> Any:
     """
     Update the eligibility trace values for input-output dimensions.
 
     This function updates the eligibility trace values for the weight x and
     differential functions (df) based on the provided Jacobians and decay
-    factor. It computes the new eligibility trace values by applying a
+    factors. It computes the new eligibility trace values by applying a
     low-pass filter to the historical values and incorporating the current
     Jacobian values.
+
+    The two sides carry independent coefficients: ``decay_x`` discounts the
+    presynaptic input trace, ``decay_f`` the Jacobian-propagated output trace.
+    They are equal for every shipped preset; the split exists so an asymmetric
+    coordinate is expressible.
 
     Args:
         hist_etrace_vals (Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]):
@@ -374,7 +417,7 @@ def _update_IO_dim_etrace_scan_fn(
         if xkey in x_repr_fns:
             x_repr_fn, weight_avals = x_repr_fns[xkey]
             x_t = x_repr_fn(x_t, weight_avals)
-        new_etrace_xs[xkey] = _low_pass_filter(hist_xs[xkey], x_t, decay)
+        new_etrace_xs[xkey] = _low_pass_filter(hist_xs[xkey], x_t, decay_x)
 
     for relation in hid_weight_op_relations:
 
@@ -410,7 +453,7 @@ def _update_IO_dim_etrace_scan_fn(
             # update: eligibility trace * hidden diagonal Jacobian + new hidden df
             #        dϵ^t = dϵ^t_{pre} + df^t, where D_h is the hidden-to-hidden Jacobian diagonal matrix.
             #
-            new_etrace_dfs[df_key] = _expon_smooth(pre_trace_df, dfs[df_key], decay)
+            new_etrace_dfs[df_key] = _expon_smooth(pre_trace_df, dfs[df_key], decay_f)
 
     return (new_etrace_xs, new_etrace_dfs), None
 
@@ -456,7 +499,7 @@ def _solve_IO_dim_weight_gradients(
     weight_hidden_relations: Sequence[HiddenParamOpRelation],
     weight_vals: Dict[Path, WeightVals],
     running_index: int,
-    decay: float,
+    decay_f: float,
     fast_solve: bool = True,
 ) -> None:
     """
@@ -481,8 +524,13 @@ def _solve_IO_dim_weight_gradients(
             A dictionary containing the current values of the weights, keyed by their paths.
         running_index (int):
             The current index in the running sequence, used to compute the correction factor.
-        decay (float):
-            The decay factor used in the exponential smoothing process, a value between 0 and 1.
+            See F-30 in ``docs/specs/2026-07-25-known-limitations.md``: this counts
+            ``update()`` calls, not trace steps, so the correction is exact only for
+            single-step input.
+        decay_f (float):
+            The f-side decay factor used in the exponential smoothing process, a value
+            in ``[0, 1)``. Only the f-side is corrected: the x-side low-pass has no
+            ``(1 - alpha)`` input weight and therefore no warm-up bias to undo.
 
     Returns:
         None: The function updates the dG_weights dictionary in place with the computed weight gradients.
@@ -490,7 +538,7 @@ def _solve_IO_dim_weight_gradients(
     # Bias correction for exponential smoothing
     #   ε_f^t = α ε_f^{t-1} + (1-α) x_t  =>  E[ε_f^t] = x · (1 - α^{t+1})
     # so unbiased estimator divides by (1 - α^{t+1}) = (1 - decay^{t+1}).
-    correction_factor = 1. - u.math.power(decay, running_index + 1)
+    correction_factor = 1. - u.math.power(decay_f, running_index + 1)
     correction_factor = u.math.where(running_index < 1000, correction_factor, 1.)
     # Clamp guards degenerate decay=0 (rank=1): correction is exactly 1 then,
     # but keep clamp for numerical safety in the early-step power computation.
@@ -699,22 +747,68 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     # the spatial gradients of the hidden states
     etrace_dfs: Dict[ETraceDF_Key, brainstate.State]
 
-    # the exponential smoothing decay factor
-    decay: float
+    #: The x-side (presynaptic input trace) exponential-smoothing decay factor.
+    decay_x: float
+
+    #: The f-side (Jacobian-propagated output trace) decay factor. Also the one
+    #: the warm-up bias correction is indexed by.
+    decay_f: float
 
     def __init__(
         self,
         model: brainstate.nn.Module,
-        decay_or_rank: float | int,
+        decay_or_rank: float | int | Tuple[float | int, float | int],
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         fast_solve: bool = True,
         control_flow: Optional[ControlFlowPolicy] = None,
+        config: Optional[ETraceConfig] = None,
+        random_feedback_key: Optional[jax.Array] = None,
     ) -> None:
+        decay_x, decay_f = _format_decays(decay_or_rank)
+        if config is None:
+            config = ETraceConfig(
+                trace_factorization='io_factorized', decay=(decay_x, decay_f))
         super().__init__(model, name=name, vjp_method=vjp_method,
-                         control_flow=control_flow)
-        self.decay, num_rank = _format_decay_and_rank(decay_or_rank)
+                         control_flow=control_flow, config=config,
+                         random_feedback_key=random_feedback_key)
+        if not self.config.is_factorized:
+            raise ValueError(
+                f'{type(self).__name__} is the input/output-factorized trace '
+                f'engine, but the config asks for '
+                f'trace_factorization={self.config.trace_factorization!r}. Use '
+                f'the engine matching the factorization, or '
+                f'braintrace.compile(model, config, ...) which picks it for you.'
+            )
+        # The config is authoritative once given: an explicit `config` and a
+        # `decay_or_rank` must not disagree about the same number.
+        self.decay_x = self.config.decay_x
+        self.decay_f = self.config.decay_f
         self.fast_solve = fast_solve
+
+    @property
+    def decay(self) -> float:
+        """The shared exponential-smoothing decay factor.
+
+        Returns
+        -------
+        float
+            The single decay, when both sides carry the same one — which is the
+            case for every shipped preset.
+
+        Raises
+        ------
+        AttributeError
+            If the two sides differ, in which case there is no single decay to
+            return; read :attr:`decay_x` / :attr:`decay_f` instead.
+        """
+        if self.decay_x != self.decay_f:
+            raise AttributeError(
+                f'this algorithm has asymmetric decays '
+                f'(x-side {self.decay_x}, f-side {self.decay_f}), so there is '
+                f'no single `decay`. Read `.decay_x` / `.decay_f`.'
+            )
+        return self.decay_x
 
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         """Initialize the eligibility trace states of the etrace algorithm.
@@ -730,6 +824,9 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
             _init_IO_dim_state(self.etrace_xs, self.etrace_dfs, relation)
+
+        # Last: the base allocates the axis-side state (random feedback).
+        super().init_etrace_state(*args, **kwargs)
 
     def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.
@@ -865,7 +962,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         return partial(
             _update_IO_dim_etrace_scan_fn,
             hid_weight_op_relations=self.graph.hidden_param_op_relations,
-            decay=self.decay,
+            decay_x=self.decay_x,
+            decay_f=self.decay_f,
         )
 
     def _update_etrace_data(
@@ -1024,7 +1122,9 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             self.graph.hidden_param_op_relations,
             weight_vals,
             running_index,
-            self.decay,
+            # The correction undoes the f-side exponential-smoothing warm-up
+            # bias; the x-side low-pass has none to undo.
+            self.decay_f,
             fast_solve=self.fast_solve,
         )
 

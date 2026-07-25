@@ -194,13 +194,29 @@ naming the legal pairings. The matrix is explicit data, not scattered `if`s.
 
 ## Coordinates of the surviving algorithms
 
-| Algorithm | factorization | recursion | recurrence_scope | signal | filter |
-|---|---|---|---|---|---|
-| `D_RTRL` | per_param | jacobian | diagonal | symmetric | none |
-| `pp_prop` | io_factorized | jacobian | diagonal | symmetric | none |
-| `OSTLRecurrent` | per_param | jacobian | **coupled** | symmetric | none |
-| `OSTLFeedforward` | io_factorized | none | diagonal | symmetric | none |
-| `EProp` | per_param | jacobian | diagonal | symmetric \| random_feedback | **kappa** |
+Asserted field-by-field in
+`_algorithm/tests/axis_acceptance_test.py::test_preset_coordinates_match_the_spec_table`,
+so the table cannot drift from the code.
+
+| Algorithm | factorization | recursion | recurrence_scope | signal | filter | decay |
+|---|---|---|---|---|---|---|
+| `D_RTRL` | per_param | jacobian | diagonal | symmetric | none | — |
+| `pp_prop` | io_factorized | (scalar_leak, jacobian) | diagonal | symmetric | none | (α, α) |
+| `OSTLRecurrent` | per_param | jacobian | **coupled** | symmetric | none | — |
+| `OSTLFeedforward` | io_factorized | (scalar_leak, jacobian) | diagonal | symmetric | none | (1e-6, 1e-6) |
+| `EProp` | per_param | jacobian | diagonal | symmetric \| random_feedback | **kappa** | — |
+
+Two entries were corrected during P2. Under `io_factorized` the recursion is a
+**pair**: the x-side (presynaptic input trace) never involves a Jacobian, so the
+scalar shorthand `jacobian` canonicalises to `(scalar_leak, jacobian)`.
+
+And `OSTLFeedforward` is **not** `recursion = none`. Its default
+`decay_or_rank=1e-6` leaves both recursion terms structurally present with a
+negligible coefficient — which is a different coordinate from dropping them. The
+exact `none` coordinate is `OSTLFeedforward(model, decay_or_rank=0.0)`. The
+default was left alone: changing it would move the preset's gradients by ~1e-6
+relative, and a numerical change must not ride along inside a refactor whose
+acceptance criterion is that numerics do not move.
 
 `update_schedule` is omitted from the table: every surviving algorithm is
 `per_step`, so the column carries no information today. It becomes load-bearing
@@ -258,7 +274,9 @@ carries no `skip` or `xfail` markers at all.
 Verified: `pytest braintrace/` → 2119 passed, 4 deselected (`diagnostic`, which
 pass separately); `mypy braintrace` clean.
 
-### P2 — Axis decomposition
+### P2 — Axis decomposition — **done**
+
+Spec: [`2026-07-25-p2-axis-decomposition.md`](2026-07-25-p2-axis-decomposition.md).
 
 Turn the six axes into code: strategy protocols, `ETraceConfig` and its
 compatibility matrix, engine hooks rewired to delegate to strategies, and the
@@ -283,6 +301,26 @@ Execution options (`vjp_method`, `fast_solve`, `trace_dtype`, `chunked_trace`,
   with test coverage.
 - Each preset's coordinates are asserted against the table in this document, so
   the table cannot drift from the code.
+
+**Delivered.** `braintrace/_algorithm/axes.py` (`ETraceConfig`, canonicalisation,
+the eight-rule compatibility matrix), the Jacobian substitution and the two
+feature lifts in `vjp_base.py`, the κ-filter in `param_dim_vjp.py`, the decay
+split in `io_dim_vjp.py`, `EProp` / `OSTLRecurrent` / `OSTLFeedforward` reduced
+to coordinates, and an `ETraceConfig` overload on `braintrace.compile`.
+
+Tests: `axes_test.py` (64), `tests/axis_golden_test.py` (24 frozen gradients over
+8 cases × 2 models, covering all three trace paths), `tests/axis_acceptance_test.py`
+(29). Verified: `pytest braintrace/` → 2240 passed, 4 deselected (`diagnostic`,
+as in P1); `mypy braintrace` clean.
+
+One deviation from the spec: the κ-filter *state* is allocated in
+`ParamDimVjpAlgorithm` rather than in the base. The spec put it in the base
+"sized from `self._get_etrace_data()`", but matrix rule 1 already confines
+`trace_filter='kappa'` to `per_param`, and the filter mirrors `etrace_bwg`'s
+pytree — so allocating it beside the thing it mirrors avoids the base reaching
+into an engine-specific structure. The lifecycle contract the spec actually cares
+about (base concrete, engines chain via `super()` as their last statement, no
+silent degradation) is unchanged.
 
 ### P3 — SnAp-n: generalise `recurrence_scope`
 
@@ -399,8 +437,9 @@ statistical class.
 
 ## Lessons learned during implementation
 
-Recorded during P1, against commit `bc153da`. These are the things the roadmap
-got wrong or could not have known, kept here because later phases rest on them.
+Items 1–9 were recorded during P1, against commit `bc153da`; items 10–17 during
+P2, against `156d058`. These are the things the roadmap got wrong or could not
+have known, kept here because later phases rest on them.
 
 1. **The instrument was the defect, not the compiler.** P1 was scoped as
    compiler work on multi-timescale and heterogeneous populations. Every one of
@@ -490,3 +529,80 @@ got wrong or could not have known, kept here because later phases rest on them.
    died with `OSTTP`'s `y_target` path. Meanwhile a docstring still pointed at
    `dev/superpowers/specs/...`, a path that is gitignored and absent. Findings
    lists must live in-tree.
+
+### From P2
+
+10. **An axis is a property of a (rule, model) pair, not of a rule.** The single
+    most repeated finding of P2, hit three separate times before it was
+    internalised. `temporal_recursion` is *invisible* on `tanh_rnn` under
+    `per_param`: that model's only hidden→hidden path runs through its recurrent
+    ETP weight, which `recurrence_scope='diagonal'` excludes from the transition
+    by construction, so `D` is identically zero and `none` — which substitutes
+    zeros — changes nothing. Likewise `OSTLRecurrent` collapses onto `D_RTRL` on
+    `two_state_rnn` (its v/a coupling is hand-written arithmetic, not an ETP op,
+    so `coupled` has no mixing primitive to trace), and `OSTLFeedforward`
+    collapses onto `D_RTRL` on `tanh_rnn` (F-29). A test asserting "this knob
+    changes the gradient" must name the model it was measured on, and the
+    degenerate pairs must be asserted to *stay* degenerate — a pair that starts
+    differing is as much a regression as one that stops.
+
+11. **Measure the axis before writing the test that asserts it.** Every
+    numerical claim in the P2 spec was measured first, and the ones that
+    surprised were the valuable ones: `io_factorized` + `coupled` is legal and
+    live (3.7e-04) though nothing in-tree exercised it; random feedback grafted
+    onto the IO-dim engine runs and moves the gradient by 5.4e-01, which is what
+    made the lift worth specifying rather than merely tidy. Writing the test
+    first would have produced two plausible assertions, one of which was wrong.
+
+12. **`leaky_linear` is the positive control the axis work needed.** Its
+    recurrence `h_t = 0.9·h_{t-1} + matmul(x, w)` has hidden→hidden Jacobian
+    `0.9·I` *exactly*, so substituting `scalar_leak` at the model's own leak must
+    reproduce the true Jacobian bitwise. That pins both halves at once — the
+    substitution is installed on this path, and the array it installs is
+    numerically right. "The knob changes something" cannot distinguish a correct
+    substitution from a corrupting one; this can. Later phases replacing the
+    transition operator should reach for the same construction.
+
+13. **Vary one thing.** The exactly-once substitution test first compared
+    `chunked_trace=False` *with* substitution against `chunked_trace=True`
+    *without*, and failed at 3.3e-08 — which is reassociation between the two
+    trace paths, not a doubled substitution. Held at fixed `chunked_trace`, the
+    substitution is bitwise exact on both. The mistake also produced a real
+    finding: the two paths are bitwise identical on `tanh_rnn` and
+    `two_state_rnn` but not on `leaky_linear`, so "bitwise" is a model-dependent
+    accident and the honest assertion is agreement to round-off.
+
+14. **A lifted feature inherits every limitation its private version had.**
+    `_include_recurrent_mixing` was a private class attribute that only
+    `OSTLRecurrent` set, so `scan_descent.py` hard-coding it to `False` for
+    descended bodies was a defensible internal decision. The moment it became
+    the public `recurrence_scope` axis it became a trap: ask for `coupled`,
+    silently get `diagonal` inside the scan. P2 added a guard that raises. Before
+    making anything private public, enumerate where the private version was
+    quietly overridden.
+
+15. **A configuration that cannot be honoured must fail loudly.** The obvious
+    implementation of the random-feedback lift fails *silently*: an unallocated
+    feedback dict is indistinguishable from `symmetric` at the hook, so the
+    algorithm computes a different learning rule than the one requested and
+    every test still passes. This is lesson 4's vacuity failure with a new face,
+    and it is the reason the base hook now raises rather than falling through.
+
+16. **Canonicalise before validating, and derive the canonical form from the
+    arithmetic.** `α_f = 0` collapses the f-side to `none` regardless of what
+    the recursion field says — because `_expon_smooth(old, new, 0)` returns
+    `new`, so the Jacobian is never applied. That is a fact about the code, not
+    about the vocabulary, and it was only found by reading the smoothing
+    primitive. But the same collapse must *not* apply to `per_param` +
+    `jacobian` + `decay=0`, which is a user error rule 4 exists to catch —
+    canonicalising it away would swallow the error. Canonicalisation rules need
+    a scope, not just a condition.
+
+17. **Do not fix a bug inside a refactor.** F-30 (the IO-dim bias correction is
+    indexed by `update()` call count, not trace-step count) surfaced during the
+    design review of the P2 spec. It is real, reproduced, and worth ~6.8e-04 on
+    the finite-window path — and it was deliberately *not* fixed, because P2's
+    entire acceptance criterion is that gradients do not move. A numerical
+    correction and a refactor cannot land together, or neither can be verified.
+    It is recorded in the findings list with a reproduction and pinned by a test
+    that asserts the current, biased behaviour.

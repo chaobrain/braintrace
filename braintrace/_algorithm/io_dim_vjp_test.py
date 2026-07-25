@@ -98,10 +98,21 @@ class TestFormatDecayAndRank:
         assert _format_decay_and_rank(0.9) == (0.9, 19)
         assert _format_decay_and_rank(19)[0] == pytest.approx(0.9)
 
-    @pytest.mark.parametrize('bad', [0.0, 1.0, 1.5, -0.1])
+    @pytest.mark.parametrize('bad', [1.0, 1.5, -0.1])
     def test_float_out_of_range_raises(self, bad):
         with pytest.raises(AssertionError):
             _format_decay_and_rank(bad)
+
+    def test_zero_decay_is_admitted(self):
+        """The bound is ``[0, 1)``, so ``temporal_recursion='none'`` is a float.
+
+        This adds no numerical regime that was not already reachable: rank 1
+        maps to decay 0 through the very same function, and the bias
+        correction's exponent ``running_index + 1`` is always at least 1, so
+        ``0 ** k`` is 0 and the correction factor is exactly 1 — no singularity.
+        """
+        assert _format_decay_and_rank(0.0) == (0.0, 1)
+        assert _format_decay_and_rank(1) == (0.0, 1)
 
     @pytest.mark.parametrize('bad', [0, -1, -10])
     def test_nonpositive_rank_raises(self, bad):
@@ -159,10 +170,16 @@ class TestConstruction:
         with pytest.raises(TypeError):
             IODimVjpAlgorithm(_build(om.tanh_rnn))
 
-    @pytest.mark.parametrize('bad', [1.5, 0.0, -0.2])
+    @pytest.mark.parametrize('bad', [1.5, -0.2])
     def test_invalid_decay_float_raises(self, bad):
         with pytest.raises(AssertionError):
             IODimVjpAlgorithm(_build(om.tanh_rnn), decay_or_rank=bad)
+
+    def test_zero_decay_is_admitted(self):
+        """``[0, 1)``: decay 0 is the exact ``temporal_recursion='none'`` point."""
+        algo = IODimVjpAlgorithm(_build(om.tanh_rnn), decay_or_rank=0.0)
+        assert algo.decay == 0.0
+        assert algo.config.temporal_recursion == ('none', 'none')
 
     @pytest.mark.parametrize('bad', [0, -3])
     def test_invalid_rank_int_raises(self, bad):
@@ -390,6 +407,76 @@ class TestElemwiseBatchingMode:
         from .param_dim_vjp_test import _assert_batching_matches_per_example
         _assert_batching_matches_per_example(
             lambda m, **kw: braintrace.IODimVjpAlgorithm(m, 0.9, **kw)
+        )
+
+
+class TestBiasCorrectionTimeIndex:
+    """F-30: the f-side de-biasing correction counts ``update()`` calls, not trace steps.
+
+    ``_solve_IO_dim_weight_gradients`` divides the f-side estimator by
+    ``1 - decay ** (running_index + 1)`` to undo exponential-smoothing warm-up
+    bias (``io_dim_vjp.py:493``). That is exact only if ``running_index`` counts
+    the smoothing steps the trace has taken. It does not: it advances once per
+    ``update()`` call (``vjp_base.py:319``) while the trace scan advances once
+    per *sequence element* (``io_dim_vjp.py:934-943``).
+
+    These tests pin the current, biased behaviour deliberately — they are a
+    description, not an endorsement. Changing the index to a true step count is
+    a numerical change to ``pp_prop`` / ``OSTLFeedforward`` and is out of scope
+    for the P2 axis decomposition, whose acceptance criterion is that no
+    preset's gradients move.
+    """
+
+    def test_running_index_counts_calls_not_trace_steps(self):
+        """The structural claim: one T-step call advances the index by one."""
+        spec = om.tanh_rnn(n_in=3, n_rec=4, seed=0)
+        xs = spec.make_inputs(6, 3, seed=0)
+        algo = _compiled(
+            _build(lambda: spec), x=xs[0],
+            decay_or_rank=0.9, vjp_method='multi-step',
+        )
+        algo(braintrace.MultiStepData(xs))
+        assert int(algo.running_index.value) == 1, (
+            'F-30 no longer holds: running_index tracked the 6 trace steps. If '
+            'this was deliberate, update the finding and regenerate the goldens.'
+        )
+
+    def test_correction_bias_is_measurable_through_a_finite_window(self):
+        """The consequence: the mis-indexed correction moves the gradient.
+
+        Compares the shipped behaviour against the same run with the index
+        forced to the true trace-step count, over a finite window — the shipped
+        full-window path is exact reverse-mode and blind to the trace (F-23), so
+        the difference is unobservable there and this test would be vacuous.
+        """
+        n_steps, chunk, decay = 6, 2, 0.9
+        spec = om.tanh_rnn(n_in=3, n_rec=4, seed=0)
+        xs = spec.make_inputs(n_steps, 3, seed=0)
+        oracle.assert_model_is_live(spec.factory, xs, min_norm=1e-6)
+
+        def run(force_true_step_count: bool):
+            model = _build(lambda: spec)
+            algo = _compiled(
+                model, x=xs[0], decay_or_rank=decay, vjp_method='multi-step')
+            params = model.states(brainstate.ParamState)
+            total = None
+            # test-support chunk loop (3 iterations), not a model step driver
+            for k, start in enumerate(range(0, n_steps, chunk)):
+                if force_true_step_count:
+                    algo.running_index.value = k * chunk + chunk - 1
+                g = brainstate.transform.grad(
+                    lambda seq: (algo(braintrace.MultiStepData(seq)) ** 2).sum(),
+                    params,
+                )(xs[start:start + chunk])
+                total = g if total is None else jax.tree.map(
+                    lambda a, b: a + b, total, g)
+            return total
+
+        oracle.assert_gradients_differ(
+            oracle.flat_gradient_leaves(run(False)),
+            oracle.flat_gradient_leaves(run(True)),
+            # measured 6.8e-04; float32 round-off on this tree is ~1e-8
+            min_rel=1e-5,
         )
 
 
