@@ -132,13 +132,9 @@ regime makes them exact); know the regime before relying on their gradients.
    EProp
    OSTLRecurrent
    OSTLFeedforward
-   OTPE
-   OTTT
-   OSTTP
 
 Trace helpers reused across the SNN algorithms — a frozen random-feedback
-projection, an output-side low-pass filter, and a leaky presynaptic
-accumulator:
+projection and an output-side low-pass filter:
 
 .. autosummary::
    :toctree: generated/
@@ -147,7 +143,6 @@ accumulator:
 
    FixedRandomFeedback
    KappaFilter
-   PresynapticTrace
 
 
 Algorithm Comparison
@@ -177,15 +172,4 @@ Algorithm Comparison
      - depends on regime
      - depends on regime
      - ``OSTLRecurrent`` ('with-H', D-RTRL) keeps the recurrent Jacobian; ``OSTLFeedforward`` ('without-H', pp_prop) drops it.
-   * - ``OTPE``
-     - :math:`O(B \cdot I \cdot O)` (full) / :math:`O(B(I+O))` (approx)
-     - :math:`O(B \cdot I \cdot O)`
-     - Deep SNNs; F-OTPE trades rank for memory
-   * - ``OTTT``
-     - :math:`O(B \cdot I)`
-     - :math:`O(B \cdot I \cdot O)`
-     - Very large SNNs; presynaptic λ-trace only
-   * - ``OSTTP``
-     - :math:`O(B \cdot |\theta|)`
-     - :math:`O(B \cdot I \cdot O)`
-     - Target-projection via fixed random feedback
+

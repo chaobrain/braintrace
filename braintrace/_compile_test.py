@@ -40,9 +40,6 @@ def test_resolve_class_passthrough():
     ('e_prop', 'EProp'),
     ('ostl_recurrent', 'OSTLRecurrent'),
     ('ostl_feedforward', 'OSTLFeedforward'),
-    ('otpe', 'OTPE'),
-    ('ottt', 'OTTT'),
-    ('osttp', 'OSTTP'),
 ])
 def test_resolve_string_names(name, cls_name):
     assert _resolve_algorithm(name) is getattr(braintrace, cls_name)
@@ -106,9 +103,9 @@ def test_compile_requires_example_inputs():
 def test_compile_propagates_missing_required_option():
     model = _fresh_model()
     x0 = jnp.ones((3,), dtype='float32')
-    # OTTT requires keyword-only ``leak``; constructor raises TypeError.
+    # pp_prop requires ``decay_or_rank``; constructor raises TypeError.
     with pytest.raises(TypeError):
-        braintrace.compile(model, 'OTTT', x0, batch_size=1)
+        braintrace.compile(model, 'pp_prop', x0, batch_size=1)
 
 
 def test_compile_matches_manual_construction():
@@ -209,9 +206,6 @@ _DOC_OPTIONS = {
     'd_rtrl': ['name', 'vjp_method', 'fast_solve', 'trace_dtype'],
     'es_d_rtrl': ['decay_or_rank', 'name', 'vjp_method', 'fast_solve'],
     'eprop': ['feedback', 'kappa_filter_decay', 'random_feedback_key', 'name', 'vjp_method', 'fast_solve'],
-    'otpe': ['mode', 'leak', 'name', 'vjp_method', 'trace_clip_abs'],
-    'ottt': ['mode', 'leak', 'name', 'vjp_method'],
-    'osttp': ['B_list', 'target_timing', 'name', 'vjp_method', 'fast_solve'],
     'ostl_recurrent': ['name', 'vjp_method', 'fast_solve', 'trace_dtype'],
     'ostl_feedforward': ['decay_or_rank', 'name'],
 }

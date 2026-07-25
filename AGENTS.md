@@ -45,7 +45,7 @@ connects parameters to the hidden states they influence.
 Layer 1  ETP operators      Custom JAX primitives + per-primitive rule registries + user-facing ops
 Layer 2  ETP compiler       Jaxpr analysis: find ETP primitives, connect parameters to hidden states
 Layer 3  Graph executor     Forward pass + hidden→weight / hidden→hidden Jacobian computation
-Layer 4  Algorithms         Orchestrators (D-RTRL, pp_prop/ES-D-RTRL, EProp/OSTL/OTPE/OTTT/OSTTP)
+Layer 4  Algorithms         Orchestrators (D-RTRL, pp_prop/ES-D-RTRL, EProp/OSTL)
 ```
 
 Dependency direction is strictly downward: operators know nothing of the

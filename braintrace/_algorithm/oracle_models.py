@@ -71,9 +71,11 @@ def leaky_linear(n_in: int = 3, n_rec: int = 4, leak: float = 0.9, seed: int = 0
 
     The recurrence ``h_t = leak * h_{t-1} + matmul(x_t, w)`` has hidden-to-hidden
     Jacobian ``leak * I`` exactly (no off-diagonal recurrent term). This is the
-    regime in which OTTT (which discards ``hid2hid_jac`` and assumes ``leak * I``)
-    is exact. ``w`` reaches every future hidden state through the leaky carry, so
-    it is a genuine ETP relation despite being an input projection.
+    degenerate regime in which rules that discard ``hid2hid_jac`` and assume a
+    scalar leak become exact, which makes it the reference model for the
+    ``scalar_leak`` temporal recursion. ``w`` reaches every future hidden state
+    through the leaky carry, so it is a genuine ETP relation despite being an
+    input projection.
     """
 
     def factory():
@@ -139,8 +141,8 @@ def two_state_rnn(n_in: int = 3, n_rec: int = 3, seed: int = 0) -> ModelSpec:
     HiddenGroup with ``num_state == 2`` (an LIF+adaptation-like topology).
 
     ``v_t = 0.9 v + matmul(x, w) - 0.1 a``; ``a_t = 0.95 a + v``. ``w`` is the
-    single trainable ETP input weight. D_RTRL handles this exactly; OTTT/OTPE
-    reject it (their per-step rule assumes a single-state group).
+    single trainable ETP input weight. D_RTRL handles this exactly; any rule
+    whose per-step formulation assumes a single-state group cannot represent it.
     """
 
     def factory():

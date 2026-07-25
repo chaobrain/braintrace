@@ -33,7 +33,7 @@ layers built on top.
      - :doc:`compiler`
    * - **Algorithms**
      - Online-learning orchestrators: the exact D-RTRL / ES-D-RTRL family and
-       the SNN algorithms (EProp, OSTL, OTPE, OTTT, OSTTP).
+       the SNN algorithms (EProp, OSTL).
      - :doc:`algorithms`
    * - **Layers**
      - Drop-in ``brainstate.nn``-style layers pre-wired through ETP primitives.

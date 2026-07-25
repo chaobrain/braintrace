@@ -13,11 +13,14 @@
 # limitations under the License.
 # ==============================================================================
 
-"""L3-C approximate-class correctness: OTTT/OTPE gradients are direction-aligned
-with BPTT (cosine/sign), exact in their degenerate regime, and their known
-approximation biases (F-07/F-08/F-09) are quantified. Multi-state guards
-(F-01/F-04) and the rate-model approximation-exactness ceiling (F-21/F-22) are
-pinned."""
+"""L3-C approximate-class correctness: direction-alignment metrics against BPTT
+(cosine / sign / relative magnitude), the multi-state (num_state == 2) exactness
+guard for D_RTRL, and the rate-model approximation-exactness ceiling
+(F-21/F-22).
+
+The OTTT/OTPE-specific bias tests (F-01/F-04/F-07/F-08/F-09) were removed in
+0.3.0 along with those algorithms; see docs/specs for the roadmap. The metric
+helpers they exercised are retained and are the basis of the benchmark suite."""
 
 import brainstate
 import jax
@@ -32,19 +35,15 @@ from braintrace._algorithm.oracle import (
     bptt_param_gradients,
     cosine_similarity,
     online_param_gradients,
-    online_param_gradients_singlestep_naive,
     relative_magnitude,
     sign_agreement,
 )
 from braintrace._algorithm.oracle_models import (
-    leaky_linear,
     tanh_rnn,
     two_state_rnn,
 )
 
 ATOL_BPTT = 1e-4
-MIN_COSINE = 0.95
-MIN_SIGN = 0.99
 
 
 def _inputs(T, n_in, seed=42):
@@ -110,104 +109,6 @@ def test_two_state_rnn_forms_one_group_num_state_two():
     assert int(algo.graph.hidden_groups[0].varshape[-1]) == 3  # n_rec
 
 
-# --- Task 4: C-level direction agreement (tanh_rnn, OTTT approximate regime) --
-
-# Single-step-only approximate algorithms; their total-sequence gradient comes
-# from the naive per-step accumulation (direction-aligned with BPTT; measured
-# cosine: OTTT(A) 0.986, OTPE(full) 0.983; sign agreement 1.000).
-_C_LEVEL_ALGOS = {
-    'OTTT_A': lambda m: braintrace.OTTT(m, mode='A', leak=0.9),
-    'OTPE_full': lambda m: braintrace.OTPE(m, mode='full', leak=0.9),
-}
-
-
-@pytest.mark.parametrize('algo_name', list(_C_LEVEL_ALGOS))
-def test_ottt_otpe_direction_aligned_with_bptt_on_tanh_rnn(algo_name):
-    """Approximate algorithms must point the same way as BPTT (cosine/sign),
-    even though they do not match it element-wise."""
-    spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
-    inputs = _inputs(6, 3)
-    g_bptt = bptt_param_gradients(spec.factory, inputs)
-    g_approx = online_param_gradients_singlestep_naive(
-        spec.factory, inputs, algo_factory=_C_LEVEL_ALGOS[algo_name])
-    assert_direction_aligned(
-        g_approx, g_bptt, min_cosine=MIN_COSINE, min_sign_agreement=MIN_SIGN,
-        keys=list(spec.etp_param_keys))
-
-
-# --- Task 5: F-09 OTTT bias scales with ||hid2hid - leak*I|| ------------------
-
-def test_ottt_is_exact_on_leaky_linear():
-    """leaky_linear has hid2hid Jacobian == leak*I exactly, so OTTT (which assumes
-    exactly that) reproduces BPTT: cosine ~ 1 and relative magnitude ~ 1."""
-    spec = leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
-    inputs = _inputs(6, 3)
-    g_bptt = bptt_param_gradients(spec.factory, inputs)
-    g_ottt = online_param_gradients_singlestep_naive(
-        spec.factory, inputs, algo_factory=lambda m: braintrace.OTTT(m, mode='A', leak=0.9))
-    assert_direction_aligned(
-        g_ottt, g_bptt, min_cosine=0.999, mag_bounds=(0.98, 1.02),
-        keys=list(spec.etp_param_keys))
-
-
-def test_ottt_is_biased_but_aligned_on_tanh_rnn_F09():
-    """F-09: on tanh_rnn the hidden Jacobian is NOT leak*I (it carries the tanh
-    derivative and the recurrent weight), so OTTT is no longer exact — its
-    magnitude is inflated (measured relmag ~1.2, outside the exact band) while
-    direction stays aligned (cosine ~0.986)."""
-    spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
-    inputs = _inputs(6, 3)
-    g_bptt = bptt_param_gradients(spec.factory, inputs)
-    g_ottt = online_param_gradients_singlestep_naive(
-        spec.factory, inputs, algo_factory=lambda m: braintrace.OTTT(m, mode='A', leak=0.9))
-    key = spec.etp_param_keys[0]
-    # Direction is still good ...
-    assert cosine_similarity(g_ottt[key], g_bptt[key]) >= MIN_COSINE
-    # ... but it is demonstrably NOT exact (magnitude inflated beyond the band that
-    # holds on leaky_linear). This is the F-09 bias.
-    assert relative_magnitude(g_ottt[key], g_bptt[key]) > 1.05
-
-
-# --- Task 6: F-07 OTPE(mode='approx') magnitude inflation --------------------
-
-def test_otpe_approx_is_directionally_ok_but_magnitude_inflated_F07():
-    """F-07: OTPE's rank-1 'approx' mode keeps the gradient direction (cosine
-    ~0.985) but grossly inflates its magnitude (measured relmag ~5.6 on tanh_rnn,
-    ~3.8 on leaky_linear). We pin: aligned direction AND relmag > 2."""
-    for spec in (tanh_rnn(n_in=3, n_rec=4, seed=0),
-                 leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)):
-        inputs = _inputs(6, 3)
-        g_bptt = bptt_param_gradients(spec.factory, inputs)
-        g_approx = online_param_gradients_singlestep_naive(
-            spec.factory, inputs,
-            algo_factory=lambda m: braintrace.OTPE(m, mode='approx', leak=0.9))
-        key = spec.etp_param_keys[0]
-        assert cosine_similarity(g_approx[key], g_bptt[key]) >= MIN_COSINE
-        assert relative_magnitude(g_approx[key], g_bptt[key]) > 2.0
-
-
-# --- Task 7: F-08 trace_clip_abs biases magnitude ----------------------------
-
-def test_trace_clip_abs_shrinks_gradient_magnitude_F08():
-    """F-08: trace_clip_abs clamps the eligibility trace with no principled bound.
-    A small clip (0.01) shrinks the OTPE gradient ~10x (measured relmag 0.096) and
-    degrades its direction (cosine 0.983 -> 0.936), while clip=None keeps relmag
-    near 1. We pin the magnitude collapse under aggressive clipping."""
-    spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
-    inputs = _inputs(6, 3)
-    g_bptt = bptt_param_gradients(spec.factory, inputs)
-    key = spec.etp_param_keys[0]
-
-    g_noclip = online_param_gradients_singlestep_naive(
-        spec.factory, inputs, algo_factory=lambda m: braintrace.OTPE(m, mode='full', leak=0.9))
-    g_clip = online_param_gradients_singlestep_naive(
-        spec.factory, inputs,
-        algo_factory=lambda m: braintrace.OTPE(m, mode='full', leak=0.9, trace_clip_abs=0.01))
-
-    assert relative_magnitude(g_noclip[key], g_bptt[key]) > 0.8     # near-unbiased
-    assert relative_magnitude(g_clip[key], g_bptt[key]) < 0.3       # collapsed
-
-
 # --- Task 8: F-01/F-04 multi-state (num_state == 2) ---------------------------
 
 def test_d_rtrl_exact_on_two_state_group():
@@ -219,22 +120,6 @@ def test_d_rtrl_exact_on_two_state_group():
     g_online = online_param_gradients(
         spec.factory, inputs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
     assert_param_gradients_close(g_online, g_bptt, atol=ATOL_BPTT)
-
-
-@pytest.mark.parametrize('algo_factory', [
-    lambda m: braintrace.OTTT(m, mode='A', leak=0.9),
-    lambda m: braintrace.OTPE(m, mode='full', leak=0.9),
-], ids=['OTTT', 'OTPE'])
-def test_ottt_otpe_reject_multistate_group_F01(algo_factory):
-    """F-01/F-04: OTTT and OTPE assume a single-state group; on a num_state==2
-    group they raise at compile (their per-state collapse has no theoretical
-    basis here). Pinning this prevents silently-wrong multi-state gradients."""
-    spec = two_state_rnn(n_in=3, n_rec=3, seed=0)
-    model = spec.factory()
-    brainstate.nn.init_all_states(model, batch_size=1)
-    algo = algo_factory(model)
-    with pytest.raises(ValueError, match='num_state == 1'):
-        algo.compile_graph(jnp.ones((1, 3), dtype='float32'))
 
 
 # --- Task 9: F-21/F-22 IODim/EProp approximations are exact on rate models -----
@@ -279,8 +164,8 @@ def test_approximations_diverge_on_snn_multipopulation_DEFERRED():
 # --- Task 10: C-level convergence backstop (loss decreases) ------------------
 
 def _train_loss_trajectory(algo, n_steps=12, lr=0.05):
-    """Manual SGD on an MSE-to-ones target (the ottt_test pattern), returning the
-    per-step loss. A working approximate gradient must drive the loss down."""
+    """Manual SGD on an MSE-to-ones target, returning the per-step loss. A working
+    approximate gradient must drive the loss down."""
     x = jnp.ones((1, 3), dtype='float32')
     algo.compile_graph(x)
     algo.init_etrace_state()
@@ -298,9 +183,10 @@ def _train_loss_trajectory(algo, n_steps=12, lr=0.05):
 
 
 @pytest.mark.parametrize('algo_factory', [
-    lambda m: braintrace.OTTT(m, mode='A', leak=0.9),
-    lambda m: braintrace.OTPE(m, mode='full', leak=0.9),
-], ids=['OTTT_A', 'OTPE_full'])
+    lambda m: braintrace.pp_prop(m, decay_or_rank=1),
+    lambda m: braintrace.EProp(
+        m, feedback='random', random_feedback_key=jax.random.PRNGKey(7)),
+], ids=['pp_prop_rank1', 'EProp_random'])
 def test_approximate_algorithm_descends_loss(algo_factory):
     """C-level backstop: the approximate gradient is a usable descent direction —
     training loss at the end is below the start."""

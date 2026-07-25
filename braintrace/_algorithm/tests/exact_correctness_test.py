@@ -14,9 +14,12 @@
 # ==============================================================================
 
 """L3-A/B exact-class correctness: multi-step online gradients reproduce BPTT
-element-wise; cross-algorithm reduction identities hold; single-step-only
-OTTT/OTPE match D_RTRL instantaneously. Findings F-19/F-20 pin the cases the
-current oracle cannot validate."""
+element-wise, cross-algorithm reduction identities hold, and the vjp_method
+boundary is pinned.
+
+The single-step-only OTTT/OTPE/OSTTP equivalence and deferral tests
+(F-19/F-20) were removed in 0.3.0 along with those algorithms; see docs/specs
+for the roadmap."""
 
 import brainstate
 import jax
@@ -204,7 +207,7 @@ def test_ostl_feedforward_equals_pp_prop_multistep():
     assert_param_gradients_close(g_ff, g_pp, atol=ATOL_EQUIV)
 
 
-# --- Task 5: one-step instantaneous equivalence (single-step-only algos) ------
+# --- Task 5: one-step instantaneous equivalence -------------------------------
 
 def _onestep_grads(algo, x):
     """Weight gradient of (algo.update(x)**2).sum() at step 0 with zero trace.
@@ -231,23 +234,22 @@ def _assert_onestep_equiv(spec, algo_factory, x):
     assert_param_gradients_close(g_algo, g_drtrl, atol=ATOL_EQUIV)
 
 
-def test_otpe_full_matches_d_rtrl_one_step_on_tanh_rnn():
+def test_eprop_unfiltered_matches_d_rtrl_one_step_on_tanh_rnn():
+    """EProp with no kappa filter and symmetric feedback is D_RTRL's trace, so
+    the instantaneous gradient must coincide."""
     spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
-    _assert_onestep_equiv(spec, lambda m: braintrace.OTPE(m, mode='full', leak=0.9),
-                          jnp.ones((1, 3), dtype='float32'))
+    _assert_onestep_equiv(
+        spec,
+        lambda m: braintrace.EProp(m, feedback='symmetric', kappa_filter_decay=0.0),
+        jnp.ones((1, 3), dtype='float32'))
 
 
-def test_ottt_matches_d_rtrl_one_step_on_leaky_linear():
-    """OTTT(A) on its exact regime (leaky_linear): instantaneous gradient == D_RTRL."""
+def test_eprop_unfiltered_matches_d_rtrl_one_step_on_leaky_linear():
     spec = leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
-    _assert_onestep_equiv(spec, lambda m: braintrace.OTTT(m, mode='A', leak=0.9),
-                          jnp.ones((1, 3), dtype='float32'))
-
-
-def test_otpe_full_matches_d_rtrl_one_step_on_leaky_linear():
-    spec = leaky_linear(n_in=3, n_rec=4, leak=0.9, seed=0)
-    _assert_onestep_equiv(spec, lambda m: braintrace.OTPE(m, mode='full', leak=0.9),
-                          jnp.ones((1, 3), dtype='float32'))
+    _assert_onestep_equiv(
+        spec,
+        lambda m: braintrace.EProp(m, feedback='symmetric', kappa_filter_decay=0.0),
+        jnp.ones((1, 3), dtype='float32'))
 
 
 # --- Task 6: vjp_method consistency & boundary -------------------------------
@@ -279,59 +281,3 @@ def test_multistep_method_is_the_exact_path():
         spec.factory, inputs,
         algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
     assert_param_gradients_close(g_multi, g_bptt, atol=ATOL_BPTT)
-
-
-# --- Task 7: findings F-19 (OTTT/OTPE single-step-only) & F-20 (OSTTP) --------
-
-def test_ottt_otpe_reject_multistep_oracle_F19():
-    """F-19: OTTT/OTPE are single-step only, so the multi-step BPTT oracle path is
-    structurally unavailable. N6 moved this rejection from a lazy failure deep
-    inside the multi-step VJP machinery to an eager `ValueError` raised by the
-    constructor itself (`algo_factory(model)`, the first thing
-    `online_param_gradients` does); we pin that both algorithms still reject
-    `vjp_method='multi-step'`, which (with F-SINGLESTEP blocking the naive
-    single-step accumulation) is why their multi-step temporal correctness is
-    deferred, not asserted."""
-    spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
-    inputs = _inputs(6, 3)
-    for algo_factory, match in (
-        (lambda m: braintrace.OTTT(m, mode='A', leak=0.9, vjp_method='multi-step'),
-         r"OTTT v1 only supports vjp_method='single-step'"),
-        (lambda m: braintrace.OTPE(m, mode='full', leak=0.9, vjp_method='multi-step'),
-         r"OTPE v1 only supports vjp_method='single-step'"),
-    ):
-        with pytest.raises(ValueError, match=match):
-            online_param_gradients(spec.factory, inputs, algo_factory=algo_factory)
-
-
-@pytest.mark.skip(
-    reason="F-19: OTTT/OTPE are single-step only and the naive single-step "
-           "accumulation diverges (F-SINGLESTEP); there is no clean multi-step "
-           "BPTT oracle for them yet. Needs an online-scan oracle for single-step "
-           "algorithms. Deferred (P6 / dedicated work).")
-def test_ottt_multistep_temporal_matches_bptt_DEFERRED():
-    pass
-
-
-def test_osttp_runs_through_oracle_but_signal_is_target_based_F20():
-    """F-20: OSTTP runs end-to-end (sequence-end) and yields finite gradients, but
-    its learning signal is B @ y_target, NOT the autodiff dL/dh. The SSE-autodiff
-    BPTT/EProp oracle therefore does not constrain it — we only smoke-test that it
-    runs and is finite here; the OSTTP <-> EProp(random feedback) equivalence is
-    deferred (see DEFERRED test below)."""
-    spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
-    inputs = _inputs(6, 3)
-    g = online_param_gradients(
-        spec.factory, inputs,
-        algo_factory=lambda m: braintrace.OSTTP(
-            m, [jnp.eye(4, dtype='float32')],
-            target_timing='sequence-end', vjp_method='multi-step'))
-    assert all(bool(jnp.all(jnp.isfinite(jnp.asarray(v)))) for v in g.values())
-
-
-@pytest.mark.skip(
-    reason="F-20: OSTTP uses B@y_target as the learning signal, bypassing the "
-           "autodiff loss; proving OSTTP == EProp(random feedback) needs a "
-           "matched-B + matched-per-step-target harness. Deferred (P5).")
-def test_osttp_equals_eprop_random_feedback_DEFERRED():
-    pass

@@ -313,7 +313,7 @@ def compile_etrace_graph(
         recurrence"), those primitives are traced into the transition, the
         recurrence becomes coupled, and the true per-position block-diagonal
         Jacobian is extracted (RTRL-exact temporal credit, e.g. for
-        :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`).
+        :class:`~braintrace.OSTLRecurrent`).
     control_flow : ControlFlowPolicy or None, optional
         Policy governing control-flow canonicalization and downstream
         handling, forwarded to :func:`~braintrace.extract_module_info` and
