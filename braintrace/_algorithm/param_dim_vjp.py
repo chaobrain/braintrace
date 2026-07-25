@@ -23,7 +23,14 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._compiler import ControlFlowPolicy, HiddenParamOpRelation, HiddenGroup
+from braintrace._compiler import (
+    ControlFlowPolicy,
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    HiddenGroup,
+    HiddenParamOpRelation,
+    gather_learning_signal,
+    widen_instant_term,
+)
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -115,11 +122,16 @@ def _init_param_dim_state(
             init_kw['group'] = group
         elif relation.primitive is etp_conv_p:
             init_kw['eqn_params'] = relation.eqn_params
+        # ``trace_state_width`` is ``num_state`` at every recurrence_scope but
+        # ``sparse_n``, where the trailing state axis carries the SnAp-n
+        # neighbourhood as well: ``M = K * num_state``. Every per-primitive rule
+        # is generic in the size of that axis, so widening is a sizing change
+        # here and nowhere else.
         init_val = init_fn(
             relation.x_var,
             relation.y_var,
             relation.trainable_vars,
-            group.num_state,
+            group.trace_state_width,
             **init_kw,
         )
         if not isinstance(init_val, dict):
@@ -394,6 +406,12 @@ def _apply_relation_step(
         for group in relation.hidden_groups:
 
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
+            if group.snap is not None:
+                # `sparse_n`: the instantaneous term lands on the position the
+                # relation anchors at, i.e. neighbour slot 0. Padding it here --
+                # rather than inside each primitive's `instant` rule -- keeps
+                # every rule generic in the width of the trailing axis.
+                df = widen_instant_term(df, group.snap.num_neighbour)
 
             # Instantaneous term: diag(D_f^t) ⊗ x^t  (Dict[str, Array]).
             # Cast the update inputs to ``trace_dtype`` (no-op when None) so the
@@ -420,10 +438,11 @@ def _apply_relation_step(
                 new_bwg_pre = fp.recurrent(
                     _cast_to_dtype(diag, trace_dtype),
                     old_bwg,
-                    group.num_state,
+                    group.trace_state_width,
                 )
             else:
-                new_bwg_pre = _comp_recurrent_legacy(diag, old_bwg, group.num_state)
+                new_bwg_pre = _comp_recurrent_legacy(
+                    diag, old_bwg, group.trace_state_width)
 
             # new_bwg_pre + phg_to_pw per-leaf.
             new_bwg = jax.tree.map(
@@ -501,19 +520,23 @@ def _update_param_dim_etrace_chunked(
         for group in relation.hidden_groups:
             gi = group.index
             if gi not in p_cache:
-                p_seq, m_full = suffix_products(diags_seq[gi], group.num_state)
+                p_seq, m_full = suffix_products(
+                    diags_seq[gi], group.trace_state_width)
                 p_cache[gi] = (
                     _cast_to_dtype(p_seq, trace_dtype),
                     _cast_to_dtype(m_full, trace_dtype),
                 )
             p_seq, m_full = p_cache[gi]
-            df_seq = _cast_to_dtype(
-                dfs_seq[etrace_df_key(relation.y_var, gi)], trace_dtype
-            )
+            df_seq = dfs_seq[etrace_df_key(relation.y_var, gi)]
+            if group.snap is not None:
+                # same widening as the per-step body; ``df_seq`` is stacked over
+                # time but the padded axis is still the trailing one.
+                df_seq = widen_instant_term(df_seq, group.snap.num_neighbour)
+            df_seq = _cast_to_dtype(df_seq, trace_dtype)
             w_key = (id(relation.y_var), gi)
             new_etrace_bwg[w_key] = fp.chunk(
                 x_seq, df_seq, p_seq, m_full,
-                hist_etrace_vals[w_key], group.num_state,
+                hist_etrace_vals[w_key], group.trace_state_width,
             )
 
     if legacy:
@@ -628,6 +651,11 @@ def _solve_param_dim_weight_gradients(
             w_key = (id(relation.y_var), group.index)
             etrace_data = hist_etrace_data[w_key]  # Dict[str, Array]
             dg_hidden = dG_hidden_groups[group.index]
+            if group.snap is not None:
+                # `sparse_n`: the trace's trailing axis indexes (neighbour,
+                # state) pairs, so the learning signal has to be expressed in
+                # the same coordinates before the contraction.
+                dg_hidden = gather_learning_signal(dg_hidden, group.snap)
 
             # dimensionless processing (unit strip + restore). Apply per-leaf.
             etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
@@ -669,8 +697,10 @@ def _solve_param_dim_weight_gradients(
                 )
                 if batched:
                     folded_paths.update(relation.trainable_paths.values())
-            elif group.num_state == 1:
-                # num_state==1 shortcut: skip outer vmap of size 1.
+            elif group.trace_state_width == 1:
+                # width==1 shortcut: skip outer vmap of size 1. Reads the widened
+                # width, not num_state: under `sparse_n` a single-state group
+                # with K > 1 has a size-K trailing axis and must NOT take it.
                 dg_hid_squeezed = jax.tree.map(
                     lambda a: u.math.squeeze(a, axis=-1), dg_hidden_unitless
                 )
@@ -926,10 +956,12 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         control_flow: Optional[ControlFlowPolicy] = None,
         config: Optional[ETraceConfig] = None,
         random_feedback_key: Optional[jax.Array] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method,
                          control_flow=control_flow, config=config,
-                         random_feedback_key=random_feedback_key)
+                         random_feedback_key=random_feedback_key,
+                         snap_max_jacobian_elements=snap_max_jacobian_elements)
         if self.config.trace_factorization != 'per_param':
             raise ValueError(
                 f'{type(self).__name__} is the per-parameter trace engine, but '

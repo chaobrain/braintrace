@@ -83,6 +83,7 @@ from ._algorithm import (
     pp_prop,
     ES_D_RTRL,
     IODimVjpAlgorithm,
+    SnAp,
     EProp,
     OSTLRecurrent,
     OSTLFeedforward,
@@ -165,6 +166,7 @@ __all__ = [
     'pp_prop',
     'ES_D_RTRL',
     'IODimVjpAlgorithm',
+    'SnAp',
 
     # one-call entry point
     'compile',

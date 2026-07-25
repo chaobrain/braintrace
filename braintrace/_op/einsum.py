@@ -227,7 +227,38 @@ def _einsum_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     return jnp.zeros((*y_var.aval.shape, num_hidden_state), dtype=y_var.aval.dtype)
 
 
+def _einsum_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_einsum`` -- conditionally.
+
+    The trace allocated by :func:`_einsum_init_drtrl` is weight-shaped and has
+    **no slot for a shared axis**, and :func:`_einsum_dt_to_t` sums the hidden
+    signal over the shared axes before applying it. So for an equation such as
+    ``btk,kn->btn`` the distinct ``t`` positions are already collapsed into one
+    trace slot: no per-position anchor exists, and widening the trailing state
+    axis cannot represent per-``t`` influence at any ``n``.
+
+    Without a shared axis (``bk,kn->bn``, ``bgk,gkn->bgn``, ...) the trace is
+    laid out exactly like the dense / grouped case and the anchor is the output
+    axis.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters; ``equation`` holds the einsum spec.
+
+    Returns
+    -------
+    bool
+        ``True`` iff the equation has no shared axis.
+    """
+    equation = eqn_params.get('equation')
+    if equation is None:
+        return False
+    return not parse_etp_einsum(equation).shared
+
+
 etp_einsum_p.register_etp_rules(
+    snap_anchor=_einsum_snap_anchor,
     dt_to_t=_einsum_dt_to_t,
     xy_to_dw=_einsum_xy_to_dw,
     init_drtrl=_einsum_init_drtrl,

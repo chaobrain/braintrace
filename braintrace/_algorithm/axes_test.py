@@ -219,7 +219,6 @@ class TestCompatibilityMatrix:
 
     @pytest.mark.parametrize('kwargs,phase', [
         (dict(trace_factorization='random_projection'), 'P4'),
-        (dict(recurrence_scope='sparse_n', sparse_n=2), 'P3'),
         (dict(learning_signal='modulatory'), 'P4'),
         (dict(learning_signal='bootstrapped'), 'P4'),
         (dict(update_schedule='window', window_size=4), 'no phase yet'),
@@ -277,14 +276,105 @@ class TestDerivedViews:
         with pytest.raises(ValueError, match='may only be a pair'):
             ETraceConfig(temporal_recursion='scalar_leak', decay=(0.9, 0.9))
 
-    @pytest.mark.parametrize('scope,expected', [
-        ('diagonal', False), ('coupled', True),
+    @pytest.mark.parametrize('kwargs,expected', [
+        (dict(recurrence_scope='diagonal'), False),
+        (dict(recurrence_scope='coupled'), True),
+        (dict(recurrence_scope='sparse_n', sparse_n=3), True),
     ])
-    def test_include_recurrent_mixing_is_the_executors_spelling(self, scope, expected):
-        assert ETraceConfig(recurrence_scope=scope).include_recurrent_mixing is expected
+    def test_include_recurrent_mixing_is_the_executors_spelling(self, kwargs, expected):
+        # SnAp-n gathers its widened transition operator out of the true
+        # cross-position Jacobian, so it needs the coupled transition traced
+        # just as much as `coupled` itself does.
+        assert ETraceConfig(**kwargs).include_recurrent_mixing is expected
 
 
 @pytest.mark.parametrize('name', sorted(PRESET_COORDINATES))
 def test_every_preset_coordinate_is_constructible(name):
     """The matrix must admit all five surviving presets, or P2 cannot land."""
     assert isinstance(ETraceConfig(**PRESET_COORDINATES[name]), ETraceConfig)
+
+
+class TestSparseNAxis:
+    """``recurrence_scope='sparse_n'`` -- the SnAp-n scale (P3).
+
+    The scale's identity element is ``coupled``, not ``diagonal``: SnAp-1 keeps
+    the instantaneous pattern and propagates it zero times, which is exactly the
+    per-position block-diagonal recursion ``coupled`` computes. ``diagonal``
+    sits *below* the scale -- it deletes the recurrent mixing primitive from the
+    transition before differentiating -- so it is not reachable by any ``n``.
+    """
+
+    def test_sparse_n_is_implemented(self):
+        cfg = ETraceConfig(recurrence_scope='sparse_n', sparse_n=3)
+        assert cfg.recurrence_scope == 'sparse_n'
+        assert cfg.sparse_n == 3
+
+    def test_n_equals_one_canonicalises_onto_coupled(self):
+        cfg = ETraceConfig(recurrence_scope='sparse_n', sparse_n=1)
+        assert cfg.recurrence_scope == 'coupled'
+        assert cfg.sparse_n is None
+        assert cfg == ETraceConfig(recurrence_scope='coupled')
+
+    def test_the_canonicalisation_is_idempotent(self):
+        once = ETraceConfig(recurrence_scope='sparse_n', sparse_n=1)
+        twice = dataclasses.replace(once)
+        assert once == twice
+
+    def test_n_at_least_two_is_left_alone(self):
+        for n in (2, 3, 17):
+            cfg = ETraceConfig(recurrence_scope='sparse_n', sparse_n=n)
+            assert (cfg.recurrence_scope, cfg.sparse_n) == ('sparse_n', n)
+
+    def test_diagonal_is_not_reachable_by_any_n(self):
+        for n in (1, 2, 5):
+            cfg = ETraceConfig(recurrence_scope='sparse_n', sparse_n=n)
+            assert cfg.recurrence_scope != 'diagonal'
+
+    def test_rule_9_sparse_n_requires_per_param(self):
+        with pytest.raises(ValueError, match="requires trace_factorization='per_param'"):
+            ETraceConfig(
+                trace_factorization='io_factorized',
+                temporal_recursion=('scalar_leak', 'jacobian'),
+                decay=0.9,
+                recurrence_scope='sparse_n',
+                sparse_n=2,
+            )
+
+    def test_rule_9_negative_control_coupled_stays_legal_under_io_factorized(self):
+        # rule 9 must reject `sparse_n` specifically, not every non-diagonal scope
+        cfg = ETraceConfig(
+            trace_factorization='io_factorized',
+            temporal_recursion=('scalar_leak', 'jacobian'),
+            decay=0.9,
+            recurrence_scope='coupled',
+        )
+        assert cfg.recurrence_scope == 'coupled'
+
+    @pytest.mark.parametrize('n', [0, -1, -5])
+    def test_rule_10_rejects_a_non_positive_order(self, n):
+        with pytest.raises(ValueError, match='at least 1'):
+            ETraceConfig(recurrence_scope='sparse_n', sparse_n=n)
+
+    @pytest.mark.parametrize('n', [True, False, 2.0, '2', None.__class__])
+    def test_rule_10_rejects_a_non_integer_order(self, n):
+        # `True == 1` would otherwise canonicalise silently onto `coupled`
+        with pytest.raises(TypeError, match='must be an integer'):
+            ETraceConfig(recurrence_scope='sparse_n', sparse_n=n)
+
+    def test_rule_2_sparse_n_still_needs_a_jacobian_recursion(self):
+        with pytest.raises(ValueError, match="to be 'jacobian'"):
+            ETraceConfig(
+                recurrence_scope='sparse_n', sparse_n=2,
+                temporal_recursion='scalar_leak', decay=0.9,
+            )
+
+    def test_rule_7_pairs_the_coefficient_with_its_axis_both_ways(self):
+        with pytest.raises(ValueError, match='`sparse_n` is required'):
+            ETraceConfig(recurrence_scope='sparse_n')
+        with pytest.raises(ValueError, match='no.*category to act on'):
+            ETraceConfig(recurrence_scope='coupled', sparse_n=2)
+
+    def test_describe_names_the_order(self):
+        text = ETraceConfig(recurrence_scope='sparse_n', sparse_n=4).describe()
+        assert "recurrence_scope='sparse_n'" in text
+        assert 'sparse_n=4' in text

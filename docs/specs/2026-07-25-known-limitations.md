@@ -56,6 +56,7 @@ resolution, never that a test stopped being run.
 | F-28 | `EProp(feedback='random')` assumes a single, direct readout whose width equals the HiddenGroup's own | active, **documented scope boundary** | `e_prop.py:117-122` states it: the hooks only see `∂L/∂h`, which has no visibility into a separate readout layer's width, so the projection matrix is square |
 | F-29 | `pp_prop(decay_or_rank=1)` is a genuine approximation | **active, misattributed as approximate** — rank 1 means decay 0, so the presynaptic EMA collapses to the exact current input | `tests/approx_correctness_test.py::test_rank1_pp_prop_is_degenerate_on_a_recurrent_only_relation` pins both sides |
 | F-30 | the IO-dim f-side de-biasing correction is indexed by `update()` call count, not by trace-step count, so it is exact only for single-step input | active, **preserved deliberately** — fixing it moves `pp_prop` / `OSTLFeedforward` gradients | `io_dim_vjp_test.py::TestBiasCorrectionTimeIndex`, both the structural claim and the finite-window consequence |
+| F-31 | on a hidden group whose `y -> hidden` tail is not position-preserving, *no* within-group scope reaches BPTT — saturated SnAp / full within-group RTRL included | active, **structural** — pre-P3, affects every `recurrence_scope`; the compiler detects the tail and warns | `_algorithm/snap_n_test.py::TestConservativeFallbackEndToEnd::test_a_relabelling_tail_defeats_saturation_and_says_so`, against the `roll=0` control; measured below |
 | F-SCAN / F-SCAN-WEIGHT | weight inside control flow raised `KeyError` | resolved | `_compiler/base_test.py::TestCheckUnsupportedOp::test_error_message_identifies_weight_variable` |
 | F-SINGLESTEP | naive single-step summation does not equal BPTT even for an exact algorithm | active as a property; documented | `online_param_gradients_singlestep_naive`' docstring; used deliberately as the maximally-sensitive window in `oracle_test.py` |
 
@@ -135,6 +136,56 @@ Not fixed in P2: the phase's acceptance criterion is that no preset's gradients
 move, and this correction is on `pp_prop`'s and `OSTLFeedforward`'s hot path.
 The P2 golden values in `data/p2_golden.npz` therefore freeze the biased
 numbers on purpose. A fix belongs in its own change, with its own goldens.
+
+## Notes on F-31
+
+The per-parameter eligibility trace indexes hidden units by *position within a
+hidden group*. Every `recurrence_scope` coordinate — `diagonal`, `coupled`,
+`sparse_n` — is a statement about which positions a parameter's influence is
+retained for. That vocabulary presumes the group's positions survive the trip
+from the mixing primitive's output back into the hidden state. When they do not,
+the trace cannot represent the influence at all, and widening the neighbourhood
+does not help: the missing term is not a neighbour that was dropped, it is a
+relabelling the representation has no slot for.
+
+Reproduced on a dense tanh RNN (`n_in=3`, `n_rec=5`, `T=8`, chunk 2, ETP
+parameters only) whose recurrent pre-activation is rolled by one position before
+it re-enters `h` — `h^t = tanh(x @ win + roll(matmul(h^{t-1}, w), 1))`. The
+position graph of the mixing primitive alone has diameter 1, so `n = 2` already
+saturates and the un-rolled control is the same model with `roll` deleted:
+
+| algorithm | rel. deviation from BPTT, **with** the roll | control, **without** |
+|---|---|---|
+| `D_RTRL` (diagonal) | 1.0329 | 0.4041 |
+| `OSTLRecurrent` (coupled) | 1.0452 | 0.2836 |
+| `SnAp(n=2)` (saturated) | 1.3031 | **1.29e-07** |
+| `SnAp(n=4)` (saturated) | 1.3031 | 1.29e-07 |
+
+The control column is what gives the first column its meaning: with a
+position-preserving tail, saturation *is* BPTT to float32 round-off while the
+cheaper scopes are genuinely approximate — the axis behaves exactly as the
+roadmap claims. Add the roll and the ordering collapses: the most expensive
+coordinate is now the least accurate of the three, because retaining more
+positions buys nothing when every position is mislabelled.
+
+Two things follow, and only the second is a defect:
+
+1. **It is detected, not silent.** The position analysis rejects the `slice`
+   equation `roll` lowers to, widens to all-to-all, and emits
+   `SNAP_PATTERN_CONSERVATIVE`. Nothing here is assumed and later violated.
+2. **The diagnostic's wording was wrong, and was fixed in P3.** It read "the
+   gradient stays correct", which is true of the *pattern* (a superset never
+   drops a real dependency) but reads as a claim about the returned gradient.
+   It now says the approximation is not degraded and points here. The warning
+   is emitted for the SnAp path only; the same tail degrades `diagonal` and
+   `coupled` too, without any warning at all, because those coordinates never
+   ask for a position graph.
+
+Not fixed: representing a non-position-preserving tail would require the trace
+to carry the tail's own permutation alongside the neighbourhood, which is a
+change to the trace layout rather than to any one algorithm. Until then, the
+usable statement is the one in `SnAp`'s docstring: saturation equals BPTT on a
+single-group model with an **elementwise** `y -> hidden` tail.
 
 ## Mapping from the `AGENTS.md` prose list
 

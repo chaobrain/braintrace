@@ -110,6 +110,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import brainunit as u
 
 from ._primitive import register_primitive
@@ -518,6 +519,50 @@ _DENSE_FAST_PATH = FastPathRules(
 )
 
 
+def _dense_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_mm`` / ``etp_mv``.
+
+    The D-RTRL trace is weight-shaped ``(..., in, out, S)``: slot ``[i, o]``
+    carries the influence of ``W[i, o]``, whose instantaneous term lands on
+    output position ``o`` and nowhere else. The anchor is therefore the ``out``
+    axis, unconditionally.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused; the anchor does not depend on them).
+
+    Returns
+    -------
+    bool
+        Always ``True``.
+    """
+    return True
+
+
+def _dense_snap_adjacency(eqn_params: dict, size: int) -> np.ndarray:
+    """Position adjacency induced by a dense recurrent ``y = x @ W``.
+
+    Every output position reads every input position, so the last-axis
+    dependency pattern is all-to-all. The *other* ``varshape`` axes (a batch
+    axis, say) are untouched by the matmul and stay ``identity`` -- that split
+    is applied by the caller, not here.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused).
+    size : int
+        Length of the hidden group's last ``varshape`` axis.
+
+    Returns
+    -------
+    numpy.ndarray
+        The all-ones ``(size, size)`` boolean pattern.
+    """
+    return np.ones((size, size), dtype=bool)
+
+
 etp_mm_p = register_primitive(
     'etp_mm',
     _etp_matmul_impl,
@@ -531,6 +576,8 @@ etp_mm_p.register_etp_rules(
     init_drtrl=_mm_init_drtrl,
     init_pp=_mm_init_pp,
     fast_path=_DENSE_FAST_PATH,
+    snap_anchor=_dense_snap_anchor,
+    snap_adjacency=_dense_snap_adjacency,
 )
 
 
@@ -675,6 +722,8 @@ etp_mv_p.register_etp_rules(
     init_drtrl=_mv_init_drtrl,
     init_pp=_mv_init_pp,
     fast_path=_DENSE_FAST_PATH,
+    snap_anchor=_dense_snap_anchor,
+    snap_adjacency=_dense_snap_adjacency,
 )
 register_batched_counterpart(etp_mv_p, etp_mm_p)
 

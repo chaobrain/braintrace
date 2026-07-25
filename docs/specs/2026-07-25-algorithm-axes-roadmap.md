@@ -146,12 +146,22 @@ naming the two that exist today:
 SnAp-n is therefore a *generalisation of an existing knob* rather than a new
 representation invented from scratch, which is what makes P3 tractable.
 
-**Open design question for P3.** Both existing values end up producing a
-per-position block-diagonal Jacobian; they differ in what enters the transition
-before the block diagonal is taken. SnAp-n instead parameterises the *n-step
-influence* that is retained. Whether `coupled` lands on a particular `n`, or
-stays a sibling value beside the `n` scale, is a design decision P3 must settle
-explicitly — this document does not assume it maps onto one.
+**Settled in P3: `coupled` *is* SnAp-1, and `diagonal` sits below the scale.**
+The open question was whether `coupled` lands on a point of the `n` scale or
+stays a sibling beside it. It lands on `n = 1`: SnAp-1 keeps only the
+instantaneous term `∂h_p/∂θ_p` and propagates it through the *self* block of
+`D`, which is exactly what `coupled` computes once the recurrent mixing
+primitive is in the transition and the per-position block diagonal is taken.
+`SnAp(model, n=1)` therefore canonicalises to `recurrence_scope='coupled'`
+rather than being a second spelling of it
+(`snap_n_test.py::TestCoordinates::test_snap_1_canonicalises_to_the_coupled_coordinate`).
+
+`diagonal` is *not* SnAp-0 or any other point on the scale. It deletes the
+recurrent mixing primitive from the transition *before* differentiating, so it
+is not a sparsification of `J = ∂h/∂θ` at all — it is a different transition
+operator. The scale runs `coupled` (= SnAp-1) → `sparse_n(2)` → … →
+`sparse_n(≥ diameter)` (= full within-group RTRL = BPTT); `diagonal` sits beside
+its lower end, cheaper and structurally different.
 
 ### Axis 4 — `learning_signal` (where the signal comes from)
 
@@ -205,6 +215,13 @@ so the table cannot drift from the code.
 | `OSTLRecurrent` | per_param | jacobian | **coupled** | symmetric | none | — |
 | `OSTLFeedforward` | io_factorized | (scalar_leak, jacobian) | diagonal | symmetric | none | (1e-6, 1e-6) |
 | `EProp` | per_param | jacobian | diagonal | symmetric \| random_feedback | **kappa** | — |
+| `SnAp(n≥2)` | per_param | jacobian | **sparse_n**(n) | symmetric | none | — |
+| `SnAp(n=1)` | per_param | jacobian | **coupled** | symmetric | none | — |
+
+`SnAp` was added in P3; its two rows are pinned by
+`snap_n_test.py::TestCoordinates` rather than by the P2 preset table, because
+`n = 1` canonicalises onto `OSTLRecurrent`'s coordinate and the preset table
+asserts a bijection between presets and coordinates.
 
 Two entries were corrected during P2. Under `io_factorized` the recursion is a
 **pair**: the x-side (presynaptic input trace) never involves a Jacobian, so the
@@ -322,7 +339,9 @@ into an engine-specific structure. The lifecycle contract the spec actually care
 about (base concrete, engines chain via `super()` as their last statement, no
 silent degradation) is unchanged.
 
-### P3 — SnAp-n: generalise `recurrence_scope`
+### P3 — SnAp-n: generalise `recurrence_scope` — **done**
+
+Spec: [`2026-07-25-p3-snap-n.md`](2026-07-25-p3-snap-n.md).
 
 Menick et al. 2021. Derive the n-step influence sparsity pattern automatically
 from the compiler's jaxpr hidden→hidden reachability graph — the thing a
@@ -350,6 +369,62 @@ today's coupled path, and add the intermediate sparse representation for
   only to assert the influence matrix `dh^t/dθ` itself when localising a
   divergence between trace and learning signal — optional debugging aid.)
 - Measured memory curve, monotone in n.
+
+**Delivered.** `braintrace/_compiler/position_graph.py` (per-axis adjacency
+analysis, closure, neighbourhood index, budget guard), the `snap_anchor`
+capability in `_op/_registries.py` plus its nine per-primitive declarations,
+`HiddenGroup.snap` / `.trace_state_width` / `widened_block_jacobian` /
+`widen_instant_term` / `gather_learning_signal` in `_compiler/hidden_group.py`,
+the widened-trace plumbing in `_algorithm/param_dim_vjp.py`, two guardrails in
+`_algorithm/vjp_base.py`, the `sparse_n` axis value and its matrix rules in
+`_algorithm/axes.py`, three new oracles (`sparse_ring_rnn`,
+`sparse_ring_two_state_rnn`, `rolled_tail_rnn`), and the `braintrace.SnAp`
+preset.
+
+122 new tests: `_algorithm/snap_n_test.py` (48 acceptance),
+`_compiler/position_graph_test.py` (41), plus 10 in `hidden_group_test.py`,
+10 in `_registries_test.py` and 13 in `axes_test.py`.
+
+Both curves, measured on `sparse_ring_rnn(n_rec=6)` (diameter 5) through
+`chunked_online_param_gradients(chunk_size=3)`, T=8, against the BPTT oracle on
+the ETP parameter only:
+
+| n | K | trace scalars | rel. deviation from BPTT |
+|---|---|---|---|
+| 1 | 1 | 12 | 2.32e-01 |
+| 2 | 2 | 24 | 4.96e-03 |
+| 3 | 3 | 36 | 5.93e-04 |
+| 4 | 4 | 48 | 2.22e-04 |
+| 5 | 5 | 60 | 8.03e-08 |
+| 6 | 6 | 72 | 8.03e-08 |
+| 7 | 6 | 72 | 8.03e-08 |
+
+Memory is exactly linear in `K` and saturates with it; accuracy is monotone and
+reaches round-off at `n = diameter`. A *dense* recurrent weight has diameter 1
+and saturates at `n = 2`, which is why the ring — and not `tanh_rnn` — is the
+reference model for the scale.
+
+Two deviations from the spec. First, the widening hooks live at the innermost
+consumers in `param_dim_vjp.py` rather than behind the
+`vjp_base._transform_trace_inputs` hook the spec proposed: the `df` widening and
+the learning-signal gather need the `HiddenGroup` they belong to, and the base
+hook does not have it without threading group identity through a signature that
+every engine shares. Second, `n = 1` canonicalises to `recurrence_scope='coupled'`
+instead of `sparse_n` with `sparse_n=1`; the spec left this open, and collapsing
+it keeps one coordinate per rule (see Axis 3 above).
+
+**Adversarial review.** An independent review of the finished implementation
+raised twelve findings; the ones that changed code were a soundness blocker in
+the reachability closure (integer overflow under-approximating the
+neighbourhood), the budget being charged against the trace rather than the block
+Jacobian that dominates it, the anchor check lapsing at `n = 1`, a missing
+guard on the public `compile_etrace_graph` entry point, and a diagnostic whose
+"the gradient stays correct" wording over-claimed. On the test side it added an
+independent masked-RTRL oracle for the interior orders, gradient execution for
+all eleven anchored primitives at a saturating order, and replaced two
+tautological assertions. Lessons 26–30 record what generalises; F-31 in the
+limitations list records the one behaviour that was confirmed as a pre-existing
+property rather than a P3 regression.
 
 ### P4 — UORO, three-factor and DNI
 
@@ -438,8 +513,10 @@ statistical class.
 ## Lessons learned during implementation
 
 Items 1–9 were recorded during P1, against commit `bc153da`; items 10–17 during
-P2, against `156d058`. These are the things the roadmap got wrong or could not
-have known, kept here because later phases rest on them.
+P2, against `156d058`; items 18–30 during P3, against `100b5be` (18–25 while
+implementing, 26–30 while working through the adversarial review). These are the
+things the roadmap got wrong or could not have known, kept here because later
+phases rest on them.
 
 1. **The instrument was the defect, not the compiler.** P1 was scoped as
    compiler work on multi-timescale and heterogeneous populations. Every one of
@@ -606,3 +683,165 @@ have known, kept here because later phases rest on them.
     correction and a refactor cannot land together, or neither can be verified.
     It is recorded in the findings list with a reproduction and pinned by a test
     that asserts the current, biased behaviour.
+
+### From P3
+
+18. **An approximation whose error does not fall when you spend more memory on
+    it is not "converging slowly" — it is wired backwards.** The first working
+    SnAp-n produced a flat error curve: `2.3167e-01` at every `n` from 1 to 4,
+    then exactly round-off at `n = 5`. Every structural test passed. The cause
+    was the direction of the neighbourhood: `A[p, q]` reads "h_p depends on
+    h_q", so the trace slot anchored at `p` must cover **column** `p` of the
+    closure — the positions `p` *influences* — and the code took the row. On a
+    directed graph the row is the set `p` reads *from*, whose contribution to
+    `p`'s own parameter gradient is exactly zero, so the trace paid the full
+    `K`-fold widening and bought nothing until the neighbourhood saturated and
+    the two sets coincided.
+
+    What makes this worth an item is that *no size-based test can see it*. `K`,
+    monotonicity, nestedness, saturation, padding validity and the memory curve
+    are all identical under either orientation, and the graph fixtures in use
+    were symmetric often enough that even the flat-adjacency cross-check passed.
+    Only membership on a strictly directed fixture separates them, which is now
+    `position_graph_test.py::TestNeighbourhoodDirection`. Generalising: when an
+    axis is supposed to trade memory for accuracy, plot accuracy against the
+    knob *before* trusting any single-point assertion — a two-point check at the
+    endpoints would have shown "SnAp-1 differs from BPTT" and "saturated SnAp
+    equals BPTT", both true here, both passing, with the entire interior wrong.
+
+19. **A whole-tree comparison against BPTT measures the truncation window, not
+    the learning rule.** Under chunking, a model's *plain* (non-ETP) parameters
+    receive exactly truncated BPTT — they are carried by no trace, so they
+    truncate by construction at every coordinate of every axis. On the ring at
+    `chunk_size=1` the plain input projection alone contributes `4.5e-01` to the
+    tree-wide relative deviation while the ETP weight is exact to `7e-08`. This
+    cost the longest debugging session of P3, chasing a "saturated SnAp is not
+    BPTT" failure that was never a failure. BPTT comparisons now restrict to
+    `spec.etp_param_keys` (`snap_n_test._rel_etp`). Algorithm-vs-algorithm
+    comparisons deliberately stay on the *full* tree: two rules at the same
+    window truncate identically, so agreeing everywhere is the stronger claim.
+
+20. **A recurrent oracle without a self-edge cannot see `recurrence_scope` at
+    all.** The first sparse ring used `offsets=(1,)`, a pure cycle. Then
+    `∂h_p/∂h_p = 0`, the per-position block of the recurrent Jacobian is
+    identically zero, and `diagonal` and `coupled` return *bit-identical*
+    gradients — so the negative control that was supposed to prove the axis has
+    content proved nothing. Fixed by defaulting both ring oracles to
+    `offsets=(0, 1)`, which restores a `3.68e-02` separation and does not change
+    `K(n)`. This is lesson 10 with a new mechanism: for a scope axis, what the
+    model must supply is a non-zero *self* block, not merely recurrence.
+
+21. **The widened trace needed zero per-primitive changes, and the reason is
+    worth keeping.** `sparse_n` replaces the trace's trailing `num_state` axis
+    `S` with a `(neighbour, state)` axis of width `M = K·S`, and not one of the
+    nine ETP primitives' rules was touched. Two existing properties make that
+    work: `_comp_recurrent_legacy` vmaps the state axes away before calling
+    `dt_to_t`, so per-primitive rules never see the widened axis; and `dt_to_t`
+    already implements each primitive's anchor map (hidden position → trace
+    slot), which is exactly the map the widening needs. The fast paths
+    (`fp.recurrent` / `instant` / `solve` / `chunk`) index the state axis by
+    einsum letter and are therefore generic in its size. P4's `random_projection`
+    should check whether the same two properties buy it the same freedom before
+    proposing to touch kernels.
+
+22. **A capability the compiler cannot infer must be declared, and must default
+    to deny.** `sparse_n` is only meaningful if every ETP relation anchors on a
+    single hidden position — a trace slot has to have one well-defined position
+    its instantaneous term lands on. `etp_einsum` with a shared axis, and the
+    embedding ops, have no such position, and nothing in their shapes reveals
+    that. So `snap_anchor` is a declared per-primitive capability whose default
+    is *no anchor*, and `sparse_n` raises naming the offending primitive and
+    pointing at `coupled` / `diagonal`. Inferring it would have been silently
+    wrong for exactly the primitives that matter; cf. lesson 15.
+
+23. **An ETP output reshaped before it reaches the hidden state severs the
+    relation, and the compiler only warns.** The grouped-matmul fixture first
+    declared a flat `(1, n_rec)` hidden state and reshaped the `etp_gmm` output
+    into it. The compiler discovered *zero* ETP relations, emitted a warning
+    ("y shape=(1, 2, 3) not broadcastable with hidden shape=(1, 6)"), and the
+    test passed while exercising nothing. Fixed by shaping the hidden state
+    `(1, G, K)` and reshaping the *input* instead. A warning is not a failure:
+    what caught it was the structural pin on `primitives`, which was `()`.
+
+24. **`@pytest.mark.parametrize` does not parametrize a `unittest.TestCase`
+    method.** pytest collects the method once and never binds the parameter. A
+    test that reads as covering nine primitives covered none. Converted to an
+    explicit loop over the fixture dict. Worth stating alongside lesson 8: this
+    repository mixes `TestCase` classes and bare pytest classes in the same
+    file, so the decorator's applicability changes from class to class.
+
+25. **Report the conservative and the degenerate case; do not just handle
+    them.** The adjacency analysis factorises per axis (`A = ⊗ A_axis`), which
+    is exact when at most one axis is non-identity and a strict superset
+    otherwise — safe, but it silently costs memory, so it emits
+    `SNAP_PATTERN_CONSERVATIVE` with the reason. The `K == 1` case matters more:
+    it is legitimate on a model with no cross-position coupling, and it is also
+    exactly what a silently failing analysis produces, so it emits
+    `SNAP_PATTERN_DEGENERATE` rather than quietly computing `coupled` under a
+    `sparse_n` label. One tooling note for reading these back:
+    `compile_etrace_graph` opens its own nested `diagnostic_context()`, so an
+    outer reporter sees nothing — the records are on `graph.diagnostics`.
+
+### From P3's adversarial review
+
+The implementation above passed its own acceptance suite before this review ran.
+These five are what a hostile second reading found anyway, which is the argument
+for running one.
+
+26. **`bool @ bool` saturates; `uint8 @ uint8` counts paths and wraps.** The
+    reachability closure `A^k` was computed on `uint8` for compactness. NumPy's
+    boolean matmul accumulates with logical-or, so it saturates at `True`; the
+    integer one accumulates with `+` and wraps modulo 256. A position pair
+    joined by exactly 256 parallel two-hop paths therefore reported
+    **unreachable** — a *subset* of the true neighbourhood, which is the one
+    error direction this analysis may never have, and the one no existing test
+    could see because every fixture had a handful of paths, not hundreds. Fixed
+    by keeping the closure boolean throughout; pinned by
+    `test_many_parallel_paths_do_not_wrap`, which builds a 256-fold fan
+    deliberately. The general form: a *conservative* analysis has an asymmetric
+    failure cost, so its arithmetic must be chosen for the direction it may err
+    in, not for its width.
+
+27. **Budget the allocation that actually dominates, and name it in the error.**
+    The first guard capped the *trace* at `P·K·S` scalars. The term that
+    actually bounds usable `n` is the widened block Jacobian `Dg`, at
+    `P·(K·S)²` — quadratic in the same knob. The constant became
+    `DEFAULT_MAX_JACOBIAN_ELEMENTS = 2^24`, which admits `P=K=256, S=1` at
+    64 MiB and rejects `P=K=512` at 512 MiB, and the message prints the computed
+    element count and names the three ways out (smaller `n`, `coupled`, or a
+    larger explicit ceiling). A limit whose message does not say what was
+    measured is a limit users work around by guessing.
+
+28. **A coordinate cannot always carry its own provenance.** `SnAp(n=1)`
+    canonicalises to `recurrence_scope='coupled'` (lesson 18's finding), and
+    `coupled` is legal on models with no anchored primitive — so the anchor
+    check, keyed on the coordinate, silently stopped applying at exactly the
+    order where a user is most likely to be comparing SnAp against something
+    else. The preset now records `_requested_snap_order` alongside the config
+    and the check keys on either. Whenever a public entry point *narrows* to a
+    shared internal coordinate, ask what the narrowing threw away that a
+    validation still needs.
+
+29. **Endpoints are not evidence about the interior; write the interior's own
+    oracle.** Saturated SnAp equals BPTT and SnAp-1 equals `OSTLRecurrent`,
+    both pinned — and both are statements about the *ends* of the scale. The
+    interior got a hand-written masked-RTRL recursion in float64 numpy
+    (`influence = mask * (influence @ Dᵀ + instant)`) whose mask is derived
+    independently of the compiler's, and orders 2, 3 and 4 match it to `<1e-6`
+    while a deliberately narrower reference misses by `1.2e-1`. Note the
+    discrimination is one-sided on a forward-only ring — a wider reference still
+    matches, because widening only adds strictly-downstream positions that
+    cannot feed back — so the test documents that rather than asserting a
+    symmetry the model does not have.
+
+30. **"Correct" needs a subject.** The conservative-widening diagnostic said
+    "the gradient stays correct". True of the *pattern* — a superset never drops
+    a real dependency — but it reads as a promise about the returned gradient,
+    and that promise is false whenever the group's `y → hidden` tail relabels
+    positions: there, full within-group RTRL is **not** BPTT, and the saturated
+    rule is further from BPTT than the cheaper ones (1.30 vs 1.03 relative
+    deviation on the `roll`-tail probe, against `1.3e-07` for the same model
+    with the roll removed). The wording now says the *approximation* is not
+    degraded and points at F-31 in the limitations list, where the pair and its
+    control are recorded. Every axis in this roadmap describes what a trace
+    retains; none of them can describe what the trace's index does not denote.

@@ -27,6 +27,7 @@ and ``docs/specs/2026-07-25-p2-axis-decomposition.md`` for this module's design.
 from __future__ import annotations
 
 import dataclasses
+import operator
 from typing import Any, Dict, Optional, Tuple, Union
 
 __all__ = ['ETraceConfig']
@@ -48,7 +49,6 @@ _VOCABULARY: Dict[str, Tuple[str, ...]] = {
 #: ``(axis, value) -> where it is scheduled``. Rejected by matrix rule 8.
 _UNIMPLEMENTED: Dict[Tuple[str, str], str] = {
     ('trace_factorization', 'random_projection'): 'P4 (UORO)',
-    ('recurrence_scope', 'sparse_n'): 'P3 (SnAp-n)',
     ('learning_signal', 'modulatory'): 'P4 (three-factor)',
     ('learning_signal', 'bootstrapped'): 'P4 (DNI)',
     ('update_schedule', 'window'): 'no phase yet',
@@ -84,6 +84,36 @@ def _check_decay(value: Any, what: str) -> float:
             'itself, so a coordinate has one spelling.'
         )
     return value
+
+
+def _check_snap_order(value: Any) -> int:
+    """Validate the SnAp order ``sparse_n`` and return it as a plain ``int``.
+
+    The order counts how many steps of influence the trace retains, so it is a
+    positive integer with no upper bound: any ``n`` at or above a hidden group's
+    diameter saturates, and saturation is a property of the model, not of the
+    vocabulary. ``bool`` is rejected explicitly -- ``True == 1`` would otherwise
+    canonicalise silently onto ``recurrence_scope='coupled'``.
+    """
+    if isinstance(value, bool):
+        raise TypeError(
+            f'sparse_n must be an integer >= 1, got {value!r}. A bool is not a '
+            'SnAp order (True would silently mean n=1).'
+        )
+    try:
+        order = operator.index(value)
+    except TypeError:
+        raise TypeError(
+            f'sparse_n must be an integer >= 1, got {value!r}.'
+        ) from None
+    if order < 1:
+        raise ValueError(
+            f'sparse_n must be at least 1, got {order}. n=1 is SnAp-1 (the '
+            "instantaneous pattern, propagated zero times) and canonicalises to "
+            "recurrence_scope='coupled'; there is no smaller order. "
+            "recurrence_scope='diagonal' is a different rule, not n=0."
+        )
+    return order
 
 
 def _as_pair(value: Any, what: str) -> Tuple[Any, Any]:
@@ -125,7 +155,13 @@ class ETraceConfig:
     recurrence_scope : str, default 'diagonal'
         How much hidden-to-hidden coupling enters ``D``. ``'diagonal'`` keeps
         only each state's own recurrence; ``'coupled'`` traces recurrent mixing
-        between states of a hidden group.
+        between states of a hidden group; ``'sparse_n'`` retains influence over
+        an ``n``-step neighbourhood derived from the model's own transition
+        (SnAp-n), with ``n`` supplied as ``sparse_n``. The last two form one
+        scale: SnAp-1 *is* ``'coupled'`` (the instantaneous pattern propagated
+        zero times), and ``sparse_n=1`` canonicalises onto it. ``'diagonal'``
+        sits below the scale -- it drops the recurrent mixing primitive from the
+        transition before differentiating -- so no ``n`` reaches it.
     learning_signal : str, default 'symmetric'
         Where the per-hidden-group signal comes from. ``'symmetric'`` uses the
         true ``dL/dh``; ``'random_feedback'`` projects it through a fixed random
@@ -143,7 +179,10 @@ class ETraceConfig:
     kappa : float, optional
         Coefficient of ``trace_filter='kappa'``, in ``[0, 1)``.
     sparse_n : int, optional
-        Coefficient of ``recurrence_scope='sparse_n'``.
+        Coefficient of ``recurrence_scope='sparse_n'``: the SnAp order, an
+        integer ``>= 1``. Any order at or above a hidden group's diameter
+        saturates to full within-group RTRL, so there is no "infinity"
+        spelling -- saturation is a property of the model, not the vocabulary.
     window_size : int, optional
         Coefficient of ``update_schedule='window'``.
 
@@ -166,6 +205,9 @@ class ETraceConfig:
       expands to a pair.
     - ``trace_filter='kappa'`` with ``kappa == 0`` becomes ``'none'``, matching
       ``EProp(kappa_filter_decay=0)``'s documented reduction to ``D_RTRL``.
+    - ``recurrence_scope='sparse_n'`` with ``sparse_n == 1`` becomes
+      ``'coupled'`` with no coefficient — SnAp-1 and the block-diagonal
+      recursion are one rule.
 
     Examples
     --------
@@ -226,6 +268,17 @@ class ETraceConfig:
             self._canonicalise_factorized()
         else:
             self._canonicalise_scalar()
+
+        # SnAp-1 retains the instantaneous pattern and propagates it zero times,
+        # which is precisely the per-position block-diagonal recursion `coupled`
+        # already computes. One coordinate, one spelling — and `coupled` keeps
+        # the established name. The order is type-checked *before* the
+        # comparison so `sparse_n=True` cannot slip through as n=1.
+        if self.sparse_n is not None:
+            self._set('sparse_n', _check_snap_order(self.sparse_n))
+            if self.sparse_n == 1 and self.recurrence_scope == 'sparse_n':
+                self._set('recurrence_scope', 'coupled')
+                self._set('sparse_n', None)
 
         # `kappa == 0` is no filter at all: EProp documents `kappa_filter_decay=0`
         # as reducing exactly to D_RTRL, so the two are one coordinate. Clearing
@@ -331,6 +384,8 @@ class ETraceConfig:
             self._rules_4_5_per_param_decay,
             self._rule_6_factorized_needs_decay,
             self._rule_7_coefficients_need_their_category,
+            self._rule_9_sparse_n_needs_per_param,
+            self._rule_10_sparse_n_is_a_widening_order,
         ):
             rule()
 
@@ -435,6 +490,32 @@ class ETraceConfig:
         if self.kappa is not None:
             _check_decay(self.kappa, 'kappa')
 
+    def _rule_9_sparse_n_needs_per_param(self) -> None:
+        if self.recurrence_scope != 'sparse_n':
+            return
+        if self.trace_factorization != 'per_param':
+            raise ValueError(
+                "recurrence_scope='sparse_n' requires "
+                "trace_factorization='per_param', not "
+                f'{self.trace_factorization!r}. SnAp-n widens the trace\'s '
+                'trailing state axis into a (neighbour, state) axis, and the '
+                'factorised x-side carries no hidden index at all to widen — '
+                'the whole widening would have to land on the f-side, which is '
+                'a different rule and would break the O(I+O) memory the '
+                "factorisation exists for. Use recurrence_scope='coupled'."
+            )
+
+    def _rule_10_sparse_n_is_a_widening_order(self) -> None:
+        if self.recurrence_scope != 'sparse_n':
+            return
+        # Post-condition of canonicalisation: n == 1 has already been rewritten
+        # onto `coupled`, so a surviving `sparse_n` coordinate genuinely widens.
+        order = _check_snap_order(self.sparse_n)
+        assert order >= 2, (
+            f'sparse_n={order} survived canonicalisation; n=1 must have been '
+            "rewritten onto recurrence_scope='coupled'."
+        )
+
     # -- derived views ----------------------------------------------------- #
 
     @property
@@ -476,8 +557,12 @@ class ETraceConfig:
         """Whether the compiler should trace hidden-to-hidden ETP mixing.
 
         The graph executor's spelling of :attr:`recurrence_scope`.
+
+        ``True`` for both non-diagonal scopes: ``'coupled'`` needs the coupled
+        transition to take its per-position block diagonal, and ``'sparse_n'``
+        needs the same transition to gather its widened operator out of.
         """
-        return self.recurrence_scope == 'coupled'
+        return self.recurrence_scope in ('coupled', 'sparse_n')
 
     def replace(self, **changes: Any) -> 'ETraceConfig':
         """Return a copy with ``changes`` applied, re-canonicalised and re-checked.

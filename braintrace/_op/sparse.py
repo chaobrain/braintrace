@@ -94,10 +94,11 @@ path, which threads :math:`f'` correctly when a transform hook is present.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import brainunit as u
 import brainevent
 
@@ -423,6 +424,70 @@ def _sp_mv_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
 
 
 # ---------------------------------------------------------------------------
+# SnAp-n declarations
+# ---------------------------------------------------------------------------
+
+def _sp_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_sp_mm`` / ``etp_sp_mv``.
+
+    The D-RTRL trace is ``(nnz, S)``-shaped: entry ``p`` carries the influence
+    of the stored weight at structural coordinate ``(row(p), col(p))``, whose
+    instantaneous term lands on output position ``col(p)`` and nowhere else.
+    The anchor is that column map -- an index map rather than an array axis,
+    which is equally sufficient for the widening.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused; the anchor does not depend on them).
+
+    Returns
+    -------
+    bool
+        Always ``True``.
+    """
+    return True
+
+
+def _sp_snap_adjacency(eqn_params: dict, size: int) -> Optional[np.ndarray]:
+    """Position adjacency induced by a recurrent ``y = x @ sparse(W)``.
+
+    The forward is ``y = x @ W``, so ``h_p`` depends on ``h_q`` iff
+    ``W[q, p] != 0`` -- the structural pattern **transposed**. The pattern is
+    read from the *static* ``sparse_mat`` equation parameter with the stored
+    data replaced by ones, so it reflects the sparse structure and is unaffected
+    by which stored entries happen to be numerically zero.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters; ``sparse_mat`` holds the
+        :class:`_HashableSparseMat`-wrapped structure.
+    size : int
+        Length of the hidden group's last ``varshape`` axis. A structure that
+        is not ``(size, size)`` cannot be a within-group transition.
+
+    Returns
+    -------
+    numpy.ndarray or None
+        The boolean ``(size, size)`` pattern, or ``None`` to decline (the
+        caller then widens to all-to-all).
+    """
+    mat = _unwrap_sparse_mat(eqn_params.get('sparse_mat'))
+    if mat is None or tuple(getattr(mat, 'shape', ())) != (size, size):
+        return None
+    try:
+        dense = np.asarray(mat.with_data(jnp.ones_like(mat.data)).todense())
+    except Exception:  # noqa: BLE001 - any failure to materialise means "decline"
+        # A structure whose pattern cannot be read concretely at compile time
+        # (an exotic representation, a traced index array) must not be guessed
+        # at: declining yields the conservative all-to-all pattern, which is
+        # sound, where a guess could silently under-approximate.
+        return None
+    return (dense != 0).T
+
+
+# ---------------------------------------------------------------------------
 # Primitive registration
 # ---------------------------------------------------------------------------
 
@@ -438,6 +503,8 @@ etp_sp_mm_p.register_etp_rules(
     xy_to_dw=_sp_xy_to_dw,
     init_drtrl=_sp_mm_init_drtrl,
     init_pp=_sp_mm_init_pp,
+    snap_anchor=_sp_snap_anchor,
+    snap_adjacency=_sp_snap_adjacency,
 )
 
 etp_sp_mv_p = register_primitive(
@@ -452,6 +519,8 @@ etp_sp_mv_p.register_etp_rules(
     xy_to_dw=_sp_xy_to_dw,
     init_drtrl=_sp_mv_init_drtrl,
     init_pp=_sp_mv_init_pp,
+    snap_anchor=_sp_snap_anchor,
+    snap_adjacency=_sp_snap_adjacency,
 )
 register_batched_counterpart(etp_sp_mv_p, etp_sp_mm_p)
 

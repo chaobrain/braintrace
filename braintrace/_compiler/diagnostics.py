@@ -142,6 +142,18 @@ class DiagnosticKind(str, Enum):
     PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'
     MULTI_OUTPUT_PRIMITIVE_DETECTED = 'multi_output_primitive_detected'
     PYTREE_WEIGHT_LEAF_AMBIGUOUS = 'pytree_weight_leaf_ambiguous'
+    # SnAp-n position analysis (P3; see _compiler/position_graph.py)
+    #
+    # ``SNAP_PATTERN_CONSERVATIVE``: the n-step position neighbourhood could
+    # not be derived from the transition jaxpr, so it widened to all-to-all
+    # (WARNING -- the approximation is not degraded, since a superset only moves
+    # the rule towards within-group RTRL, but the trace is larger than the
+    # requested order implies).
+    # ``SNAP_PATTERN_DEGENERATE``: the group has no cross-position coupling, so
+    # SnAp-n retains a single position and coincides with `coupled` (INFO).
+    SNAP_PATTERN_CONSERVATIVE = 'snap_pattern_conservative'
+    SNAP_PATTERN_DEGENERATE = 'snap_pattern_degenerate'
+
     TRANSITION_TAIL_BOUNDED = 'transition_tail_bounded'
     HIDDEN_GROUP_MERGED = 'hidden_group_merged'
     STATE_MISMATCH = 'state_mismatch'

@@ -538,7 +538,29 @@ etp_lora_mm_p = register_primitive(
     trainable_invars_fn=_lora_trainable_invars,
     x_invar_index=0,
 )
+def _lora_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_lora_mm`` / ``etp_lora_mv``.
+
+    The trace ``'lora_b'`` is *effective-weight* shaped ``(..., in, out, S)``
+    -- the low-rank factors are recombined only at solve time by
+    :func:`_lora_solve_drtrl` -- so the anchor is the effective weight's ``out``
+    axis, exactly as for a dense matmul.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused).
+
+    Returns
+    -------
+    bool
+        Always ``True``.
+    """
+    return True
+
+
 etp_lora_mm_p.register_etp_rules(
+    snap_anchor=_lora_snap_anchor,
     dt_to_t=_lora_mm_dt_to_t,
     xy_to_dw=_lora_xy_to_dw,
     init_drtrl=_lora_mm_init_drtrl,
@@ -559,6 +581,7 @@ etp_lora_mv_p = register_primitive(
     x_invar_index=0,
 )
 etp_lora_mv_p.register_etp_rules(
+    snap_anchor=_lora_snap_anchor,
     dt_to_t=_lora_mv_dt_to_t,
     xy_to_dw=_lora_xy_to_dw,
     init_drtrl=_lora_mv_init_drtrl,

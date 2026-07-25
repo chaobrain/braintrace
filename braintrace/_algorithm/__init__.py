@@ -32,6 +32,7 @@ from .ostl import OSTLFeedforward, OSTLRecurrent
 from .io_dim_vjp import IODimVjpAlgorithm
 from .param_dim_vjp import ParamDimVjpAlgorithm
 from .pp_prop import ES_D_RTRL, pp_prop  # ES_D_RTRL: back-compat alias
+from .snap_n import SnAp
 from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
@@ -50,6 +51,7 @@ __all__ = [
     'pp_prop',
     'ES_D_RTRL',
     'IODimVjpAlgorithm',
+    'SnAp',
     # SNN
     'EProp',
     'OSTLRecurrent',

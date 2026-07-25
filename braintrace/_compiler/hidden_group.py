@@ -51,6 +51,7 @@ from typing import List, Dict, FrozenSet, Sequence, Tuple, Set, Optional, Callab
 import brainstate
 import brainunit as u
 import jax.core
+import jax.numpy as jnp
 import numpy as np
 from brainstate import HiddenGroupState
 
@@ -76,15 +77,20 @@ from .base import JaxprEvaluation, find_matched_vars
 from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
+from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS, build_snap_pattern
 
 __all__ = [
     'HiddenGroup',
+    'widened_block_jacobian',
+    'widen_instant_term',
+    'gather_learning_signal',
     'find_hidden_groups_from_minfo',
     'find_hidden_groups_from_module',
 ]
 
 if TYPE_CHECKING:
     from .scan_descent import GroupDescent  # noqa: F401
+    from .position_graph import SnapPattern  # noqa: F401
 
 # Recurrent-weight mixing primitives -- dense / convolutional weights -- whose
 # consumption of a hidden state is a genuine *cross-position* coupling, i.e. that
@@ -136,6 +142,9 @@ class HiddenGroup(NamedTuple):
     is_diagonal_recurrence : bool
         Whether the recurrence is diagonal across the leading ``varshape``
         positions (see the field comment for the full contract).
+    snap : SnapPattern or None
+        The SnAp-n neighbourhood the trace is widened onto
+        (``recurrence_scope='sparse_n'``); ``None`` for every other scope.
     descent : GroupDescent or None
         Descent context when this group's transition is one substep of a
         descended scan (Phase 4 structured scan descent); ``None`` for
@@ -199,6 +208,22 @@ class HiddenGroup(NamedTuple):
     # to ``True`` to preserve the cheap behavior for any positional construction.
     is_diagonal_recurrence: bool = True
 
+    snap: Optional['SnapPattern'] = None
+    """The SnAp-n neighbourhood this group's trace is widened onto, or ``None``.
+
+    Set only when ``recurrence_scope='sparse_n'``; ``'diagonal'`` and
+    ``'coupled'`` groups carry ``None`` and every pre-P3 code path is reached
+    unchanged. When set, :meth:`diagonal_jacobian` returns the widened operator
+    (:func:`widened_block_jacobian`) instead of the per-position block diagonal,
+    and :attr:`trace_state_width` -- not :attr:`num_state` -- sizes the trailing
+    axis of every trace leaf.
+
+    Orthogonal to :attr:`is_diagonal_recurrence`, which answers a different
+    question: *is this transition position-diagonal, so the cheap column-sum
+    Jacobian is exact?* SnAp-n needs the coupled transition, so a widened group
+    always has ``is_diagonal_recurrence=False``.
+    """
+
     descent: Optional['GroupDescent'] = None
     """Set when this group's transition is one substep of a descended scan
     (Phase 4 structured scan descent): ``transition_jaxpr``/
@@ -227,6 +252,25 @@ class HiddenGroup(NamedTuple):
             The total number of hidden states across the group.
         """
         return sum([st.num_state for st in self.hidden_states])
+
+    @property
+    def trace_state_width(self) -> int:
+        """The width of a trace leaf's trailing axis.
+
+        ``num_state`` normally; ``K * num_state`` under SnAp-n, where the
+        trailing axis carries a ``(neighbour, state)`` pair rather than a state
+        alone. Every trace allocation, recursion and solve reads this rather
+        than :attr:`num_state`, which keeps the per-primitive kernels -- all
+        generic in that axis's size -- untouched.
+
+        Returns
+        -------
+        int
+            The trailing-axis width of this group's trace leaves.
+        """
+        if self.snap is None:
+            return self.num_state
+        return int(self.snap.num_neighbour) * self.num_state
 
     def check_consistent_varshape(self):
         """Check whether the shapes of the hidden states are consistent.
@@ -290,7 +334,11 @@ class HiddenGroup(NamedTuple):
         jax.Array
             The per-position block-diagonal of the recurrent Jacobian
             ``d h^t / d h^{t-1}``, with shape
-            ``(*varshape, num_states, num_states)``. Entry ``[p, a, b]`` is
+            ``(*varshape, num_states, num_states)`` -- or, when :attr:`snap` is
+            set, the SnAp-n widened operator of shape
+            ``(*varshape, trace_state_width, trace_state_width)`` whose entry
+            ``[p, (k, a), (k', b)]`` is
+            ``d h^t[nbr[p,k], a] / d h^{t-1}[nbr[p,k'], b]``. Entry ``[p, a, b]`` is
             ``d h^t[p, a] / d h^{t-1}[p, b]`` -- the cross-position terms
             ``d h^t[p] / d h^{t-1}[q]`` (``p != q``) are intentionally dropped
             (the D-RTRL / e-prop diagonal approximation).
@@ -315,6 +363,11 @@ class HiddenGroup(NamedTuple):
         fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
         concat_hid = self.concat_hidden(hidden_vals)
         needs_fwd = _transition_contains_while(self.transition_jaxpr)
+        if self.snap is not None:
+            return widened_block_jacobian(
+                fn, concat_hid, self.snap.neighbours, self.snap.valid,
+                use_forward_mode=needs_fwd,
+            )
         if self.is_diagonal_recurrence:
             extract = jacfwd_last_dim if needs_fwd else jacrev_last_dim
             return extract(fn, concat_hid)
@@ -524,6 +577,168 @@ def block_diagonal_last_dim(
     block = u.math.diagonal(full_jac, axis1=0, axis2=2)  # (num_state, num_state, num_pos)
     block = u.math.moveaxis(block, -1, 0)  # (num_pos, num_state, num_state)
     return u.math.reshape(block, (*varshape, num_state, num_state))
+
+
+def widened_block_jacobian(
+    fn: Callable[..., jax.Array],
+    hid_vals: jax.Array,
+    neighbours: np.ndarray,
+    valid: np.ndarray,
+    use_forward_mode: bool = False,
+) -> jax.Array:
+    r"""Gather the SnAp-n widened transition operator out of the full Jacobian.
+
+    Where :func:`block_diagonal_last_dim` keeps only ``J[p, :, p, :]``, this
+    keeps the whole ``K x K`` block over position ``p``'s neighbourhood:
+
+    .. math::
+
+        Dg[p, (k, a), (k', b)] = J[\mathrm{nbr}[p,k],\, a,\,
+                                   \mathrm{nbr}[p,k'],\, b]
+                                 \cdot v[p,k] \cdot v[p,k'],
+
+    which is exactly the recursion SnAp-n truncates the influence matrix onto.
+    The result's trailing pair of axes has width ``M = K * num_state``, so every
+    downstream kernel -- all of which are generic in the size of that axis --
+    runs unchanged.
+
+    Parameters
+    ----------
+    fn : Callable[[jax.Array], jax.Array]
+        A shape-preserving map on ``(*varshape, num_state)`` arrays.
+    hid_vals : jax.Array
+        The point at which to linearize, shape ``(*varshape, num_state)``.
+    neighbours : numpy.ndarray
+        ``(num_position, K)`` flat neighbour indices, ``neighbours[p, 0] == p``.
+    valid : numpy.ndarray
+        ``(num_position, K)`` boolean mask; a ``False`` slot gets a zero row and
+        a zero column, so its trace stays zero for all time and contributes
+        nothing to the gradient.
+    use_forward_mode : bool, optional
+        Materialize the full Jacobian with :func:`jax.jacfwd` instead of
+        :func:`jax.jacrev`, as :func:`block_diagonal_last_dim` does for a
+        transition containing a ``while``. Default ``False``.
+
+    Returns
+    -------
+    jax.Array
+        The widened operator, shape ``(*varshape, K * num_state, K * num_state)``.
+
+    Notes
+    -----
+    Peak memory is the full ``(P*S) x (P*S)`` Jacobian -- the same array
+    ``block_diagonal_last_dim`` already materializes for the coupled path -- but
+    the *stored* result is ``O(P * K^2 * S^2)``, which at saturation is
+    ``P^3 S^2``. Affordable for the small dense groups this targets; a
+    matrix-free per-position ``vmap(jacrev)`` would trade it for compute.
+
+    At ``K == 1`` with an all-valid mask this returns exactly
+    :func:`block_diagonal_last_dim`'s output: the scale's identity element is
+    exact, not approximately exact.
+    """
+    num_state = hid_vals.shape[-1]
+    varshape = hid_vals.shape[:-1]
+    num_pos = int(np.prod(varshape)) if varshape else 1
+    num_nbr = int(neighbours.shape[1])
+    jac_fn = jax.jacfwd if use_forward_mode else jax.jacrev
+    full_jac = jac_fn(fn)(hid_vals)  # (*varshape, num_state, *varshape, num_state)
+    full_jac = u.math.reshape(full_jac, (num_pos, num_state, num_pos, num_state))
+
+    neighbours = np.asarray(neighbours)
+    rows = np.repeat(neighbours[:, :, None], num_nbr, axis=2)  # (P, K, K)
+    cols = np.repeat(neighbours[:, None, :], num_nbr, axis=1)  # (P, K, K)
+    # Advanced indices separated by a slice: the broadcast (P, K, K) leads, the
+    # two sliced state axes follow -> sub[p, k, k', a, b].
+    sub = full_jac[rows, :, cols, :]
+    mask = (valid[:, :, None] & valid[:, None, :]).astype(hid_vals.dtype)
+    sub = sub * mask[:, :, :, None, None]
+    sub = u.math.transpose(sub, (0, 1, 3, 2, 4))  # (P, K, S, K', S)
+    width = num_nbr * num_state
+    return u.math.reshape(sub, (*varshape, width, width))
+
+
+def widen_instant_term(df: Any, num_neighbour: int) -> Any:
+    r"""Zero-pad an instantaneous term onto the SnAp-n widened state axis.
+
+    The trace slot ``(p, (k, a))`` holds
+    :math:`\partial h[\mathrm{nbr}[p,k], a] / \partial \theta_p`, and the
+    instantaneous term of a relation anchored at position ``p`` lands on ``p``
+    itself. Since ``nbr[p, 0] == p`` by construction, that is slot ``k = 0``:
+
+    .. math::
+
+        \widetilde{D_f}[\dots, p, (k, a)] =
+            \begin{cases} D_f[\dots, p, a] & k = 0 \\ 0 & \text{otherwise.}\end{cases}
+
+    Padded (invalid) slots therefore start at zero and, because
+    :func:`widened_block_jacobian` gives them a zero row, stay zero for all
+    time — which is what makes the repeated ``p`` index in ``neighbours``
+    harmless rather than a double count.
+
+    Parameters
+    ----------
+    df : ArrayLike
+        The instantaneous term, shape ``(..., num_state)``. Only the trailing
+        axis is touched, so single-step ``(*varshape, S)`` and stacked
+        ``(T, *varshape, S)`` layouts are both accepted.
+    num_neighbour : int
+        The neighbourhood width ``K``.
+
+    Returns
+    -------
+    ArrayLike
+        Shape ``(..., K * num_state)``; the input unchanged when ``K == 1``.
+    """
+    if num_neighbour == 1:
+        return df
+    tail = u.math.repeat(u.math.zeros_like(df), num_neighbour - 1, axis=-1)
+    return u.math.concatenate([df, tail], axis=-1)
+
+
+def gather_learning_signal(signal: Any, snap: 'SnapPattern') -> Any:
+    r"""Gather :math:`\partial L / \partial h` onto the SnAp-n neighbour index.
+
+    The solve contracts the trace's widened axis with the learning signal, so
+    the signal has to be expressed in the *same* coordinates the trace is:
+
+    .. math::
+
+        \widetilde{s}[\dots, p, (k, a)] =
+            \frac{\partial L}{\partial h}[\dots, \mathrm{nbr}[p,k], a]
+            \cdot v[p, k] .
+
+    The mask is applied for the same reason it is applied to the transition
+    operator: a padded slot's neighbour index is ``p`` itself (an in-range dummy
+    that keeps the gather safe), and zeroing it makes the slot's contribution
+    identically zero rather than merely zero-by-consequence.
+
+    Parameters
+    ----------
+    signal : ArrayLike
+        Shape ``(..., *varshape, num_state)``; leading axes are carried through.
+    snap : SnapPattern
+        The group's neighbourhood.
+
+    Returns
+    -------
+    ArrayLike
+        Shape ``(..., *varshape, K * num_state)``.
+    """
+    varshape = tuple(snap.varshape)
+    num_position = snap.num_position
+    num_neighbour = snap.num_neighbour
+    rank = len(varshape)
+    lead = tuple(u.math.shape(signal))[:u.math.ndim(signal) - rank - 1]
+    num_state = tuple(u.math.shape(signal))[-1]
+
+    flat = u.math.reshape(signal, (*lead, num_position, num_state))
+    # One advanced index on axis -2, so the gathered (P, K) block stays in place
+    # and the result is (*lead, P, K, num_state).
+    gathered = flat[..., np.asarray(snap.neighbours), :]
+    mask = jnp.asarray(snap.valid, dtype=jnp.result_type(u.get_mantissa(flat)))
+    gathered = gathered * mask[:, :, None]
+    return u.math.reshape(
+        gathered, (*lead, *varshape, num_neighbour * num_state))
 
 
 def _param_subjaxprs(eqn: JaxprEqn) -> List[Jaxpr]:
@@ -911,6 +1126,10 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
         outvar_to_hidden_path: The mapping from the hidden output variable to the hidden state path.
         path_to_state: The mapping from the hidden state path to the state.
+        include_recurrent_mixing: Whether recurrent ETP mixing primitives are
+            traced into the hidden-to-hidden transition jaxpr.
+        sparse_n: SnAp order for ``recurrence_scope='sparse_n'``; ``None``
+            (default) leaves every group's ``snap`` pattern unset.
         control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
             opaque control-flow handling (see ``base.check_unsupported_op``).
         descended_scan_eqn_ids: ``id()`` values of scan equations rewritten by
@@ -929,6 +1148,8 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         outvar_to_hidden_path: Dict[HiddenOutVar, Path],
         path_to_state: Dict[Path, brainstate.HiddenState],
         include_recurrent_mixing: bool = False,
+        sparse_n: Optional[int] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
         control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
         descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
         descended_hidden_paths: FrozenSet[Path] = frozenset(),
@@ -950,6 +1171,16 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # (``True``) or treated as boundaries and excluded (``False``, default).
         # See :func:`find_hidden_groups_from_jaxpr` for the rationale.
         self.include_recurrent_mixing = include_recurrent_mixing
+
+        # SnAp order (``recurrence_scope='sparse_n'``): when set, every group
+        # built below carries the derived n-step neighbourhood its trace is
+        # widened onto. ``None`` (every other scope) leaves ``HiddenGroup.snap``
+        # unset and no pre-P3 code path changes.
+        self.sparse_n = sparse_n
+
+        # Ceiling on the widened block Jacobian, in elements. Only consulted
+        # when ``sparse_n`` is set; see ``DEFAULT_MAX_JACOBIAN_ELEMENTS``.
+        self.snap_max_jacobian_elements = snap_max_jacobian_elements
 
         # the hidden state groups
         self.hidden_outvar_to_invar = hidden_outvar_to_invar
@@ -1187,6 +1418,58 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             for sub, seeds, feedback in _map_positions_to_subjaxpr_seeds(eqn, positions)
         )
 
+    def _attach_snap_pattern(self, group: HiddenGroup) -> HiddenGroup:
+        """Derive and attach this group's SnAp-n neighbourhood, if one is asked for.
+
+        A degenerate result (``K == 1``) is legitimate -- a group with no
+        cross-position coupling has nothing to retain, and ``sparse_n`` there is
+        exactly ``coupled`` -- but it is also what a silently failing analysis
+        would produce, so it is reported. A conservative result is reported too,
+        since it can inflate the trace by orders of magnitude.
+        """
+        if self.sparse_n is None or group.descent is not None:
+            return group
+        pattern = build_snap_pattern(
+            group.transition_jaxpr, group.varshape, self.sparse_n,
+            num_state=group.num_state,
+            max_jacobian_elements=self.snap_max_jacobian_elements,
+        )
+        if pattern.conservative:
+            emit(
+                kind=DiagnosticKind.SNAP_PATTERN_CONSERVATIVE,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'The SnAp-n position analysis could not derive a pattern for '
+                    f'hidden group {group.index} ({group.hidden_paths}) and widened '
+                    f'to all-to-all (K={pattern.num_neighbour} of '
+                    f'{pattern.num_position} positions): {pattern.reason} The '
+                    f'approximation is not degraded -- a superset neighbourhood '
+                    f'only moves the rule towards within-group RTRL -- but the '
+                    f'trace is larger than sparse_n={self.sparse_n} implies. '
+                    f'Note that within-group RTRL equals BPTT only when the '
+                    f'group\'s tail is position-preserving; see F-31 in '
+                    f'docs/specs/2026-07-25-known-limitations.md.'
+                ),
+                hidden_paths=tuple(group.hidden_paths),
+                context={'num_neighbour': pattern.num_neighbour,
+                         'num_position': pattern.num_position,
+                         'sparse_n': self.sparse_n},
+            )
+        elif pattern.is_degenerate:
+            emit(
+                kind=DiagnosticKind.SNAP_PATTERN_DEGENERATE,
+                level=DiagnosticLevel.INFO,
+                message=(
+                    f'Hidden group {group.index} ({group.hidden_paths}) has no '
+                    f'cross-position coupling in its transition, so SnAp-n at '
+                    f'sparse_n={self.sparse_n} retains a single position and '
+                    f"computes exactly what recurrence_scope='coupled' computes."
+                ),
+                hidden_paths=tuple(group.hidden_paths),
+                context={'sparse_n': self.sparse_n},
+            )
+        return group._replace(snap=pattern)
+
     def _post_check(self) -> Tuple[
         Sequence[HiddenGroup],
         Dict[Path, HiddenGroup],
@@ -1295,6 +1578,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 transition_jaxpr_constvars=list(jaxpr.constvars),
                 is_diagonal_recurrence=not self.include_recurrent_mixing,
             )
+            group = self._attach_snap_pattern(group)
             # Belt-and-braces: the per-transition shape filter in
             # ``_simplify_hid2hid_tracer`` should already guarantee this, but
             # a merged group violating it would corrupt concat/split downstream.
@@ -1597,6 +1881,8 @@ def find_hidden_groups_from_jaxpr(
     outvar_to_hidden_path: Dict[HiddenOutVar, Path],
     path_to_state: Dict[Path, brainstate.State],
     include_recurrent_mixing: bool = False,
+    sparse_n: Optional[int] = None,
+    snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     descended_hidden_paths: FrozenSet[Path] = frozenset(),
@@ -1652,6 +1938,8 @@ def find_hidden_groups_from_jaxpr(
         # brainstate is currently untyped (both collapse to Any).
         path_to_state=cast(Dict[Path, brainstate.HiddenState], path_to_state),  # type: ignore[redundant-cast]
         include_recurrent_mixing=include_recurrent_mixing,
+        sparse_n=sparse_n,
+        snap_max_jacobian_elements=snap_max_jacobian_elements,
         control_flow=control_flow,
         descended_scan_eqn_ids=descended_scan_eqn_ids,
         descended_hidden_paths=descended_hidden_paths,
@@ -1663,6 +1951,8 @@ def find_hidden_groups_from_jaxpr(
 def find_hidden_groups_from_minfo(
     minfo: ModuleInfo,
     include_recurrent_mixing: bool = False,
+    sparse_n: Optional[int] = None,
+    snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     descended_hidden_paths: FrozenSet[Path] = frozenset(),
 ):
@@ -1675,6 +1965,10 @@ def find_hidden_groups_from_minfo(
     include_recurrent_mixing : bool, default False
         Whether to trace recurrent ETP mixing primitives into the transition
         jaxpr. See :func:`find_hidden_groups_from_jaxpr` for the full semantics.
+    sparse_n : int, optional
+        SnAp order for ``recurrence_scope='sparse_n'``. When given, each group
+        carries the derived n-step neighbourhood in its ``snap`` field. Default
+        ``None``.
     descended_scan_eqn_ids : frozenset of int, default ``frozenset()``
         ``id()`` values of scan equations rewritten by structured scan descent
         (Phase 4); those equations are skipped by the hidden-group walker.
@@ -1704,6 +1998,8 @@ def find_hidden_groups_from_minfo(
         outvar_to_hidden_path=minfo.outvar_to_hidden_path,
         path_to_state=minfo.retrieved_model_states,
         include_recurrent_mixing=include_recurrent_mixing,
+        sparse_n=sparse_n,
+        snap_max_jacobian_elements=snap_max_jacobian_elements,
         control_flow=minfo.control_flow,
         descended_scan_eqn_ids=descended_scan_eqn_ids,
         descended_hidden_paths=descended_hidden_paths,
@@ -1715,6 +2011,8 @@ def find_hidden_groups_from_module(
     model: brainstate.nn.Module,
     *model_args,
     include_recurrent_mixing: bool = False,
+    sparse_n: Optional[int] = None,
+    snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     **model_kwargs,
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """Find hidden groups from a model.
@@ -1729,6 +2027,9 @@ def find_hidden_groups_from_module(
         Whether to trace recurrent ETP mixing primitives into the transition
         jaxpr. Keyword-only. See :func:`find_hidden_groups_from_jaxpr` for the
         full semantics.
+    sparse_n : int, optional
+        SnAp order for ``recurrence_scope='sparse_n'``. Keyword-only. Default
+        ``None``.
     **model_kwargs
         The keyword arguments of the model.
 
@@ -1757,4 +2058,9 @@ def find_hidden_groups_from_module(
         1
     """
     minfo = extract_module_info(model, *model_args, **model_kwargs)
-    return find_hidden_groups_from_minfo(minfo, include_recurrent_mixing=include_recurrent_mixing)
+    return find_hidden_groups_from_minfo(
+        minfo,
+        include_recurrent_mixing=include_recurrent_mixing,
+        sparse_n=sparse_n,
+        snap_max_jacobian_elements=snap_max_jacobian_elements,
+    )

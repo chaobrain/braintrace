@@ -228,7 +228,29 @@ etp_gmm_p = register_primitive(
     trainable_invars_fn=_gmm_trainable_invars,
     x_invar_index=0,
 )
+def _grouped_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_gmm`` / ``etp_gmv``.
+
+    The trace keeps the group axis and the per-group output axis
+    (``(..., G, K, N, S)``), so slot ``[g, k, n]`` carries the influence of
+    ``W[g, k, n]``, whose instantaneous term lands on output position
+    ``(g, n)`` alone.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused).
+
+    Returns
+    -------
+    bool
+        Always ``True``.
+    """
+    return True
+
+
 etp_gmm_p.register_etp_rules(
+    snap_anchor=_grouped_snap_anchor,
     dt_to_t=_gmm_dt_to_t,
     xy_to_dw=_gmm_xy_to_dw,
     init_drtrl=_gmm_init_drtrl,
@@ -316,6 +338,7 @@ etp_gmv_p = register_primitive(
     x_invar_index=0,
 )
 etp_gmv_p.register_etp_rules(
+    snap_anchor=_grouped_snap_anchor,
     dt_to_t=_gmv_dt_to_t,
     xy_to_dw=_gmv_xy_to_dw,
     init_drtrl=_gmv_init_drtrl,

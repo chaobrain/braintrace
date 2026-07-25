@@ -1591,3 +1591,206 @@ class TestWhileRecurrentMixingGuard:
         assert list(group.transition_jaxpr.eqns) == []
         kinds = [r.kind for r in reporter.records()]
         assert DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING in kinds
+
+
+# ---------------------------------------------------------------------------
+# SnAp-n: the widened transition operator (P3)
+# ---------------------------------------------------------------------------
+
+from braintrace._compiler.hidden_group import widened_block_jacobian
+from braintrace._compiler.position_graph import SnapPattern, build_snap_pattern
+
+
+def _full_jacobian(fn, h):
+    """The whole ``(P, S, P, S)`` cross-position Jacobian, for reference."""
+    num_state = h.shape[-1]
+    num_pos = int(np.prod(h.shape[:-1]))
+    return np.asarray(jax.jacrev(fn)(h)).reshape(num_pos, num_state, num_pos, num_state)
+
+
+def _identity_snap(num_pos):
+    return (np.arange(num_pos, dtype=np.int32)[:, None],
+            np.ones((num_pos, 1), dtype=bool))
+
+
+def _saturated_snap(num_pos):
+    return (np.tile(np.arange(num_pos, dtype=np.int32), (num_pos, 1)),
+            np.ones((num_pos, num_pos), dtype=bool))
+
+
+class TestWidenedBlockJacobian:
+    """``widened_block_jacobian`` gathers ``Dg`` out of the full Jacobian.
+
+    ``Dg[p, (k, a), (k', b)] = J[nbr[p,k], a, nbr[p,k'], b]`` masked by the
+    validity of both slots. Its identity element (``K == 1``) must reproduce
+    ``block_diagonal_last_dim`` exactly, and its saturated form must reproduce
+    the whole Jacobian for every position -- those two ends are what make the
+    SnAp scale a scale.
+    """
+
+    def _fn_and_point(self, num_pos=4, num_state=2, seed=0):
+        rng = brainstate.random.RandomState(seed)
+        w = rng.randn(num_pos * num_state, num_pos * num_state)
+        h = rng.randn(num_pos, num_state)
+        b = rng.randn(num_pos * num_state)
+
+        def fn(hid):
+            flat = hid.reshape(-1)
+            return jnp.tanh(flat @ w + b).reshape(hid.shape)
+
+        return fn, h
+
+    def test_single_neighbour_reproduces_the_block_diagonal(self):
+        fn, h = self._fn_and_point()
+        nbr, valid = _identity_snap(h.shape[0])
+        got = widened_block_jacobian(fn, h, nbr, valid)
+        want = block_diagonal_last_dim(fn, h)
+        assert got.shape == want.shape
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+    def test_saturated_reproduces_the_full_jacobian_for_every_position(self):
+        fn, h = self._fn_and_point()
+        num_pos, num_state = h.shape
+        nbr, valid = _saturated_snap(num_pos)
+        got = np.asarray(widened_block_jacobian(fn, h, nbr, valid))
+        assert got.shape == (num_pos, num_pos * num_state, num_pos * num_state)
+        want = _full_jacobian(fn, h).transpose(0, 1, 2, 3)
+        want = _full_jacobian(fn, h).reshape(num_pos * num_state, num_pos * num_state)
+        for p in range(num_pos):
+            np.testing.assert_allclose(got[p], want, rtol=1e-6, atol=1e-6)
+
+    def test_an_invalid_slot_has_a_zero_row_and_a_zero_column(self):
+        fn, h = self._fn_and_point()
+        num_pos, num_state = h.shape
+        # two neighbour slots, but position 0's second slot is padding
+        nbr = np.stack([np.arange(num_pos), (np.arange(num_pos) + 1) % num_pos], 1)
+        nbr = nbr.astype(np.int32)
+        valid = np.ones((num_pos, 2), dtype=bool)
+        valid[0, 1] = False
+        nbr[0, 1] = 0  # padded slots repeat self
+        got = np.asarray(widened_block_jacobian(fn, h, nbr, valid))
+        pad = slice(num_state, 2 * num_state)
+        np.testing.assert_array_equal(got[0, pad, :], 0.0)
+        np.testing.assert_array_equal(got[0, :, pad], 0.0)
+        # ... while a *valid* second slot at another position is not zero
+        assert np.abs(got[1, pad, :]).max() > 0
+
+    def test_entries_match_the_gather_definition(self):
+        fn, h = self._fn_and_point(num_pos=5, num_state=2, seed=3)
+        num_pos, num_state = h.shape
+        rng = np.random.RandomState(0)
+        nbr = np.stack(
+            [np.arange(num_pos), rng.permutation(num_pos), rng.permutation(num_pos)],
+            axis=1,
+        ).astype(np.int32)
+        valid = np.ones((num_pos, 3), dtype=bool)
+        got = np.asarray(widened_block_jacobian(fn, h, nbr, valid))
+        full = _full_jacobian(fn, h)
+        num_nbr = nbr.shape[1]
+        for p in range(num_pos):
+            for k in range(num_nbr):
+                for a in range(num_state):
+                    for k2 in range(num_nbr):
+                        for b in range(num_state):
+                            np.testing.assert_allclose(
+                                got[p, k * num_state + a, k2 * num_state + b],
+                                full[nbr[p, k], a, nbr[p, k2], b],
+                                rtol=1e-6, atol=1e-6,
+                            )
+
+    def test_forward_mode_agrees_with_reverse_mode(self):
+        fn, h = self._fn_and_point()
+        nbr, valid = _saturated_snap(h.shape[0])
+        rev = np.asarray(widened_block_jacobian(fn, h, nbr, valid))
+        fwd = np.asarray(widened_block_jacobian(fn, h, nbr, valid, use_forward_mode=True))
+        np.testing.assert_allclose(rev, fwd, rtol=1e-6, atol=1e-6)
+
+    def test_varshape_with_several_axes_is_preserved(self):
+        w = brainstate.random.RandomState(1).randn(6, 6)
+        h = jnp.zeros((2, 3, 1))
+
+        def fn(hid):
+            return jnp.tanh(hid.reshape(1, -1) @ w).reshape(hid.shape)
+
+        nbr, valid = _saturated_snap(6)
+        got = widened_block_jacobian(fn, h, nbr, valid)
+        assert got.shape == (2, 3, 6, 6)  # (*varshape, K*S, K*S), S == 1
+
+
+class _SnapTanhRNN(brainstate.nn.Module):
+    """``h <- tanh(x @ win + matmul(h, w))`` -- one group, dense recurrence."""
+
+    def __init__(self, n_in=3, n_rec=4):
+        super().__init__()
+        self.w = brainstate.ParamState(
+            0.5 * brainstate.random.RandomState(0).randn(n_rec, n_rec))
+        self.win = brainstate.ParamState(
+            0.5 * brainstate.random.RandomState(1).randn(n_in, n_rec))
+        self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+    def update(self, x):
+        self.h.value = jnp.tanh(
+            x @ self.win.value + braintrace.matmul(self.h.value, self.w.value))
+        return self.h.value
+
+
+class TestHiddenGroupSnapWidening:
+    """``HiddenGroup`` carries the pattern and dispatches on it."""
+
+    def _compiled(self):
+        net = _SnapTanhRNN()
+        brainstate.nn.init_all_states(net)
+        x = jnp.ones((1, 3))
+        groups, _ = find_hidden_groups_from_module(net, x, include_recurrent_mixing=True)
+        assert len(groups) == 1
+        group = groups[0]
+        hidden_vals = [
+            brainstate.random.RandomState(7 + i).randn(*v.aval.shape).astype(v.aval.dtype)
+            for i, v in enumerate(group.hidden_invars)
+        ]
+        input_vals = [
+            brainstate.random.RandomState(11 + i).randn(*v.aval.shape).astype(v.aval.dtype)
+            for i, v in enumerate(group.transition_jaxpr_constvars)
+        ]
+        return group, hidden_vals, input_vals
+
+    def test_trace_state_width_defaults_to_num_state(self):
+        group, _, _ = self._compiled()
+        assert group.snap is None
+        assert group.trace_state_width == group.num_state
+
+    def test_trace_state_width_is_k_times_num_state(self):
+        group, _, _ = self._compiled()
+        pattern = build_snap_pattern(group.transition_jaxpr, group.varshape, 2)
+        widened = group._replace(snap=pattern)
+        assert pattern.num_neighbour == 4  # dense recurrence saturates at n=2
+        assert widened.trace_state_width == 4 * group.num_state
+
+    def test_diagonal_jacobian_dispatches_on_the_pattern(self):
+        group, hidden_vals, input_vals = self._compiled()
+        pattern = build_snap_pattern(group.transition_jaxpr, group.varshape, 2)
+        widened = group._replace(snap=pattern)
+
+        plain = group.diagonal_jacobian(hidden_vals, input_vals)
+        wide = widened.diagonal_jacobian(hidden_vals, input_vals)
+        width = widened.trace_state_width
+        s = group.num_state
+        assert plain.shape == (*group.varshape, s, s)
+        assert wide.shape == (*group.varshape, width, width)
+        # slot 0 of the widened operator is the un-widened block diagonal, and
+        # the off-diagonal blocks it adds are genuinely non-zero (otherwise the
+        # equality above would hold vacuously)
+        np.testing.assert_allclose(
+            np.asarray(wide)[..., :s, :s], np.asarray(plain), rtol=1e-6, atol=1e-6
+        )
+        assert np.abs(np.asarray(wide)[..., s:, :s]).max() > 1e-6
+
+    def test_a_degenerate_pattern_reproduces_the_coupled_jacobian(self):
+        group, hidden_vals, input_vals = self._compiled()
+        pattern = build_snap_pattern(group.transition_jaxpr, group.varshape, 1)
+        assert pattern.num_neighbour == 1
+        widened = group._replace(snap=pattern)
+        np.testing.assert_array_equal(
+            np.asarray(widened.diagonal_jacobian(hidden_vals, input_vals)),
+            np.asarray(group.diagonal_jacobian(hidden_vals, input_vals)),
+        )
