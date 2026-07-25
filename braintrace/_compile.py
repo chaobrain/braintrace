@@ -26,6 +26,10 @@ from ._algorithm import (
     ETraceConfig,
     IODimVjpAlgorithm,
     ParamDimVjpAlgorithm,
+    RandomProjectionVjpAlgorithm,
+    UORO,
+    ThreeFactor,
+    DNI,
     D_RTRL,
     pp_prop,
     EProp,
@@ -47,6 +51,9 @@ _ALGORITHM_REGISTRY: dict[str, type[ETraceAlgorithm]] = {
     'e_prop': EProp,
     'ostl_recurrent': OSTLRecurrent,
     'ostl_feedforward': OSTLFeedforward,
+    'uoro': UORO,
+    'three_factor': ThreeFactor,
+    'dni': DNI,
 }
 
 
@@ -55,6 +62,7 @@ _ALGORITHM_REGISTRY: dict[str, type[ETraceAlgorithm]] = {
 _FACTORIZATION_TO_ENGINE: dict[str, type[ETraceAlgorithm]] = {
     'per_param': ParamDimVjpAlgorithm,
     'io_factorized': IODimVjpAlgorithm,
+    'random_projection': RandomProjectionVjpAlgorithm,
 }
 
 

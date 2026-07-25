@@ -294,12 +294,17 @@ class ETraceAlgorithm(brainstate.nn.Module):
                 )
                 and not getattr(self, '_supports_scan_descent', False)
             ):
+                # Engines whose refusal has an axis-level reason (rather than
+                # merely missing support) state it via this hook, so the message
+                # names the coordinate instead of only the mechanism.
+                reason = getattr(self, '_scan_descent_refusal_reason', None)
                 raise NotImplementedError(
                     f'{type(self).__name__} does not support structured scan '
                     f'descent yet (an ETP relation or hidden group was '
                     f'discovered inside a scan body). Use an algorithm that '
                     f'supports scan descent, or set '
                     f"ControlFlowPolicy(scan_descent='off')."
+                    + (f' {reason}' if reason else '')
                 )
 
             # --- the initialization of the states --- #
@@ -355,7 +360,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         """
         return self.graph_executor.show_graph(verbose=verbose, return_msg=return_msg)
 
-    def __call__(self, *args: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """
         Update the model and the eligibility trace states.
 
@@ -363,15 +368,20 @@ class ETraceAlgorithm(brainstate.nn.Module):
         ----------
         *args
             The input arguments.
+        **kwargs
+            Per-call options forwarded to :meth:`update`. Not model inputs: the
+            model's forward call receives ``*args`` only. Used by axes that take
+            a per-call auxiliary signal, e.g. ``learning_signal='modulatory'``
+            accepts ``modulator=``.
 
         Returns
         -------
         Any
             The output of the update method.
         """
-        return self.update(*args)
+        return self.update(*args, **kwargs)
 
-    def update(self, *args: Any) -> Any:
+    def update(self, *args: Any, **kwargs: Any) -> Any:
         """
         Update the model and the eligibility trace states.
 
@@ -379,6 +389,8 @@ class ETraceAlgorithm(brainstate.nn.Module):
         ----------
         *args
             The input arguments.
+        **kwargs
+            Per-call options, not model inputs. See :meth:`__call__`.
 
         Returns
         -------

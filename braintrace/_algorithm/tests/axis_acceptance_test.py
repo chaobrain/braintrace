@@ -438,6 +438,70 @@ class TestCompileIntegration:
             )
 
 
+# ---------------------------------------------------------------------------
+# P4 preset coordinates
+#
+# Field by field, not by equality against a hand-written config: an equality
+# assertion silently follows the preset if someone edits it, whereas naming each
+# field records what the preset *is supposed to be* and fails when it drifts.
+# ---------------------------------------------------------------------------
+
+class TestP4PresetCoordinates:
+
+    def test_uoro_is_random_projection_at_coupled_scope(self):
+        cfg = braintrace.UORO._default_config
+        assert cfg.trace_factorization == 'random_projection'
+        assert cfg.recurrence_scope == 'coupled'
+        assert cfg.learning_signal == 'symmetric'
+        assert cfg.trace_filter == 'none'
+        assert cfg.update_schedule == 'per_step'
+        assert cfg.kappa is None and cfg.decay is None and cfg.sparse_n is None
+
+    def test_three_factor_is_d_rtrl_with_a_modulatory_signal(self):
+        cfg = braintrace.ThreeFactor._default_config
+        ref = braintrace.D_RTRL._default_config
+        assert cfg.learning_signal == 'modulatory'
+        assert cfg.trace_factorization == ref.trace_factorization == 'per_param'
+        assert cfg.temporal_recursion == ref.temporal_recursion
+        assert cfg.recurrence_scope == ref.recurrence_scope == 'diagonal'
+        assert cfg.trace_filter == ref.trace_filter
+        assert cfg.update_schedule == ref.update_schedule
+
+    def test_dni_is_d_rtrl_with_a_bootstrapped_signal(self):
+        cfg = braintrace.DNI._default_config
+        ref = braintrace.D_RTRL._default_config
+        assert cfg.learning_signal == 'bootstrapped'
+        assert cfg.trace_factorization == ref.trace_factorization
+        assert cfg.temporal_recursion == ref.temporal_recursion
+        assert cfg.recurrence_scope == ref.recurrence_scope
+        assert cfg.trace_filter == ref.trace_filter
+        assert cfg.update_schedule == ref.update_schedule
+
+    def test_the_three_presets_occupy_three_distinct_coordinates(self):
+        coords = {
+            braintrace.UORO._default_config,
+            braintrace.ThreeFactor._default_config,
+            braintrace.DNI._default_config,
+            braintrace.D_RTRL._default_config,
+        }
+        assert len(coords) == 4, coords
+
+    def test_the_vjp_method_defaults_match_each_rule(self):
+        # Not cosmetic: `modulatory` is meaningless under multi-step (the
+        # in-window half would stay unmodulated) and `bootstrapped` is
+        # meaningless under single-step (there is no window to have an exit).
+        import inspect
+        assert inspect.signature(
+            braintrace.ThreeFactor.__init__).parameters[
+                'vjp_method'].default == 'single-step'
+        assert inspect.signature(
+            braintrace.DNI.__init__).parameters[
+                'vjp_method'].default == 'multi-step'
+        assert inspect.signature(
+            braintrace.UORO.__init__).parameters[
+                'vjp_method'].default == 'multi-step'
+
+
 def _leafwise(actual: dict, reference: dict) -> dict:
     """Per-leaf relative deviation, keyed by leaf label.
 

@@ -48,9 +48,6 @@ _VOCABULARY: Dict[str, Tuple[str, ...]] = {
 
 #: ``(axis, value) -> where it is scheduled``. Rejected by matrix rule 8.
 _UNIMPLEMENTED: Dict[Tuple[str, str], str] = {
-    ('trace_factorization', 'random_projection'): 'P4 (UORO)',
-    ('learning_signal', 'modulatory'): 'P4 (three-factor)',
-    ('learning_signal', 'bootstrapped'): 'P4 (DNI)',
     ('update_schedule', 'window'): 'no phase yet',
     ('update_schedule', 'sequence_end'): 'no phase yet',
 }
@@ -144,7 +141,13 @@ class ETraceConfig:
         ``'per_param'`` keeps a trace per parameter element
         (:class:`~braintrace.ParamDimVjpAlgorithm`, ``O(P*H)``);
         ``'io_factorized'`` keeps an input-side and an output-side factor
-        (:class:`~braintrace.IODimVjpAlgorithm`, ``O(I+O)``).
+        (:class:`~braintrace.IODimVjpAlgorithm`, ``O(I+O)``);
+        ``'random_projection'`` keeps a rank-1 ``(hidden, parameter)`` factor
+        pair carrying UORO's unbiased estimator
+        (:class:`~braintrace.RandomProjectionVjpAlgorithm`,
+        ``O(|theta| + P*S)`` of *carrier storage*). It is the only coordinate
+        whose trace is unbiased, and it requires
+        ``recurrence_scope='coupled'`` -- see rule 11.
     temporal_recursion : str or tuple of str, default 'jacobian'
         The structural operator ``R`` in the trace recurrence. ``'jacobian'``
         uses the hidden-to-hidden Jacobian ``D``, ``'scalar_leak'`` replaces it
@@ -165,7 +168,13 @@ class ETraceConfig:
     learning_signal : str, default 'symmetric'
         Where the per-hidden-group signal comes from. ``'symmetric'`` uses the
         true ``dL/dh``; ``'random_feedback'`` projects it through a fixed random
-        matrix (feedback alignment).
+        matrix (feedback alignment); ``'modulatory'`` *replaces* it with a
+        user-supplied neuromodulator (three-factor learning -- one array expanded
+        to every group, never a per-group sequence, and single-step only);
+        ``'bootstrapped'`` leaves it alone and instead injects a learned estimate
+        of the future-loss gradient at the window's *exit* cotangent (DNI), which
+        reaches the plain parameters only -- the eligibility trace already
+        carries the ETP parameters' cross-window credit.
     trace_filter : str, default 'none'
         Optional low-pass on the trace. ``'kappa'`` applies
         ``e_bar <- kappa * e_bar + e``, e-prop's filter.
@@ -384,6 +393,11 @@ class ETraceConfig:
             self._rules_4_5_per_param_decay,
             self._rule_6_factorized_needs_decay,
             self._rule_7_coefficients_need_their_category,
+            # Rule 11 runs before rule 9 so that a `random_projection` config
+            # naming an illegal scope is explained by the factorization the user
+            # chose, not by rule 9's io_factorized-specific argument about the
+            # x-side having no hidden index to widen.
+            self._rule_11_random_projection_needs_the_coupled_scope,
             self._rule_9_sparse_n_needs_per_param,
             self._rule_10_sparse_n_is_a_widening_order,
         ):
@@ -406,13 +420,26 @@ class ETraceConfig:
 
     def _rule_1_kappa_needs_per_param(self) -> None:
         if self.trace_filter == 'kappa' and self.trace_factorization != 'per_param':
+            if self.trace_factorization == 'random_projection':
+                why = (
+                    'a rank-1 carrier, and the sum of two rank-1 traces at '
+                    'different times is rank-2, so the filter cannot be applied '
+                    'to the factors without changing the estimator (and '
+                    'destroying its unbiasedness).'
+                )
+            else:
+                why = (
+                    'an input/output factor pair, so it cannot store the filtered '
+                    'sum; filtering the two factors separately is a different '
+                    'rule.'
+                )
             raise ValueError(
                 "trace_filter='kappa' requires "
                 "trace_factorization='per_param', not "
                 f"{self.trace_factorization!r}. The filtered trace "
-                '`e_bar <- kappa * e_bar + e` is not rank-1, so it cannot be '
-                'stored factorised; filtering the two factors separately is a '
-                "different rule. Use trace_filter='none'."
+                f'`e_bar <- kappa * e_bar + e` is not rank-1, and '
+                f'{self.trace_factorization!r} keeps {why} '
+                "Use trace_filter='none'."
             )
 
     def _rule_2_scope_needs_a_jacobian(self) -> None:
@@ -514,6 +541,36 @@ class ETraceConfig:
         assert order >= 2, (
             f'sparse_n={order} survived canonicalisation; n=1 must have been '
             "rewritten onto recurrence_scope='coupled'."
+        )
+
+    def _rule_11_random_projection_needs_the_coupled_scope(self) -> None:
+        if self.trace_factorization != 'random_projection':
+            return
+        if self.recurrence_scope == 'coupled':
+            return
+        if self.recurrence_scope == 'diagonal':
+            why = (
+                "'diagonal' deletes the recurrent mixing from the transition, so "
+                'the rank-1 estimator would be an *unbiased estimate of an '
+                'already-biased trace*: strictly more variance than the '
+                'per-parameter trace, the same asymptotic error, and no memory '
+                'saved -- the anchored per_param trace is already smaller than '
+                "UORO's two factors."
+            )
+        else:  # 'sparse_n'
+            why = (
+                "'sparse_n' widens the trace's trailing state axis to retain n "
+                'steps of influence, but the random projection retains the *whole* '
+                'within-group influence in expectation already, so the widening '
+                'would pay SnAp-n memory for an accuracy the estimator has '
+                'without it.'
+            )
+        raise ValueError(
+            "trace_factorization='random_projection' requires "
+            f"recurrence_scope='coupled', not {self.recurrence_scope!r}. UORO "
+            'rolls the *full* within-group hidden-to-hidden Jacobian, and '
+            "'coupled' is the coordinate that puts the recurrent ETP mixing into "
+            f'the transition for it to be full of. {why}'
         )
 
     # -- derived views ----------------------------------------------------- #

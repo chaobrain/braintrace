@@ -57,6 +57,10 @@ resolution, never that a test stopped being run.
 | F-29 | `pp_prop(decay_or_rank=1)` is a genuine approximation | **active, misattributed as approximate** — rank 1 means decay 0, so the presynaptic EMA collapses to the exact current input | `tests/approx_correctness_test.py::test_rank1_pp_prop_is_degenerate_on_a_recurrent_only_relation` pins both sides |
 | F-30 | the IO-dim f-side de-biasing correction is indexed by `update()` call count, not by trace-step count, so it is exact only for single-step input | active, **preserved deliberately** — fixing it moves `pp_prop` / `OSTLFeedforward` gradients | `io_dim_vjp_test.py::TestBiasCorrectionTimeIndex`, both the structural claim and the finite-window consequence |
 | F-31 | on a hidden group whose `y -> hidden` tail is not position-preserving, *no* within-group scope reaches BPTT — saturated SnAp / full within-group RTRL included | active, **structural** — pre-P3, affects every `recurrence_scope`; the compiler detects the tail and warns | `_algorithm/snap_n_test.py::TestConservativeFallbackEndToEnd::test_a_relabelling_tail_defeats_saturation_and_says_so`, against the `roll=0` control; measured below |
+| F-32 | the coupled-scope transition is materialised as a dense `(*V, S, *V, S)` Jacobian, so `random_projection` costs `O((V·S)^2)` per group even though it only ever needs `D @ s_tilde` — one JVP would do | active, **deliberate**; a matrix-free `D_full` would need a JVP seam the executor does not have | `_algorithm/vjp_graph_executor_test.py::TestFullJacobianFlag::test_the_flag_changes_the_jacobian_shape` records the shape; UORO's docstring states the memory honestly |
+| F-33 | under `vjp_method='single-step'`, every **plain** (non-ETP) parameter's gradient is exactly **zero** — not merely truncated | active, **structural** | `oracle_models_test.py::test_single_step_zeroes_every_plain_key`, and for the preset that cannot avoid it, `three_factor_test.py::TestItDoesSomethingMeasurably::test_every_plain_parameter_gets_an_exact_zero_which_is_f_33`; consequence documented in `ThreeFactor`'s docstring |
+| F-34 | in the multi-step backward pass, `dg_etrace_params` carries the within-window gradient of **every** trainable parameter, plain ones included, while `dg_non_etrace_params` is empty — so the ETP/plain split cannot be read off which dictionary a parameter arrives in | active, **naming only**; the graph is the authority | `_algorithm/vjp_base_test.py::TestTheDefaultHooksAreInert::test_etp_routed_paths_reads_the_compiled_graph`; `_etp_routed_paths()` exists because of this |
+| F-35 | a `train_synthetic_gradient` fit is valid only for the exact `(loss_fn, chunk_size)` pair it was given, and **nothing checks that deployment matches** — a mismatch is not degraded DNI but noise shaped like a cotangent, measurably worse than leaving DNI off | active, **documented not enforced**; the learner never sees the caller's objective, so it has nothing to compare against | `dni_test.py::TestALearnedSynthesiserHelps::test_training_on_the_wrong_window_size_is_worse_than_not_training` pins the `chunk_size` half; the `loss_fn` half is measured in B4's docstring (0.577 against 0.140 for `M ≡ 0`) |
 | F-SCAN / F-SCAN-WEIGHT | weight inside control flow raised `KeyError` | resolved | `_compiler/base_test.py::TestCheckUnsupportedOp::test_error_message_identifies_weight_variable` |
 | F-SINGLESTEP | naive single-step summation does not equal BPTT even for an exact algorithm | active as a property; documented | `online_param_gradients_singlestep_naive`' docstring; used deliberately as the maximally-sensitive window in `oracle_test.py` |
 
@@ -186,6 +190,46 @@ to carry the tail's own permutation alongside the neighbourhood, which is a
 change to the trace layout rather than to any one algorithm. Until then, the
 usable statement is the one in `SnAp`'s docstring: saturation equals BPTT on a
 single-group model with an **elementwise** `y -> hidden` tail.
+
+## Notes on F-33
+
+Under `vjp_method='single-step'` the residual jaxpr yields an **empty**
+`dg_etrace_params` and an empty `dg_non_etrace_params`, so `dG_weights[path]`
+is never written for a non-ETP parameter and stays `None` — which surfaces as an
+exact zero, not as a truncated approximation. Measured on `plain_and_etp_rnn`
+(ETP `w`, plain `win`, `wout`): the single-step total gradient is exactly zero
+for both plain keys while `w` is finite.
+
+This is a property of the single-step window, not of any learning rule, but it
+bounds what a single-step-only rule can train. `ThreeFactor` is single-step by
+construction (see its docstring for why), so a model given to it will train only
+its ETP-routed parameters. The rule for callers: route what you intend to
+modulate through an ETP primitive.
+
+## Notes on F-34
+
+The gradient dictionaries the multi-step backward pass unflattens out of the
+residual jaxpr are named after the *category* they were introduced for, not the
+category they actually carry:
+
+| Name | What it holds under multi-step |
+|---|---|
+| `dg_etrace_params` | the within-window reverse-AD gradient of **every** trainable parameter, ETP-routed and plain alike |
+| `dg_non_etrace_params` | empty |
+
+Measured on `plain_and_etp_rnn`: `dg_etrace_params` arrives keyed
+`[('w',), ('win',), ('wout',)]` and `dg_non_etrace_params` keyed `[]`.
+
+This matters for anything that has to treat the two categories differently. DNI
+does: the injected exit cotangent must reach the plain parameters and must not
+reach the ETP ones. A first implementation that split them by *dictionary* was
+silently a no-op — the plain parameters never moved, because they were not in the
+dictionary it was adding to. `_etp_routed_paths()` exists to ask the compiled
+graph instead, which is the only authority on which parameters have a trace.
+
+Not fixed: renaming the slots would touch every engine's
+`_solve_weight_gradients` signature for no behavioural gain. The hazard is
+recorded here and the helper makes the correct route the easy one.
 
 ## Mapping from the `AGENTS.md` prose list
 

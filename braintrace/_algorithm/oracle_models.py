@@ -725,6 +725,367 @@ def while_settle_twin_rnn(
 
 
 # ---------------------------------------------------------------------------
+# P4 specs: fixtures whose *shape* is the point.
+#
+# Each of these exists because a P4 acceptance criterion is vacuous without it,
+# and each carries the measurement that made it necessary in its docstring. They
+# are deliberately small: `nonzero_init_rnn` is enumerated over 16 sign patterns,
+# so every element costs 16 algorithm constructions.
+# ---------------------------------------------------------------------------
+
+
+def nonzero_init_rnn(n_rec: int = 2, h0: float = 0.4, seed: int = 0) -> ModelSpec:
+    """Minimal dense tanh RNN with a **non-zero initial hidden state**.
+
+    ``h^t = tanh(x^t + matmul(h^{t-1}, w))`` — one square ETP weight, no plain
+    parameters, so ``x`` must carry ``n_rec`` features. This is the reference
+    model for ``trace_factorization='random_projection'`` (UORO), where the pin
+    is that the rolled hidden-to-hidden Jacobian is the *full* within-group one.
+
+    The non-zero ``h0`` is not cosmetic, and it is the reason this spec exists
+    rather than reusing :func:`tanh_rnn`. With ``h^0 = 0`` the recurrent weight's
+    first instantaneous term is identically zero, so the transition is applied to
+    a zero influence and rolling the full Jacobian versus its block diagonal
+    become indistinguishable. Measured at ``n_rec = 2``, ``T = 3``, one-step
+    windows, exhaustive over the two draws that reach a boundary (16 runs),
+    deviation of the enumeration mean from BPTT:
+
+    | initial hidden | full ``D`` | block-diagonal ``D`` |
+    |---|---|---|
+    | ``h0 = 0``     | 1.0e-16 | 3.3e-16 |   <- pin passes for the wrong rule
+    | ``h0 = 0.4``   | 2.1e-16 | 2.6e-04 |   <- pin discriminates
+
+    ``T >= 3`` matters for the same reason: at ``T <= 2`` with one-step windows
+    the boundary trace holds only instantaneous terms and ``D`` never enters.
+
+    ``init_state``/``reset_state`` restore ``h0``, so a re-initialized model
+    repeats a run bit-for-bit -- the other fixtures in this module set their
+    hidden value in ``__init__`` only, which means ``init_all_states`` leaves a
+    *used* model wherever the last step left it.
+
+    Parameters
+    ----------
+    n_rec : int, optional
+        Number of recurrent units. Also the required input width.
+    h0 : float, optional
+        The constant initial hidden value. Must be non-zero for the fixture to
+        do its job; ``0.0`` is accepted so tests can build the negative control.
+    seed : int, optional
+        Seed for the deterministic weight draw.
+
+    Returns
+    -------
+    ModelSpec
+        Spec whose only parameter is the ETP recurrent weight ``w``.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.6 * brainstate.random.randn(n_rec, n_rec))
+                self.h = brainstate.HiddenState(jnp.full((1, n_rec), h0))
+
+            def init_state(self, batch_size=None, **kwargs):
+                size = (n_rec,) if batch_size is None else (batch_size, n_rec)
+                self.h.value = jnp.full(size, h0)
+
+            def reset_state(self, batch_size=None, **kwargs):
+                self.init_state(batch_size, **kwargs)
+
+            def update(self, x):
+                self.h.value = jax.nn.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
+
+
+def unit_weight_rnn(n_in: int = 3, n_rec: int = 4, seed: int = 0) -> ModelSpec:
+    """Two coupled hidden states carrying **different physical units**.
+
+    ``v`` is in mV and ``a`` is in nA, and the compiler groups them into one
+    HiddenGroup with ``num_state == 2``, so ``concat_hidden`` has to strip two
+    *different* units into one mantissa array. The single ETP parameter ``w`` is
+    in mV.
+
+    This is the fixture for every claim of the form "the scalar is applied to
+    mantissas only". A normaliser computed on a concatenated hidden vector whose
+    entries are mV and nA has no meaningful unit, so an implementation that
+    tries to keep units through ``rho`` either raises a
+    ``brainunit`` dimension error here or silently compares mV against nA. A
+    single-unit model cannot tell the two apart.
+
+    Parameters
+    ----------
+    n_in : int, optional
+        Input dimension (dimensionless input).
+    n_rec : int, optional
+        Units per hidden state.
+    seed : int, optional
+        Seed for the deterministic weight draw.
+
+    Returns
+    -------
+    ModelSpec
+        Spec whose only parameter is the ETP input weight ``w`` (in mV).
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_in, n_rec) * u.mV)
+                self.v = brainstate.HiddenState(jnp.zeros((1, n_rec)) * u.mV)
+                self.a = brainstate.HiddenState(jnp.zeros((1, n_rec)) * u.nA)
+
+            def update(self, x):
+                v, a = self.v.value, self.a.value
+                self.v.value = (0.9 * v
+                                + braintrace.matmul(x, self.w.value)
+                                - a * (1.0 * u.mV / u.nA))
+                self.a.value = 0.95 * a + v * (0.1 * u.nA / u.mV)
+                return self.v.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=())
+
+
+def plain_and_etp_rnn(
+    n_in: int = 3, n_rec: int = 4, n_out: int = 2, seed: int = 0
+) -> ModelSpec:
+    """Tanh RNN with one ETP weight and **two kinds of plain weight**.
+
+    ``h^t = tanh(x^t @ win + matmul(h^{t-1}, w))``, output ``h^t @ wout``:
+
+    * ``w`` — ETP recurrent weight; its cross-window credit already flows,
+      through the eligibility trace;
+    * ``win`` — plain, and reaches every *future* loss through the recurrence, so
+      a finite window truncates its credit. This is the parameter
+      ``learning_signal='bootstrapped'`` exists to repair;
+    * ``wout`` — plain, but reaches only the loss at its own step, so its
+      windowed gradient already equals the full-sequence one.
+
+    Both plain kinds are needed. ``wout`` is the control that turns "DNI changed
+    the plain gradients" into "DNI changed exactly the plain gradients that were
+    truncated": a synthesiser that leaks credit into ``wout`` is wrong, and a
+    fixture with only ``win`` cannot see it. Measured, ``T = 4``, ``n_rec = 4``,
+    two-step windows, max-abs gradient:
+
+    | key | BPTT | windowed (D_RTRL, multi-step) |
+    |---|---|---|
+    | ``w``    | 1.437 | 1.437 (exact -- the trace carries it) |
+    | ``win``  | 4.289 | 3.175 (truncated) |
+    | ``wout`` | 4.060 | 4.060 (nothing to truncate) |
+
+    Note that under ``vjp_method='single-step'`` *both* plain keys are identically
+    zero, not merely truncated (F-33), so this fixture belongs to the multi-step
+    windowed path.
+
+    Parameters
+    ----------
+    n_in, n_rec, n_out : int, optional
+        Input, recurrent and output widths.
+    seed : int, optional
+        Seed for the deterministic weight draws.
+
+    Returns
+    -------
+    ModelSpec
+        Spec with ETP ``w`` and plain ``win``, ``wout``.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_rec, n_rec))
+                    self.win = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_in, n_rec))
+                    self.wout = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_rec, n_out))
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                self.h.value = jax.nn.tanh(
+                    x @ self.win.value
+                    + braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value @ self.wout.value
+
+        return Net()
+
+    return ModelSpec(
+        factory=factory,
+        etp_param_keys=(('w',),),
+        plain_param_keys=(('win',), ('wout',)),
+    )
+
+
+def delayed_reward_rnn(
+    n_in: int = 2, n_rec: int = 8, leak: float = 0.95, seed: int = 0
+) -> ModelSpec:
+    """Long-memory leaky RNN for a **delayed-reward** task.
+
+    ``h^t = leak * h^{t-1} + (1 - leak) * tanh(x^t @ win + matmul(h^{t-1}, w))``,
+    scalar output ``h^t @ wout``. The near-unit leak is the point: credit for an
+    input at step 0 survives to step 20 (``0.95^20 = 0.36``), so a reward
+    delivered at the end of the sequence has to be attributed across many
+    windows.
+
+    The ``(1 - leak)`` factor is a **convex** combination, not decoration. Without
+    it the state is a plain accumulator bounded only by ``1 / (1 - leak) = 20``,
+    and every downstream quantity inherits that scale: outputs reach ``O(10)``,
+    squared errors ``O(100)``, and the hidden cotangents that
+    :func:`~braintrace.train_synthetic_gradient` regresses against reach
+    ``O(1e5)``. Measured on the unscaled form at ``T=24``, the synthesiser's
+    regression loss started at ``1.7e5`` and diverged to ``nan`` under its
+    built-in SGD, and plain-SGD training of the model itself diverged at every
+    learning rate down to ``2e-3``. With the factor, ``|h| <= 1`` for all ``T``.
+    The credit span is untouched -- it comes from the ``leak * h`` term, whose
+    Jacobian contribution is still ``leak * I``.
+
+    This is the fixture for the ``bootstrapped`` end-to-end criterion, which a
+    bandit cannot serve -- with no temporal credit to carry there is nothing for
+    a synthetic gradient to supply, and the control runs would tie. The task
+    itself (cue placement, reward definition, held-out sequence) lives in the
+    test, because the same model serves the modulatory smoke test with a
+    different reward.
+
+    Parameters
+    ----------
+    n_in : int, optional
+        Input width. The task uses one cue channel and one distractor.
+    n_rec : int, optional
+        Recurrent width.
+    leak : float, optional
+        Carry coefficient. Values near 1 lengthen the credit span; ``leak`` also
+        makes the hidden-to-hidden Jacobian well-conditioned, so BPTT on the
+        same model is a stable reference.
+    seed : int, optional
+        Seed for the deterministic weight draws.
+
+    Returns
+    -------
+    ModelSpec
+        Spec with ETP ``w`` and plain ``win``, ``wout``.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.2 * brainstate.random.randn(n_rec, n_rec))
+                    self.win = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_in, n_rec))
+                    self.wout = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_rec, 1))
+                self.h = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def update(self, x):
+                self.h.value = leak * self.h.value + (1.0 - leak) * jax.nn.tanh(
+                    x @ self.win.value
+                    + braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value @ self.wout.value
+
+        return Net()
+
+    return ModelSpec(
+        factory=factory,
+        etp_param_keys=(('w',),),
+        plain_param_keys=(('win',), ('wout',)),
+    )
+
+
+def two_island_rnn(n_in: int = 3, n_rec: int = 3, seed: int = 0) -> ModelSpec:
+    """Two **disconnected** recurrent subnetworks -- the only multi-group fixture.
+
+    ``ha`` and ``hb`` each carry their own ETP weight (``wa``, ``wb``) and never
+    read each other; only the loss sees both, via ``ha + hb``.
+
+    This fixture exists because of a property of ``recurrence_scope='coupled'``
+    that is easy to assume away: hidden grouping follows the *transition*, so
+    coupled scope merges every set of mutually reachable hidden states into a
+    single group. Every other spec in this module therefore compiles to exactly
+    **one** group under coupled, including :func:`stacked_tanh_rnn` (whose two
+    layers are joined by the plain inter-layer projection) and
+    :func:`two_state_rnn` (whose ``v`` and ``a`` are joined by construction).
+    Measured, ``stacked_tanh_rnn(n_in=4, n_rec=4)``:
+
+    ==================  ============================
+    ``recurrence_scope``  compiled hidden groups
+    ==================  ============================
+    ``'diagonal'``        2: ``[('h1',)]``, ``[('h2',)]``
+    ``'coupled'``         1: ``[('h1',), ('h2',)]``
+    ==================  ============================
+
+    So a per-group carrier claim ("one hidden factor per group, one parameter
+    factor per group-path pair") cannot be pinned on any pre-existing spec at
+    coupled scope -- the group count is 1 and the two clauses are
+    indistinguishable. Severing the two halves is what separates them.
+
+    Parameters
+    ----------
+    n_in : int, optional
+        Input width. The drive is *added* to each island's recurrent term rather
+        than projected, so this must equal ``n_rec`` (or 1, to broadcast); there
+        is deliberately no input weight to keep both islands purely ETP.
+    n_rec : int, optional
+        Width of each island; the compiled groups are ``n_rec`` wide, not
+        ``2 * n_rec``.
+    seed : int, optional
+        Seed for the deterministic weight draws.
+
+    Returns
+    -------
+    ModelSpec
+        Spec with ETP ``wa`` and ``wb``, no plain parameters.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.wa = brainstate.ParamState(
+                        0.2 * brainstate.random.randn(n_rec, n_rec))
+                    self.wb = brainstate.ParamState(
+                        0.2 * brainstate.random.randn(n_rec, n_rec))
+                self.ha = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+                self.hb = brainstate.HiddenState(jnp.zeros((1, n_rec)))
+
+            def init_state(self, batch_size=None, **kwargs):
+                shape = (batch_size or 1, n_rec)
+                self.ha = brainstate.HiddenState(jnp.zeros(shape))
+                self.hb = brainstate.HiddenState(jnp.zeros(shape))
+
+            def update(self, x):
+                self.ha.value = jax.nn.tanh(
+                    x + braintrace.matmul(self.ha.value, self.wa.value))
+                self.hb.value = jax.nn.tanh(
+                    x + braintrace.matmul(self.hb.value, self.wb.value))
+                return self.ha.value + self.hb.value
+
+        return Net()
+
+    return ModelSpec(
+        factory=factory,
+        etp_param_keys=(('wa',), ('wb',)),
+        plain_param_keys=(),
+    )
+
+
+# ---------------------------------------------------------------------------
 # SNN specs: the realistic-model end of the zoo.
 #
 # These wrap the layer classes in ``braintrace/_etrace_model_test.py`` for

@@ -52,6 +52,141 @@ __all__ = [
 ]
 
 
+def _add_future_for_plain_paths(base: Any, future: Any, etp_paths: Any) -> Any:
+    """Add a second-pass parameter-gradient tree, skipping ETP-routed paths.
+
+    The plain parameters need the future cotangent -- it is the credit their
+    truncated window threw away, and adding it makes the sum over windows
+    telescope. The ETP-routed ones must not get it: their cross-window credit is
+    already carried by the eligibility trace, so adding it here would count the
+    same path twice.
+
+    Parameters
+    ----------
+    base : dict or None
+        Path-keyed gradients from the first pass.
+    future : dict or None
+        Path-keyed gradients from the injected second pass, same structure.
+    etp_paths : set
+        Paths whose credit the trace already carries.
+
+    Raises
+    ------
+    KeyError
+        If ``future`` carries a path ``base`` does not. Both trees are unflattened
+        from the *same* ``in_tree``, so their key sets are identical by
+        construction and this cannot happen. It is checked rather than skipped
+        because the failure mode would be silent: a dropped path loses exactly the
+        cross-window credit this function exists to deliver, and every one of
+        DNI's invariance tests would still pass -- which is how F-34 survived its
+        first implementation.
+
+    Returns
+    -------
+    dict or None
+        ``base`` with the plain-path entries of ``future`` added in.
+    """
+    if not base or not future:
+        return base
+    missing = set(future).difference(base)
+    if missing:
+        raise KeyError(
+            f'the second backward pass produced parameter gradients for paths '
+            f'the first pass did not: {sorted(missing)}. Both trees come from '
+            f'the same `in_tree`, so this indicates the two passes have drifted '
+            f'apart; adding them by path would silently drop these.')
+    out = dict(base)
+    for path, val in future.items():
+        if path in etp_paths:
+            continue
+        out[path] = jax.tree.map(lambda x, y: x + y, out[path], val,
+                                 is_leaf=u.math.is_quantity)
+    return out
+
+
+def expand_modulator_to_group(
+    modulator: Any,
+    group_shape: Tuple[int, ...],
+    *,
+    group_index: int,
+    hidden_paths: Any = None,
+) -> Any:
+    r"""Expand a modulatory signal to one hidden group's signal shape.
+
+    Implements the ``learning_signal='modulatory'`` broadcasting contract. It is
+    deliberately *not* bare NumPy broadcasting: NumPy aligns trailing axes, so a
+    ``(1, n_rec)`` modulator does **not** broadcast to a ``(1, n_rec, 1)``
+    signal -- it would raise, or worse, silently align ``n_rec`` against the
+    state axis when ``num_state == n_rec``. The contract, matching AGENTS.md's
+    SNN learning-signal trailing-axis rule:
+
+    * a scalar is broadcast to the whole group shape;
+    * a modulator shaped exactly like the group's ``varshape`` gains a trailing
+      size-1 state axis first, then broadcasts;
+    * anything else must broadcast against ``(*varshape, num_state)`` as given.
+
+    The expansion is driven only by shapes, never by group index or group count.
+    A scalar reward is therefore valid for any model whatever its HiddenGroup
+    count, which is the property that keeps this axis general (roadmap risk 5).
+
+    Parameters
+    ----------
+    modulator : array_like or Quantity
+        The user-supplied signal. A ``list`` or ``tuple`` is refused: see Raises.
+    group_shape : tuple of int
+        The target ``(*varshape, num_state)``.
+    group_index : int
+        Index of the hidden group, used only in error messages.
+    hidden_paths : optional
+        The group's hidden paths, used only in error messages.
+
+    Returns
+    -------
+    jax.Array or Quantity
+        An array of exactly ``group_shape``.
+
+    Raises
+    ------
+    TypeError
+        If ``modulator`` is a list or tuple. A length-``n_groups`` sequence is
+        the binding that made OSTTP non-general, and there is deliberately no
+        spelling for it.
+    ValueError
+        If the modulator cannot be broadcast, naming the group and both shapes.
+    """
+    if isinstance(modulator, (list, tuple)):
+        raise TypeError(
+            f'The modulatory signal must be ONE array (or scalar) expanded to '
+            f'every hidden group, but a {type(modulator).__name__} of length '
+            f'{len(modulator)} was given. There is deliberately no per-group '
+            f'sequence spelling: binding the signal to the hidden-group '
+            f'decomposition is what made OSTTP non-general, since the group '
+            f'count is a property of the compiled graph rather than of the '
+            f'task. A scalar reward is valid for any model, whatever its group '
+            f'count. To vary the signal across units, pass one array shaped '
+            f'like the group (or its varshape) instead.'
+        )
+
+    m = modulator if isinstance(modulator, u.Quantity) else u.math.asarray(modulator)
+    group_shape = tuple(group_shape)
+
+    if m.ndim > 0 and tuple(m.shape) == group_shape[:-1]:
+        # varshape -> varshape + (1,): the trailing state axis.
+        m = u.math.reshape(m, tuple(m.shape) + (1,))
+
+    try:
+        return u.math.broadcast_to(m, group_shape)
+    except Exception as e:
+        raise ValueError(
+            f'The modulatory signal of shape {tuple(u.math.shape(modulator))} '
+            f'cannot be expanded to hidden group {group_index} '
+            f'(hidden_paths={hidden_paths}), whose signal shape is '
+            f'{group_shape}. Pass a scalar, an array shaped like the group '
+            f'varshape {group_shape[:-1]}, or an array that broadcasts against '
+            f'{group_shape}.'
+        ) from e
+
+
 class ETraceVjpAlgorithm(ETraceAlgorithm):
     r"""
     The base class for the eligibility trace algorithm supporting the VJP gradient
@@ -124,6 +259,18 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     #: :meth:`init_etrace_state` when ``learning_signal='random_feedback'``.
     _random_feedback: Dict[int, FixedRandomFeedback]
 
+    #: The standing modulatory signal for ``learning_signal='modulatory'``,
+    #: assignable between calls. ``update(..., modulator=m)`` takes precedence
+    #: for that one call. There is no fallback to ``symmetric``: a missing
+    #: modulator raises, because silently computing a different learning rule
+    #: than the configured one is worse than failing.
+    modulator: Any = None
+
+    #: Per-call modulator from the ``update(..., modulator=...)`` keyword. Set at
+    #: the top of :meth:`update` and cleared in its ``finally``, so an exception
+    #: mid-update cannot leak a stale signal into the next call.
+    _modulator_this_call: Any = None
+
     def __init__(
         self,
         model: brainstate.nn.Module,
@@ -159,6 +306,22 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 'from, so the run is reproducible. Pass one, e.g. '
                 'random_feedback_key=jax.random.PRNGKey(0).'
             )
+        if (config.learning_signal == 'modulatory'
+                and vjp_method != 'single-step'):
+            raise ValueError(
+                "learning_signal='modulatory' requires "
+                "vjp_method='single-step', but got "
+                f"vjp_method={vjp_method!r}. Under multi-step, "
+                '`_solve_weight_gradients` adds `dl_to_etws_at_t` -- the '
+                'within-window reverse-AD gradient of the ETP parameters -- on '
+                'top of the trace contraction. Replacing the *boundary* signal '
+                'would therefore leave that in-window half unmodulated, giving '
+                'a hybrid whose gradient is part three-factor and part plain '
+                'loss gradient: not the rule this axis names. Single-step makes '
+                'every ETP contribution flow through the replaced signal, and '
+                'makes the modulator per step, which is what a neuromodulator '
+                'is.'
+            )
 
         # graph
         graph_executor = ETraceVjpGraphExecutor(
@@ -168,6 +331,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             sparse_n=config.sparse_n,
             snap_max_jacobian_elements=snap_max_jacobian_elements,
             control_flow=control_flow,
+            # A rank-1 estimator only pays for itself against the *full*
+            # within-group recursion (matrix rule 11 pins the scope), so the
+            # random-projection engine needs the whole transition Jacobian
+            # rather than its per-position blocks. One constructor flag, no
+            # compiler metadata -- unlike ``sparse_n``, which needs
+            # ``group.snap`` built at compile time.
+            full_jacobian=config.trace_factorization == 'random_projection',
         )
 
         # super initialization
@@ -380,7 +550,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         return substituted_stepper
 
-    def update(self, *args: Any) -> Any:
+    def update(self, *args: Any, modulator: Any = None) -> Any:
         r"""
         Update the model states and the eligibility trace.
 
@@ -396,6 +566,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         ----------
         *args
             The input arguments.
+        modulator : array_like or Quantity, optional
+            The per-call modulatory signal for ``learning_signal='modulatory'``,
+            taking precedence over the :attr:`modulator` attribute for this call
+            only. It is **not** forwarded to the model's forward call; it reaches
+            the rule through :meth:`_get_update_aux`. Ignored on every other
+            ``learning_signal``.
 
         Returns
         -------
@@ -441,6 +617,19 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         be fed into the model within five consecutive steps, and the second input argument will be fed
         into the model at each time of this five consecutive steps.
         """
+        # The per-call modulator is stashed rather than threaded, because
+        # `update()` is the public entry point of a long chain that ends in
+        # `_get_update_aux`. Cleared in the `finally` so that an exception raised
+        # anywhere below -- a shape error in the model, a failed expansion --
+        # cannot leave a stale signal to be silently reused by the next call.
+        self._modulator_this_call = modulator
+        try:
+            return self._update_impl(*args)
+        finally:
+            self._modulator_this_call = None
+
+    def _update_impl(self, *args: Any) -> Any:
+        """The body of :meth:`update`. See there for the semantics."""
 
         # ----------------------------------------------------------------------------------------------
         #
@@ -729,6 +918,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             running_index,
             args,  # threaded to _update_fn_bwd for the learning-signal hook
             aux,  # per-call auxiliary data (see _get_update_aux), also threaded to the hook
+            # `learning_signal='bootstrapped'`: the synthetic cotangent for the
+            # window-exit hidden values. Computed here because this is the only
+            # place `h^exit` exists, and stashed in the residuals rather than
+            # recomputed in the backward pass.
+            self._inject_exit_cotangent(hiddens, aux),
         )
         return fwd_out, fwd_res
 
@@ -759,6 +953,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             running_index,  # the running index
             args,  # original update(*args) tuple, used by _compute_learning_signal
             aux,  # per-call auxiliary data from _get_update_aux, also used by _compute_learning_signal
+            exit_cotangent,  # `bootstrapped`: synthetic cotangent at h^exit, or None
         ) = fwd_res
 
         (
@@ -866,6 +1061,80 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         )
 
         #
+        # [3b] `learning_signal='bootstrapped'`: the second linear pass.
+        #
+        # `eval_jaxpr` on the residual jaxpr is linear in the cotangents, so the
+        # synthetic future gradient can be pushed through the *same* transposed
+        # jaxpr on its own and the results added -- one extra evaluation per
+        # window, and none at all when no synthesiser is active.
+        #
+        # Which consumers it reaches is the crux, and getting it wrong
+        # double-counts silently:
+        #
+        #   * plain (non-ETP) parameters, inputs, other states -- ADD it. Their
+        #     cross-window credit is truncated at the window edge, and adding the
+        #     estimate makes the sum over windows telescope to the exact gradient.
+        #   * ETP parameters and the boundary learning signal -- do NOT. Their
+        #     cross-window credit is *already* carried by the eligibility trace:
+        #     an occurrence inside this window that reaches a later window's loss
+        #     is counted there, because that window's trace contains it. Adding
+        #     the estimate here would count the same path twice. This is what an
+        #     eligibility trace is for; DNI's job is to give the *plain*
+        #     parameters the cross-window credit the trace already gives the ETP
+        #     ones.
+        #   * the returned hidden cotangent -- ADD it. It is both the previous
+        #     window's incoming cotangent and the synthesiser's own regression
+        #     target, and both want the future term.
+        #
+        # Note the ordering: the learning signal above is derived from pass 1
+        # only, which is why this block sits *after* it rather than folding into
+        # `dg_last_hiddens` before.
+        #
+        dg_last_hiddens_future = None
+        if exit_cotangent is not None:
+            injected = self._exit_cotangent_grads(grads[:-1], exit_cotangent)
+            flat_injected, injected_tree = jax.tree.flatten((injected,))
+            # `PyTreeDef` compares by value at runtime; mypy's jax stubs do not
+            # model its `__ne__`.
+            if injected_tree != grad_tree:  # type: ignore[operator]
+                raise TypeError(
+                    f'The injected exit cotangent must have the same tree '
+                    f'structure as the incoming gradients, so it can go through '
+                    f'the same transposed jaxpr. Got\n'
+                    f'{injected_tree}\n!=\n{grad_tree}'
+                )
+            cts_future = jax.core.eval_jaxpr(jaxpr, consts, *flat_injected)
+            (
+                dg_args_future,
+                dg_last_hiddens_future,
+                dg_non_etrace_params_future,
+                dg_etrace_params_future,    # plain paths only: see below
+                dg_oth_states_future,
+                _dg_hid_perturb_future,     # ditto; the signal is pass 1 only
+            ) = jax.tree.unflatten(in_tree, cts_future)
+
+            def _add(a: Any, b: Any) -> Any:
+                return jax.tree.map(lambda x, y: x + y, a, b,
+                                    is_leaf=u.math.is_quantity)
+
+            dg_args = _add(dg_args, dg_args_future)
+            dg_oth_states = _add(dg_oth_states, dg_oth_states_future)
+            # The ETP/plain split cannot be read off *which dict* a parameter
+            # arrives in: under multi-step the reverse pass delivers the
+            # within-window gradient of every trainable parameter -- plain ones
+            # included -- through `dg_etrace_params`, leaving
+            # `dg_non_etrace_params` empty. The authority on which parameters
+            # have a trace carrying their cross-window credit is the compiled
+            # graph, so ask it by path.
+            etp_paths = self._etp_routed_paths()
+            dg_non_etrace_params = _add_future_for_plain_paths(
+                dg_non_etrace_params, dg_non_etrace_params_future, etp_paths)
+            # Added *before* `_solve_weight_gradients`, which folds these into
+            # its result.
+            dg_etrace_params = _add_future_for_plain_paths(
+                dg_etrace_params, dg_etrace_params_future, etp_paths)
+
+        #
         # [4] Compute the gradients of the weights
         #
         # the gradients of the weights are computed through the RTRL algorithm.
@@ -882,6 +1151,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_etrace_params,
         )
 
+        # The returned hidden cotangent carries the future term too: it is what
+        # the *previous* window will receive, and what a synthesiser regresses on.
+        if dg_last_hiddens_future is not None:
+            dg_last_hiddens = jax.tree.map(
+                lambda x, y: x + y, dg_last_hiddens, dg_last_hiddens_future,
+                is_leaf=u.math.is_quantity)
+
         # Note that there are no gradients flowing through the etrace data, the
         # running index, or the auxiliary data.
         dg_etrace = None
@@ -896,6 +1172,108 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_etrace,
             dg_running_index,
             dg_aux,
+        )
+
+    def _etp_routed_paths(self) -> set:
+        """The parameter paths whose cross-window credit an eligibility trace carries.
+
+        Read off the compiled graph rather than inferred from which gradient
+        dictionary a parameter turns up in, because that grouping does not mean
+        what its name suggests: under multi-step, the within-window reverse pass
+        delivers the gradient of *every* trainable parameter through
+        ``dg_etrace_params``, plain ones included.
+
+        Returns
+        -------
+        set
+            Paths appearing in some ``hidden_param_op_relation``.
+        """
+        paths: set = set()
+        for relation in self.graph.hidden_param_op_relations:
+            paths.update(relation.trainable_paths.values())
+        return paths
+
+    def _inject_exit_cotangent(self, exit_hiddens: Dict[Path, Any], aux: Any) -> Any:
+        """Override hook. The synthetic cotangent to add at the window-exit hidden values.
+
+        Implements the *injection* half of ``learning_signal='bootstrapped'``.
+        Called inside `_update_fn_fwd`, which is the only place the window-exit
+        hidden values exist; the result is stashed in the residuals and consumed
+        by the second linear pass in `_update_fn_bwd`.
+
+        This is deliberately **not** part of `_compute_learning_signal`. Replacing
+        a boundary learning signal and adding an exit cotangent are different
+        operations, on different tensors, at different points of the window:
+        the boundary signal is per hidden *group* and is consumed only by the
+        trace contraction, while the exit cotangent is per hidden *path* and has
+        to be propagated by the window's own reverse pass to reach the plain
+        parameters at all.
+
+        Implementations must apply `jax.lax.stop_gradient` to their estimate, or
+        the online loss will train the synthesiser through the wrong path.
+
+        Args:
+            exit_hiddens: Hidden-path-keyed window-exit values, `h^exit`.
+            aux: Per-call auxiliary data from `_get_update_aux`.
+
+        Returns:
+            A hidden-path-keyed mapping of cotangents shaped like the
+            corresponding entry of `exit_hiddens`, or `None` for "no injection"
+            (the default, and the zero-cost path: no second pass runs).
+        """
+        return None
+
+    def _exit_cotangent_grads(self, grads_wo_etrace: tuple, exit_cotangent: Any) -> tuple:
+        """Build the pass-2 cotangent tuple: zero everywhere but the exit hiddens.
+
+        Args:
+            grads_wo_etrace: The incoming `(dg_out, dg_hiddens, dg_oth_states)`
+                triple, used purely as a shape/unit/dtype template so the result
+                flattens to the same tree the transposed jaxpr expects.
+            exit_cotangent: The hidden-path-keyed synthetic cotangents.
+
+        Returns:
+            A triple with the same structure as `grads_wo_etrace`.
+
+        Raises:
+            ValueError: If a synthetic cotangent's shape does not match the
+                hidden cotangent it replaces, or if it is keyed by a path that is
+                not a hidden state.
+        """
+        dg_out, dg_hiddens, dg_oth = grads_wo_etrace
+
+        unknown = set(exit_cotangent).difference(dg_hiddens)
+        if unknown:
+            raise ValueError(
+                f'The synthetic gradient is keyed by {sorted(unknown)}, which '
+                f'are not hidden states of this model. Expected a subset of '
+                f'{sorted(dg_hiddens)}.'
+            )
+
+        injected_hiddens = {}
+        for path, template in dg_hiddens.items():
+            synthetic = exit_cotangent.get(path)
+            if synthetic is None:
+                injected_hiddens[path] = u.math.zeros_like(template)
+                continue
+            want, got = u.math.shape(template), u.math.shape(synthetic)
+            if want != got:
+                raise ValueError(
+                    f'The synthetic gradient for hidden path {path} has shape '
+                    f'{got}, but the hidden cotangent it is added to has shape '
+                    f'{want}. The synthesiser must emit one cotangent per hidden '
+                    f'state, shaped like that state.'
+                )
+            mantissa = jnp.asarray(u.get_mantissa(synthetic),
+                                   dtype=u.get_mantissa(template).dtype)
+            unit = u.get_unit(template)
+            injected_hiddens[path] = (
+                mantissa if unit.is_unitless else mantissa * unit)
+
+        return (
+            jax.tree.map(u.math.zeros_like, dg_out),
+            injected_hiddens,
+            jax.tree.map(u.math.zeros_like, dg_oth),
         )
 
     def _get_update_aux(self) -> Any:
@@ -923,8 +1301,46 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             Any pytree (or `None`). Appended to the `args` tuple seen by
             `_compute_learning_signal` (see below); never forwarded to the
             model's forward call.
+
+        Raises:
+            RuntimeError: If `learning_signal='modulatory'` but no modulator was
+                supplied. Falling back to the symmetric signal there would
+                silently compute a different learning rule.
         """
-        return None
+        if self.config.learning_signal != 'modulatory':
+            return None
+        # The keyword wins over the standing attribute, for this call only.
+        modulator = (self._modulator_this_call if self._modulator_this_call
+                     is not None else self.modulator)
+        if modulator is None:
+            raise RuntimeError(
+                "learning_signal='modulatory' was configured but no modulator "
+                'was supplied, so the signal would silently fall back to '
+                'symmetric -- a different learning rule. Pass one per call as '
+                '`update(*inputs, modulator=m)`, or set the standing attribute '
+                '`learner.modulator = m`.'
+            )
+        # Validated here, synchronously, against every group's declared signal
+        # shape. The expansion that actually feeds the rule happens in
+        # `_compute_learning_signal`, which runs inside the custom_vjp *backward*
+        # pass -- so without this pre-flight a malformed modulator would pass a
+        # forward-only `update()` silently and only fail once the caller got
+        # around to differentiating, with a traceback pointing into JAX internals
+        # rather than at the offending call.
+        for group in self.graph.hidden_groups:
+            if group.descent is not None:
+                # A descended group's signal carries a leading substep axis, so
+                # its runtime shape is not `(*varshape, num_state)`; leave the
+                # check to the authoritative one in `_compute_learning_signal`,
+                # which reads the shape off the signal itself.
+                continue
+            expand_modulator_to_group(
+                modulator,
+                tuple(group.varshape) + (group.num_state,),
+                group_index=group.index,
+                hidden_paths=group.hidden_paths,
+            )
+        return modulator
 
     # ------------------------------------------------------------------ #
     # axis: learning_signal
@@ -973,10 +1389,17 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         Implements the ``learning_signal`` axis. ``'symmetric'`` returns the
         reverse-AD gradient unchanged; ``'random_feedback'`` projects it through
-        a frozen random matrix (feedback alignment). Because the hook only sees
+        a frozen random matrix (feedback alignment); ``'modulatory'`` *replaces*
+        it with the user-supplied signal from :meth:`_get_update_aux`, expanded
+        per group by :func:`expand_modulator_to_group`. Because the hook only sees
         per-hidden-group signals, which carry no trace-factorization structure,
         this works identically on both engines — the IO-dim engine gains random
         feedback from the lift for free.
+
+        ``'bootstrapped'`` is *not* handled here: adding a synthetic cotangent at
+        the window exit is a different operation, on a different tensor, at a
+        different time than replacing a boundary signal. See
+        :meth:`_inject_exit_cotangent`.
 
         Args:
             dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
@@ -998,8 +1421,43 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 would quietly compute a *different rule* than the one
                 configured.
         """
-        if self.config.learning_signal == 'symmetric':
+        # `bootstrapped` leaves the boundary signal exactly alone -- its whole
+        # effect is the extra cotangent injected at the window *exit*, which
+        # reaches the plain parameters through the window's own reverse pass. It
+        # must not fall through to the projection branch below.
+        if self.config.learning_signal in ('symmetric', 'bootstrapped'):
             return dl_to_hidden_from_autodiff
+
+        if self.config.learning_signal == 'modulatory':
+            # *Replace*, not multiply. Multiplying (`m * dL/dh`) would be a
+            # four-factor rule and would make the degenerate criterion --
+            # "equals `symmetric` element-wise when the modulator is set to
+            # `dL/dh`" -- unsatisfiable, so there would be no coordinate at
+            # which the axis reduces to the rule it generalises.
+            #
+            # `dl_to_hidden_from_autodiff[g].shape == (*varshape_g, num_state_g)`,
+            # which is the expansion target. Reading it off the signal rather
+            # than from the group keeps this correct for descended groups, whose
+            # arrays carry a leading substep axis.
+            modulator = args[-1] if args else None
+            if modulator is None:
+                raise RuntimeError(
+                    "learning_signal='modulatory' reached the learning signal "
+                    'with no modulator. `_get_update_aux` must supply one; if '
+                    'this algorithm overrides that hook, it must return the '
+                    'modulator (or defer to `super()`).'
+                )
+            groups = self.graph.hidden_groups
+            return [
+                expand_modulator_to_group(
+                    modulator,
+                    u.math.shape(sig),
+                    group_index=gid,
+                    hidden_paths=(groups[gid].hidden_paths
+                                  if gid < len(groups) else None),
+                )
+                for gid, sig in enumerate(dl_to_hidden_from_autodiff)
+            ]
 
         signals = list(dl_to_hidden_from_autodiff)
         if not self._random_feedback:
