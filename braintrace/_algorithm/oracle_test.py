@@ -20,6 +20,7 @@ former F-SINGLESTEP finding)."""
 
 import brainevent
 import brainstate
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -513,3 +514,96 @@ def test_pp_prop_conv_bias_known_limitation():
                 factory, xs,
                 algo_factory=lambda m: braintrace.pp_prop(m, decay_or_rank=0.9, vjp_method='single-step'),
             )
+
+
+# --- P1: negative-control helpers -------------------------------------------
+
+def test_flat_gradient_leaves_handles_nested_and_units():
+    """Gradient trees are nested dicts and may carry units; the flattener must
+    yield plain arrays keyed by a stable label."""
+    import brainunit as u
+    from braintrace._algorithm.oracle import flat_gradient_leaves
+    tree = {
+        ('syn', 'comm', 'weight'): {'weight': jnp.ones((2, 3)) * u.mS,
+                                    'bias': jnp.zeros((3,)) * u.mS},
+        ('w',): jnp.arange(4.0),
+    }
+    flat = flat_gradient_leaves(tree)
+    assert len(flat) == 3
+    for arr in flat.values():
+        assert not isinstance(arr, u.Quantity)
+    assert sorted(k.split('|')[0] for k in flat) == ['syn/comm/weight',
+                                                    'syn/comm/weight', 'w']
+
+
+def test_gradient_norm_and_relative_deviation():
+    from braintrace._algorithm.oracle import gradient_norm, relative_deviation
+    a = {('w',): jnp.array([3.0, 4.0])}
+    b = {('w',): jnp.array([3.0, 4.0])}
+    assert gradient_norm(a) == pytest.approx(5.0, abs=1e-6)
+    assert relative_deviation(a, b) == pytest.approx(0.0, abs=1e-12)
+    # relative_deviation(actual, expected) normalises by ||expected||:
+    # ||[3,4] - [0,4]|| / ||[0,4]|| == 3 / 4.
+    c = {('w',): jnp.array([0.0, 4.0])}
+    assert relative_deviation(a, c) == pytest.approx(3.0 / 4.0, abs=1e-6)
+    # all-zero reference: infinite deviation, not a silent zero.
+    zero = {('w',): jnp.zeros(2)}
+    assert relative_deviation(a, zero) == float('inf')
+    assert relative_deviation(zero, zero) == 0.0
+
+
+def test_assert_model_is_live_passes_on_live_model():
+    from braintrace._algorithm.oracle import assert_model_is_live
+    spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
+    xs = _inputs(4, 3)
+    norm = assert_model_is_live(spec.factory, xs)
+    assert norm > 0.0
+
+
+def test_assert_model_is_live_rejects_a_dead_model():
+    """A model whose output is detached from its parameter has a zero gradient,
+    so any comparison against it asserts nothing. The guard must reject it.
+
+    The parameter is still *used* — an entirely unused ``ParamState`` makes
+    ``brainstate``'s gradient transform raise before the oracle sees it — but
+    ``stop_gradient`` severs the derivative, which is exactly the silent-SNN
+    situation F-25 describes: a live forward pass with a zero gradient.
+    """
+    from braintrace._algorithm.oracle import assert_model_is_live
+
+    def factory():
+        class Dead(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 3)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, 3)))
+
+            def update(self, x):
+                self.h.value = jax.lax.stop_gradient(x @ self.w.value)
+                return self.h.value
+
+        return Dead()
+
+    xs = jnp.ones((3, 1, 3))
+    with pytest.raises(AssertionError, match='gradient norm'):
+        assert_model_is_live(factory, xs)
+
+
+def test_assert_gradients_differ_flags_a_dead_knob():
+    from braintrace._algorithm.oracle import assert_gradients_differ
+    a = {('w',): jnp.array([1.0, 2.0])}
+    assert_gradients_differ(a, {('w',): jnp.array([1.0, 5.0])})
+    with pytest.raises(AssertionError, match='indistinguishable'):
+        assert_gradients_differ(a, {('w',): jnp.array([1.0, 2.0])})
+
+
+def test_assert_param_gradients_close_supports_nested_unit_trees():
+    """The pre-existing helper only handled flat, unitless dicts. SNN models
+    have nested weight dicts carrying units."""
+    import brainunit as u
+    a = {('syn',): {'weight': jnp.ones((2, 2)) * u.mS, 'bias': jnp.zeros(2) * u.mS}}
+    b = {('syn',): {'weight': jnp.ones((2, 2)) * u.mS, 'bias': jnp.zeros(2) * u.mS}}
+    assert_param_gradients_close(a, b, atol=1e-6)
+    c = {('syn',): {'weight': jnp.full((2, 2), 2.0) * u.mS, 'bias': jnp.zeros(2) * u.mS}}
+    with pytest.raises(AssertionError, match='maxabsdiff'):
+        assert_param_gradients_close(a, c, atol=1e-6)
