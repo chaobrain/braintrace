@@ -85,6 +85,10 @@ __all__ = [
     'get_solve_drtrl_rule',
     'ETP_RULES_PP_X_REPR',
     'get_pp_x_repr',
+    'ETP_RULES_SNAP_ANCHOR',
+    'is_snap_anchored',
+    'ETP_RULES_SNAP_ADJACENCY',
+    'get_snap_adjacency_rule',
 ]
 
 ETP_PRIMITIVES: set = set()
@@ -401,3 +405,92 @@ def get_pp_x_repr(primitive) -> Optional[Callable]:
         not register one (the trace then filters the raw ``x``).
     """
     return ETP_RULES_PP_X_REPR.get(primitive)
+
+
+ETP_RULES_SNAP_ANCHOR: Dict[Primitive, Callable] = {}
+r"""Optional SnAp-n *anchor* declaration, ``eqn.params -> bool``.
+
+SnAp-n (``recurrence_scope='sparse_n'``) widens the trace's trailing
+``num_state`` axis into a ``(neighbour, state)`` axis. That substitution is
+meaningful only if every trace slot has one well-defined hidden *position*
+its instantaneous term lands on -- its **anchor** -- so that the widened
+slot ``(k, a)`` can mean "influence of this slot on ``h[nbr[anchor, k], a]``".
+
+The anchor is a property of the primitive's **trace layout**, not of its
+parameter: a spatially shared convolution kernel is still anchored, because
+its trace keeps one kernel-shaped slot per spatial output position and
+defers the spatial sum to solve time. ``etp_einsum_p`` with a *shared* axis
+is not: its trace has no slot for the shared axis and ``dt_to_t`` sums the
+hidden signal over that axis, so distinct shared-axis positions are already
+collapsed into one slot and per-position influence is unrepresentable.
+
+Unregistered primitives are treated as **not anchored** (default deny), so a
+third-party primitive is rejected loudly under ``sparse_n`` rather than
+silently mis-traced; ``diagonal`` and ``coupled`` remain available to it.
+Queried through :func:`is_snap_anchored`.
+"""
+
+
+def is_snap_anchored(primitive, params: Optional[Dict] = None) -> bool:
+    """Return True iff *primitive* declares a SnAp-n trace anchor.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The ETP primitive to look up.
+    params : dict, optional
+        The equation parameters. Passed to the declaration so a primitive whose
+        anchor depends on the equation (e.g. ``etp_einsum_p``, anchored only
+        when the equation has no shared axis) can decide per call site.
+        Default ``None`` (an empty parameter mapping).
+
+    Returns
+    -------
+    bool
+        ``True`` when the primitive declared an anchor that accepts *params*;
+        ``False`` when it registered no declaration at all (default deny) or
+        its declaration rejected this equation.
+    """
+    rule = ETP_RULES_SNAP_ANCHOR.get(primitive)
+    if rule is None:
+        return False
+    return bool(rule(params or {}))
+
+
+ETP_RULES_SNAP_ADJACENCY: Dict[Primitive, Callable] = {}
+r"""Optional SnAp-n *position adjacency* rule, ``(eqn.params, size) -> pattern``.
+
+Returns the boolean ``(size, size)`` one-step dependency pattern this
+primitive induces on the **last** axis of the hidden group's ``varshape``
+(``pattern[p, q]`` is ``True`` iff ``h_p^t`` may depend on ``h_q^{t-1}``
+through this equation), or ``None`` to decline -- the analysis then widens to
+all-to-all.
+
+Only primitives whose position coupling is fully determined by static
+equation parameters register one: ``etp_mm``/``etp_mv`` (dense: all-to-all on
+the last axis) and ``etp_sp_mm``/``etp_sp_mv`` (the static sparsity pattern,
+*transposed*, since the forward is ``y = x @ W``). Everything else -- conv,
+einsum, ``dot_general``, grouped, LoRA -- is deliberately unregistered: the
+tempting "mixing happens on the last axis" rule is unsound for them (an
+einsum such as ``btn,tu->bun`` mixes a middle axis, ``dot_general`` exposes
+arbitrary contraction dimensions, convolution mixes spatial axes as well as
+channels). Queried through :func:`get_snap_adjacency_rule`.
+"""
+
+
+def get_snap_adjacency_rule(primitive) -> Optional[Callable]:
+    """Return the SnAp-n position-adjacency rule for *primitive*, or ``None``.
+
+    Parameters
+    ----------
+    primitive : Primitive
+        The ETP primitive to look up.
+
+    Returns
+    -------
+    Callable or None
+        Rule ``(eqn_params, size) -> numpy.ndarray | None`` producing the
+        boolean ``(size, size)`` last-axis dependency pattern, or ``None`` if
+        the primitive registered no rule (the analysis is then conservative).
+    """
+    return ETP_RULES_SNAP_ADJACENCY.get(primitive)

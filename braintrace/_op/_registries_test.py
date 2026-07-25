@@ -33,7 +33,12 @@ from braintrace._op import (
     ETP_RULES_DT_TO_T,
     GRADIENT_ENABLED_PRIMITIVES,
     etp_conv_p,
+    etp_einsum_p,
     etp_elemwise_p,
+    etp_emb_p,
+    etp_emb_v_p,
+    etp_gmm_p,
+    etp_gmv_p,
     etp_lora_mm_p,
     etp_lora_mv_p,
     etp_mm_p,
@@ -41,9 +46,11 @@ from braintrace._op import (
     etp_sp_mm_p,
     etp_sp_mv_p,
     get_fast_path_rules,
+    get_snap_adjacency_rule,
     is_batched_primitive,
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
+    is_snap_anchored,
 )
 from braintrace._op._primitive import register_primitive
 from braintrace._op._registries import (
@@ -249,3 +256,87 @@ class TestBatchedCounterparts:
         pu2 = register_primitive('etp_test_ctr_u3', lambda x, w: x @ w, batched=False)
         with pytest.raises(ValueError, match='batched'):
             register_batched_counterpart(pu1, pu2)
+
+
+class TestSnapAnchorDeclarations:
+    """The SnAp-n anchor capability: default deny, explicit opt-in.
+
+    ``recurrence_scope='sparse_n'`` widens the trailing state axis of every
+    trace leaf into a ``(neighbour, state)`` axis. That is only meaningful when
+    each trace slot has one hidden position its instantaneous term lands on --
+    the *anchor*. The capability is declared by the primitive rather than
+    assumed by the algorithm, and an undeclared primitive is rejected loudly.
+    """
+
+    ANCHORED = (
+        etp_mm_p, etp_mv_p, etp_gmm_p, etp_gmv_p, etp_sp_mm_p, etp_sp_mv_p,
+        etp_elemwise_p, etp_lora_mm_p, etp_lora_mv_p, etp_conv_p,
+    )
+
+    @pytest.mark.parametrize('primitive', ANCHORED, ids=lambda p: p.name)
+    def test_declared_anchored(self, primitive):
+        assert is_snap_anchored(primitive, {})
+
+    def test_unregistered_primitive_defaults_to_not_anchored(self):
+        fresh = register_primitive('etp_test_snap_unanchored', lambda x, w: x @ w)
+        assert not is_snap_anchored(fresh, {})
+
+    def test_plain_non_etp_primitive_is_not_anchored(self):
+        assert not is_snap_anchored(Primitive('not_etp_test_snap'), {})
+
+    def test_embedding_is_left_undeclared(self):
+        # A recorded limitation, not an oversight: the embedding trace layout
+        # was not analysed in P3, so sparse_n must refuse it rather than guess.
+        assert not is_snap_anchored(etp_emb_p, {})
+        assert not is_snap_anchored(etp_emb_v_p, {})
+
+    def test_einsum_anchor_is_conditional_on_the_equation(self):
+        # no shared axis -> laid out like a dense matmul, anchored
+        assert is_snap_anchored(etp_einsum_p, {'equation': 'bk,kn->bn'})
+        assert is_snap_anchored(etp_einsum_p, {'equation': 'bgk,gkn->bgn'})
+        # a shared axis is summed away by dt_to_t and has no trace slot
+        assert not is_snap_anchored(etp_einsum_p, {'equation': 'btk,kn->btn'})
+
+    def test_missing_params_are_tolerated(self):
+        assert is_snap_anchored(etp_mm_p)
+        assert not is_snap_anchored(etp_einsum_p)
+
+
+class TestSnapAdjacencyRules:
+    """Only primitives whose coupling is fully static register an adjacency rule."""
+
+    def test_dense_registers_all_to_all(self):
+        rule = get_snap_adjacency_rule(etp_mm_p)
+        assert rule is not None
+        pattern = rule({}, 3)
+        assert pattern.shape == (3, 3)
+        assert pattern.all()
+        assert get_snap_adjacency_rule(etp_mv_p) is rule
+
+    def test_sparse_registers_a_rule(self):
+        assert get_snap_adjacency_rule(etp_sp_mm_p) is not None
+        assert get_snap_adjacency_rule(etp_sp_mv_p) is not None
+
+    @pytest.mark.parametrize(
+        'primitive',
+        [etp_conv_p, etp_einsum_p, etp_gmm_p, etp_gmv_p, etp_lora_mm_p,
+         etp_lora_mv_p, etp_elemwise_p, etp_emb_p],
+        ids=lambda p: p.name,
+    )
+    def test_everything_else_is_deliberately_unregistered(self, primitive):
+        # Anchored (mostly) but conservative: "the mixing happens on the last
+        # axis" is unsound for conv (spatial mixing), einsum (`btn,tu->bun`
+        # mixes a middle axis) and grouped/LoRA layouts.
+        assert get_snap_adjacency_rule(primitive) is None
+
+    def test_sparse_rule_declines_a_non_square_structure(self):
+        import brainevent
+        import jax.numpy as jnp
+        import numpy as np
+
+        dense = np.zeros((4, 5), dtype=np.float32)
+        dense[0, 0] = 1.0
+        csr = brainevent.CSR.fromdense(jnp.asarray(dense))
+        rule = get_snap_adjacency_rule(etp_sp_mv_p)
+        assert rule({'sparse_mat': csr}, 5) is None
+        assert rule({'sparse_mat': None}, 5) is None

@@ -41,6 +41,8 @@ from ._registries import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_PP_X_REPR,
+    ETP_RULES_SNAP_ADJACENCY,
+    ETP_RULES_SNAP_ANCHOR,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_DT_TO_T,
     ETP_TRAINABLE_INVARS_FNS,
@@ -136,6 +138,8 @@ class ETPPrimitive(Primitive):
         init_pp: Callable[..., Any] | None = None,
         fast_path: FastPathRules | None = None,
         pp_x_repr: Callable[..., Any] | None = None,
+        snap_anchor: Callable[..., Any] | None = None,
+        snap_adjacency: Callable[..., Any] | None = None,
     ) -> None:
         """Install multiple ETP rules in one call.
 
@@ -164,6 +168,20 @@ class ETPPrimitive(Primitive):
             the operand the op is linear in (e.g. ``etp_emb_p`` filters the
             one-hot encoding of its integer indices); ``None`` leaves the
             IO-dim trace filtering the raw ``x``. Default ``None``.
+        snap_anchor : Callable, optional
+            SnAp-n anchor declaration ``eqn_params -> bool``. Registered into
+            :data:`ETP_RULES_SNAP_ANCHOR`. Declares that the primitive's trace
+            layout keeps, for every slot, one well-defined hidden position the
+            slot's instantaneous term lands on -- the precondition for widening
+            the trailing state axis into a ``(neighbour, state)`` axis.
+            ``None`` (the default) leaves the primitive **unanchored**, so
+            ``recurrence_scope='sparse_n'`` rejects it loudly.
+        snap_adjacency : Callable, optional
+            SnAp-n position-adjacency rule ``(eqn_params, size) -> pattern``.
+            Registered into :data:`ETP_RULES_SNAP_ADJACENCY`. Supply it only
+            when the primitive's cross-position coupling is fully determined by
+            static equation parameters; ``None`` (the default) makes the
+            position analysis conservative for this primitive. Default ``None``.
         """
         if dt_to_t is not None:
             ETP_RULES_DT_TO_T[self] = dt_to_t
@@ -177,6 +195,10 @@ class ETPPrimitive(Primitive):
             ETP_FAST_PATH_RULES[self] = fast_path
         if pp_x_repr is not None:
             ETP_RULES_PP_X_REPR[self] = pp_x_repr
+        if snap_anchor is not None:
+            ETP_RULES_SNAP_ANCHOR[self] = snap_anchor
+        if snap_adjacency is not None:
+            ETP_RULES_SNAP_ADJACENCY[self] = snap_adjacency
 
 
 def register_primitive(

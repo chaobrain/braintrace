@@ -41,7 +41,12 @@ from typing import Dict, Any, Optional
 
 import brainstate
 
-from braintrace._compiler import ControlFlowPolicy, ETraceGraph, compile_etrace_graph
+from braintrace._compiler import (
+    ControlFlowPolicy,
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    ETraceGraph,
+    compile_etrace_graph,
+)
 from .._input_data import get_single_step_data
 from .._typing import Path
 
@@ -68,6 +73,13 @@ class ETraceGraphExecutor:
     include_recurrent_mixing: bool, optional
         Hidden-group grouping mode for the hidden-to-hidden transition; see
         ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
+    sparse_n: int, optional
+        SnAp order for ``recurrence_scope='sparse_n'``; each hidden group then
+        carries the derived n-step neighbourhood its trace is widened onto.
+        ``None`` (default) for every other scope.
+    snap_max_jacobian_elements: int, optional
+        Ceiling on each group's widened block Jacobian, ``P * (K * S) ** 2``
+        elements; only consulted when *sparse_n* is given.
     control_flow: ControlFlowPolicy, optional
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
@@ -80,6 +92,8 @@ class ETraceGraphExecutor:
         self,
         model: brainstate.nn.Module,
         include_recurrent_mixing: bool = False,
+        sparse_n: Optional[int] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
         control_flow: Optional[ControlFlowPolicy] = None,
     ) -> None:
         # The original model
@@ -94,6 +108,13 @@ class ETraceGraphExecutor:
         # hidden-group grouping mode for the hidden-to-hidden transition; see
         # ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
         self.include_recurrent_mixing = include_recurrent_mixing
+
+        # SnAp order for ``recurrence_scope='sparse_n'``; ``None`` for every
+        # other scope, which leaves each hidden group's ``snap`` pattern unset.
+        self.sparse_n = sparse_n
+
+        # ceiling on the widened block Jacobian; only read when sparse_n is set
+        self.snap_max_jacobian_elements = snap_max_jacobian_elements
 
         # control-flow canonicalization policy; None -> compiler default
         self.control_flow = control_flow
@@ -197,6 +218,8 @@ class ETraceGraphExecutor:
         self._compiled_graph = compile_etrace_graph(
             self.model, *args,
             include_recurrent_mixing=self.include_recurrent_mixing,
+            sparse_n=self.sparse_n,
+            snap_max_jacobian_elements=self.snap_max_jacobian_elements,
             control_flow=self.control_flow,
         )
 

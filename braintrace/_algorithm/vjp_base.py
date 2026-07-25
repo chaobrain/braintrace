@@ -40,7 +40,8 @@ from braintrace._typing import (
     dG_Hidden,
     dG_State,
 )
-from braintrace._compiler import ControlFlowPolicy
+from braintrace._compiler import ControlFlowPolicy, DEFAULT_MAX_JACOBIAN_ELEMENTS
+from braintrace._op import is_snap_anchored
 from ._common import FixedRandomFeedback
 from .axes import ETraceConfig
 from .base import ETraceAlgorithm
@@ -131,6 +132,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         control_flow: Optional[ControlFlowPolicy] = None,
         config: Optional[ETraceConfig] = None,
         random_feedback_key: Optional[jax.Array] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     ):
 
         # the VJP method
@@ -163,6 +165,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             model,
             vjp_method=vjp_method,
             include_recurrent_mixing=config.include_recurrent_mixing,
+            sparse_n=config.sparse_n,
+            snap_max_jacobian_elements=snap_max_jacobian_elements,
             control_flow=control_flow,
         )
 
@@ -188,9 +192,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         super().compile_graph(*args)
         if self.is_compiled:
             self._assert_recurrence_scope_is_honoured()
+            self._assert_relations_are_snap_anchored()
 
     def _assert_recurrence_scope_is_honoured(self) -> None:
-        """Raise if ``recurrence_scope='coupled'`` cannot be delivered.
+        """Raise if a non-diagonal ``recurrence_scope`` cannot be delivered.
 
         ``_compiler/scan_descent.py`` analyses a descended scan body with
         ``include_recurrent_mixing=False`` unconditionally: the per-substep
@@ -199,10 +204,17 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         the flag is private, but ``recurrence_scope`` is a public axis — asking
         for ``'coupled'`` and silently getting ``'diagonal'`` inside the scan is
         exactly the silent-degradation failure the axis decomposition exists to
-        remove. Generalising the scope *inside* descended scans belongs with P3,
-        which rebuilds the recurrence representation anyway.
+        remove.
+
+        ``'sparse_n'`` inherits the same limitation, and for a second reason on
+        top of the first: a descended group's per-substep Jacobian is folded
+        before the trace ever sees it, so there is no single transition jaxpr
+        for the position analysis to read. ``_attach_snap_pattern`` therefore
+        skips descended groups outright, which would leave the requested order
+        silently unapplied.
         """
-        if self.config.recurrence_scope != 'coupled':
+        scope = self.config.recurrence_scope
+        if scope not in ('coupled', 'sparse_n'):
             return
         # A descended *group* can exist without any descended relation (all body
         # weights routed through plain ops), so check both — as
@@ -214,13 +226,62 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         groups = sum(g.descent is not None for g in self.graph.hidden_groups)
         if relations or groups:
             raise NotImplementedError(
-                f"recurrence_scope='coupled' is not honoured inside a "
+                f"recurrence_scope={scope!r} is not honoured inside a "
                 f'descended scan ({relations} ETP relation(s) and {groups} '
                 f'hidden group(s) were discovered inside a scan body, whose '
                 f'transition is always analysed with diagonal recurrence). Use '
                 f"recurrence_scope='diagonal', or keep the recurrent weights "
                 f"outside the scan body, or set "
                 f"ControlFlowPolicy(scan_descent='off')."
+            )
+
+    def _assert_relations_are_snap_anchored(self) -> None:
+        """Raise if ``sparse_n`` meets a primitive with no well-defined anchor.
+
+        SnAp-n widens each trace slot into ``(neighbour, state)`` pairs relative
+        to *the one hidden position the slot's instantaneous term lands on*. A
+        primitive that spreads one weight entry across several hidden positions
+        — ``etp_einsum`` with a shared axis, ``etp_embedding``'s gathered row —
+        has no such position, so the widened representation is not merely
+        approximate for it, it is undefined.
+
+        Whether a primitive has an anchor is a property of the primitive, so it
+        is declared in the operator protocol (``register_etp_rules(
+        snap_anchor=...)``) and *default-deny*: a newly added primitive is
+        rejected here until it says otherwise, rather than silently producing a
+        gradient nobody derived.
+
+        The check also fires for ``SnAp(n=1)``, whose coordinate canonicalises
+        to ``'coupled'``. That is deliberate. ``coupled`` itself needs no
+        anchor — it takes the per-position block diagonal of the full Jacobian
+        and never asks where an instantaneous term lands — so plain
+        ``recurrence_scope='coupled'`` stays legal on every model. But SnAp-1 is
+        *defined* as the instantaneous nonzero pattern of ``∂h/∂θ``, and on a
+        primitive that spreads one weight entry across positions that pattern is
+        not a single position: ``coupled`` then drops cross-position
+        instantaneous terms which true SnAp-1 retains. Accepting the request
+        silently would hand back a rule the caller did not ask for, so the
+        preset carries its provenance (``_requested_snap_order``) and is checked
+        on it rather than on the canonicalised scope.
+        """
+        requested = getattr(self, '_requested_snap_order', None)
+        if self.config.recurrence_scope != 'sparse_n' and requested is None:
+            return
+        order = self.config.sparse_n if requested is None else requested
+        offenders = sorted({
+            relation.primitive.name
+            for relation in self.graph.hidden_param_op_relations
+            if not is_snap_anchored(relation.primitive, relation.eqn_params)
+        })
+        if offenders:
+            raise NotImplementedError(
+                f"recurrence_scope='sparse_n' (sparse_n="
+                f'{order}) requires every eligibility-trace '
+                f'relation to anchor on a single hidden position, but '
+                f'{", ".join(offenders)} does not declare a SnAp anchor: one '
+                f'weight entry of it reaches several hidden positions, so a '
+                f'widened trace slot has no position to be a neighbourhood of. '
+                f"Use recurrence_scope='coupled' or 'diagonal' for this model."
             )
 
     # ------------------------------------------------------------------ #

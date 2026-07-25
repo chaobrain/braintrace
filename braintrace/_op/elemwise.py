@@ -414,7 +414,29 @@ etp_elemwise_p = register_primitive(
     trainable_invars_fn=_elem_trainable_invars,
     x_invar_index=None,
 )
+def _elemwise_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_elemwise``.
+
+    The D-RTRL trace is allocated straight from the hidden group's
+    ``varshape``: slot ``p`` carries the influence of the elementwise weight at
+    position ``p``, whose instantaneous term lands on that same position. The
+    anchor is the position itself.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused).
+
+    Returns
+    -------
+    bool
+        Always ``True``.
+    """
+    return True
+
+
 etp_elemwise_p.register_etp_rules(
+    snap_anchor=_elemwise_snap_anchor,
     dt_to_t=_elemwise_dt_to_t,
     xy_to_dw=_elemwise_xy_to_dw,
     init_drtrl=_elemwise_init_drtrl,

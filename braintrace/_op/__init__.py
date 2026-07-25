@@ -43,6 +43,8 @@ from ._registries import (
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
     ETP_RULES_PP_X_REPR,
+    ETP_RULES_SNAP_ADJACENCY,
+    ETP_RULES_SNAP_ANCHOR,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_DT_TO_T,
     ETP_TRAINABLE_INVARS_FNS,
@@ -52,12 +54,14 @@ from ._registries import (
     GRADIENT_ENABLED_PRIMITIVES,
     get_fast_path_rules,
     get_pp_x_repr,
+    get_snap_adjacency_rule,
     get_trainable_invars,
     get_x_invar_index,
     get_y_outvar_index,
     is_batched_primitive,
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
+    is_snap_anchored,
 )
 from .conv import _etp_conv_impl
 from .conv import conv, etp_conv_p
@@ -96,6 +100,10 @@ __all__ = [
     'get_fast_path_rules',
     'ETP_RULES_PP_X_REPR',
     'get_pp_x_repr',
+    'ETP_RULES_SNAP_ANCHOR',
+    'is_snap_anchored',
+    'ETP_RULES_SNAP_ADJACENCY',
+    'get_snap_adjacency_rule',
 
     # primitives
     'etp_mm_p',

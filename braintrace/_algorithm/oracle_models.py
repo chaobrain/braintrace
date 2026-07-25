@@ -440,6 +440,216 @@ def snn_scan_two_state_rnn(n_rec: int = 3, loops: int = 40,
                      plain_param_keys=())
 
 
+def _ring_csr(n_rec: int, offsets: Tuple[int, ...]):
+    """The CSR matrix connecting ``q -> (q + off) % n_rec`` for each offset.
+
+    Shared by the ring fixtures below so their position graphs are the *same*
+    graph: a test that reads a neighbourhood size off one of them and an
+    expected ``K(n)`` off the other is comparing like with like.
+
+    Returns
+    -------
+    tuple
+        ``(csr, nnz)`` — the matrix and its stored-entry count, which is the
+        shape of the ETP data vector.
+    """
+    import brainevent
+
+    dense_mask = np.zeros((n_rec, n_rec), dtype='float32')
+    for q in range(n_rec):
+        for off in offsets:
+            dense_mask[q, (q + off) % n_rec] = 1.0
+    return brainevent.CSR.fromdense(jnp.asarray(dense_mask)), int(dense_mask.sum())
+
+
+def sparse_ring_rnn(
+    n_in: int = 3, n_rec: int = 6, offsets: Tuple[int, ...] = (0, 1), seed: int = 0
+) -> ModelSpec:
+    """Tanh RNN whose recurrence is a **fixed sparse ring**, via ``sparse_matmul``.
+
+    ``h^t = tanh(x^t @ win + sparse_matmul(h^{t-1}, w, sparse_mat=CSR))`` where
+    the CSR pattern connects ``q -> (q + off) % n_rec`` for each ``off`` in
+    ``offsets``. This is the reference model for the ``sparse_n`` recurrence
+    scope: unlike a dense recurrent weight — whose position graph has diameter
+    1, so ``n = 2`` already saturates — a ring of ``n_rec`` units has diameter
+    ``n_rec - 1``, so the SnAp neighbourhood grows one position per order and
+    ``K(n) == min(n, n_rec)`` exactly.
+
+    The default ``offsets=(0, 1)`` keeps the **self** edge. Without it (a pure
+    cycle) position ``p``'s hidden state does not depend on its own previous
+    value at all, so the per-position block of the recurrent Jacobian is
+    identically zero and ``recurrence_scope='diagonal'`` and ``'coupled'``
+    produce *bit-identical* gradients — which would make every negative control
+    that separates them vacuous on this model. The self edge is also the more
+    realistic recurrent unit. It does not change ``K(n)``: closing ``I | shift``
+    still reaches exactly one further position per order.
+
+    Structural properties the acceptance suite pins:
+
+    * one hidden group, ``varshape == (n_rec,)``, ``num_state == 1`` — the
+      ``S = 1, K > 1`` configuration that exercises every ``num_state == 1``
+      shortcut in the engine under a widened trace;
+    * the relation's primitive is ``etp_sp_mv``, whose D-RTRL trace is
+      ``nnz``-shaped rather than position-shaped, so it also pins that the
+      widening is transparent to a primitive with a non-trivial anchor map;
+    * the ``y -> hidden`` tail is elementwise (``add`` then ``tanh``), so a
+      saturated within-group SnAp is full RTRL and must equal BPTT.
+
+    Parameters
+    ----------
+    n_in : int, optional
+        Input dimension.
+    n_rec : int, optional
+        Number of recurrent units (the ring length, hence the diameter).
+    offsets : tuple of int, optional
+        Ring offsets present in the sparse pattern. ``(1,)`` gives the pure
+        cycle; adding offsets shortens the diameter.
+    seed : int, optional
+        Seed for the deterministic weight draw.
+
+    Returns
+    -------
+    ModelSpec
+        Spec whose ETP parameter is the sparse data vector ``w`` (shape
+        ``(nnz,)``) and whose plain parameter is the input projection ``win``.
+    """
+    csr, nnz = _ring_csr(n_rec, offsets)
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.6 * brainstate.random.randn(nnz))
+                    self.win = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_in, n_rec))
+                self.h = brainstate.HiddenState(jnp.zeros((n_rec,)))
+
+            def update(self, x):
+                rec = braintrace.sparse_matmul(self.h.value, self.w.value, sparse_mat=csr)
+                self.h.value = jax.nn.tanh(x @ self.win.value + rec)
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
+
+
+def rolled_tail_rnn(
+    n_in: int = 3, n_rec: int = 5, roll: int = 1, seed: int = 0
+) -> ModelSpec:
+    """Dense tanh RNN whose ``y -> hidden`` tail **relabels positions** (F-31).
+
+    ``h^t = tanh(x @ win + roll(matmul(h^{t-1}, w), roll))``. The mixing
+    primitive is the ordinary dense ``etp_mm``/``etp_mv``, whose position graph
+    has diameter 1, so ``sparse_n`` saturates at ``n = 2`` and a *saturated*
+    within-group rule is full within-group RTRL. What the roll breaks is the
+    premise underneath the whole ``recurrence_scope`` axis: the trace indexes
+    hidden units by position, and here the position that a mixing output lands
+    on is not the position it was computed for.
+
+    ``roll=0`` gives the control — the same model with a position-preserving
+    tail — which is what makes the comparison legible: at ``roll=0`` saturation
+    equals BPTT to round-off, and at ``roll=1`` it does not, while the model is
+    otherwise identical. Use the pair, never the rolled model alone.
+
+    The position analysis detects the tail (the ``slice`` equations ``roll``
+    lowers to are not position-preserving) and widens to all-to-all with a
+    ``SNAP_PATTERN_CONSERVATIVE`` diagnostic, so the shortfall is warned about
+    rather than silent. See "Notes on F-31" in
+    ``docs/specs/2026-07-25-known-limitations.md``.
+
+    Parameters
+    ----------
+    n_in : int, optional
+        Input dimension.
+    n_rec : int, optional
+        Number of recurrent units.
+    roll : int, optional
+        Positions to roll the recurrent term by. ``0`` disables the relabelling
+        and yields the control model.
+    seed : int, optional
+        Seed for the deterministic weight draw.
+
+    Returns
+    -------
+    ModelSpec
+        Spec whose ETP parameter is the recurrent matrix ``w``.
+    """
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.6 * brainstate.random.randn(n_rec, n_rec))
+                    self.win = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_in, n_rec))
+                self.h = brainstate.HiddenState(jnp.zeros((n_rec,)))
+
+            def update(self, x):
+                rec = braintrace.matmul(self.h.value, self.w.value)
+                if roll:
+                    rec = jnp.roll(rec, roll)
+                self.h.value = jax.nn.tanh(x @ self.win.value + rec)
+                return self.h.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
+
+
+def sparse_ring_two_state_rnn(
+    n_in: int = 3, n_rec: int = 5, offsets: Tuple[int, ...] = (0, 1), seed: int = 0
+) -> ModelSpec:
+    """:func:`sparse_ring_rnn` with a second, coupled hidden state.
+
+    ``v^t = tanh(x @ win + sparse_matmul(v^{t-1}, w) - 0.1 a^{t-1})`` and
+    ``a^t = 0.95 a^{t-1} + v^{t-1}``. The compiler groups ``(v, a)`` into one
+    HiddenGroup with ``num_state == 2``, so the widened trace axis is
+    ``M = K * 2`` — the ``S > 1, K > 1`` configuration. The adjacency analysis
+    still sees exactly one mixing equation (on ``v``); the ``a`` coupling is
+    hand-written arithmetic and contributes no position mixing, which is why
+    the pattern stays the precise ring rather than falling back to conservative.
+
+    Parameters
+    ----------
+    n_in, n_rec, offsets, seed
+        As in :func:`sparse_ring_rnn`.
+
+    Returns
+    -------
+    ModelSpec
+        Spec whose ETP parameter is the sparse data vector ``w``.
+    """
+    csr, nnz = _ring_csr(n_rec, offsets)
+
+    def factory():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(seed):
+                    self.w = brainstate.ParamState(
+                        0.6 * brainstate.random.randn(nnz))
+                    self.win = brainstate.ParamState(
+                        0.5 * brainstate.random.randn(n_in, n_rec))
+                self.v = brainstate.HiddenState(jnp.zeros((n_rec,)))
+                self.a = brainstate.HiddenState(jnp.zeros((n_rec,)))
+
+            def update(self, x):
+                v, a = self.v.value, self.a.value
+                rec = braintrace.sparse_matmul(v, self.w.value, sparse_mat=csr)
+                self.v.value = jax.nn.tanh(x @ self.win.value + rec - 0.1 * a)
+                self.a.value = 0.95 * a + v
+                return self.v.value
+
+        return Net()
+
+    return ModelSpec(factory=factory, etp_param_keys=(('w',),), plain_param_keys=(('win',),))
+
+
 def while_settle_rnn(
     n_in: int = 3, n_rec: int = 4, k: int = 3, decay: float = 0.8, seed: int = 0
 ) -> ModelSpec:
