@@ -19,8 +19,10 @@ from dataclasses import dataclass
 from typing import Callable, Tuple
 
 import brainstate
+import brainunit as u
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 import braintrace
 
@@ -32,11 +34,54 @@ class ModelSpec:
     ``factory()`` returns a freshly constructed, *uninitialized* model with
     deterministic weights. Callers must call
     ``brainstate.nn.init_all_states(model, batch_size=...)`` themselves.
+
+    Attributes
+    ----------
+    factory : Callable[[], brainstate.nn.Module]
+        Deterministic zero-arg model constructor.
+    etp_param_keys : tuple of tuple
+        Parameter paths routed through an ETP primitive.
+    plain_param_keys : tuple of tuple
+        Parameter paths used via plain JAX ops, hence excluded from ETP.
+    input_scale : float, optional
+        Multiplier applied by :meth:`make_inputs`. Spiking models need a scale
+        well above 1.0 to reach threshold at all; below it the loss and the
+        gradient are identically zero and any comparison is vacuous (F-25).
+    batched_input : bool, optional
+        Whether :meth:`make_inputs` emits a leading batch axis of 1. SNN layers
+        concatenate the input with the recurrent spike vector, so their ranks
+        must match; the rate models broadcast instead and do not need it.
     """
 
     factory: Callable[[], brainstate.nn.Module]
     etp_param_keys: Tuple[tuple, ...]    # routed through an ETP primitive
     plain_param_keys: Tuple[tuple, ...]  # used via plain JAX ops (excluded from ETP)
+    input_scale: float = 1.0
+    batched_input: bool = False
+
+    def make_inputs(self, T: int, n_in: int, *, seed: int = 0):
+        """Build a ``(T, [1,] n_in)`` input sequence at this spec's scale.
+
+        Values are non-negative so that spiking models receive net excitatory
+        drive; a zero-mean drive largely cancels and leaves the network silent.
+
+        Parameters
+        ----------
+        T : int
+            Number of time steps.
+        n_in : int
+            Input dimension.
+        seed : int, optional
+            Seed for the input draw.
+
+        Returns
+        -------
+        jax.Array
+            The input sequence, scaled by :attr:`input_scale`.
+        """
+        rng = np.random.RandomState(seed)
+        shape = (T, 1, n_in) if self.batched_input else (T, n_in)
+        return self.input_scale * jnp.asarray(np.abs(rng.randn(*shape)).astype('float32'))
 
 
 def tanh_rnn(n_in: int = 3, n_rec: int = 4, seed: int = 0) -> ModelSpec:
@@ -467,3 +512,145 @@ def while_settle_twin_rnn(
         return Net()
 
     return ModelSpec(factory=factory, etp_param_keys=(('win',),), plain_param_keys=())
+
+
+# ---------------------------------------------------------------------------
+# SNN specs: the realistic-model end of the zoo.
+#
+# These wrap the layer classes in ``braintrace/_etrace_model_test.py`` for
+# oracle use. Two things have to be fixed at this boundary:
+#
+# * F-24 -- those constructors call unseeded ``braintools.init.*``, which draws
+#   from the global ``brainstate.random`` stream, so ``factory()`` returns a
+#   different model on every call and a BPTT-vs-online comparison would compare
+#   two different networks. Each factory re-seeds before constructing.
+# * F-25 -- at unit input scale the neurons never reach threshold, so the loss
+#   and the gradient are identically zero. Each spec records the scale that
+#   makes it live; ``oracle_models_test.py`` asserts both properties.
+#
+# The live input-scale window is bounded on **both** sides, which is the part of
+# F-25 that is easy to miss. Too little drive and the neuron never crosses
+# threshold; too much and the surrogate derivative saturates, so the gradient is
+# exactly zero again *while the network keeps spiking*. Measured for
+# ``ALIF_Delta`` at n_in=4, n_rec=5, T=6:
+#
+#     scale  spike_rate  |g_bptt|
+#      0.05     0.00      0.0        <- under threshold
+#      0.20     0.17      3.0e+00
+#      1.00     0.53      9.3e+00    <- chosen
+#      2.00     0.60      0.0        <- saturated surrogate, still spiking
+#     20.00     0.60      0.0
+#
+# So spike rate is not a proxy for liveness, and the per-spec scale below is not
+# a free parameter: conductance-based (ExpCu/ExpCo) layers need a large scale,
+# while delta layers inject straight into mV and need a small one.
+# ---------------------------------------------------------------------------
+
+_SNN_SEED = 7
+_SNN_SCALE = 20.0        # conductance-based layers
+_SNN_SCALE_DELTA = 1.0   # ALIF + delta synapse: saturates above ~2.0
+
+
+def _snn_spec(cls, n_in, n_rec, seed, scale=_SNN_SCALE, **kwargs) -> ModelSpec:
+    """Wrap an SNN layer class as a deterministic, live ``ModelSpec``."""
+
+    def factory():
+        brainstate.random.seed(seed)
+        return cls(n_in, n_rec, **kwargs)
+
+    return ModelSpec(
+        factory=factory,
+        etp_param_keys=(),   # discovered by the compiler; not asserted per-spec
+        plain_param_keys=(),
+        input_scale=scale,
+        batched_input=True,
+    )
+
+
+def snn_if_delta(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """IF neuron, delta synapse. Single hidden state (``num_state == 1``)."""
+    from braintrace._etrace_model_test import IF_Delta_Dense_Layer
+    return _snn_spec(IF_Delta_Dense_Layer, n_in, n_rec, seed)
+
+
+def snn_alif_delta(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """ALIF neuron, delta synapse. Membrane + adaptation (``num_state == 2``).
+
+    Uses the smaller delta scale: the synapse injects directly in mV, so the
+    conductance-model scale saturates the surrogate derivative and drives the
+    gradient to exactly zero while the network still spikes. See the F-25 note
+    above this block.
+    """
+    from braintrace._etrace_model_test import ALIF_Delta_Dense_Layer
+    return _snn_spec(ALIF_Delta_Dense_Layer, n_in, n_rec, seed,
+                     scale=_SNN_SCALE_DELTA)
+
+
+def snn_lif_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """LIF neuron, exponential current synapse. Two timescales: tau_mem, tau_syn."""
+    from braintrace._etrace_model_test import LIF_ExpCu_Dense_Layer
+    return _snn_spec(LIF_ExpCu_Dense_Layer, n_in, n_rec, seed)
+
+
+def snn_alif_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """ALIF + exponential current synapse. Three timescales, ``num_state == 3``."""
+    from braintrace._etrace_model_test import ALIF_ExpCu_Dense_Layer
+    return _snn_spec(ALIF_ExpCu_Dense_Layer, n_in, n_rec, seed)
+
+
+def snn_lif_std_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """LIF + short-term depression. Adds tau_std as a further timescale."""
+    from braintrace._etrace_model_test import LIF_STDExpCu_Dense_Layer
+    return _snn_spec(LIF_STDExpCu_Dense_Layer, n_in, n_rec, seed)
+
+
+def snn_lif_stp_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """LIF + short-term plasticity. Adds tau_f and tau_d."""
+    from braintrace._etrace_model_test import LIF_STPExpCu_Dense_Layer
+    return _snn_spec(LIF_STPExpCu_Dense_Layer, n_in, n_rec, seed)
+
+
+def snn_alif_expco_ei(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
+    """ALIF with an excitatory/inhibitory population split and conductance
+    synapses. The heterogeneous-population case: separate E and I projections
+    produce several ETP relations feeding one hidden group."""
+    from braintrace._etrace_model_test import ALIF_ExpCo_Dense_Layer
+    return _snn_spec(ALIF_ExpCo_Dense_Layer, n_in, n_rec, seed)
+
+
+def snn_lif_expcu_heterogeneous(
+    n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED
+) -> ModelSpec:
+    """LIF whose membrane time constant differs per neuron.
+
+    The heterogeneous-leak case: ``tau_mem`` is a length-``n_rec`` vector, so no
+    single global leak exists for the transition to factor out.
+    """
+    from braintrace._etrace_model_test import LIF_ExpCu_Dense_Layer
+    tau_mem = jnp.linspace(3.0, 12.0, n_rec) * u.ms
+    return _snn_spec(LIF_ExpCu_Dense_Layer, n_in, n_rec, seed, tau_mem=tau_mem)
+
+
+def snn_alif_expcu_heterogeneous(
+    n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED
+) -> ModelSpec:
+    """ALIF with per-neuron membrane *and* adaptation time constants."""
+    from braintrace._etrace_model_test import ALIF_ExpCu_Dense_Layer
+    return _snn_spec(
+        ALIF_ExpCu_Dense_Layer, n_in, n_rec, seed,
+        tau_mem=jnp.linspace(3.0, 12.0, n_rec) * u.ms,
+        tau_a=jnp.linspace(60.0, 150.0, n_rec) * u.ms,
+    )
+
+
+SNN_SPECS = {
+    'if_delta': snn_if_delta,
+    'alif_delta': snn_alif_delta,
+    'lif_expcu': snn_lif_expcu,
+    'alif_expcu': snn_alif_expcu,
+    'lif_std_expcu': snn_lif_std_expcu,
+    'lif_stp_expcu': snn_lif_stp_expcu,
+    'alif_expco_ei': snn_alif_expco_ei,
+    'lif_expcu_heterogeneous': snn_lif_expcu_heterogeneous,
+    'alif_expcu_heterogeneous': snn_alif_expcu_heterogeneous,
+}
