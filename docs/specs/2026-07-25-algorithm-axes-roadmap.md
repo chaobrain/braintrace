@@ -230,34 +230,33 @@ direction-alignment metric helpers were retained as the basis of P5.
 
 Verified: `pytest braintrace/` → 2062 passed, 1 skipped; `mypy braintrace` clean.
 
-### P1 — Compiler: multi-timescale and heterogeneous populations
+### P1 — Verification harness and the limitation list — **done**
 
-Make the surviving rules actually run on realistic brain-simulation models —
-LIF + ALIF + multi-timescale synapses, heterogeneous leaks, multi-state
-HiddenGroups — before widening the algorithm family.
+Retitled during implementation. P1 was scoped as compiler work; measurement
+showed the compiler already passes every one of its targets, and that the
+instrument was what failed. Full spec:
+[`2026-07-25-p1-verification-harness.md`](2026-07-25-p1-verification-harness.md).
 
-**Scope has to be reconstructed first.** `AGENTS.md` points at a
-known-limitation findings list under `dev/`, but `dev/` is gitignored and absent
-from the repository. The only machine-readable remnant is a single skipped test
-(`approx_correctness_test.py::test_approximations_diverge_on_snn_multipopulation_DEFERRED`,
-finding F-22). Everything else on that list has either been resolved — F-19 and
-F-20 died with the algorithms they described; F-SINGLESTEP was resolved into a
-positive direction-alignment assertion in `oracle_test.py` — or exists only as
-prose in `AGENTS.md`. **The first task of P1 is to rebuild the list in-tree**,
-from `AGENTS.md`'s summary plus a sweep of the test suite, so it stops living in
-an untracked directory. Expect the rebuilt list to be shorter than the original:
-part of it is already done.
+Delivered: negative-control oracle helpers (`assert_model_is_live`,
+`assert_gradients_differ`) and pytree/unit-aware gradient comparison;
+documented window semantics on every oracle entry point; deterministic and live
+SNN model specs; an axis-discrimination meta-test; gradient-correctness tests on
+realistic SNN models (multi-timescale, per-neuron heterogeneous leaks,
+`num_state` 1–5, E/I populations); the conv-bias IO-dim fix (F-26); and the
+in-tree findings list at
+[`2026-07-25-known-limitations.md`](2026-07-25-known-limitations.md).
 
-Known items from `AGENTS.md`: heterogeneous-population leak resolution,
-multi-state HiddenGroups, approximation validity beyond shallow depth,
-single-readout / feedback-shape assumptions, cross-algorithm equivalence gaps.
+`hidden_group.py` was **not** modified — no defect was found in its Jacobian
+path — so P3 inherits today's representation and risk 2 below is retired rather
+than mitigated.
 
-This phase owns `hidden_group.py`'s Jacobian path, which P3 also needs — doing
-it first is what keeps P3 from fighting a moving target.
+**Acceptance:** met. The reconstructed limitation list is committed under
+`docs/specs/`; every item has a passing test or a documented scope boundary; the
+one skipped test (F-22) is retired rather than deferred, and the suite now
+carries no `skip` or `xfail` markers at all.
 
-**Acceptance:** the reconstructed limitation list is committed under
-`docs/specs/`; every item on it has either a passing test or an explicitly
-documented scope boundary; no expected-failure item silently remains.
+Verified: `pytest braintrace/` → 2119 passed, 4 deselected (`diagnostic`, which
+pass separately); `mypy braintrace` clean.
 
 ### P2 — Axis decomposition
 
@@ -273,7 +272,12 @@ Execution options (`vjp_method`, `fast_solve`, `trace_dtype`, `chunked_trace`,
 
 **Acceptance:**
 - Element-wise equality against golden values frozen *before* the refactor, for
-  all five surviving algorithms.
+  all five surviving algorithms — frozen and compared through a **finite-window**
+  oracle path (`chunked_online_param_gradients`, `chunk_size` < `T`). The
+  full-window multi-step path returns BPTT for every algorithm regardless of its
+  axis coordinates (F-23), so golden values captured there would be identical
+  across all five and would guard nothing. Guard each comparison with
+  `assert_gradients_differ` between any two presets that differ in an axis.
 - `decay_or_rank=0.9` equals the new two-sided `(0.9, 0.9)` element-wise.
 - Illegal axis combinations raise a readable error naming the legal pairings,
   with test coverage.
@@ -292,11 +296,15 @@ today's coupled path, and add the intermediate sparse representation for
 `1 < n < diameter`.
 
 **Acceptance (two-sided squeeze):**
-- `n = 1` equals the current `D_RTRL` element-wise (regression guard).
+- `n = 1` equals the current `D_RTRL` element-wise, compared through a
+  finite-window path (regression guard). On the full-window path this holds for
+  every algorithm and so proves nothing (F-23).
 - Whatever configuration expresses `recurrence_scope = coupled` after the
-  refactor equals the current `OSTLRecurrent` element-wise — regardless of
-  whether that configuration turns out to be a point on the `n` scale or a
-  sibling value beside it (regression guard for the existing `True` branch).
+  refactor equals the current `OSTLRecurrent` element-wise — again through a
+  finite-window path — regardless of whether that configuration turns out to be
+  a point on the `n` scale or a sibling value beside it.
+  `axis_discrimination_test.py` pins that `D_RTRL` and `OSTLRecurrent` *are*
+  distinguishable on that path, so this comparison has content.
 - `n ≥ graph diameter` equals the **BPTT oracle** element-wise, on models whose
   hidden-state coupling the compiler fully captures. Full RTRL and BPTT compute
   the same total gradient, so `oracle.py` is the correct instrument and no
@@ -364,16 +372,21 @@ statistical class.
 
 1. **P2 changes numerics silently.** Mitigation: freeze reference gradients for
    all five surviving algorithms as golden values *before* touching the engine;
-   assert element-wise equality after. Separately, the `IODim` decay split must
-   prove `decay_or_rank=0.9` equals the new `(0.9, 0.9)` element-wise.
-2. **P1 and P3 collide in `hidden_group.py`.** Both rework the hidden→hidden
-   Jacobian path. Mitigation: P1 owns that file and lands first; P3 consumes the
-   representation P1 leaves behind rather than introducing a second one.
-3. **The P1 scope is not actually written down.** The findings list lives in an
-   untracked `dev/`, and the in-tree remnants are already stale — one docstring
-   still cross-referenced a test renamed some time ago. Mitigation: rebuilding
-   the list in-tree is P1's first task, not an assumption, and the rebuilt list
-   must be verified against the test suite rather than transcribed.
+   assert element-wise equality after, **through a finite-window oracle path**.
+   Golden values captured through the full-window path are identical across all
+   five algorithms (F-23) and would not detect any change. Separately, the
+   `IODim` decay split must prove `decay_or_rank=0.9` equals the new
+   `(0.9, 0.9)` element-wise.
+2. ~~**P1 and P3 collide in `hidden_group.py`.**~~ **Retired.** P1 found no
+   defect in the hidden→hidden Jacobian path and did not modify the file, so
+   there is no collision: P3 inherits today's representation directly.
+3. ~~**The P1 scope is not actually written down.**~~ **Resolved by P1.** The
+   list is now in-tree at
+   [`2026-07-25-known-limitations.md`](2026-07-25-known-limitations.md), verified
+   against the suite rather than transcribed, and the stale `dev/` docstring
+   cross-reference is gone. The residual form of this risk for later phases is
+   different and worse — see lesson 2 below: a criterion can be *written down*
+   and still be vacuous if it names the wrong oracle path.
 4. **Statistical tests are flaky in CI** (P4). Mitigation: fixed seeds, generous
    intervals, a separate slow-test marker.
 5. **`modulatory` recreates OSTTP's plumbing mistake** (P4). Mitigation: the
@@ -383,3 +396,86 @@ statistical class.
    algorithm families ship together. Mitigation: phases merge independently
    behind the axis interfaces, and P5 runs on every merge so regressions surface
    per phase rather than at release.
+
+## Lessons learned during implementation
+
+Recorded during P1, against commit `bc153da`. These are the things the roadmap
+got wrong or could not have known, kept here because later phases rest on them.
+
+1. **The instrument was the defect, not the compiler.** P1 was scoped as
+   compiler work on multi-timescale and heterogeneous populations. Every one of
+   those targets already passed: HiddenGroups with `num_state` up to 5,
+   per-neuron heterogeneous `tau_mem` and `tau_a`, multi-timescale synapses
+   (`tau_mem` / `tau_syn` / `tau_a` / `tau_std` / `tau_f` / `tau_d`), and E/I
+   population splits all reproduce BPTT. Measure before scoping a phase around
+   a suspected defect.
+
+2. **A full-sequence multi-step VJP is BPTT, so it cannot see any axis**
+   (F-23). `D_RTRL`, `OSTLRecurrent`, `EProp` at any `kappa_filter_decay` and
+   `pp_prop` at any `decay_or_rank` return bitwise-identical gradients through
+   `online_param_gradients`. This is correct semantics — no truncation, nothing
+   to approximate — but it silently voids any assertion whose subject is a
+   learning-rule axis. `chunked_online_param_gradients` documented this from the
+   start; the tests written against the other entry point did not heed it. **Any
+   acceptance criterion in this roadmap phrased as "equals X element-wise" must
+   name a finite-window path.**
+
+3. **A wrong cause propagates further than a wrong measurement.** F-21 observed
+   real behaviour and attributed it to the model being a single-HiddenGroup rate
+   model. F-22 then deferred an entire work item — an SNN multi-population model
+   zoo — on that attribution, and P5 inherited it. Building exactly that model
+   (`ALIF_ExpCo` with an E/I split, 3 relations, `num_state` 5) reproduced the
+   same bitwise exactness, so no zoo could ever have helped. The fix was one
+   parameter: `chunk_size`.
+
+4. **Vacuous tests look like passing tests.** Three distinct ways a gradient
+   assertion in this repository can assert nothing: the reference gradient is
+   zero (a silent SNN — at unit input scale the conductance-based models never
+   reach threshold); the model differs between the two sides of the comparison
+   (`_etrace_model_test.py` constructors draw from the unseeded global RNG, so
+   `factory()` returns a different network per call); or the oracle path cannot
+   see the knob under test (F-23). Spiking is *not* sufficient for the first,
+   and the live window is bounded **above** as well as below — driven hard,
+   `ALIF_Delta` keeps spiking at rate 0.60 while its surrogate derivative
+   saturates and the BPTT gradient returns to exactly zero. Hence
+   `assert_model_is_live` keys on gradient norm rather than spike rate, and
+   every new axis assertion carries `assert_gradients_differ`.
+
+   This bit twice, and the second time it was self-inflicted: a probe written
+   *while investigating F-29* silently reported 0.0 deviation for every
+   configuration because the model under it had no input drive. Run the liveness
+   helper inside throwaway probes too, not just inside committed tests.
+
+5. **A threshold below round-off is not an assertion.** The first version of the
+   F-22 replacement test demanded a relative deviation of only `1e-9` between an
+   approximate and an exact algorithm. float32 round-off on these gradient trees
+   is around `1e-8`, so the test would have passed on numerical noise for any
+   configuration at all — and it failed only because one configuration was
+   *even quieter* than noise. Axis assertions now use `1e-6` against deviations
+   of `1e-3` to `1e-1`.
+
+6. **"Approximate" is a claim about a configuration, not about a class**
+   (F-29). `pp_prop(decay_or_rank=1)` is nominally an approximation, but an int
+   rank maps through `decay = (rank - 1) / (rank + 1)`, so rank 1 means decay 0,
+   the presynaptic EMA collapses to the exact current input, and on a model whose
+   only ETP relation is the recurrent weight it reproduces exact `D_RTRL` to
+   round-off — across chunk sizes, sequence lengths, widths and recurrent
+   spectral radii from 0.25 to 4.97. It *is* a real approximation (0.31 to 0.79)
+   once the relation's presynaptic input carries an external component, as every
+   SNN spec's does. Consequence for P2 and P5: when picking a positive control
+   for approximation error, verify the chosen configuration actually deviates on
+   the chosen model instead of assuming its class name guarantees it.
+
+7. **`xy_to_dw` rules may return un-reduced, per-position leaves.** Conv's rule
+   deliberately defers the spatial sum of the bias Jacobian to `_conv_dt_to_t`,
+   which only the param-dim path calls. Any new solver that consumes `xy_to_dw`
+   directly must reduce produced leaves to the parameter's own shape (F-26).
+   This matters for P2: the axis strategies will introduce new contraction
+   paths.
+
+8. **The removed algorithms took findings with them, and left stale
+   cross-references behind.** F-07/F-08/F-09/F-19/F-20 died with OTTT / OTPE /
+   OSTTP, and the `AGENTS.md` prose item "target-signal threading under JIT"
+   died with `OSTTP`'s `y_target` path. Meanwhile a docstring still pointed at
+   `dev/superpowers/specs/...`, a path that is gitignored and absent. Findings
+   lists must live in-tree.
