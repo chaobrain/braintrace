@@ -473,7 +473,18 @@ got wrong or could not have known, kept here because later phases rest on them.
    This matters for P2: the axis strategies will introduce new contraction
    paths.
 
-8. **The removed algorithms took findings with them, and left stale
+8. **mypy's `exclude` does not apply to files reached by an import.** The oracle
+   SNN specs wrap the layer classes in `_etrace_model_test.py` rather than
+   duplicating them, which is the right call for keeping one definition of each
+   model — but it means a non-excluded module imports an excluded one. mypy then
+   type-checks that test file anyway and reported 52 pre-existing
+   `brainpy.state.*` attribute errors, turning a clean gate red without any
+   change to the file itself. Fixed with a scoped `ignore_errors` override so the
+   existing "test files are outside the typed surface" policy holds however the
+   file is reached. Watch for this whenever shipped code imports a `_test.py`
+   module.
+
+9. **The removed algorithms took findings with them, and left stale
    cross-references behind.** F-07/F-08/F-09/F-19/F-20 died with OTTT / OTPE /
    OSTTP, and the `AGENTS.md` prose item "target-signal threading under JIT"
    died with `OSTTP`'s `y_target` path. Meanwhile a docstring still pointed at

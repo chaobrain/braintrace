@@ -1,6 +1,6 @@
 # P1 — Verification harness: make the oracle axis-aware, rebuild the limitation list
 
-Status: approved, ready for implementation
+Status: implemented
 Parent: [`2026-07-25-algorithm-axes-roadmap.md`](2026-07-25-algorithm-axes-roadmap.md) § P1
 Baseline: commit `bc153da`
 Target release: 0.3.0
@@ -147,6 +147,19 @@ Reconstructed disposition:
 | **F-25** | SNN zoo silent at default scale → vacuous comparisons | **new, active** | D3 |
 | **F-26** | `pp_prop` / IODim raises on conv + trainable bias | **new, active** (pre-existing) | `oracle_test.py::test_pp_prop_conv_bias_known_limitation` |
 
+This was the table as scoped. Two entries moved during implementation, and one
+finding was added that the scoping did not anticipate:
+
+| ID | Change from the table above |
+|---|---|
+| F-26 | **resolved**, not carried forward — the IO-dim solver now reduces produced leaves to the parameter's shape, and the pinning test became `oracle_test.py::test_pp_prop_conv_bias_matches_bptt` |
+| F-27 / F-28 | F-27 was reserved for "an SNN spec that cannot be made live" and was never instantiated; F-28 (`EProp(feedback='random')` assumes a single readout of the HiddenGroup's own width) is **active as a documented scope boundary** in `e_prop.py`, not a defect |
+| **F-29** | **new** — `pp_prop(decay_or_rank=1)` is not an approximation at all on a recurrent-only relation: rank 1 means decay 0, so the presynaptic EMA collapses to the exact input. Found by the D2 work, since a config held out as a positive control turned out not to deviate |
+
+The authoritative, verified list is
+[`2026-07-25-known-limitations.md`](2026-07-25-known-limitations.md); this table
+records what the scoping expected so the two can be compared.
+
 `AGENTS.md`'s prose items map on as follows, and the mapping is recorded in the
 list so nothing survives only as prose:
 
@@ -267,6 +280,31 @@ apply to every new gradient assertion:
 Verification for the phase: full `pytest braintrace/` and `mypy braintrace`
 clean, matching the P0 bar (2062 passed, 1 skipped at `928219b`; the skip count
 drops to 0 once D6 lands).
+
+**Observed at completion:**
+
+```
+$ pytest braintrace/ -q -rs
+2119 passed, 4 deselected, 262 warnings in 788.97s
+
+$ pytest braintrace/ -m diagnostic -q
+4 passed, 2119 deselected
+
+$ mypy braintrace
+Success: no issues found in 56 source files
+```
+
+2062 → 2119 passed (+57), and 1 skipped → 0: F-22's skip was retired rather than
+deferred, and the suite now carries no `skip` or `xfail` marker anywhere. The 4
+deselected are the `diagnostic`-marked tests that the default `addopts` excludes
+from CI gating; they are run above and pass.
+
+`mypy` needed one config change to stay clean, and it was caused by this work:
+`exclude` does not apply to files reached by an import, so
+`oracle_models.py`'s import of the `_etrace_model_test.py` layer classes
+re-admitted that file and surfaced 52 pre-existing `brainpy.state.*`
+attribute errors. A scoped `ignore_errors` override for that one module
+restores the existing policy. See lesson 8 in the roadmap.
 
 ## Acceptance
 
