@@ -25,7 +25,6 @@ import brainunit as u
 from braintrace._algorithm._common import (
     FixedRandomFeedback,
     KappaFilter,
-    PresynapticTrace,
     _batched_zeros_like,
     _extract_leaf,
     _reset_state_in_a_dict,
@@ -33,22 +32,7 @@ from braintrace._algorithm._common import (
     _update_dict,
     _wrap_leaves_as_pytree,
     _zeros_like_batch_or_not,
-    extract_y_target,
 )
-
-
-class TestPresynapticTrace(unittest.TestCase):
-    def test_exponential_accumulation(self):
-        trace = PresynapticTrace(jnp.zeros((2, 3)), leak=0.9)
-        trace.update(jnp.ones((2, 3)))
-        trace.update(jnp.ones((2, 3)))
-        # After 2 ones: 0.9*(0.9*0 + 1) + 1 == 1.9
-        assert jnp.allclose(trace.value, jnp.full((2, 3), 1.9))
-
-    def test_reset_to_zero(self):
-        trace = PresynapticTrace(jnp.ones((4,)), leak=0.5)
-        trace.reset_state()
-        assert jnp.allclose(trace.value, jnp.zeros((4,)))
 
 
 class TestKappaFilter(unittest.TestCase):
@@ -82,15 +66,6 @@ class TestFixedRandomFeedback(unittest.TestCase):
         y_target = jnp.ones((3, 4))  # batched
         proj = fb.project(y_target)
         assert proj.shape == (3, 7)
-
-
-class TestExtractYTarget(unittest.TestCase):
-    def test_absent_returns_none(self):
-        assert extract_y_target(()) is None
-
-    def test_present_returns_value(self):
-        y = jnp.ones((5,))
-        assert extract_y_target((jnp.zeros(3), y), index=1) is y
 
 
 # ---------------------------------------------------------------------------

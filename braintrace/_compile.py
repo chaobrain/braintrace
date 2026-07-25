@@ -28,9 +28,6 @@ from ._algorithm import (
     EProp,
     OSTLRecurrent,
     OSTLFeedforward,
-    OTPE,
-    OTTT,
-    OSTTP,
 )
 
 __all__ = ['compile']
@@ -47,9 +44,6 @@ _ALGORITHM_REGISTRY: dict[str, type[ETraceAlgorithm]] = {
     'e_prop': EProp,
     'ostl_recurrent': OSTLRecurrent,
     'ostl_feedforward': OSTLFeedforward,
-    'otpe': OTPE,
-    'ottt': OTTT,
-    'osttp': OSTTP,
 }
 
 
@@ -63,7 +57,7 @@ def _resolve_algorithm(
     algorithm : type or str
         Either an :class:`ETraceAlgorithm` subclass (returned unchanged) or a
         registered string name (case-insensitive), e.g. ``'D_RTRL'``,
-        ``'eprop'``, ``'ottt'``.
+        ``'eprop'``, ``'ostl_recurrent'``.
 
     Returns
     -------
@@ -124,8 +118,8 @@ def compile(
         need to be pre-initialized; ``compile`` always (re)initializes its states.
     algorithm : type or str
         An :class:`ETraceAlgorithm` subclass, or a registered case-insensitive
-        name, e.g. ``'D_RTRL'``, ``'es_d_rtrl'``, ``'eprop'``, ``'otpe'``,
-        ``'ottt'``, ``'osttp'``, ``'ostl_recurrent'``, ``'ostl_feedforward'``.
+        name, e.g. ``'D_RTRL'``, ``'es_d_rtrl'``, ``'eprop'``,
+        ``'ostl_recurrent'``, ``'ostl_feedforward'``.
     *example_inputs
         Example call inputs (arrays / :class:`SingleStepData` /
         :class:`MultiStepData`) matching what ``learner.update(...)`` will
@@ -205,14 +199,6 @@ def compile(
     - ``'eprop'`` — ``feedback`` (default ``'symmetric'``), ``kappa_filter_decay``
       (default ``0.0``), ``random_feedback_key`` (default ``None``),
       ``vjp_method``, ``fast_solve``, ``name``.
-    - ``'otpe'`` — ``leak`` (**required**, keyword-only), ``mode`` (default
-      ``'full'``), ``trace_clip_abs`` (default ``None``), ``vjp_method``,
-      ``name``.
-    - ``'ottt'`` — ``leak`` (**required**, keyword-only), ``mode`` (default
-      ``'A'``), ``vjp_method``, ``name``.
-    - ``'osttp'`` — ``B_list`` (**required**: per-layer feedback matrices),
-      ``target_timing`` (default ``'per-step'``), ``vjp_method``, ``fast_solve``,
-      ``name``.
     - ``'ostl_recurrent'`` — ``vjp_method``, ``fast_solve``, ``trace_dtype``,
       ``name``.
     - ``'ostl_feedforward'`` — ``decay_or_rank`` (default ``1e-6``), ``name``.

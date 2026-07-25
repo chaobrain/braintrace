@@ -113,8 +113,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     #: (default) excludes recurrent ETP mixing primitives from the transition
     #: (bounded D-RTRL / e-prop diagonal approximation). Recurrence-defining
     #: algorithms that keep the full temporal term (RTRL-exact "with-H", e.g.
-    #: :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`) override
-    #: this to ``True``. Not a user-facing constructor argument by design.
+    #: :class:`~braintrace.OSTLRecurrent`) override this to ``True``. Not a
+    #: user-facing constructor argument by design.
     _include_recurrent_mixing: bool = False
 
     def __init__(
@@ -263,8 +263,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # etrace data
         last_etrace_vals = self._get_etrace_data()
 
-        # Optional per-call auxiliary data (e.g. OSTTP's `y_target`) that a
-        # subclass needs inside `_compute_learning_signal` but that must not be
+        # Optional per-call auxiliary data (e.g. a neuromodulatory signal) that
+        # a subclass needs inside `_compute_learning_signal` but that must not be
         # forwarded to the model itself. Read synchronously here -- before the
         # custom_vjp machinery runs -- so it becomes a genuine argument of
         # `_true_update_fun` rather than an instance-attribute side channel:
@@ -626,7 +626,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         #
         # Hook: subclasses may replace the reverse-AD learning signal with an
-        # alternative (e.g. target projection in OSTTP, κ-filtered signal in EProp).
+        # alternative (e.g. the κ-filtered signal in EProp).
         #
         # `aux` (see `_get_update_aux`) is appended to `args` here, not inside
         # `args` itself, so it never reaches the model's own forward call --
@@ -655,7 +655,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         )
 
         # Note that there are no gradients flowing through the etrace data, the
-        # running index, or the auxiliary data (e.g. OSTTP's y_target).
+        # running index, or the auxiliary data.
         dg_etrace = None
         dg_running_index = None
         dg_aux = None
@@ -686,10 +686,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         lazy read would silently observe a cleared/stale value.
 
         Default returns `None` (unused). Subclasses that need auxiliary data
-        not already part of the model's own forward arguments (e.g. OSTTP's
-        `y_target`, which must not be forwarded to the model call) should
-        override this and read whatever they stashed on `self` during their
-        own `update()` override, at this exact call site.
+        not already part of the model's own forward arguments (e.g. a reward or
+        neuromodulatory signal, which must not be forwarded to the model call)
+        should override this and read whatever they stashed on `self` during
+        their own `update()` override, at this exact call site.
 
         Returns:
             Any pytree (or `None`). Appended to the `args` tuple seen by
@@ -706,7 +706,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         """Override hook. Return the learning signal used by `_solve_weight_gradients`.
 
         Default returns the reverse-AD gradient unchanged. Subclasses that need
-        target projection (OSTTP) or any other alternative can override this.
+        a random-feedback projection, a modulatory signal, or any other
+        alternative can override this.
 
         Args:
             dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
@@ -714,10 +715,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             args: The `*args` tuple passed to the most recent `update()` call,
                 with the per-call auxiliary data from `_get_update_aux` appended
                 as the trailing element. Subclasses that override
-                `_get_update_aux` (e.g. OSTTP) can pull their auxiliary tensor
-                (e.g. ``y_target``) from there (see `extract_y_target` in
-                `_common.py`); subclasses that don't (the default `None`) can
-                ignore `args` entirely, as the base implementation does.
+                `_get_update_aux` can pull their auxiliary tensor from there;
+                subclasses that don't (the default `None`) can ignore `args`
+                entirely, as the base implementation does.
 
         Returns:
             Sequence of per-hidden-group gradient arrays, one per HiddenGroup. Must

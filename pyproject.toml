@@ -114,6 +114,19 @@ implicit_optional = true
 warn_redundant_casts = true
 no_implicit_reexport = false
 
+# `exclude` above removes test files from the checked set, but it does NOT apply
+# to files pulled in by an import. `_algorithm/oracle_models.py` imports the
+# layer classes from `_etrace_model_test.py` (deliberately -- the oracle wraps
+# those models rather than duplicating them), which re-admits that file and
+# surfaces its `brainpy.state.*` attribute errors. Those come from brainpy's
+# dynamic re-exports, the same reason `brainpy.*` is listed as untyped below;
+# they are not our errors, and the file is already outside the typed public
+# surface by the `exclude` policy. Suppress reporting for it specifically so the
+# policy holds however the file is reached.
+[[tool.mypy.overrides]]
+module = ["braintrace._etrace_model_test"]
+ignore_errors = true
+
 # Third-party scientific deps that ship without inline types or a py.typed
 # marker. Scoped per-module so missing stubs here never mask errors in our
 # own code.

@@ -3,6 +3,36 @@
 
 ## UNRELEASED
 
+### Breaking changes
+
+- **Removed `OTTT`, `OSTTP` and `OTPE`.** `braintrace` is a framework for online
+  learning in brain simulation, and a framework should ship *general*
+  mechanisms. These three rules were not model-agnostic: all of them whitelisted
+  dense-matmul primitives (`_SUPPORTED_PRIMITIVES = {etp_mm_p, etp_mv_p}`) and
+  raised `NotImplementedError` for lora / sparse / convolutional /
+  element-wise relations, and all of them were single-step only. `OTPE`
+  additionally assumed a single global time constant, was feed-forward only,
+  was gradient-exact for one hidden layer, and rejected `num_state > 1`
+  outright — ruling out ALIF and any adaptation variable. `OSTTP` bound
+  `B_list` to the HiddenGroup count and threaded `y_target` through a bespoke
+  path.
+
+  Their coordinates remain reachable: the planned axis decomposition
+  (`trace_factorization` × `temporal_recursion` × `learning_signal` ×
+  `trace_filter` × `update_schedule`) expresses each of them as a configuration
+  that works for **every** ETP primitive, not just dense matmul. See
+  `docs/specs/2026-07-25-algorithm-axes-roadmap.md`.
+
+  Also removed with them: `PresynapticTrace` (used only by `OTTT`) and the
+  internal `extract_y_target` helper (used only by `OSTTP`). `KappaFilter` and
+  `FixedRandomFeedback` are unaffected. The `'ottt'`, `'osttp'` and `'otpe'`
+  names no longer resolve in `braintrace.compile`.
+
+  **Migration:** `OTTT` → `pp_prop` (same `io_factorized` trace, keeps the
+  temporal term instead of dropping it); `OTPE` → `D_RTRL` or `pp_prop`;
+  `OSTTP` → `EProp(feedback='random')`, which is random feedback on the error
+  rather than on the target.
+
 ### Improvements
 
 - **`sparse_matmul` migrates off brainevent's deprecated trace protocol.**

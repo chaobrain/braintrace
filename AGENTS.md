@@ -45,7 +45,7 @@ connects parameters to the hidden states they influence.
 Layer 1  ETP operators      Custom JAX primitives + per-primitive rule registries + user-facing ops
 Layer 2  ETP compiler       Jaxpr analysis: find ETP primitives, connect parameters to hidden states
 Layer 3  Graph executor     Forward pass + hidden→weight / hidden→hidden Jacobian computation
-Layer 4  Algorithms         Orchestrators (D-RTRL, pp_prop/ES-D-RTRL, EProp/OSTL/OTPE/OTTT/OSTTP)
+Layer 4  Algorithms         Orchestrators (D-RTRL, pp_prop/ES-D-RTRL, EProp/OSTL)
 ```
 
 Dependency direction is strictly downward: operators know nothing of the
@@ -147,13 +147,20 @@ Pin exact names/versions in `pyproject.toml` / requirements files,.
 
 ## Known limitations
 
-First-cut SNN algorithms pass smoke/cross-checks but carry approximation edges
-and rough spots (e.g. approximation-mode validity beyond shallow depth,
-heterogeneous-population leak resolution, target-signal threading under JIT,
-single-readout/feedback-shape assumptions, and gaps in cross-algorithm
-equivalence coverage). These are enumerated and mapped to concrete improvement
-actions in the test-strategy findings list under `dev/`. Treat that list as the
-backlog of expected-failure / improvement items rather than duplicating it here.
+First-cut SNN algorithms pass smoke and cross-checks but carry approximation
+edges and rough spots. These are enumerated, verified against the test suite,
+and mapped to concrete improvement actions in the findings list at
+`docs/specs/2026-07-25-known-limitations.md`. Treat that list as the backlog of
+expected-failure and improvement items rather than duplicating it here.
+
+One rule from that list is load-bearing enough to state here: a gradient
+assertion whose subject is a **learning-rule property** — a trace
+factorization, a temporal recursion, a recurrence scope, a filter, a learning
+signal — must be measured through a *finite-window* oracle path
+(`chunked_online_param_gradients`). A whole-sequence multi-step VJP has no
+truncation left to approximate and returns BPTT for every algorithm at every
+hyperparameter, so such an assertion passes vacuously there. Assertions about
+the compiler or an ETP per-primitive rule may use the whole-sequence path.
 
 
 ## Docstring style (NumPy-doc)
