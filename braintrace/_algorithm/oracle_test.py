@@ -441,14 +441,10 @@ def test_d_rtrl_singlestep_matches_bptt_across_families(name, T):
             assert rel < _TOL, f'{name} T={T} {key}: D_RTRL vs BPTT rel={rel:.3e}'
 
 
-@pytest.mark.parametrize('name', sorted(set(_FAMILIES) - {'conv_nwc_bias'}))
+@pytest.mark.parametrize('name', sorted(_FAMILIES))
 def test_pp_prop_singlestep_exact_at_t1_across_families(name):
     """pp_prop (ES-D-RTRL, IO-dim, approximate) has no history to factor or
     decay at T=1, so it must also match BPTT exactly there, for every family.
-
-    ``conv_nwc_bias`` is excluded here and covered separately by
-    ``test_pp_prop_conv_bias_known_limitation`` -- see that test's docstring
-    for the newly-discovered (pre-existing, out-of-scope-for-this-task) gap.
     """
     factory, seed = _FAMILIES[name]
     with brainstate.environ.context(precision=64):
@@ -463,7 +459,7 @@ def test_pp_prop_singlestep_exact_at_t1_across_families(name):
             assert rel < _TOL, f'{name} T=1 {key}: pp_prop vs BPTT rel={rel:.3e}'
 
 
-@pytest.mark.parametrize('name', sorted(set(_FAMILIES) - {'conv_nwc_bias'}))
+@pytest.mark.parametrize('name', sorted(_FAMILIES))
 def test_pp_prop_singlestep_bounded_at_t2_across_families(name):
     """pp_prop is an *approximate* algorithm beyond T=1: at T=2 it factors /
     decays history and is **not** expected to match BPTT element-wise. This
@@ -486,34 +482,29 @@ def test_pp_prop_singlestep_bounded_at_t2_across_families(name):
             )
 
 
-def test_pp_prop_conv_bias_known_limitation():
-    """Documents a newly-discovered gap found while building this suite:
-    ``pp_prop``/``IODimVjpAlgorithm`` raises when a conv layer has a
-    trainable bias, regardless of layout (NCH or NWC) -- the custom-VJP bwd
-    rule returns the bias cotangent still shaped per-position
-    ``(batch, *spatial, out_ch)`` instead of reduced to the bias's own shape
-    ``(out_ch,)``.
+def test_pp_prop_conv_bias_matches_bptt():
+    """Formerly ``test_pp_prop_conv_bias_known_limitation`` (finding F-26).
 
-    This is unrelated to the Task 6/7 fixes under audit: ``D_RTRL``
-    (param-dim) handles conv+bias exactly (see
-    ``test_d_rtrl_singlestep_matches_bptt_across_families['conv_nwc_bias']``);
-    only the IO-dim path used by ``pp_prop`` is affected. Fixing it would
-    require touching ``io_dim_vjp.py``, which is out of scope for this task
-    (see module docstring / architecture notes: io_dim_vjp.py's core logic is
-    never modified as part of this audit). This test pins the *current*
-    behavior with ``pytest.raises(ValueError, ...)`` so that a future fix is
-    caught loudly (the raise will stop happening and this test will fail),
-    prompting promotion to an exactness assertion instead of silently going
-    unnoticed.
+    ``_conv_xy_to_dw`` returns the bias Jacobian per output position by design;
+    the param-dim path reduces it in ``_conv_dt_to_t``, but the IO-dim solver
+    calls ``xy_to_dw`` directly at solve time and used to hand the un-reduced
+    ``(batch, *spatial, out_ch)`` array back to ``custom_vjp``, which rejected it
+    against the bias's own ``(out_ch,)``. The IO-dim solver now reduces every
+    produced leaf to its parameter's shape. At T=1 there is no history to factor,
+    so pp_prop must match BPTT exactly.
     """
     factory, seed = _FAMILIES['conv_nwc_bias']
     with brainstate.environ.context(precision=64):
         xs = _xs_for('conv_nwc_bias', 1, seed)
-        with pytest.raises(ValueError, match='Custom VJP bwd rule'):
-            online_param_gradients_singlestep_naive(
-                factory, xs,
-                algo_factory=lambda m: braintrace.pp_prop(m, decay_or_rank=0.9, vjp_method='single-step'),
-            )
+        g_bptt = bptt_param_gradients(factory, xs)
+        g_online = online_param_gradients_singlestep_naive(
+            factory, xs,
+            algo_factory=lambda m: braintrace.pp_prop(
+                m, decay_or_rank=0.9, vjp_method='single-step'),
+        )
+        for key in g_bptt:
+            rel = _rel_err(g_bptt[key], g_online[key])
+            assert rel < _TOL, f'conv_nwc_bias T=1 {key}: pp_prop vs BPTT rel={rel:.3e}'
 
 
 # --- P1: negative-control helpers -------------------------------------------

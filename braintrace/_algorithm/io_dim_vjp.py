@@ -415,6 +415,37 @@ def _update_IO_dim_etrace_scan_fn(
     return (new_etrace_xs, new_etrace_dfs), None
 
 
+def _reduce_to_param_shape(grad: jax.Array, param: jax.Array) -> jax.Array:
+    """Sum a produced gradient leaf down to its parameter's own shape.
+
+    Some ``xy_to_dw`` rules deliberately return a *per-position* instantaneous
+    Jacobian for parameters that broadcast over positions -- a conv bias is the
+    canonical case, and :func:`braintrace._op.conv._conv_xy_to_dw` documents that
+    the spatial sum is deferred. The param-dim path performs that sum during
+    trace propagation; the IO-dim path contracts at solve time and must perform
+    it here, or ``custom_vjp`` rejects the shape mismatch (finding F-26).
+
+    This is the standard broadcast-gradient reduction -- sum the extra leading
+    axes, then any axis the parameter holds as a singleton -- so it is
+    primitive-agnostic and a no-op whenever the shapes already agree.
+    """
+    g_shape = u.math.shape(grad)
+    p_shape = u.math.shape(param)
+    if g_shape == p_shape:
+        return grad
+    extra = len(g_shape) - len(p_shape)
+    if extra < 0:
+        return grad
+    out = u.math.sum(grad, axis=tuple(range(extra))) if extra else grad
+    squeeze = tuple(
+        i for i, (gd, pd) in enumerate(zip(u.math.shape(out), p_shape))
+        if pd == 1 and gd != 1
+    )
+    if squeeze:
+        out = u.math.sum(out, axis=squeeze, keepdims=True)
+    return out
+
+
 def _solve_IO_dim_weight_gradients(
     hist_etrace_data: Tuple[
         Dict[ETraceX_Key, jax.Array],
@@ -537,6 +568,12 @@ def _solve_IO_dim_weight_gradients(
                 else:
                     dg_dict = jax.tree.map(_sum_dim, fn_vmap(df_hid))
 
+            # Reduce per-position leaves to their parameter's own shape before
+            # routing; see _reduce_to_param_shape (finding F-26).
+            dg_dict = {
+                key: _reduce_to_param_shape(value, weights_dict[key])
+                for key, value in dg_dict.items()
+            }
             # Route per-key to owning ParamState path and assemble per-path pytrees.
             _route_grads_by_path(relation, dg_dict, weight_vals, dG_weights)
 
