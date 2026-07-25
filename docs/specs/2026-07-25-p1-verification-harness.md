@@ -70,6 +70,16 @@ raises `NotImplementedError` on multi-step input data. The only live paths today
 are `chunked_online_param_gradients` with `chunk_size < T` and
 `online_param_gradients_singlestep_naive`.
 
+**This is already documented in the code, and that is the sharper form of the
+finding.** `chunked_online_param_gradients`' docstring states it outright — the
+full-sequence call is "exact reverse-mode and the trace only enters at the
+sequence boundary", while chunking "makes the total depend on the eligibility
+trace at every chunk boundary — this is the oracle that actually validates trace
+correctness." So F-23 is not a discovery about the code; it is a discovery that
+the assertions written against `online_param_gradients` do not heed what
+`oracle.py` already says. `online_param_gradients` itself carries no such
+warning, which is the gap P1 closes.
+
 Scale of exposure: 95 `vjp_method='multi-step'` call sites across 20 test
 modules. Most are legitimate — see [Out of scope](#out-of-scope).
 
@@ -132,7 +142,7 @@ Reconstructed disposition:
 | F-22 | approximation bias needs an SNN multi-population zoo | **premise false** — retire in P1, not P5 | re-point at a finite window |
 | F-SCAN / F-SCAN-WEIGHT | weight inside control flow | resolved | `_compiler/base_test.py` |
 | F-SINGLESTEP | single-step naive vs BPTT | resolved into a direction-alignment assertion | `oracle_test.py` |
-| **F-23** | full-window multi-step oracle path is axis-blind | **new, active** | D2 |
+| **F-23** | full-window multi-step oracle path is axis-blind | **active, by design** — documented in `chunked_online_param_gradients` but not heeded by the assertions | D2 |
 | **F-24** | `_etrace_model_test.py` factories are non-deterministic | **new, active** | D3 |
 | **F-25** | SNN zoo silent at default scale → vacuous comparisons | **new, active** | D3 |
 | **F-26** | `pp_prop` / IODim raises on conv + trainable bias | **new, active** (pre-existing) | `oracle_test.py::test_pp_prop_conv_bias_known_limitation` |
