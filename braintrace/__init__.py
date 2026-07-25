@@ -72,6 +72,7 @@ from typing import TYPE_CHECKING, Any
 from . import nn
 from ._compile import compile
 from ._algorithm import (
+    ETraceConfig,
     ETraceAlgorithm,
     EligibilityTrace,
     ETraceGraphExecutor,
@@ -150,6 +151,9 @@ __all__ = [
     # version
     '__version__',
     '__version_info__',
+
+    # learning-rule axes
+    'ETraceConfig',
 
     # algorithms
     'ETraceAlgorithm',

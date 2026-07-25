@@ -138,9 +138,14 @@ class TestFormatDecayAndRank:
 
     # --- invalid float inputs ---
 
-    def test_float_zero_raises(self):
-        with pytest.raises(AssertionError, match="decay should be in"):
-            _format_decay_and_rank(0.0)
+    def test_float_zero_is_admitted(self):
+        """The bound is ``[0, 1)``: decay 0 is the degenerate no-recursion rule.
+
+        It was already reachable as ``decay_or_rank=1`` (rank 1 -> decay 0), so
+        admitting the float spelling adds no new numerical regime — it only lets
+        ``temporal_recursion='none'`` be written as a decay.
+        """
+        assert _format_decay_and_rank(0.0) == (0.0, 1)
 
     def test_float_one_raises(self):
         with pytest.raises(AssertionError, match="decay should be in"):

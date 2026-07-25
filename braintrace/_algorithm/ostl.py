@@ -44,6 +44,7 @@ from typing import Any, Optional
 
 import brainstate
 
+from .axes import ETraceConfig
 from .param_dim_vjp import ParamDimVjpAlgorithm
 from .pp_prop import pp_prop
 
@@ -131,8 +132,9 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
 
     #: 'with-H' keeps the full recurrent (hidden-to-hidden) Jacobian, so the
     #: hidden-group transition must trace recurrent ETP mixing primitives and
-    #: extract the true per-position block-diagonal (bounded) Jacobian.
-    _include_recurrent_mixing = True
+    #: extract the true per-position block-diagonal (bounded) Jacobian. That is
+    #: the ``recurrence_scope='coupled'`` coordinate; everything else is D-RTRL's.
+    _default_config = ETraceConfig(recurrence_scope='coupled')
 
 
 class OSTLFeedforward(pp_prop):
@@ -163,9 +165,18 @@ class OSTLFeedforward(pp_prop):
     decay_or_rank : float or int, default 1e-6
         Exponential-smoothing factor of the IO-dim trace. The tiny default makes
         the temporal contribution negligible, matching the 'without-H' regime. A
-        float must lie in (0, 1); an int is read as an approximation rank.
+        float must lie in ``[0, 1)``; an int is read as an approximation rank.
     name, vjp_method, fast_solve : optional
         Forwarded verbatim to :class:`~braintrace.pp_prop`.
+
+    Notes
+    -----
+    The default ``1e-6`` is *negligible*, not zero, so in axis terms the
+    coordinate is ``temporal_recursion=('scalar_leak', 'jacobian')`` with a tiny
+    coefficient — both recursion terms are structurally present. The exact
+    ``temporal_recursion='none'`` coordinate is ``decay_or_rank=0.0`` (or
+    equivalently ``decay_or_rank=1``, since rank 1 maps to decay 0). The default
+    is left at ``1e-6`` because changing it would move this preset's gradients.
 
     Examples
     --------

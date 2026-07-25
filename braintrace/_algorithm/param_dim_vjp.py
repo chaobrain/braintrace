@@ -58,6 +58,7 @@ from ._common import (
     _update_dict,
 )
 from .base import EligibilityTrace
+from .axes import ETraceConfig
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [
@@ -903,6 +904,12 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     # batch of weight gradients
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State]
 
+    #: ``trace_filter='kappa'`` state, keyed exactly like :attr:`etrace_bwg`
+    #: (``ETraceWG_Key == (id(y_var), group.index)``): one filter per trainable
+    #: weight / HiddenGroup relation, holding a PyTree that mirrors the raw
+    #: trace's own structure and shape. Empty under ``trace_filter='none'``.
+    _trace_filters: Dict[ETraceWG_Key, brainstate.State]
+
     _supports_scan_descent = True
     """Structured scan descent (Phase 4): the param-dim trace update folds
     per-substep injections with an inner scan; see
@@ -917,9 +924,20 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         trace_dtype: Optional[DTypeLike] = None,
         chunked_trace: bool = True,
         control_flow: Optional[ControlFlowPolicy] = None,
+        config: Optional[ETraceConfig] = None,
+        random_feedback_key: Optional[jax.Array] = None,
     ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method,
-                         control_flow=control_flow)
+                         control_flow=control_flow, config=config,
+                         random_feedback_key=random_feedback_key)
+        if self.config.trace_factorization != 'per_param':
+            raise ValueError(
+                f'{type(self).__name__} is the per-parameter trace engine, but '
+                f'the config asks for '
+                f'trace_factorization={self.config.trace_factorization!r}. Use '
+                f'the engine matching the factorization, or '
+                f"braintrace.compile(model, config, ...) which picks it for you."
+            )
         # ``fast_solve=True`` enables closed-form einsum kernels for
         # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
         # Conv / sparse / LoRA primitives always use the legacy path.
@@ -955,6 +973,21 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
                 self.etrace_bwg, relation, self.trace_dtype, self.fast_solve,
             )
 
+        # `trace_filter`: one filter per raw-trace key, initialised to zeros
+        # with the exact PyTree structure/shape of that trace (batch axis,
+        # weight shape, and the trailing num_state axis all included) -- no
+        # reduction, so per-state channels never mix. It mirrors the trace
+        # pytree and so cannot be sized before the traces exist.
+        self._trace_filters = {}
+        if self.config.trace_filter == 'kappa':
+            for trace_key, trace_state in self.etrace_bwg.items():
+                self._trace_filters[trace_key] = brainstate.ShortTermState(
+                    jax.tree.map(jnp.zeros_like, trace_state.value)
+                )
+
+        # Last: the base allocates the axis-side state that is not ours.
+        super().init_etrace_state(*args, **kwargs)
+
     def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.
 
@@ -965,6 +998,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         """
         self.running_index.value = 0
         _reset_state_in_a_dict(self.etrace_bwg, batch_size)
+        _reset_state_in_a_dict(self._trace_filters, batch_size)
 
     def get_etrace_of(self, weight: brainstate.ParamState | Path) -> Dict:
         """Get the eligibility trace of the given weight.
@@ -1200,6 +1234,29 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         Returns:
             Dict[Path, PyTree]: Dictionary mapping parameter paths to their gradient values.
         """
+        # `trace_filter`: low-pass the raw trace before it is contracted with the
+        # learning signal. Applied elementwise (`jax.tree.map` over the trace's
+        # own PyTree, including its trailing num_state axis) so multi-state
+        # HiddenGroups are filtered independently per state -- never summed
+        # across states and broadcast back.
+        #
+        #     e_bar^t_{ji} = kappa * e_bar^{t-1}_{ji} + e^t_{ji}
+        #
+        if self._trace_filters:
+            kappa = self.config.kappa
+            filtered: Dict[ETraceWG_Key, PyTree] = {}
+            for key, trace in etrace_h2w_at_t.items():
+                flt = self._trace_filters.get(key)
+                if flt is None:
+                    filtered[key] = trace
+                    continue
+                new_val = jax.tree.map(
+                    lambda prev, e: kappa * prev + e, flt.value, trace
+                )
+                flt.value = new_val
+                filtered[key] = new_val
+            etrace_h2w_at_t = filtered
+
         dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
 
         # update the etrace weight gradients

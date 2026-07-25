@@ -55,6 +55,7 @@ resolution, never that a test stopped being run.
 | F-27 | *(never instantiated)* — reserved during planning for "an SNN spec that cannot be made live". No such spec exists: every one of the nine is live at a recorded input scale. The phenomenon that prompted the reservation is the bounded-above liveness window, recorded under F-25. | n/a | — |
 | F-28 | `EProp(feedback='random')` assumes a single, direct readout whose width equals the HiddenGroup's own | active, **documented scope boundary** | `e_prop.py:117-122` states it: the hooks only see `∂L/∂h`, which has no visibility into a separate readout layer's width, so the projection matrix is square |
 | F-29 | `pp_prop(decay_or_rank=1)` is a genuine approximation | **active, misattributed as approximate** — rank 1 means decay 0, so the presynaptic EMA collapses to the exact current input | `tests/approx_correctness_test.py::test_rank1_pp_prop_is_degenerate_on_a_recurrent_only_relation` pins both sides |
+| F-30 | the IO-dim f-side de-biasing correction is indexed by `update()` call count, not by trace-step count, so it is exact only for single-step input | active, **preserved deliberately** — fixing it moves `pp_prop` / `OSTLFeedforward` gradients | `io_dim_vjp_test.py::TestBiasCorrectionTimeIndex`, both the structural claim and the finite-window consequence |
 | F-SCAN / F-SCAN-WEIGHT | weight inside control flow raised `KeyError` | resolved | `_compiler/base_test.py::TestCheckUnsupportedOp::test_error_message_identifies_weight_variable` |
 | F-SINGLESTEP | naive single-step summation does not equal BPTT even for an exact algorithm | active as a property; documented | `online_param_gradients_singlestep_naive`' docstring; used deliberately as the maximally-sensitive window in `oracle_test.py` |
 
@@ -104,6 +105,36 @@ component: 0.55 on a variant whose ETP weight is the input weight, and 0.31 to
 `pp_prop(decay_or_rank=1)` on a recurrent-only relation is unusable as a
 positive control for approximation error, and any future axis test that wants
 one must either use a float decay or a model with an external-input relation.
+
+## Notes on F-30
+
+`_solve_IO_dim_weight_gradients` undoes the warm-up bias of the f-side
+exponential smoothing by dividing by `1 - decay ** (running_index + 1)`
+(`io_dim_vjp.py:493`). The comment above it derives the factor correctly for
+`ε_f^t = α ε_f^{t-1} + (1-α) x_t`, but `t` there is a *smoothing step* whereas
+`running_index` is a *call counter*: it is incremented once per `update()`
+(`vjp_base.py:319`) while the trace scan runs once per sequence element
+(`io_dim_vjp.py:934-943`). The two agree only when every call carries one step.
+
+Measured on `tanh_rnn(n_in=3, n_rec=4)` at `decay=0.9`:
+
+| observation | value |
+|---|---|
+| `running_index` after a single 6-step `MultiStepData` call | 1, not 6 |
+| correction applied vs. required, that call | `1 - 0.9^1 = 0.100` vs. `1 - 0.9^6 = 0.469` |
+| gradient deviation, full-window multi-step | 0 — that path is exact reverse-mode (F-23) |
+| gradient deviation, finite window (`T` 6, chunk 2) | 6.8e-04 |
+
+The last two rows are the useful ones. The mis-indexing is invisible wherever
+the trace is not load-bearing, so it only biases the estimator on the paths
+that actually use it, and the magnitude is set by how far `decay ** k` has
+decayed at the first few chunk boundaries — largest on the first call, shrinking
+as both counters grow.
+
+Not fixed in P2: the phase's acceptance criterion is that no preset's gradients
+move, and this correction is on `pp_prop`'s and `OSTLFeedforward`'s hot path.
+The P2 golden values in `data/p2_golden.npz` therefore freeze the biased
+numbers on purpose. A fix belongs in its own change, with its own goldens.
 
 ## Mapping from the `AGENTS.md` prose list
 

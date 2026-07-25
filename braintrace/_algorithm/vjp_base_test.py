@@ -38,8 +38,8 @@ def _make_gru(in_size=3, out_size=4):
 class ConcreteVjpAlgorithm(ETraceVjpAlgorithm):
     """Minimal concrete subclass that implements all abstract protocol methods."""
 
-    def __init__(self, model, name=None, vjp_method='single-step'):
-        super().__init__(model, name=name, vjp_method=vjp_method)
+    def __init__(self, model, name=None, vjp_method='single-step', **kwargs):
+        super().__init__(model, name=name, vjp_method=vjp_method, **kwargs)
         self._etrace_data = {}
         self._solve_weight_gradients_called = False
         self._update_etrace_data_called = False
@@ -47,8 +47,8 @@ class ConcreteVjpAlgorithm(ETraceVjpAlgorithm):
         self._assign_etrace_data_called = False
 
     def init_etrace_state(self, *args, **kwargs):
-        """Initialize etrace states (no-op for testing)."""
-        pass
+        """This subclass has no trace of its own; chain for the axis-side state."""
+        super().init_etrace_state(*args, **kwargs)
 
     def _solve_weight_gradients(
         self,
@@ -564,14 +564,42 @@ class TestComputeLearningSignalHook:
     """Tests for the overridable learning-signal hook on ETraceVjpAlgorithm."""
 
     def test_default_hook_is_identity(self):
-        """Default `_compute_learning_signal` returns input unchanged."""
-        algo = ETraceVjpAlgorithm.__new__(ETraceVjpAlgorithm)
+        """`learning_signal='symmetric'` (the default) returns input unchanged.
+
+        Built on a real instance rather than a ``__new__``'d shell: the hook now
+        reads ``self.config`` to decide, so a shell that never ran ``__init__``
+        would test nothing about the shipped default.
+        """
+        algo = ConcreteVjpAlgorithm(_make_gru())
+        assert algo.config.learning_signal == 'symmetric'
         dl2h = [jnp.ones((2, 3)), jnp.zeros((2, 5))]
-        out = ETraceVjpAlgorithm._compute_learning_signal(algo, dl2h, args=())
+        out = algo._compute_learning_signal(dl2h, args=())
         assert isinstance(out, (list, tuple))
         assert len(out) == 2
         assert jnp.allclose(out[0], dl2h[0])
         assert jnp.allclose(out[1], dl2h[1])
+
+    def test_random_feedback_without_allocation_raises(self):
+        """A configuration that cannot be honoured must fail, not degrade.
+
+        An unallocated feedback dict used to be indistinguishable from
+        ``'symmetric'`` at this hook, so the algorithm would quietly compute a
+        different learning rule than the one requested.
+        """
+        algo = ConcreteVjpAlgorithm(
+            _make_gru(),
+            config=braintrace.ETraceConfig(learning_signal='random_feedback'),
+            random_feedback_key=jax.random.PRNGKey(0),
+        )
+        with pytest.raises(RuntimeError, match='silently fall back to symmetric'):
+            algo._compute_learning_signal([jnp.ones((2, 3))], args=())
+
+    def test_random_feedback_without_a_key_is_rejected_at_construction(self):
+        with pytest.raises(ValueError, match='random_feedback_key'):
+            ConcreteVjpAlgorithm(
+                _make_gru(),
+                config=braintrace.ETraceConfig(learning_signal='random_feedback'),
+            )
 
     def test_override_hook_replaces_learning_signal(self):
         """Subclass override is used instead of reverse-AD dl/dh."""
