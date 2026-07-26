@@ -160,10 +160,19 @@ class SyntheticGradient(brainstate.nn.Module):
         """
         out = {}
         for gid, h in group_hiddens.items():
+            mantissa = u.get_mantissa(h)
             shape = tuple(u.math.shape(h))
-            flat = jnp.reshape(u.get_mantissa(h), shape[:-2] + (-1,))
+            flat = jnp.reshape(mantissa, shape[:-2] + (-1,))
             est = flat @ param_values['w'][gid] + param_values['b'][gid]
-            out[gid] = jnp.reshape(est, shape)
+            # Cast back to the group's own dtype. The parameters are float32, so a
+            # float16 or bfloat16 model would otherwise get a float32 estimate,
+            # and the injected cotangent would upcast the hidden and input
+            # gradients of the whole window. A *zero* estimate would still change
+            # the result's dtype, which is enough to break the claim that an
+            # untrained synthesiser leaves the run bit-identical to the plain
+            # truncated rule.
+            out[gid] = jnp.reshape(est, shape).astype(
+                jax.dtypes.result_type(mantissa))
         return out
 
 
@@ -365,7 +374,31 @@ class DNI(ParamDimVjpAlgorithm):
             # would train the synthesiser through the injection path instead of
             # through its own regression objective.
             est = jax.lax.stop_gradient(estimates[group.index])
-            for path, part in zip(group.hidden_paths, group.split_hidden(est)):
+            # Checked before the split, not after. `split_hidden` cuts the last
+            # axis at the group's own boundaries, so an estimate with a wider
+            # state axis splits into *more* parts than the group has paths and
+            # `zip` would drop the surplus -- injecting a silently truncated
+            # cotangent rather than reporting the mismatch. `_exit_cotangent_grads`
+            # only sees the per-path pieces by then, each of which has a plausible
+            # shape.
+            want = tuple(group.varshape) + (group.num_state,)
+            got = tuple(u.math.shape(est))
+            if got != want:
+                raise ValueError(
+                    f'The synthesiser emitted an estimate of shape {got} for '
+                    f'hidden group {group.index} (hidden_paths='
+                    f'{list(group.hidden_paths)}), but that group\'s '
+                    f'concatenated slab has shape {want}. Emit one cotangent per '
+                    f'group, shaped like the group.'
+                )
+            parts = group.split_hidden(est)
+            if len(parts) != len(group.hidden_paths):
+                raise ValueError(
+                    f'Splitting the estimate for hidden group {group.index} gave '
+                    f'{len(parts)} parts for {len(group.hidden_paths)} hidden '
+                    f'paths {list(group.hidden_paths)}.'
+                )
+            for path, part in zip(group.hidden_paths, parts):
                 out[path] = part
         return out
 
@@ -380,6 +413,7 @@ def train_synthetic_gradient(
     lr: float = 1e-2,
     epochs: int = 1,
     reset: bool = True,
+    batch_size: Optional[int] = None,
 ) -> list:
     r"""Fit the synthesiser against the learner's own returned hidden cotangent.
 
@@ -434,25 +468,70 @@ def train_synthetic_gradient(
     reset : bool, optional
         Whether to re-initialise the model states and the trace before each
         epoch. Default ``True``.
+    batch_size : int, optional
+        Batch size for that re-initialisation. Inferred from the learner's own
+        hidden states when omitted, which is almost always what you want; pass it
+        only to override. It is *not* assumed to be 1 -- doing so either raises a
+        shape error on a wider learner or, worse, succeeds and fits the
+        synthesiser against the wrong initial states.
 
     Returns
     -------
     list of float
-        The mean squared prediction error per epoch.
+        The mean squared prediction error per epoch, averaged over every window
+        boundary *and* the terminal boundary.
+
+    Notes
+    -----
+    Each epoch fits one extra pair beyond the window loop: the terminal state
+    ``h^T`` against a target of exactly zero. Deployment injects at window *exit*
+    states while the loop iterates *entry* states, and those sets differ at the
+    ends -- ``h^T`` is injected at but never otherwise trained, and its true
+    future gradient is zero because nothing follows it.
     """
     if learner.synthesizer is None:
         raise RuntimeError(
             'train_synthetic_gradient needs a synthesizer attached to the '
             'learner; call `learner.attach_synthesizer(...)` first.')
+    # Bound to a local after the check: the closures below run outside the
+    # narrowing, so `learner.synthesizer` reads as `Optional` inside them.
+    synthesizer = learner.synthesizer
     loss_fn = loss_fn or (lambda out: (out ** 2).sum())
-    synth_states = learner.synthesizer.states_dict()
+    synth_states = synthesizer.states_dict()
     hidden_states = dict(learner.hidden_states)
     history = []
+
+    groups = learner.graph.hidden_groups
+    if batch_size is None:
+        batch_size = _infer_batch_size(hidden_states, groups)
+
+    def _fit_one(group_hiddens: dict, group_target: dict) -> float:
+        """One regression step on a single (state, target) pair."""
+
+        def regression(values):
+            pred = synthesizer.apply(values, group_hiddens)
+            return sum(jnp.mean((pred[gi] - group_target[gi]) ** 2)
+                       for gi in group_hiddens)
+
+        g_synth = brainstate.transform.grad(
+            lambda: regression(synthesizer.param_values()),
+            synth_states)()
+        err = float(regression(synthesizer.param_values()))
+        if optimizer is None:
+            for key, st in synth_states.items():
+                st.value = st.value - lr * g_synth[key]
+        else:
+            optimizer.update(g_synth)
+        return err
+
+    def _grouped(tree: dict) -> dict:
+        return {g.index: g.concat_hidden(
+            [u.get_mantissa(tree[p]) for p in g.hidden_paths]) for g in groups}
 
     for _ in range(epochs):
         if reset:
             brainstate.nn.init_all_states(
-                learner.graph_executor.model, batch_size=1)
+                learner.graph_executor.model, batch_size=batch_size)
             learner.init_etrace_state()
         errors = []
         for start in range(0, inputs.shape[0], chunk_size):
@@ -466,36 +545,56 @@ def train_synthetic_gradient(
             # Detached: the regression must not be able to reshape the model's
             # gradients into something easier to predict.
             target = jax.tree.map(jax.lax.stop_gradient, grads)
+            errors.append(_fit_one(_grouped(entry), _grouped(target)))
 
-            groups = learner.graph.hidden_groups
-            group_entry = {
-                g.index: g.concat_hidden(
-                    [u.get_mantissa(entry[p]) for p in g.hidden_paths])
-                for g in groups
-            }
-            group_target = {
-                g.index: g.concat_hidden(
-                    [u.get_mantissa(target[p]) for p in g.hidden_paths])
-                for g in groups
-            }
+        # The terminal pair, which the window loop cannot produce.
+        #
+        # The loop fits `M` at window *entry* states, h^0 ... h^{T-C}; deployment
+        # applies it at window *exit* states, h^C ... h^T. Those sets agree in the
+        # middle -- exit of window k is entry of window k+1 -- but differ at both
+        # ends: h^0 is trained and never injected at, and h^T is injected at and
+        # never trained. h^T is the one that matters, because its true future
+        # gradient is exactly zero: nothing follows it. Left out, the synthesiser
+        # extrapolates some non-zero estimate there and DNI adds a spurious
+        # cross-window gradient to a window that has no future -- the very
+        # terminal condition `test_the_last_window_gets_a_zero_estimate` requires
+        # of the oracle.
+        final = {path: st.value for path, st in hidden_states.items()}
+        zeros = {gi: jnp.zeros_like(v) for gi, v in _grouped(final).items()}
+        errors.append(_fit_one(_grouped(final), zeros))
 
-            def regression(values):
-                pred = learner.synthesizer.apply(values, group_entry)
-                return sum(jnp.mean((pred[gi] - group_target[gi]) ** 2)
-                           for gi in group_entry)
-
-            g_synth = brainstate.transform.grad(
-                lambda: regression(learner.synthesizer.param_values()),
-                synth_states)()
-            errors.append(float(regression(learner.synthesizer.param_values())))
-
-            if optimizer is None:
-                for key, st in synth_states.items():
-                    st.value = st.value - lr * g_synth[key]
-            else:
-                optimizer.update(g_synth)
         history.append(float(sum(errors) / max(len(errors), 1)))
     return history
+
+
+def _infer_batch_size(hidden_states: dict, groups) -> int:
+    """The learner's batch size, from a hidden state rather than assumed.
+
+    Re-initialising at a hard-coded ``batch_size=1`` either raises a shape error
+    on a learner compiled for a wider batch, or -- worse -- succeeds and produces
+    regression targets for the wrong initial states.
+
+    Parameters
+    ----------
+    hidden_states : dict
+        Path-keyed hidden states of the compiled model.
+    groups : sequence of HiddenGroup
+        The compiled hidden groups, used for the declared ``varshape``.
+
+    Returns
+    -------
+    int
+        The leading axis of a hidden state, or ``1`` if it cannot be determined.
+    """
+    for group in groups:
+        for path in group.hidden_paths:
+            shape = u.math.shape(hidden_states[path].value)
+            declared = tuple(group.varshape)
+            if len(shape) > len(declared):
+                return int(shape[0])
+            if declared:
+                return int(declared[0])
+    return 1
 
 
 def _as_window(seq, chunk_size: int):

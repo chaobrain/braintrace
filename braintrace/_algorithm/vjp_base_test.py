@@ -14,8 +14,10 @@
 # ==============================================================================
 
 import brainstate
+import brainunit as u
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import braintrace
@@ -602,7 +604,14 @@ class TestComputeLearningSignalHook:
             )
 
     def test_override_hook_replaces_learning_signal(self):
-        """Subclass override is used instead of reverse-AD dl/dh."""
+        """Subclass override is *used*, not merely called.
+
+        Observing the call and a non-zero gradient is not enough: a base that
+        invoked the hook and then went on using ``dl_autodiff`` would pass both.
+        What pins it is that the parameter gradient is linear in the learning
+        signal, so returning ``k * ones`` must scale the gradient by exactly
+        ``k`` -- and must differ from the un-overridden reverse-AD signal.
+        """
         from braintrace._algorithm.param_dim_vjp import ParamDimVjpAlgorithm
 
         class Mini(brainstate.nn.Module):
@@ -619,29 +628,39 @@ class TestComputeLearningSignalHook:
 
         captured = {}
 
-        class ConstantSignalAlgo(ParamDimVjpAlgorithm):
-            def _compute_learning_signal(self, dl_autodiff, args):
-                captured['autodiff'] = dl_autodiff
-                captured['args'] = args
-                return [jnp.ones_like(a) for a in dl_autodiff]
+        def _w_grad(algo_factory):
+            net = Mini()
+            brainstate.nn.init_all_states(net, batch_size=1)
+            algo = algo_factory(net)
+            x0 = jnp.ones((1, 3))
+            algo.compile_graph(x0)
+            algo.init_etrace_state()
+            grads, _ = brainstate.transform.grad(
+                lambda x: (algo.update(x) ** 2).sum(),
+                algo.param_states, return_value=True,
+            )(x0)
+            return np.asarray(u.get_mantissa(grads[next(iter(grads))]))
 
-        net = Mini()
-        brainstate.nn.init_all_states(net, batch_size=1)
-        algo = ConstantSignalAlgo(net)
-        x0 = jnp.ones((1, 3))
-        algo.compile_graph(x0)
-        algo.init_etrace_state()
+        def _constant(k):
+            class ConstantSignalAlgo(ParamDimVjpAlgorithm):
+                def _compute_learning_signal(self, dl_autodiff, args):
+                    captured['autodiff'] = dl_autodiff
+                    captured['args'] = args
+                    return [jnp.full_like(a, k) for a in dl_autodiff]
 
-        def loss(x):
-            out = algo.update(x)
-            return (out ** 2).sum()
+            return ConstantSignalAlgo
 
-        grads, _ = brainstate.transform.grad(
-            loss, algo.param_states, return_value=True
-        )(x0)
-        assert 'autodiff' in captured  # hook was invoked
-        w_grad = grads[next(iter(grads))]
-        assert jnp.any(w_grad != 0.0)
+        ones = _w_grad(_constant(1.0))
+        assert 'autodiff' in captured, 'the hook was never invoked'
+        assert np.any(ones != 0.0)
+
+        twos = _w_grad(_constant(2.0))
+        np.testing.assert_allclose(twos, 2.0 * ones, rtol=1e-5, atol=1e-7)
+
+        autodiff = _w_grad(ParamDimVjpAlgorithm)
+        assert not np.allclose(ones, autodiff, rtol=1e-3), (
+            'the constant signal produced the reverse-AD gradient, so the '
+            'override was called but its return value was discarded')
 
 # ---------------------------------------------------------------------------
 # P4: the modulator expansion contract, and the two-pass exit-cotangent hooks.
@@ -686,7 +705,6 @@ class TestExpandModulatorToGroup:
         assert jnp.array_equal(got, m)
 
     def test_units_survive_the_expansion(self):
-        import brainunit as u
         from braintrace._algorithm.vjp_base import expand_modulator_to_group
         got = expand_modulator_to_group(3.0 * u.mV, (1, 2, 1), group_index=0)
         assert u.get_unit(got) == u.get_unit(3.0 * u.mV)

@@ -336,6 +336,38 @@ class TestRefusalsAndLifecycle:
         assert '(1, 2, 1)' in msg, msg     # the group's own shape
         assert 'group' in msg.lower(), msg
 
+    @pytest.mark.slow
+    def test_a_descended_model_validates_eagerly_too(self):
+        """The pre-flight used to skip descended groups, on a false premise.
+
+        The skip's stated reason was that a descended group's learning signal
+        carries a leading substep axis and so is not ``(*varshape, num_state)``.
+        Measured on ``snn_scan_rnn(loops=40)`` -- which does descend, asserted
+        below -- the signal is ``(1, 4, 1)``, exactly the group shape:
+        ``scan_descent`` folds the per-substep Jacobians inside the body, so the
+        reverse pass hands out one array per *group*, not per substep. The skip
+        bought nothing and cost the eager check, letting this forward-only call
+        accept a malformed modulator and fail later from inside JAX.
+        """
+        spec = om.snn_scan_rnn(n_rec=4, loops=40)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.ThreeFactor(model, vjp_method='single-step')
+        x = jnp.ones((1, 4))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        assert any(g.descent is not None for g in algo.graph.hidden_groups), (
+            'the fixture no longer descends, so this test pins nothing')
+
+        algo.modulator = jnp.ones((3,))
+        with pytest.raises(ValueError, match=r'\(3,\)') as exc:
+            algo(x)                     # forward only: no outer grad
+        assert '(1, 4, 1)' in str(exc.value), str(exc.value)
+
+        # ... and a well-formed one still goes through.
+        algo.modulator = jnp.ones((1, 4))
+        algo(x)
+
     def test_the_keyword_overrides_the_attribute(self):
         spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
         inputs = _inputs()
@@ -375,6 +407,24 @@ class TestRefusalsAndLifecycle:
         algo.modulator = 0.5
         for _ in range(2):
             assert jnp.all(jnp.isfinite(algo(_inputs()[0])))
+
+    def test_a_successful_keyword_call_does_not_leak_into_the_next_one(self):
+        """The other half of the lifecycle, and the one that was missing.
+
+        ``test_an_exception_mid_update_does_not_leave_a_stale_modulator`` covers
+        the ``finally`` on the *failure* path. Nothing covered the success path, so
+        an implementation that stashed the keyword and only cleared it when an
+        exception unwound would have passed the whole suite while quietly making
+        every subsequent call inherit the last one's modulator.
+        """
+        algo = self._algo()
+        assert algo.modulator is None
+        x = _inputs()[0]
+        assert jnp.all(jnp.isfinite(algo.update(x, modulator=1.0)))
+        # The stash is per call: with no standing attribute, the next bare call
+        # must fail for want of a modulator rather than silently reuse 1.0.
+        with pytest.raises(RuntimeError, match='modulator'):
+            algo(x)
 
     def test_two_consecutive_calls_with_different_modulators_differ(self):
         spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
@@ -526,3 +576,76 @@ class TestStructure:
     def test_the_axis_value_is_accepted_by_the_matrix(self):
         cfg = ETraceConfig(learning_signal='modulatory')
         assert 'modulatory' in cfg.describe()
+
+
+# ---------------------------------------------------------------------------
+# F-38: the standing modulator is a plain attribute, so `jit` captures it.
+# ---------------------------------------------------------------------------
+
+class TestTheStandingModulatorUnderJit:
+    """A hazard, pinned. The per-call form is the one to reach for."""
+
+    @staticmethod
+    def _algo(modulator):
+        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.ThreeFactor(model, vjp_method='single-step',
+                                      modulator=modulator)
+        algo.compile_graph(_inputs()[0])
+        algo.init_etrace_state()
+        return algo, model
+
+    def test_reassigning_the_attribute_does_not_retrace(self):
+        """Documents F-38 rather than asserting the behaviour anyone would want.
+
+        ``ThreeFactor.modulator`` is an ordinary Python attribute, not a
+        ``brainstate.State``. Under ``jit`` it is therefore a *constant of the
+        trace*: reassigning it changes nothing the compiled function can see, so
+        the gradient keeps the sign the first call baked in. Nothing here is
+        wrong per step -- the eager path re-reads the attribute every call -- but
+        the repository drives models under ``jit`` by convention, and a modulator
+        that silently stops responding is worth a failing test if it ever changes.
+
+        If this test starts failing because the value now tracks reassignment, the
+        fix has landed and F-38 should come off the limitations list.
+        """
+        algo, model = self._algo(1.0)
+        params = model.states(brainstate.ParamState)
+
+        @brainstate.transform.jit
+        def step(x):
+            return brainstate.transform.grad(
+                lambda inp: (algo(inp) ** 2).sum(), params)(x)
+
+        x = _inputs()[0]
+        first = np.asarray(u.get_mantissa(step(x)[('w',)]))
+        algo.modulator = -1.0
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo.init_etrace_state()
+        second = np.asarray(u.get_mantissa(step(x)[('w',)]))
+        assert np.abs(first).max() > 1e-6, 'the gradient must not be trivially zero'
+        # Captured at trace time: the sign does *not* flip.
+        np.testing.assert_allclose(second, first, rtol=1e-6, atol=1e-7)
+
+    def test_the_per_call_keyword_is_not_affected(self):
+        """The recommended form, and the reason F-38 is a documented hazard.
+
+        A modulator passed to ``update`` is an ordinary traced argument, so it
+        flips the gradient under ``jit`` exactly as it does eagerly.
+        """
+        algo, model = self._algo(None)
+        params = model.states(brainstate.ParamState)
+
+        @brainstate.transform.jit
+        def step(x, m):
+            return brainstate.transform.grad(
+                lambda inp: (algo.update(inp, modulator=m) ** 2).sum(), params)(x)
+
+        x = _inputs()[0]
+        pos = np.asarray(u.get_mantissa(step(x, 1.0)[('w',)]))
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo.init_etrace_state()
+        neg = np.asarray(u.get_mantissa(step(x, -1.0)[('w',)]))
+        assert np.abs(pos).max() > 1e-6
+        np.testing.assert_allclose(neg, -pos, rtol=1e-6, atol=1e-7)

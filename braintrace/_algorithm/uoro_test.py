@@ -273,6 +273,69 @@ class TestHandComputedFactors:
         got_theta = np.asarray(u.get_mantissa(theta[(0, ('w',))]))
         np.testing.assert_allclose(got_theta, want_theta, rtol=1e-4, atol=1e-6)
 
+    def test_the_second_step_factors_pin_rho0_which_the_first_step_cannot(self):
+        """``rho0`` is exactly ``1`` at step 0, so one step pins only ``rho1``.
+
+        At the first step ``s_tilde`` and ``theta_tilde`` are both zero, so
+        ``rho0 == sqrt(eps / eps) == 1`` whatever the formula says: swapping its
+        numerator and denominator, or dropping it entirely, leaves the one-step
+        test green. The second step is the first one where it is live, and this is
+        the only test that observes it -- U1's exhaustive enumeration cannot,
+        because unbiasedness holds for *any* draw-independent positive ``rho0``.
+        """
+        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
+        # `scale` is load-bearing: at the suite's default 0.5 this fixture puts
+        # rho0 at 0.92, so inverting its ratio would move the expectation by only
+        # 19% -- detectable, but with no margin. At 5.0 the transition saturates,
+        # rho0 lands near 16, and an inverted ratio is off by 264x.
+        inputs = _inputs(2, scale=5.0)
+        nu0 = np.array([1.0, -1.0]).reshape(1, H, 1)
+        nu1 = np.array([-1.0, -1.0]).reshape(1, H, 1)
+        table = np.stack([nu0[None], nu1[None]])   # (2 steps, 1 group, 1, H, 1)
+
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = _TabulatedUORO(model, table, vjp_method='multi-step')
+        algo.compile_graph(braintrace.MultiStepData(inputs))
+        algo.init_etrace_state()
+        w = np.asarray(model.states(brainstate.ParamState)[('w',)].value)
+        algo(braintrace.MultiStepData(inputs))
+        s, theta = self._factors(algo)
+
+        eps = 1e-12
+        x0, x1 = np.asarray(inputs[0]), np.asarray(inputs[1])
+        h0 = np.full((1, H), 0.4)
+
+        # --- step 0: d_s == 0 and theta == 0, so rho0 == 1 exactly ------------
+        pre0 = x0 + h0 @ w
+        dphi0 = 1.0 - np.tanh(pre0) ** 2                     # (1, H)
+        h1 = np.tanh(pre0)
+        proj0 = h0.T @ (nu0[..., 0] * dphi0)                 # (H, H)
+        rho1_0 = np.sqrt((np.linalg.norm(proj0) + eps)
+                         / (np.linalg.norm(nu0) + eps))
+        s1 = rho1_0 * nu0
+        theta1 = proj0 / rho1_0
+
+        # --- step 1: both normalisers live ------------------------------------
+        pre1 = x1 + h1 @ w
+        dphi1 = 1.0 - np.tanh(pre1) ** 2
+        # d f(h)[0, o] / d h[0, q] == dphi[o] * w[q, o], contracted with s1.
+        d_s = (dphi1[0] * (w.T @ s1[0, :, 0])).reshape(1, H, 1)
+        proj1 = h1.T @ (nu1[..., 0] * dphi1)
+        rho0_1 = np.sqrt((np.linalg.norm(theta1) + eps)
+                         / (np.linalg.norm(d_s) + eps))
+        rho1_1 = np.sqrt((np.linalg.norm(proj1) + eps)
+                         / (np.linalg.norm(nu1) + eps))
+        assert rho0_1 > 4.0 or rho0_1 < 0.25, (
+            f'rho0 == {rho0_1} is too close to 1 for this fixture to pin it')
+
+        want_s = rho0_1 * d_s + rho1_1 * nu1
+        want_theta = theta1 / rho0_1 + proj1 / rho1_1
+        np.testing.assert_allclose(np.asarray(s[0]), want_s, rtol=1e-4, atol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(u.get_mantissa(theta[(0, ('w',))])),
+            want_theta, rtol=1e-4, atol=1e-6)
+
     def test_the_outer_product_of_the_factors_is_the_influence_estimate(self):
         # The representation claim: eps_tilde[j, u] == s_tilde[u] * theta_tilde[j].
         # After one step the estimate must be exactly the instantaneous term
@@ -538,6 +601,44 @@ class TestStructure:
         assert float(jnp.abs(u.get_mantissa(g[('w',)])).max()) > 0.0
         assert bool(jnp.all(jnp.isfinite(u.get_mantissa(g[('w',)]))))
 
+    @pytest.mark.parametrize('dtype', ['float16', 'bfloat16', 'float32'])
+    def test_a_narrow_model_dtype_survives_the_scan_carry(self, dtype):
+        """The factors are scan carries, so their dtype is a hard contract.
+
+        Two independent ways to break it, both of which did: allocating the
+        factors at a hard-coded ``float32`` (so a float16 or -- under
+        ``jax_enable_x64`` -- a float64 model mismatches on entry), and letting
+        the ``rho`` normalisers set the output dtype. The normalisers are
+        deliberately computed at float32-or-wider, because a sum of squares in
+        float16 underflows, so the *result* has to be narrowed back. Neither
+        failure is a silent downcast: ``jax.lax.scan`` raises ``carry input and
+        carry output must have equal types`` on the first windowed call.
+        """
+        dt = jnp.dtype(dtype)
+
+        class Narrow(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.full((H, H), 0.1, dt))
+                self.h = brainstate.HiddenState(jnp.full((1, H), 0.4, dt))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x + braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value
+
+        model = Narrow()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.UORO(model, vjp_method='multi-step')
+        x = braintrace.MultiStepData(jnp.ones((2, 1, H), dt))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+        algo(x)   # the call that used to raise
+        data = algo._get_etrace_data()
+        for leaf in jax.tree.leaves((data['s_tilde'], data['theta_tilde'])):
+            assert jnp.dtype(u.get_mantissa(leaf).dtype) == dt, (
+                f'factor came back as {u.get_mantissa(leaf).dtype}, not {dt}')
+
     @pytest.mark.parametrize('scope', ['diagonal', 'sparse_n'])
     def test_a_non_coupled_scope_is_refused_by_name(self, scope):
         kwargs = {'sparse_n': 3} if scope == 'sparse_n' else {}
@@ -610,6 +711,42 @@ class TestReproducibility:
         second = run()
         np.testing.assert_array_equal(first, second)
 
+    def test_reset_state_reproduces_the_gradients_not_just_the_outputs(self):
+        """The forward pass is the wrong observable for this claim.
+
+        A model's outputs do not depend on the projection factors, the step
+        counter or the key at all -- they are a function of the hidden state and the
+        parameters. So the output-equality test above stays green even if
+        ``reset_state`` forgot to reset every one of UORO's own carriers, as long
+        as the *model* states were re-initialised. The gradients are what carry the
+        stream, so they are what must be compared.
+        """
+        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
+        inputs = _inputs()
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.UORO(model, vjp_method='multi-step', projection_key=3)
+        algo.compile_graph(braintrace.MultiStepData(inputs[:CHUNK]))
+        algo.init_etrace_state()
+        params = model.states(brainstate.ParamState)
+
+        def run():
+            total = None
+            for start in range(0, inputs.shape[0], CHUNK):
+                g = brainstate.transform.grad(
+                    lambda s: (algo(braintrace.MultiStepData(s)) ** 2).sum(),
+                    params)(inputs[start:start + CHUNK])
+                total = g if total is None else jax.tree.map(
+                    lambda a, b: a + b, total, g)
+            return _etp_leaves(total)[('w',)]
+
+        first = run()
+        algo.reset_state(batch_size=1)
+        brainstate.nn.init_all_states(model, batch_size=1)
+        second = run()
+        assert np.abs(first).max() > 1e-6, 'a zero gradient would pin nothing'
+        np.testing.assert_array_equal(first, second)
+
     def test_the_first_step_factors_are_finite_with_the_default_epsilon(self):
         # At the first step both norms are zero, so both rho ratios are 0/0.
         # With projection_eps == 0 this is NaN at every T; the default guard is
@@ -626,15 +763,119 @@ class TestReproducibility:
         for leaf in jax.tree.leaves((data['s_tilde'], data['theta_tilde'])):
             assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
 
-    def test_zeroing_the_epsilon_produces_the_documented_nan(self):
+    def test_zeroing_the_epsilon_is_refused_rather_than_producing_nan(self):
+        """It used to be allowed, and it made every gradient NaN.
+
+        This test previously asserted the NaN, which recorded the behaviour
+        faithfully and left a configuration in the API whose only possible outcome
+        is a poisoned carrier. There is no window length and no model for which
+        ``projection_eps=0`` is useful, so the constructor now refuses it.
+        """
         spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
-        x = _inputs(1)[0]
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
-        algo = braintrace.UORO(model, vjp_method='multi-step',
-                              projection_eps=0.0)
-        algo.compile_graph(braintrace.MultiStepData(x[None]))
+        with pytest.raises(ValueError, match='projection_eps must be positive'):
+            braintrace.UORO(model, vjp_method='multi-step', projection_eps=0.0)
+
+    def test_an_epsilon_that_underflows_float32_is_refused_too(self):
+        """The subtler half: positive in Python, zero where it is used.
+
+        The norms are accumulated in float32, so ``1e-50`` is exactly the same
+        guard as ``0.0`` by the time it reaches the ratio -- and would pass a naive
+        ``> 0`` check.
+        """
+        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        with pytest.raises(ValueError, match='remain positive in float32'):
+            braintrace.UORO(model, vjp_method='multi-step', projection_eps=1e-50)
+
+
+# ---------------------------------------------------------------------------
+# The production draw, and the key schedule that feeds it.
+#
+# The tests above establish that the step counter advances and that the carried
+# key changes. Neither observes the draw ``nu`` that production actually uses:
+# ``_TabulatedUORO`` replaces it, and a key that advances in the carry can still be
+# ignored by the draw.
+#
+# The freshness is not in ``_draw_projection`` -- that is a deterministic function
+# of one key, which is exactly what makes it a usable seam. It is in the schedule
+# at ``random_projection_vjp.py:553``: one ``split_key(len(groups))`` per step, one
+# subkey per group, carried key advanced. So the schedule is what these tests
+# replay, feeding the *production* draw function. An implementation that reused
+# the initial key at every step -- one ``nu`` forever, which breaks the
+# conditional parity argument -- fails the first test; one that handed both groups
+# the same subkey fails the second, and no mean-based pin can see either, since
+# each group's marginal expectation is untouched by correlating the two.
+#
+# Replaying beats capturing here: an ``io_callback`` placed inside the stepper is
+# eliminated, because the stepper is traced under ``jax.custom_vjp`` where the
+# callback's unused result is dead.
+# ---------------------------------------------------------------------------
+
+class TestTheProductionDrawAndItsKeySchedule:
+
+    def _algo(self, spec=None, n_rec=6):
+        spec = spec or om.nonzero_init_rnn(n_rec=n_rec, h0=0.4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.UORO(model, vjp_method='multi-step', projection_key=11)
+        algo.compile_graph(braintrace.MultiStepData(_inputs(1, n=n_rec)))
         algo.init_etrace_state()
-        algo(braintrace.MultiStepData(x[None]))
-        leaves = jax.tree.leaves(algo._get_etrace_data()['s_tilde'])
-        assert any(bool(jnp.any(jnp.isnan(u.get_mantissa(a)))) for a in leaves)
+        return algo
+
+    @staticmethod
+    def _schedule(key, n_groups, n_steps):
+        """Replay production's per-step split: subkeys per step, key advanced."""
+        per_step = []
+        for _ in range(n_steps):
+            rng = brainstate.random.RandomState(key)
+            per_step.append(jnp.asarray(rng.split_key(n_groups)))
+            key = rng.value
+        return per_step
+
+    def test_the_draw_changes_from_step_to_step(self):
+        """The freshness property, on the production draw itself.
+
+        Six units make an accidental collision a 1-in-64 event per pair, and four
+        consecutive steps of the real schedule are compared.
+        """
+        algo = self._algo()
+        step0 = jnp.asarray(0, jnp.int32)
+        draws = [
+            np.asarray(algo._draw_projection(
+                subkeys[0], step0, 0, (1, 6, 1), jnp.float32)).tobytes()
+            for subkeys in self._schedule(algo._initial_projection_key(), 1, 4)
+        ]
+        assert len(set(draws)) > 1, (
+            'four steps of the production schedule drew the same vector')
+
+    def test_the_two_hidden_groups_draw_independently(self):
+        algo = self._algo(om.two_island_rnn(n_in=6, n_rec=6))
+        assert len(algo.graph.hidden_groups) == 2, 'the fixture must be two groups'
+        subkeys = self._schedule(algo._initial_projection_key(), 2, 1)[0]
+        step0 = jnp.asarray(0, jnp.int32)
+        a, b = (
+            np.asarray(algo._draw_projection(
+                subkeys[gi], step0, gi, (1, 6, 1), jnp.float32)).tobytes()
+            for gi in (0, 1)
+        )
+        assert a != b, 'both hidden groups drew the same projection vector'
+
+    def test_the_draw_is_rademacher_which_is_what_the_parity_argument_needs(self):
+        # +-1 valued (so E[nu nu^T] == I) and hence negation-symmetric.
+        algo = self._algo()
+        nu = np.asarray(algo._draw_projection(
+            algo._initial_projection_key(), jnp.asarray(0, jnp.int32),
+            0, (1, 6, 1), jnp.float32))
+        assert set(np.unique(nu).tolist()) <= {-1.0, 1.0}, np.unique(nu)
+
+    def test_one_key_gives_one_draw_which_is_why_the_seam_works(self):
+        # The determinism the fwd/bwd replay depends on: the same key must
+        # reproduce the same nu, or the backward pass would re-draw.
+        algo = self._algo()
+        key, step0 = algo._initial_projection_key(), jnp.asarray(0, jnp.int32)
+        first = algo._draw_projection(key, step0, 0, (1, 6, 1), jnp.float32)
+        second = algo._draw_projection(key, step0, 0, (1, 6, 1), jnp.float32)
+        np.testing.assert_array_equal(np.asarray(first), np.asarray(second))

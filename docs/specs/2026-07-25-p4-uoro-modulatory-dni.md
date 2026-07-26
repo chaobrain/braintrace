@@ -300,7 +300,37 @@ At the first step `s_tilde = 0` and `theta_tilde = 0`, so both `rho` ratios are
 `0/0`. Measured with `eps = 0`: **NaN at every `T`**. `projection_eps` defaults
 to `1e-12`, is documented as the reason the exactness pins carry a tolerance
 above float64 epsilon, and is asserted to produce finite factors on the first
-step.
+step. As delivered it is also *validated*: a value that is zero, negative, or
+underflows to zero in float32 is refused at construction rather than allowed to
+produce the documented NaN.
+
+The same degeneracy has a testing consequence that took a review round to see.
+At step 1 `rho0 = sqrt(eps/eps) = 1` whatever its formula says, so a one-step
+hand computation pins `rho1` alone; U1's enumeration cannot pin either, since
+unbiasedness holds for *any* draw-independent positive `rho0`. The delivered
+suite therefore hand-computes **two** steps on a saturating fixture where `rho0`
+lands near 16, and asserts that separation so the fixture cannot drift back to the
+degenerate regime (roadmap lesson 47).
+
+### Precision: the factors are scan carries
+
+Both factors ride a `jax.lax.scan` carry, so their dtype is a contract, not a
+preference — a mismatch is a hard `carry input and carry output must have equal
+types` on the first `MultiStepData` call, not a silent downcast. Two independent
+ways to break it, both of which did:
+
+* allocating `s_tilde` at a hard-coded `float32`, which fails for any float16
+  model and for any model under `jax_enable_x64`. Fixed by reading the dtype off
+  the group's own hidden states (`_group_dtype`); `theta_tilde` already followed
+  each parameter.
+* letting the normalisers set the output dtype. `_tree_sq_norm` accumulates at
+  float32-or-wider *deliberately* (a sum of squares in float16 underflows below
+  about `1e-3`), so `rho0 * d_s + rho1 * nu` comes back wider than the carry.
+  Fixed by narrowing the result, not the reduction.
+
+Pinned by a parametrised test over `float16 / bfloat16 / float32`, which also
+asserts the factors come back at the model's dtype rather than merely not
+crashing.
 
 ---
 
@@ -348,7 +378,21 @@ arrives through the retained `_get_update_aux` side channel — read
 `learner.update(*inputs, modulator=m)` or an assignable `learner.modulator`, with
 the keyword taking precedence. A missing modulator raises; it does not fall back
 to `symmetric` (lesson 15). The stash is cleared in a `finally` so an exception
-mid-update cannot leak a stale modulator into the next call.
+mid-update cannot leak a stale modulator into the next call — on the successful
+path as well as the failing one, which has its own test.
+
+**Where the shape check happens, and for which groups.** The expansion that feeds
+the rule runs inside the `custom_vjp` *backward* pass, so validating only there
+would let a malformed modulator through a forward-only `update()` and fail later
+from inside JAX. The refusal is therefore raised eagerly at the top of `update()`,
+against every group's declared signal shape — **including descended groups**. An
+earlier revision skipped those, reasoning that a descended group's signal carries
+a leading substep axis; measured on `snn_scan_rnn(loops=40)` it does not, because
+`scan_descent` folds the per-substep Jacobians inside the body and the reverse
+pass hands out one array per group of exactly `(*varshape, num_state)`. The skip
+bought nothing and cost the pre-flight on every descended model (roadmap
+lesson 43); it is gone, with a test asserting the fixture still descends so the
+pin cannot go vacuous.
 
 ---
 

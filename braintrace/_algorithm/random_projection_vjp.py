@@ -88,6 +88,33 @@ def _tree_norm(tree: PyTree) -> jax.Array:
     return jnp.sqrt(_tree_sq_norm(tree))
 
 
+def _at_precision_of(value: Any, template: Any) -> Any:
+    """*value* narrowed back to *template*'s dtype, unit-preserving.
+
+    ``_tree_sq_norm`` accumulates in at least float32 deliberately — a sum of
+    squares in float16 underflows for state magnitudes below about ``1e-3`` — so
+    the normalisers come back wider than a half-precision model's factors, and
+    scaling a factor by one promotes it. The rank-1 factors are ``scan`` carries,
+    and ``jax.lax.scan`` rejects a carry whose output dtype differs from its
+    input: not a silent downcast but a hard ``carry input and carry output must
+    have equal types`` on the first ``MultiStepData`` call. Reducing in the wider
+    dtype and narrowing the *result* keeps both the accuracy and the contract.
+
+    Parameters
+    ----------
+    value : jax.Array or brainunit.Quantity
+        The freshly combined factor.
+    template : jax.Array or brainunit.Quantity
+        The carry slot *value* has to fit, whose dtype is authoritative.
+
+    Returns
+    -------
+    jax.Array or brainunit.Quantity
+        *value* at *template*'s dtype.
+    """
+    return u.math.astype(value, jax.dtypes.result_type(u.get_mantissa(template)))
+
+
 def _scale_tree(tree: PyTree, scale: jax.Array) -> PyTree:
     """Multiply every leaf by a dimensionless scalar, unit-safely."""
     return jax.tree.map(lambda a: a * scale, tree, is_leaf=u.math.is_quantity)
@@ -283,6 +310,22 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
         self.fast_solve = fast_solve
         self.projection_key = projection_key
         self.projection_eps = float(projection_eps)
+        # Rejected rather than documented. At the first step both factors are zero
+        # so both normalisers are `0/0`; a guard that is zero -- or one so small it
+        # rounds to zero in the float32 the norms are accumulated in -- makes the
+        # carrier NaN at *every* window length, and the NaN then propagates to
+        # every gradient. There is no configuration in which that is the intended
+        # behaviour, so it is an error at construction rather than a surprise at
+        # the first backward pass.
+        if not (self.projection_eps > 0.0
+                and float(jnp.asarray(self.projection_eps, jnp.float32)) > 0.0):
+            raise ValueError(
+                f'projection_eps must be positive and remain positive in float32, '
+                f'got {projection_eps!r}. It guards the `0/0` both normalisers hit '
+                f'at the first step (and that a dead group hits at any step); '
+                f'without it every gradient is NaN. The default, 1e-12, is a '
+                f'reasonable choice.'
+            )
 
     # ------------------------------------------------------------------ #
     # the projection stream
@@ -359,6 +402,26 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
                     paths.append(path)
         return paths
 
+    def _group_dtype(self, group: HiddenGroup) -> Any:
+        """The dtype of a group's concatenated hidden slab.
+
+        Read off the model's own hidden states rather than assumed, because
+        ``s_tilde`` shares a scan carry with values derived from them.
+
+        Parameters
+        ----------
+        group : HiddenGroup
+            The compiled hidden group.
+
+        Returns
+        -------
+        numpy.dtype
+            The promoted dtype across the group's hidden paths.
+        """
+        dtypes = [jax.dtypes.result_type(u.get_mantissa(self.hidden_states[p].value))
+                  for p in group.hidden_paths]
+        return jax.dtypes.result_type(*dtypes) if dtypes else jnp.float32
+
     def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
         """Allocate the rank-1 factors, the projection key and the step counter."""
         weight_vals = {path: st.value for path, st in self.param_states.items()}
@@ -367,8 +430,14 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
         self.etrace_theta = {}
         for group in self.graph.hidden_groups:
             shape = (*group.varshape, group.num_state)
+            # The group's own dtype, not a hard-coded `float32`. `s_tilde` rides
+            # in a scan carry alongside `D @ s_tilde`, whose dtype comes from the
+            # model; a mismatch is not a silent downcast but a hard
+            # "carry input and carry output must have equal types" from
+            # `jax.lax.scan`. A float64 model under `jax_enable_x64`, or a
+            # float16 one, would fail on the first `MultiStepData` call.
             self.etrace_s[group.index] = brainstate.ShortTermState(
-                jnp.zeros(shape, dtype=jnp.float32))
+                jnp.zeros(shape, dtype=self._group_dtype(group)))
             for path in self._etp_paths_of_group(group):
                 self.etrace_theta[(group.index, path)] = brainstate.ShortTermState(
                     jax.tree.map(u.math.zeros_like, weight_vals[path])
@@ -540,10 +609,13 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
                 rho1 = jnp.sqrt(
                     (_tree_norm(proj) + eps) / (_tree_norm(nu) + eps))
 
-                new_s[gi] = rho0 * d_s + rho1 * nu
+                # Narrowed back to the carry's own dtype: the normalisers are
+                # float32-or-wider by design, and the carry's dtype is part of
+                # the scan's contract, not a preference.
+                new_s[gi] = _at_precision_of(rho0 * d_s + rho1 * nu, s_tilde)
                 for p in paths:
                     new_theta[(gi, p)] = jax.tree.map(
-                        lambda th, pr: th / rho0 + pr / rho1,
+                        lambda th, pr: _at_precision_of(th / rho0 + pr / rho1, th),
                         theta_g[p], proj[p], is_leaf=u.math.is_quantity,
                     )
 

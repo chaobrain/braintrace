@@ -995,3 +995,63 @@ for running one.
     fixture used only for gradient comparisons can get away with poor
     conditioning; the moment a test runs an optimiser on it, conditioning becomes
     part of the fixture's contract.
+
+43. **A comment that asserts a shape is a claim, and claims get measured.**
+    The eager modulator pre-flight skipped descended hidden groups, with a comment
+    explaining that a descended group's learning signal "carries a leading substep
+    axis, so its runtime shape is not `(*varshape, num_state)`". Measured on
+    `snn_scan_rnn(loops=40)`, which does descend, the signal is `(1, 4, 1)` — the
+    group shape exactly, because `scan_descent` folds the per-substep Jacobians
+    *inside* the body and the reverse pass hands out one array per group. The skip
+    bought nothing and cost the pre-flight: a malformed modulator was accepted by
+    a forward-only `update()` on any descended model and only failed later from
+    inside JAX. Two lines of probe would have caught it at the time it was
+    written; the plausible-sounding comment is what stopped anyone looking.
+
+44. **Widening a reduction is a dtype change, and a scan carry's dtype is a
+    contract.** `_tree_sq_norm` accumulates in float32-or-wider on purpose — a sum
+    of squares in float16 underflows below about `1e-3` — but the resulting
+    normalisers then set the dtype of `rho0 * d_s + rho1 * nu`, which *is* the scan
+    carry. `jax.lax.scan` rejects that: `carry input and carry output must have
+    equal types`, on the first `MultiStepData` call, for every float16 or
+    (under `jax_enable_x64`) float64 model. The fix is not to narrow the reduction
+    but to narrow its *result*: reduce wide, then `astype` back to the carry's own
+    dtype. Note this is the second dtype bug in the same three lines — the first
+    was allocating the factors at a hard-coded `float32` — which is the tell that
+    "what dtype does this carry" deserved a parametrised test from the start
+    rather than two point fixes.
+
+45. **Observing that a hook was called is not observing that it was used.**
+    `test_override_hook_replaces_learning_signal` captured the hook's argument and
+    asserted the resulting gradient was non-zero. A base class that invoked the
+    override, discarded its return value, and went on using the reverse-AD signal
+    passes both assertions. What pins it is a property of the quantity itself: the
+    parameter gradient is linear in the learning signal, so a hook returning
+    `k · ones` must scale the gradient by exactly `k`, and must differ from the
+    un-overridden run. Same shape as lesson 39 — the assertion has to be sensitive
+    to the thing being claimed, not merely present when it holds.
+
+46. **`io_callback` is not a universal observation seam.** Capturing UORO's
+    production `nu` looked like the direct way to pin draw freshness, but a
+    callback placed inside the stepper never fires: the stepper is traced under
+    `jax.custom_vjp`, where the callback's unused result is dead and gets
+    eliminated. The property was observable anyway, because the freshness does not
+    live in `_draw_projection` at all — that is a deterministic function of one
+    key, which is exactly what makes it a usable test seam. It lives in the
+    caller's schedule (`split_key(len(groups))` per step, carried key advanced).
+    Replaying that schedule in the test and feeding the *production* draw function
+    pins both freshness and cross-group independence, with no tracing involved.
+    When a seam resists observation, check whether the property is actually
+    located where you are looking.
+
+47. **A recursion's first step cannot pin a normaliser that degenerates there.**
+    The hand-computed factor test ran one step, where `s_tilde` and `theta_tilde`
+    are both zero, so `rho0 = sqrt(eps/eps) = 1` regardless of the formula:
+    inverting its ratio or deleting it outright left the test green. Only step 2
+    makes it live. The fixture's conditioning matters as much as the step count —
+    at the suite's default input scale `rho0` lands at 0.92, an 8% departure from
+    the degenerate value, so an inverted ratio would move the expectation by only
+    19%. Saturating the transition (`scale=5.0`) puts `rho0` near 16, where an
+    inversion is off by 264×, and the test asserts that separation explicitly so a
+    later fixture change cannot quietly return it to the degenerate regime.
+

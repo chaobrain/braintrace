@@ -322,6 +322,19 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 'makes the modulator per step, which is what a neuromodulator '
                 'is.'
             )
+        if (config.learning_signal == 'bootstrapped'
+                and type(self)._inject_exit_cotangent
+                is ETraceVjpAlgorithm._inject_exit_cotangent):
+            raise NotImplementedError(
+                "learning_signal='bootstrapped' needs a subclass that overrides "
+                '`_inject_exit_cotangent` to supply the estimate of the future '
+                f'hidden cotangent, and {type(self).__name__} does not. Left '
+                'unchecked this is not an error but something worse: the default '
+                'hook returns None, so the second backward pass never runs and '
+                'the rule silently degrades to exactly `symmetric` -- a '
+                'configuration that reads as DNI and behaves as if the axis were '
+                'never set. Use `braintrace.DNI`, or override the hook.'
+            )
 
         # graph
         graph_executor = ETraceVjpGraphExecutor(
@@ -922,7 +935,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             # window-exit hidden values. Computed here because this is the only
             # place `h^exit` exists, and stashed in the residuals rather than
             # recomputed in the backward pass.
-            self._inject_exit_cotangent(hiddens, aux),
+            #
+            # Gated on the axis, not merely on the hook returning None. A subclass
+            # that overrides the hook would otherwise inject under *any*
+            # `learning_signal`, including `symmetric` -- so the axis would
+            # describe the rule without controlling it.
+            (self._inject_exit_cotangent(hiddens, aux)
+             if self.config.learning_signal == 'bootstrapped' else None),
         )
         return fwd_out, fwd_res
 
@@ -1113,8 +1132,17 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 _dg_hid_perturb_future,     # ditto; the signal is pass 1 only
             ) = jax.tree.unflatten(in_tree, cts_future)
 
+            def _add_leaf(x: Any, y: Any) -> Any:
+                # An integer or boolean input has no derivative, and JAX gives it
+                # a `float0` cotangent -- a zero-sized dtype that `+` is not
+                # defined for. Both passes produce the same `float0` placeholder,
+                # so keeping either is correct; adding them raises.
+                if jax.dtypes.result_type(x) == jax.dtypes.float0:
+                    return x
+                return x + y
+
             def _add(a: Any, b: Any) -> Any:
-                return jax.tree.map(lambda x, y: x + y, a, b,
+                return jax.tree.map(_add_leaf, a, b,
                                     is_leaf=u.math.is_quantity)
 
             dg_args = _add(dg_args, dg_args_future)
@@ -1264,9 +1292,24 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                     f'{want}. The synthesiser must emit one cotangent per hidden '
                     f'state, shaped like that state.'
                 )
+            unit = u.get_unit(template)
+            if isinstance(synthetic, u.Quantity) and not unit.is_unitless:
+                # *Convert*, do not relabel. Taking the mantissa of a `1 V`
+                # estimate and reattaching the template's `mV` would inject
+                # `1 mV` -- a thousandfold error that no shape or dtype check
+                # sees. `in_unit` also raises on incompatible dimensions, which a
+                # relabel would have silently accepted.
+                try:
+                    synthetic = synthetic.in_unit(unit)
+                except Exception as e:
+                    raise ValueError(
+                        f'The synthetic gradient for hidden path {path} has unit '
+                        f'{u.get_unit(synthetic)}, which cannot be converted to '
+                        f'{unit}, the unit of the hidden cotangent it is added '
+                        f'to.'
+                    ) from e
             mantissa = jnp.asarray(u.get_mantissa(synthetic),
                                    dtype=u.get_mantissa(template).dtype)
-            unit = u.get_unit(template)
             injected_hiddens[path] = (
                 mantissa if unit.is_unitless else mantissa * unit)
 
@@ -1327,13 +1370,15 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # forward-only `update()` silently and only fail once the caller got
         # around to differentiating, with a traceback pointing into JAX internals
         # rather than at the offending call.
+        # Descended groups included. This loop used to skip them, on the belief
+        # that a descended group's signal carries a leading substep axis and so
+        # is not `(*varshape, num_state)`. Measured, it is: `scan_descent` folds
+        # the per-substep Jacobians inside the body, and `_compute_learning_signal`
+        # sees one array per *group*, of exactly the group shape, whether or not
+        # the group descended. The skip therefore bought nothing and cost the
+        # pre-flight: on a descended model a malformed modulator was accepted by
+        # a forward-only `update()` and only failed once the caller differentiated.
         for group in self.graph.hidden_groups:
-            if group.descent is not None:
-                # A descended group's signal carries a leading substep axis, so
-                # its runtime shape is not `(*varshape, num_state)`; leave the
-                # check to the authoritative one in `_compute_learning_signal`,
-                # which reads the shape off the signal itself.
-                continue
             expand_modulator_to_group(
                 modulator,
                 tuple(group.varshape) + (group.num_state,),
@@ -1436,9 +1481,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             # which the axis reduces to the rule it generalises.
             #
             # `dl_to_hidden_from_autodiff[g].shape == (*varshape_g, num_state_g)`,
-            # which is the expansion target. Reading it off the signal rather
-            # than from the group keeps this correct for descended groups, whose
-            # arrays carry a leading substep axis.
+            # which is the expansion target. It is read off the signal rather than
+            # rebuilt from the group so that this stays a single source of truth
+            # with whatever the reverse pass actually produced -- descended groups
+            # included, whose signals measure the same shape as any other's.
             modulator = args[-1] if args else None
             if modulator is None:
                 raise RuntimeError(

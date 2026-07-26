@@ -553,10 +553,6 @@ class TestStructure:
 
     def test_a_shape_mismatch_raises_naming_both_shapes(self):
         algo, _ = self._compiled()
-        # Widen the *hidden* axis, not the state axis: `group.split_hidden` cuts
-        # the estimate along its last axis at the num_state boundaries, so a wrong
-        # trailing size is silently truncated there and the mismatch that reaches
-        # the check is a different one than the one emitted.
         algo.attach_synthesizer(_ConstantSynthesizer(
             _group_shapes(), emit_shape=(1, N_REC + 5, 1)))
         inputs = _inputs()
@@ -565,8 +561,29 @@ class TestStructure:
                 lambda seq: (algo(braintrace.MultiStepData(seq)) ** 2).sum(),
                 algo.param_states)(inputs[:CHUNK])
         msg = str(exc.value)
-        assert str((1, N_REC + 5)) in msg and str((1, N_REC)) in msg, msg
-        assert "('h',)" in msg, msg
+        assert str((1, N_REC + 5, 1)) in msg and str((1, N_REC, 1)) in msg, msg
+
+    def test_a_wrong_state_axis_raises_instead_of_being_truncated(self):
+        """The mismatch that used to be swallowed.
+
+        ``group.split_hidden`` cuts the estimate along its **last** axis at the
+        group's ``num_state`` boundaries. An estimate with a wider state axis
+        therefore splits into more parts than the group has hidden paths, and a
+        plain ``zip`` dropped the surplus -- injecting a truncated cotangent whose
+        per-path pieces each have an entirely plausible shape, so nothing
+        downstream could notice. The check now runs on the whole slab before the
+        split, so this case is named rather than trimmed.
+        """
+        algo, _ = self._compiled()
+        algo.attach_synthesizer(_ConstantSynthesizer(
+            _group_shapes(), emit_shape=(1, N_REC, 2)))
+        inputs = _inputs()
+        with pytest.raises(ValueError, match=r'shape') as exc:
+            brainstate.transform.grad(
+                lambda seq: (algo(braintrace.MultiStepData(seq)) ** 2).sum(),
+                algo.param_states)(inputs[:CHUNK])
+        msg = str(exc.value)
+        assert str((1, N_REC, 2)) in msg and str((1, N_REC, 1)) in msg, msg
 
     def test_bootstrapped_without_a_synthesiser_raises(self):
         algo, _ = self._compiled(synth=False)
@@ -734,9 +751,7 @@ class TestTheDelayedRewardTask:
 
             first = evaluate()
             for _ in range(epochs):
-                if mode == 'oracle':
-                    synth.table = _b4_oracle_table(spec, seq, params, groups)
-                elif mode == 'trained':
+                if mode == 'trained':
                     # Same window size and same loss as the descent below.
                     train_synthetic_gradient(
                         algo, seq, chunk_size=CHUNK_B4, epochs=1,
@@ -745,6 +760,13 @@ class TestTheDelayedRewardTask:
                 algo.init_etrace_state()
                 for k, start in enumerate(range(0, T_B4, CHUNK_B4)):
                     if mode == 'oracle':
+                        # Refreshed per *window*, not per epoch. The optimiser
+                        # steps after every window, so a table built once at the
+                        # top of the epoch describes a trajectory the learner has
+                        # already left -- from the second window on it would hold
+                        # cotangents of stale parameters, and the arm would stop
+                        # being an oracle exactly where it starts mattering.
+                        synth.table = _b4_oracle_table(spec, seq, params, groups)
                         synth.window = k
                     g = brainstate.transform.grad(
                         lambda s: _b4_step_loss(
@@ -780,3 +802,130 @@ class TestTheDelayedRewardTask:
         # ...and must not beat the exact estimate it is approximating.
         assert oracle_last <= trained_last + 1e-6, (
             f'nothing may beat the oracle: {oracle_last} vs {trained_last}')
+
+
+# ---------------------------------------------------------------------------
+# The two structural boundaries of the pass-2 routing (F-36, F-37).
+#
+# Both are limitations rather than bugs, and both are pinned here so that a
+# future change to the routing has to decide about them on purpose.
+# ---------------------------------------------------------------------------
+
+class TestMixedRoutingIsPathGranular:
+    """F-36: one parameter used both as an ETP weight and plainly."""
+
+    @staticmethod
+    def _spec():
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(0):
+                    self.w = brainstate.ParamState(
+                        0.2 * brainstate.random.randn(N_REC, N_REC))
+                self.h = brainstate.HiddenState(jnp.zeros((1, N_REC)))
+
+            def update(self, x):
+                # `w` twice: once through the ETP primitive, once plainly.
+                self.h.value = jnp.tanh(
+                    braintrace.matmul(self.h.value, self.w.value)
+                    + x @ self.w.value)
+                return self.h.value
+
+        return om.ModelSpec(factory=Net, etp_param_keys=(('w',),),
+                            plain_param_keys=())
+
+    def test_the_plain_occurrence_gets_no_future_credit(self):
+        """The whole leaf is skipped, plain occurrence included.
+
+        `_etp_routed_paths()` answers per *path*, and the gradient dictionaries are
+        keyed per path too, so "add the future term to the plain occurrences of
+        `w` but not the ETP ones" is not a statement the routing can make. The
+        conservative choice is taken -- skip the leaf, since double-counting the
+        ETP half would be the worse error -- and the consequence is that the plain
+        half's cross-window credit is lost.
+
+        Pinned by equality against the `M == 0` run: if a future change makes the
+        routing occurrence-granular, this test fails and F-36 comes off the list.
+        """
+        spec = self._spec()
+        inputs = _inputs(t=T, n=N_REC)
+        live = _arrays(chunked_online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: DNI(
+                m, synthesizer=_ConstantSynthesizer(_group_shapes(), 0.3)),
+            chunk_size=CHUNK), [('w',)])
+        off = _arrays(chunked_online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: DNI(
+                m, synthesizer=SyntheticGradient(_group_shapes())),
+            chunk_size=CHUNK), [('w',)])
+        np.testing.assert_allclose(live[('w',)], off[('w',)], rtol=1e-6, atol=1e-7)
+
+    def test_a_purely_plain_parameter_does_get_it_which_gives_the_above_teeth(self):
+        # Without this half, an implementation that injected nothing anywhere
+        # would pass the test above.
+        spec = om.plain_and_etp_rnn(n_in=N_IN, n_rec=N_REC)
+        inputs = _inputs(t=T)
+        live = _arrays(chunked_online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: DNI(
+                m, synthesizer=_ConstantSynthesizer(_group_shapes(), 0.3)),
+            chunk_size=CHUNK), [('win',)])
+        off = _arrays(chunked_online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: DNI(
+                m, synthesizer=SyntheticGradient(_group_shapes())),
+            chunk_size=CHUNK), [('win',)])
+        assert np.abs(live[('win',)] - off[('win',)]).max() > 1e-6
+
+
+class TestOtherStateCreditIsNotInjected:
+    """F-37: the injected template zeroes the non-hidden persistent states."""
+
+    def test_the_other_state_slot_is_zeroed_on_a_model_that_has_one(self):
+        """Non-vacuously, which the earlier version of this assertion was not.
+
+        The template's `oth_states` slot is zeroed, so a synthesiser cannot supply
+        future credit that would arrive through a persistent *non-hidden* state.
+        The previous test asserted the same zeroing on a model whose other-state
+        tree was empty, where it holds no matter what the code does.
+        """
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(0):
+                    self.w = brainstate.ParamState(
+                        0.2 * brainstate.random.randn(N_REC, N_REC))
+                self.h = brainstate.HiddenState(jnp.zeros((1, N_REC)))
+                # Persistent, carried across windows, and not a HiddenState.
+                self.trail = brainstate.ShortTermState(jnp.zeros((1, N_REC)))
+
+            def update(self, x):
+                self.trail.value = 0.5 * self.trail.value + x
+                self.h.value = jnp.tanh(
+                    self.trail.value
+                    + braintrace.matmul(self.h.value, self.w.value))
+                return self.h.value
+
+        model = Net()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = DNI(model, synthesizer=_ConstantSynthesizer(_group_shapes(), 0.3))
+        algo.compile_graph(_inputs(n=N_REC)[0])
+        algo.init_etrace_state()
+
+        hiddens = {p: st.value for p, st in algo.hidden_states.items()}
+        template = (
+            {},
+            {p: jnp.ones_like(v) for p, v in hiddens.items()},
+            {('trail',): jnp.ones((1, N_REC))},
+        )
+        _dg_out, dg_hidden, dg_oth = algo._exit_cotangent_grads(
+            template, algo._inject_exit_cotangent(hiddens, {'value': 0.3}))
+        # The model really does have a non-hidden persistent state...
+        assert set(dg_oth) == {('trail',)}
+        # ...and its slot is zeroed, which is the limitation.
+        np.testing.assert_array_equal(
+            dg_oth[('trail',)], np.zeros((1, N_REC), dtype='float32'))
+        # The hidden slot, by contrast, carries the estimate.
+        assert np.abs(np.asarray(u.get_mantissa(dg_hidden[('h',)]))).max() > 0
