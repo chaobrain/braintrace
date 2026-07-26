@@ -531,6 +531,77 @@ class TestStructure:
         assert all(np.isfinite(h) for h in history)
         assert history[0] > 0.0, 'the regression loss must be live'
 
+    def test_the_window_body_is_traced_once_not_once_per_window(self):
+        """AGENTS.md rule 10, observed rather than asserted by inspection.
+
+        The window loop drives the learner, so a Python ``for`` re-traces the
+        whole ``custom_vjp`` machinery -- the model, the trace update, the
+        regression, the optimiser step -- once per window. Under
+        ``for_loop`` the body is traced once and ``lax.scan`` repeats it.
+
+        The observable is the number of times the synthesiser's ``apply`` runs at
+        *trace* time. Under a Python loop it grows with the window count; under
+        ``for_loop`` it does not. Comparing two sequence lengths rather than
+        asserting an absolute count keeps this insensitive to how many times the
+        body's trace touches ``apply`` (twice: once under ``grad``, once for the
+        reported error) and to the terminal pair.
+        """
+        counts = {}
+
+        class _CountingSynthesizer(SyntheticGradient):
+            def apply(self, param_values, hidden):
+                counts[self] = counts.get(self, 0) + 1
+                return super().apply(param_values, hidden)
+
+        def traces_for(n_steps):
+            spec = om.plain_and_etp_rnn(n_in=N_IN, n_rec=N_REC)
+            model = spec.factory()
+            brainstate.nn.init_all_states(model, batch_size=1)
+            synth = _CountingSynthesizer(_group_shapes(), scale=0.1, seed=1)
+            algo = DNI(model, synthesizer=synth)
+            algo.compile_graph(_inputs(t=n_steps)[0])
+            algo.init_etrace_state()
+            train_synthetic_gradient(algo, _inputs(t=n_steps), chunk_size=1,
+                                     epochs=1)
+            return counts[synth]
+
+        four, twelve = traces_for(4), traces_for(12)
+        assert four == twelve, (
+            f'the body was traced {four} times for 4 windows and {twelve} for '
+            f'12, so it is being re-traced per window rather than compiled once')
+
+    @pytest.mark.parametrize('n_steps,chunk', [(7, 2), (5, 3), (6, 4)])
+    def test_a_ragged_final_window_is_refused_rather_than_truncated(
+            self, n_steps, chunk):
+        """A short last window fits the wrong target.
+
+        It is not merely that ``for_loop`` needs uniform windows. The
+        synthesiser is fit against the future span of a window of *this* length
+        and deployed on windows of that same length, so a truncated tail is the
+        same mismatch that ``chunk_size``'s own docstring warns about -- just
+        introduced by the helper instead of by the caller.
+        """
+        spec = om.plain_and_etp_rnn(n_in=N_IN, n_rec=N_REC)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = DNI(model, synthesizer=SyntheticGradient(_group_shapes()))
+        algo.compile_graph(_inputs()[0])
+        algo.init_etrace_state()
+        with pytest.raises(ValueError, match='chunk_size') as exc:
+            train_synthetic_gradient(algo, _inputs(t=n_steps), chunk_size=chunk)
+        msg = str(exc.value)
+        assert str(n_steps) in msg and str(chunk) in msg, msg
+
+    def test_a_chunk_size_below_one_is_refused(self):
+        spec = om.plain_and_etp_rnn(n_in=N_IN, n_rec=N_REC)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = DNI(model, synthesizer=SyntheticGradient(_group_shapes()))
+        algo.compile_graph(_inputs()[0])
+        algo.init_etrace_state()
+        with pytest.raises(ValueError, match='chunk_size'):
+            train_synthetic_gradient(algo, _inputs(), chunk_size=0)
+
     def test_the_per_group_mapping_is_correct_on_a_two_group_model(self):
         spec = om.two_island_rnn(n_in=3, n_rec=3)
         model = spec.factory()

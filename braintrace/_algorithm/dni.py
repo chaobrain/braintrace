@@ -438,7 +438,9 @@ def train_synthetic_gradient(
     learner : DNI
         A compiled learner with a synthesiser attached.
     inputs : array
-        A ``(T, ...)`` sequence, consumed one window at a time.
+        A ``(T, ...)`` sequence, consumed one window at a time. ``T`` must be a
+        multiple of *chunk_size*; a ragged final window is refused rather than
+        truncated (see Raises).
     chunk_size : int, optional
         Steps per window. This **must match the window size the learner will be
         driven with**: the synthesiser predicts the future at a window boundary,
@@ -481,8 +483,24 @@ def train_synthetic_gradient(
         The mean squared prediction error per epoch, averaged over every window
         boundary *and* the terminal boundary.
 
+    Raises
+    ------
+    RuntimeError
+        If no synthesiser is attached to *learner*.
+    ValueError
+        If *chunk_size* is below 1, or if it does not divide ``len(inputs)``.
+
     Notes
     -----
+    The window loop is a ``brainstate.transform.for_loop``, so the body -- which
+    drives the learner through its ``custom_vjp`` and then takes a regression
+    step -- is traced once per epoch rather than once per window (AGENTS.md
+    rule 10). Everything that changes across windows is ``State`` and threads
+    through automatically: the model's hidden states, the learner's trace, the
+    synthesiser's parameters, and the optimiser's moments. Epochs remain a Python
+    loop, because ``reset`` calls ``init_all_states``, which reallocates state and
+    cannot run under a trace.
+
     Each epoch fits one extra pair beyond the window loop: the terminal state
     ``h^T`` against a target of exactly zero. Deployment injects at window *exit*
     states while the loop iterates *entry* states, and those sets differ at the
@@ -505,8 +523,35 @@ def train_synthetic_gradient(
     if batch_size is None:
         batch_size = _infer_batch_size(hidden_states, groups)
 
-    def _fit_one(group_hiddens: dict, group_target: dict) -> float:
-        """One regression step on a single (state, target) pair."""
+    n_steps = int(inputs.shape[0])
+    if chunk_size < 1:
+        raise ValueError(f'chunk_size must be at least 1, got {chunk_size}.')
+    if n_steps % chunk_size:
+        # Refused, not truncated. The window loop is a `for_loop`, which needs
+        # every window the same length -- but the deeper reason is the contract
+        # `chunk_size` already documents: the synthesiser is fit against the
+        # future span of a window of *this* length, and it is deployed on windows
+        # of that same length. A ragged tail fits one pair against a shorter
+        # future than any window the learner will ever see, which is the same
+        # mismatch as training on one window size and deploying on another.
+        raise ValueError(
+            f'The sequence length {n_steps} is not a multiple of chunk_size '
+            f'{chunk_size}, so the last window would be '
+            f'{n_steps % chunk_size} step(s) long instead of {chunk_size}. The '
+            f'synthesiser predicts the future at a window boundary, so a window '
+            f'of the wrong length fits the wrong target. Trim the sequence to '
+            f'{n_steps - n_steps % chunk_size} steps, or pick a chunk_size that '
+            f'divides {n_steps}.'
+        )
+    n_windows = n_steps // chunk_size
+
+    def _fit_one(group_hiddens: dict, group_target: dict):
+        """One regression step on a single (state, target) pair.
+
+        Returns the *traced* pre-update error, not a Python float: this runs
+        inside the window ``for_loop``, where a concretising ``float()`` would
+        raise. The caller converts once, after the loop.
+        """
 
         def regression(values):
             pred = synthesizer.apply(values, group_hiddens)
@@ -516,7 +561,7 @@ def train_synthetic_gradient(
         g_synth = brainstate.transform.grad(
             lambda: regression(synthesizer.param_values()),
             synth_states)()
-        err = float(regression(synthesizer.param_values()))
+        err = regression(synthesizer.param_values())
         if optimizer is None:
             for key, st in synth_states.items():
                 st.value = st.value - lr * g_synth[key]
@@ -528,24 +573,40 @@ def train_synthetic_gradient(
         return {g.index: g.concat_hidden(
             [u.get_mantissa(tree[p]) for p in g.hidden_paths]) for g in groups}
 
+    def _one_window(window):
+        """Drive one window, then fit the synthesiser at its entry state."""
+        # The entry hiddens are what the synthesiser sees; snapshot before
+        # the window advances them.
+        entry = {path: st.value for path, st in hidden_states.items()}
+        grads = brainstate.transform.grad(
+            lambda seq: loss_fn(learner(_as_window(seq, chunk_size))),
+            hidden_states)(window)
+        # Detached: the regression must not be able to reshape the model's
+        # gradients into something easier to predict.
+        target = jax.tree.map(jax.lax.stop_gradient, grads)
+        return _fit_one(_grouped(entry), _grouped(target))
+
+    # (n_windows, chunk_size, *feature) -- the shape `for_loop` maps over.
+    windows = inputs.reshape((n_windows, chunk_size) + tuple(inputs.shape[1:]))
+
     for _ in range(epochs):
         if reset:
             brainstate.nn.init_all_states(
                 learner.graph_executor.model, batch_size=batch_size)
             learner.init_etrace_state()
-        errors = []
-        for start in range(0, inputs.shape[0], chunk_size):
-            window = inputs[start:start + chunk_size]
-            # The entry hiddens are what the synthesiser sees; snapshot before
-            # the window advances them.
-            entry = {path: st.value for path, st in hidden_states.items()}
-            grads = brainstate.transform.grad(
-                lambda seq: loss_fn(learner(_as_window(seq, chunk_size))),
-                hidden_states)(window)
-            # Detached: the regression must not be able to reshape the model's
-            # gradients into something easier to predict.
-            target = jax.tree.map(jax.lax.stop_gradient, grads)
-            errors.append(_fit_one(_grouped(entry), _grouped(target)))
+
+        # One compiled program per epoch, not one trace per window. The body
+        # drives the learner, so AGENTS.md rule 10 applies: a Python loop here
+        # re-traces the whole custom_vjp machinery every window. `State` is
+        # carried automatically, which is what makes this a drop-in -- the
+        # learner's hidden states, its trace, the synthesiser's parameters and
+        # the optimiser's moments all thread through as state, and the stacked
+        # per-window errors come back as the loop's output.
+        #
+        # Epochs stay a Python loop, matching the repo's own training loops:
+        # `reset` calls `init_all_states`, which reallocates state and cannot
+        # run under a trace.
+        errors = list(brainstate.transform.for_loop(_one_window, windows))
 
         # The terminal pair, which the window loop cannot produce.
         #
@@ -563,7 +624,9 @@ def train_synthetic_gradient(
         zeros = {gi: jnp.zeros_like(v) for gi, v in _grouped(final).items()}
         errors.append(_fit_one(_grouped(final), zeros))
 
-        history.append(float(sum(errors) / max(len(errors), 1)))
+        # Concretised once, here, rather than per window inside the loop.
+        history.append(float(jnp.mean(jnp.stack([jnp.asarray(e)
+                                                 for e in errors]))))
     return history
 
 
