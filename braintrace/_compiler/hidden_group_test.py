@@ -1217,6 +1217,7 @@ from braintrace._compiler.hidden_group import (
     _transition_contains_while,
     block_diagonal_last_dim,
     find_hidden_groups_from_minfo,
+    full_position_jacobian,
     jacfwd_last_dim,
     jacrev_last_dim,
 )
@@ -1616,6 +1617,78 @@ def _identity_snap(num_pos):
 def _saturated_snap(num_pos):
     return (np.tile(np.arange(num_pos, dtype=np.int32), (num_pos, 1)),
             np.ones((num_pos, num_pos), dtype=bool))
+
+
+class TestFullPositionJacobian:
+    """``full_position_jacobian`` keeps what ``block_diagonal_last_dim`` throws away.
+
+    UORO (P4) rolls the *whole* within-group transition rather than its
+    per-position block diagonal, so it needs the array
+    ``block_diagonal_last_dim`` materialises internally, undiminished.
+    """
+
+    def _fn_and_point(self, num_pos=4, num_state=2, seed=0):
+        rng = brainstate.random.RandomState(seed)
+        w = rng.randn(num_pos * num_state, num_pos * num_state)
+        h = rng.randn(num_pos, num_state)
+
+        def fn(hid):
+            flat = hid.reshape(-1)
+            return jnp.tanh(flat @ w).reshape(hid.shape)
+
+        return fn, h
+
+    def test_matches_jax_jacrev_exactly(self):
+        fn, h = self._fn_and_point()
+        got = full_position_jacobian(fn, h)
+        want = jax.jacrev(fn)(h)
+        assert got.shape == want.shape == (4, 2, 4, 2)
+        np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+    def test_its_block_diagonal_is_the_block_diagonal(self):
+        # The two entry points must agree where they overlap, or `coupled` and
+        # `random_projection` would disagree about the same transition.
+        fn, h = self._fn_and_point()
+        full = np.asarray(full_position_jacobian(fn, h))
+        block = np.asarray(block_diagonal_last_dim(fn, h))
+        for p in range(h.shape[0]):
+            np.testing.assert_allclose(full[p, :, p, :], block[p], atol=1e-12)
+
+    def test_it_is_not_the_block_diagonal(self):
+        # Negative control: on a coupled transition the off-diagonal positions
+        # must be non-zero, otherwise this test would pass for the biased path.
+        fn, h = self._fn_and_point()
+        full = np.asarray(full_position_jacobian(fn, h))
+        off = [abs(full[p, :, q, :]).max()
+               for p in range(h.shape[0]) for q in range(h.shape[0]) if p != q]
+        assert min(off) > 1e-6
+
+    def test_forward_mode_matches_reverse(self):
+        fn, h = self._fn_and_point()
+        fwd = full_position_jacobian(fn, h, use_forward_mode=True)
+        rev = full_position_jacobian(fn, h)
+        assert u.math.allclose(fwd, rev, atol=1e-6)
+
+    def test_multi_axis_varshape_is_preserved(self):
+        rng = brainstate.random.RandomState(1)
+        h = rng.randn(2, 3, 2)  # varshape (2, 3), num_state 2
+
+        def fn(hid):
+            flat = hid.reshape(-1)
+            return jnp.tanh(flat * 1.3 + jnp.roll(flat, 1)).reshape(hid.shape)
+
+        got = full_position_jacobian(fn, h)
+        assert got.shape == (2, 3, 2, 2, 3, 2)
+
+    def test_a_diagonal_transition_gives_a_position_diagonal_jacobian(self):
+        rng = brainstate.random.RandomState(2)
+        h = rng.randn(4, 1)
+        fn = lambda hid: jnp.tanh(hid * 0.7)
+        full = np.asarray(full_position_jacobian(fn, h))
+        for p in range(4):
+            for q in range(4):
+                if p != q:
+                    np.testing.assert_allclose(full[p, :, q, :], 0.0, atol=1e-12)
 
 
 class TestWidenedBlockJacobian:

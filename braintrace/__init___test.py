@@ -71,6 +71,10 @@ def _algo_constructors():
         'EProp': lambda m: braintrace.EProp(m),
         'OSTLRecurrent': lambda m: braintrace.OSTLRecurrent(m),
         'OSTLFeedforward': lambda m: braintrace.OSTLFeedforward(m, decay_or_rank=0.9),
+        'SnAp': lambda m: braintrace.SnAp(m, n=1),
+        'UORO': lambda m: braintrace.UORO(m),
+        # `modulatory` has no fallback: a standing modulator is required.
+        'ThreeFactor': lambda m: braintrace.ThreeFactor(m, modulator=0.5),
     }
 
 
@@ -85,6 +89,32 @@ def test_algorithm_is_usable_end_to_end(name):
     y = algo(x0)
     assert y.shape == (1, 4)
     assert bool(jnp.all(jnp.isfinite(y)))
+
+
+def test_dni_is_usable_end_to_end():
+    # DNI is the one preset whose second collaborator is sized from the compiled
+    # graph, so it cannot join the shared map above: build, compile, then attach.
+    model = tanh_rnn(n_in=3, n_rec=4, seed=0).factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    algo = braintrace.DNI(model)
+    x0 = jnp.ones((3,), dtype='float32')
+    algo.compile_graph(x0)
+    algo.init_etrace_state()
+    algo.attach_synthesizer(
+        braintrace.SyntheticGradient(algo.group_signal_shapes()))
+    y = algo(x0)
+    assert y.shape == (1, 4)
+    assert bool(jnp.all(jnp.isfinite(y)))
+
+
+@pytest.mark.parametrize('name', ['UORO', 'ThreeFactor', 'DNI',
+                                  'SyntheticGradient', 'train_synthetic_gradient',
+                                  'RandomProjectionVjpAlgorithm'])
+def test_p4_symbols_are_exported_from_both_all_lists(name):
+    from braintrace import _algorithm
+    assert name in braintrace.__all__, f'{name} missing from braintrace.__all__'
+    assert name in _algorithm.__all__, f'{name} missing from _algorithm.__all__'
+    assert getattr(braintrace, name) is getattr(_algorithm, name)
 
 
 # --- Task 4: dynamic weight assignment raises NotSupportedError --------------

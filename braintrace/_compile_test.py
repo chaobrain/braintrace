@@ -40,9 +40,32 @@ def test_resolve_class_passthrough():
     ('e_prop', 'EProp'),
     ('ostl_recurrent', 'OSTLRecurrent'),
     ('ostl_feedforward', 'OSTLFeedforward'),
+    # P4 presets
+    ('uoro', 'UORO'),
+    ('UORO', 'UORO'),
+    ('three_factor', 'ThreeFactor'),
+    ('dni', 'DNI'),
+    ('DNI', 'DNI'),
 ])
 def test_resolve_string_names(name, cls_name):
     assert _resolve_algorithm(name) is getattr(braintrace, cls_name)
+
+
+# --- P4: the three coordinates resolve from a config alone -------------------
+#
+# The engine must be selectable by coordinate, not only by preset name --
+# otherwise the axis space is decoration and the presets are the real API.
+
+@pytest.mark.parametrize('kwargs,engine_name', [
+    ({'trace_factorization': 'random_projection',
+      'recurrence_scope': 'coupled'}, 'RandomProjectionVjpAlgorithm'),
+    ({'learning_signal': 'modulatory'}, 'ParamDimVjpAlgorithm'),
+    ({'learning_signal': 'bootstrapped'}, 'ParamDimVjpAlgorithm'),
+])
+def test_resolve_p4_coordinates_from_config(kwargs, engine_name):
+    from braintrace._algorithm.axes import ETraceConfig
+    assert _resolve_algorithm(ETraceConfig(**kwargs)) is getattr(
+        braintrace, engine_name)
 
 
 def test_resolve_unknown_string_raises_value_error():

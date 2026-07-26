@@ -218,9 +218,8 @@ class TestCompatibilityMatrix:
             ETraceConfig(trace_filter='kappa')
 
     @pytest.mark.parametrize('kwargs,phase', [
-        (dict(trace_factorization='random_projection'), 'P4'),
-        (dict(learning_signal='modulatory'), 'P4'),
-        (dict(learning_signal='bootstrapped'), 'P4'),
+        # P4 delivered `random_projection`, `modulatory` and `bootstrapped`, so
+        # only the two schedule values are still routed through rule 8.
         (dict(update_schedule='window', window_size=4), 'no phase yet'),
         (dict(update_schedule='sequence_end'), 'no phase yet'),
     ])
@@ -378,3 +377,121 @@ class TestSparseNAxis:
         text = ETraceConfig(recurrence_scope='sparse_n', sparse_n=4).describe()
         assert "recurrence_scope='sparse_n'" in text
         assert 'sparse_n=4' in text
+
+
+class TestRandomProjectionAxis:
+    """``trace_factorization='random_projection'`` -- UORO (P4).
+
+    The coordinate carries a rank-1 unbiased estimator of the *full* within-group
+    influence recursion, so it needs the coupled transition (the block diagonal is
+    what it declines to take) and cannot host a filtered trace.
+    """
+
+    def test_random_projection_is_implemented(self):
+        cfg = ETraceConfig(
+            trace_factorization='random_projection', recurrence_scope='coupled')
+        assert cfg.trace_factorization == 'random_projection'
+        assert cfg.recurrence_scope == 'coupled'
+
+    def test_rule_11_requires_the_coupled_scope(self):
+        # `diagonal` would make UORO an unbiased estimator of an already-biased
+        # trace: more variance, same asymptotic error, no memory saved.
+        with pytest.raises(ValueError, match="requires recurrence_scope='coupled'"):
+            ETraceConfig(trace_factorization='random_projection')
+
+    def test_rule_11_rejects_sparse_n(self):
+        with pytest.raises(ValueError, match="requires recurrence_scope='coupled'"):
+            ETraceConfig(
+                trace_factorization='random_projection',
+                recurrence_scope='sparse_n', sparse_n=3,
+            )
+
+    def test_rule_11_negative_control_per_param_keeps_every_scope(self):
+        # rule 11 must constrain `random_projection` only.
+        for scope, extra in (('diagonal', {}), ('coupled', {}),
+                             ('sparse_n', {'sparse_n': 2})):
+            cfg = ETraceConfig(recurrence_scope=scope, **extra)
+            assert cfg.recurrence_scope == scope
+
+    def test_rule_12_rejects_the_kappa_filter(self):
+        with pytest.raises(ValueError, match="trace_filter='kappa' requires"):
+            ETraceConfig(
+                trace_factorization='random_projection',
+                recurrence_scope='coupled',
+                trace_filter='kappa', kappa=0.9,
+            )
+
+    def test_rule_2_still_needs_a_jacobian_recursion(self):
+        with pytest.raises(ValueError, match="to be 'jacobian'"):
+            ETraceConfig(
+                trace_factorization='random_projection',
+                recurrence_scope='coupled',
+                temporal_recursion='scalar_leak', decay=0.9,
+            )
+
+    def test_include_recurrent_mixing_is_on(self):
+        # The full Jacobian is only *full* if the recurrent ETP mixing was traced
+        # into the transition in the first place.
+        cfg = ETraceConfig(
+            trace_factorization='random_projection', recurrence_scope='coupled')
+        assert cfg.include_recurrent_mixing
+
+    def test_is_factorized_is_false(self):
+        # `random_projection` is rank-1 in (hidden, parameter), which is not the
+        # (x, f) input/output factorisation `is_factorized` names.
+        cfg = ETraceConfig(
+            trace_factorization='random_projection', recurrence_scope='coupled')
+        assert not cfg.is_factorized
+        assert cfg.temporal_recursion == 'jacobian'
+
+    def test_describe_names_the_factorization(self):
+        text = ETraceConfig(
+            trace_factorization='random_projection',
+            recurrence_scope='coupled').describe()
+        assert "trace_factorization='random_projection'" in text
+        assert "recurrence_scope='coupled'" in text
+
+
+class TestNewLearningSignals:
+    """``learning_signal='modulatory'`` and ``'bootstrapped'`` (P4)."""
+
+    @pytest.mark.parametrize('signal', ['modulatory', 'bootstrapped'])
+    def test_the_signal_is_implemented(self, signal):
+        cfg = ETraceConfig(learning_signal=signal)
+        assert cfg.learning_signal == signal
+
+    @pytest.mark.parametrize('signal', ['modulatory', 'bootstrapped'])
+    def test_the_signal_is_orthogonal_to_the_factorization(self, signal):
+        # These axes replace / augment the signal; they say nothing about the
+        # trace, so both engines must accept them.
+        for extra in (dict(),
+                      dict(trace_factorization='io_factorized', decay=0.9),
+                      dict(trace_factorization='random_projection',
+                           recurrence_scope='coupled')):
+            cfg = ETraceConfig(learning_signal=signal, **extra)
+            assert cfg.learning_signal == signal
+
+    @pytest.mark.parametrize('signal', ['modulatory', 'bootstrapped'])
+    def test_the_signal_is_orthogonal_to_the_scope_and_filter(self, signal):
+        cfg = ETraceConfig(
+            learning_signal=signal, recurrence_scope='sparse_n', sparse_n=2,
+            trace_filter='kappa', kappa=0.5,
+        )
+        assert cfg.learning_signal == signal
+
+    @pytest.mark.parametrize('signal', ['modulatory', 'bootstrapped'])
+    def test_describe_names_the_signal(self, signal):
+        assert f"learning_signal={signal!r}" in ETraceConfig(
+            learning_signal=signal).describe()
+
+
+class TestNothingIsLeftUnimplementedByAccident:
+
+    def test_only_the_update_schedule_values_remain_unimplemented(self):
+        # P4 delivers all three of its coordinates; if one is still listed the
+        # rule-8 message would send users to a phase that already shipped.
+        from braintrace._algorithm.axes import _UNIMPLEMENTED
+        assert set(_UNIMPLEMENTED) == {
+            ('update_schedule', 'window'),
+            ('update_schedule', 'sequence_end'),
+        }

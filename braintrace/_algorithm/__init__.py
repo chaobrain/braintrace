@@ -31,8 +31,12 @@ from .graph_executor import ETraceGraphExecutor
 from .ostl import OSTLFeedforward, OSTLRecurrent
 from .io_dim_vjp import IODimVjpAlgorithm
 from .param_dim_vjp import ParamDimVjpAlgorithm
+from .random_projection_vjp import RandomProjectionVjpAlgorithm
 from .pp_prop import ES_D_RTRL, pp_prop  # ES_D_RTRL: back-compat alias
 from .snap_n import SnAp
+from .dni import DNI, SyntheticGradient, train_synthetic_gradient
+from .three_factor import ThreeFactor
+from .uoro import UORO
 from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
@@ -52,6 +56,12 @@ __all__ = [
     'ES_D_RTRL',
     'IODimVjpAlgorithm',
     'SnAp',
+    'RandomProjectionVjpAlgorithm',
+    'UORO',
+    'ThreeFactor',
+    'DNI',
+    'SyntheticGradient',
+    'train_synthetic_gradient',
     # SNN
     'EProp',
     'OSTLRecurrent',

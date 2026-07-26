@@ -81,6 +81,7 @@ from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS, build_snap_pattern
 
 __all__ = [
     'HiddenGroup',
+    'full_position_jacobian',
     'widened_block_jacobian',
     'widen_instant_term',
     'gather_learning_signal',
@@ -373,6 +374,51 @@ class HiddenGroup(NamedTuple):
             return extract(fn, concat_hid)
         return block_diagonal_last_dim(fn, concat_hid, use_forward_mode=needs_fwd)
 
+    def full_jacobian(
+        self,
+        hidden_vals: Sequence[jax.Array],
+        input_vals: PyTree,
+    ):
+        """Compute the complete within-group hidden-to-hidden Jacobian.
+
+        The sibling of :meth:`diagonal_jacobian` that keeps the cross-position
+        terms that method drops. Selected by the graph executor when the
+        algorithm's ``trace_factorization`` is ``'random_projection'``: UORO's
+        rank-1 estimator is unbiased for the recursion it rolls, so rolling the
+        block diagonal would make it an unbiased estimate of an already-biased
+        trace (matrix rule 11 rejects that coordinate).
+
+        Parameters
+        ----------
+        hidden_vals : sequence of jax.Array
+            The hidden-state values.
+        input_vals : PyTree
+            The input values.
+
+        Returns
+        -------
+        jax.Array
+            Shape ``(*varshape, num_state, *varshape, num_state)``, with entry
+            ``[p, a, q, b] = d h^t[p, a] / d h^{t-1}[q, b]``.
+
+        Notes
+        -----
+        :attr:`snap` is ignored: the SnAp neighbourhood is a *sparsity pattern
+        for a stored trace*, and this Jacobian is consumed immediately by a
+        matrix-vector product rather than stored, so there is nothing to
+        sparsify. Rule 11 rejects ``recurrence_scope='sparse_n'`` under
+        ``'random_projection'`` for that reason, so the combination cannot
+        reach here.
+
+        The Jacobian is only *full* if the recurrent ETP mixing was traced into
+        the transition, i.e. under ``include_recurrent_mixing``. Rule 11
+        guarantees that by requiring ``recurrence_scope='coupled'``.
+        """
+        fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
+        concat_hid = self.concat_hidden(hidden_vals)
+        needs_fwd = _transition_contains_while(self.transition_jaxpr)
+        return full_position_jacobian(fn, concat_hid, use_forward_mode=needs_fwd)
+
     def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]):
         """Concatenate split hidden-state values into a single array.
 
@@ -527,6 +573,50 @@ def jacfwd_last_dim(
     return jax.vmap(_push, in_axes=-2, out_axes=-1)(basis)
 
 
+def full_position_jacobian(
+    fn: Callable[..., jax.Array],
+    hid_vals: jax.Array,
+    use_forward_mode: bool = False,
+) -> jax.Array:
+    """Materialize ``fn``'s complete Jacobian over hidden units.
+
+    The quantity :func:`block_diagonal_last_dim` computes and then throws most of
+    away. UORO (``trace_factorization='random_projection'``) rolls its rank-1
+    hidden factor through the *whole* within-group transition rather than its
+    per-position block diagonal, so it needs the undiminished array.
+
+    Parameters
+    ----------
+    fn : Callable[[jax.Array], jax.Array]
+        A shape-preserving map on ``(*varshape, num_state)`` arrays.
+    hid_vals : jax.Array
+        The point at which to linearize, shape ``(*varshape, num_state)``.
+    use_forward_mode : bool, optional
+        Use :func:`jax.jacfwd` instead of :func:`jax.jacrev`. Required when
+        ``fn`` contains a ``while`` loop (no reverse-mode rule); the values are
+        identical. Default ``False``.
+
+    Returns
+    -------
+    jax.Array
+        Shape ``(*varshape, num_state, *varshape, num_state)``, with entry
+        ``[p, a, q, b] = d fn(hid)[p, a] / d hid[q, b]``.
+
+    Notes
+    -----
+    ``O((prod(varshape) * num_state) ** 2)`` in memory -- the same array
+    :func:`block_diagonal_last_dim` already builds for every ``'coupled'``
+    step, so this is not a new memory regime. It *is* a transient one: the
+    random-projection engine must roll it inside the fused stepper
+    (``_make_etrace_stepper``) so the executor never stacks it over ``T``.
+
+    A matrix-free ``jax.jvp`` would avoid materializing it at all, since UORO
+    only ever needs ``D @ s_tilde``; that is deferred as F-32.
+    """
+    jac_fn = jax.jacfwd if use_forward_mode else jax.jacrev
+    return jac_fn(fn)(hid_vals)
+
+
 def block_diagonal_last_dim(
     fn: Callable[..., jax.Array],
     hid_vals: jax.Array,
@@ -570,8 +660,7 @@ def block_diagonal_last_dim(
     num_state = hid_vals.shape[-1]
     varshape = hid_vals.shape[:-1]
     num_pos = int(np.prod(varshape)) if varshape else 1
-    jac_fn = jax.jacfwd if use_forward_mode else jax.jacrev
-    full_jac = jac_fn(fn)(hid_vals)  # (*varshape, num_state, *varshape, num_state)
+    full_jac = full_position_jacobian(fn, hid_vals, use_forward_mode)
     full_jac = u.math.reshape(full_jac, (num_pos, num_state, num_pos, num_state))
     # take the per-position block: block[p] = full_jac[p, :, p, :]
     block = u.math.diagonal(full_jac, axis1=0, axis2=2)  # (num_state, num_state, num_pos)

@@ -265,6 +265,125 @@ def _update_param_dim_etrace_scan_fn(
     return new_etrace_bwg, None
 
 
+def relation_weights_dict(
+    relation: HiddenParamOpRelation,
+    weight_path_to_vals: Dict[Path, PyTree],
+) -> Dict[str, Any]:
+    """The ``{trainable name: leaf}`` dict the per-primitive rules consume.
+
+    Parameters
+    ----------
+    relation : HiddenParamOpRelation
+        The relation whose trainable inputs are wanted.
+    weight_path_to_vals : dict
+        Mapping from ``ParamState`` path to its PyTree value.
+
+    Returns
+    -------
+    dict
+        One entry per trainable input name of the relation's primitive.
+    """
+    return {
+        key: _extract_leaf(
+            weight_path_to_vals[relation.trainable_paths[key]],
+            relation.trainable_leaf_indices[key],
+        )
+        for key in relation.trainable_vars
+    }
+
+
+def relation_instant_term(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    x: Any,
+    df: Any,
+    weights_dict: Dict[str, Any],
+    fast_solve: bool = True,
+    trace_dtype: Optional[DTypeLike] = None,
+) -> Dict[str, Any]:
+    r"""The instantaneous term :math:`\mathrm{diag}(D_f^t) \otimes x^t`.
+
+    The instantaneous half of one trace-update application, extracted so that a
+    second engine can build it without also rolling a recurrent term.
+    :class:`~braintrace._algorithm.random_projection_vjp.RandomProjectionVjpAlgorithm`
+    needs exactly this array (contracted with a random projection instead of
+    accumulated), and building it twice in two spellings is how the two engines
+    would drift apart on a primitive's documented regime.
+
+    Parameters
+    ----------
+    relation : HiddenParamOpRelation
+        The relation being applied.
+    group : HiddenGroup
+        The hidden group this application targets. Only ``group.snap`` is read,
+        to widen the term onto neighbour slot 0 under ``sparse_n``.
+    x : array or None
+        The relation's x-side carrier, or ``None`` for ``etp_elemwise`` (whose
+        output *is* the weight, so it has no x carrier).
+    df : array
+        The ``y -> hidden`` tangent for this ``(relation, group)`` pair, with a
+        trailing state axis.
+    weights_dict : dict
+        As returned by :func:`relation_weights_dict`.
+    fast_solve : bool, default True
+        Whether a registered closed-form kernel may be used.
+    trace_dtype : dtype-like, optional
+        Reduced precision for the returned term (fast path only).
+
+    Returns
+    -------
+    dict
+        ``{trainable name: array}`` in trace coordinates -- parameter-shaped
+        plus whatever leading (batch / position) and trailing (state) axes the
+        primitive's ``init_drtrl`` rule declares.
+    """
+    xy_to_dw_rule = (
+        get_instant_drtrl_rule(relation.primitive)
+        or ETP_RULES_XY_TO_DW[relation.primitive]
+    )
+    eqn_params = relation.eqn_params
+    batched = is_batched_primitive(relation.primitive)
+    has_bias = eqn_params.get('has_bias', False)
+    fp = get_fast_path_rules(relation.primitive)
+    use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
+
+    if group.snap is not None:
+        # `sparse_n`: the instantaneous term lands on the position the relation
+        # anchors at, i.e. neighbour slot 0. Padding it here -- rather than
+        # inside each primitive's `instant` rule -- keeps every rule generic in
+        # the width of the trailing axis.
+        df = widen_instant_term(df, group.snap.num_neighbour)
+
+    if use_fast:
+        assert fp is not None  # use_fast implies a registered fast path
+        return fp.instant(
+            _cast_to_dtype(x, trace_dtype),
+            _cast_to_dtype(df, trace_dtype),
+            has_bias,
+        )
+
+    def comp_dw_with_x(x_: Any, df_: Any) -> Any:
+        return xy_to_dw_rule(x_, df_, weights_dict, **eqn_params)
+
+    # Legacy nested-vmap path: vmap xy_to_dw over num_state (and batch).
+    @partial(jax.vmap, in_axes=-1, out_axes=-1)
+    def _inner(df_slice: Any) -> Any:
+        if batched:
+            df_b = df_slice
+            # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-state
+            # trace (df) is per-lane and has lost its leading batch axis, while a
+            # conv input still carries the singleton batch its forward API
+            # requires (x = [1, *spatial, C]). Re-insert the matching singleton so
+            # the per-sample vmap maps consistent leading axes (collapsed again by
+            # the solve-time batch sum).
+            if x is not None and x.ndim == df_b.ndim + 1:
+                df_b = df_b[None]
+            return jax.vmap(comp_dw_with_x)(x, df_b)
+        return comp_dw_with_x(x, df_slice)
+
+    return _inner(df)
+
+
 def _apply_relation_step(
     hist_etrace_vals: Dict[ETraceWG_Key, jax.Array],
     etrace_xs_at_t: Dict[ETraceX_Key, jax.Array],
@@ -314,27 +433,12 @@ def _apply_relation_step(
     for relation in relations:
 
         # Build the weights dict the rules consume.
-        weights_dict = {
-            key: _extract_leaf(
-                weight_path_to_vals[relation.trainable_paths[key]],
-                relation.trainable_leaf_indices[key],
-            )
-            for key in relation.trainable_vars
-        }
+        weights_dict = relation_weights_dict(relation, weight_path_to_vals)
 
-        # Instantaneous-term rule: a primitive whose trace structure differs
-        # from its parameter structure registers a dedicated ``instant_drtrl``
-        # rule (same call signature as ``xy_to_dw``); everyone else falls back
-        # to ``xy_to_dw`` — the historical, byte-identical default.
-        xy_to_dw_rule = (
-            get_instant_drtrl_rule(relation.primitive)
-            or ETP_RULES_XY_TO_DW[relation.primitive]
-        )
         dt_to_t_rule = ETP_RULES_DT_TO_T[relation.primitive]
         eqn_params = relation.eqn_params
         is_elemwise = relation.primitive is etp_elemwise_p
         batched = is_batched_primitive(relation.primitive)
-        has_bias = eqn_params.get('has_bias', False)
         # Fast path only applies to primitives with elementwise dt_to_t, and
         # only when no parameter-transform hook is present (the closed-form
         # kernels drop the f'(W) factor — gated by ``fp.applicable``).
@@ -346,34 +450,8 @@ def _apply_relation_step(
         else:
             x = etrace_xs_at_t[id(relation.x_var)]
 
-        def _call_xy_to_dw_dict(x_: Any, df_: Any, weights_: Any, _rule: Any = xy_to_dw_rule, _params: Any = eqn_params) -> Any:
-            return _rule(x_, df_, weights_, **_params)
-
         def _call_dt_to_t_dict(d: Any, trace_: Any, _rule: Any = dt_to_t_rule, _params: Any = eqn_params) -> Any:
             return _rule(d, trace_, **_params)
-
-        def comp_dw_with_x(x_: Any, df_: Any, _wdict: Any = weights_dict) -> Any:
-            return _call_xy_to_dw_dict(x_, df_, _wdict)
-
-        def _comp_instant_legacy(df_all: Any) -> Any:
-            """Legacy nested-vmap path: vmap xy_to_dw over num_state (and batch)."""
-
-            @partial(jax.vmap, in_axes=-1, out_axes=-1)
-            def _inner(df_slice: Any) -> Any:
-                if batched:
-                    df_b = df_slice
-                    # Under ``brainstate.nn.Vmap(vmap_states='new')`` the hidden-
-                    # state trace (df) is per-lane and has lost its leading batch
-                    # axis, while a conv input still carries the singleton batch its
-                    # forward API requires (x = [1, *spatial, C]). Re-insert the
-                    # matching singleton so the per-sample vmap maps consistent
-                    # leading axes (collapsed again by the solve-time batch sum).
-                    if x is not None and x.ndim == df_b.ndim + 1:
-                        df_b = df_b[None]
-                    return jax.vmap(comp_dw_with_x)(x, df_b)
-                return comp_dw_with_x(x, df_slice)
-
-            return _inner(df_all)
 
         def _comp_recurrent_legacy(diag_: Any, old_bwg_: Any, num_state_: Any) -> Any:
             """Legacy nested-vmap dt_to_t + sum path."""
@@ -406,26 +484,15 @@ def _apply_relation_step(
         for group in relation.hidden_groups:
 
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
-            if group.snap is not None:
-                # `sparse_n`: the instantaneous term lands on the position the
-                # relation anchors at, i.e. neighbour slot 0. Padding it here --
-                # rather than inside each primitive's `instant` rule -- keeps
-                # every rule generic in the width of the trailing axis.
-                df = widen_instant_term(df, group.snap.num_neighbour)
 
             # Instantaneous term: diag(D_f^t) ⊗ x^t  (Dict[str, Array]).
             # Cast the update inputs to ``trace_dtype`` (no-op when None) so the
             # multiply-add runs in the trace precision and the new trace stays
             # there; Jacobians/learning-signal remain full precision elsewhere.
-            if use_fast:
-                assert fp is not None  # use_fast implies a registered fast path
-                phg_to_pw = fp.instant(
-                    _cast_to_dtype(x, trace_dtype),
-                    _cast_to_dtype(df, trace_dtype),
-                    has_bias,
-                )
-            else:
-                phg_to_pw = _comp_instant_legacy(df)
+            phg_to_pw = relation_instant_term(
+                relation, group, x, df, weights_dict,
+                fast_solve=fast_solve, trace_dtype=trace_dtype,
+            )
 
             w_key = (id(relation.y_var), group.index)
             diag = hid_group_jacobians[group.index]
@@ -557,6 +624,202 @@ def _update_param_dim_etrace_chunked(
     return new_etrace_bwg
 
 
+def relation_solve_to_param(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    dg_hidden: Any,
+    etrace_data: Dict[str, Any],
+    weight_vals: Dict[Path, PyTree],
+    fast_solve: bool = True,
+) -> Tuple[Dict[str, Any], bool]:
+    r"""Contract one ``(relation, group)`` trace with a hidden-side signal.
+
+    Computes :math:`\mathrm{signal} \cdot \varepsilon` for a single relation and
+    group, reducing the hidden and trailing state axes and leaving the result in
+    *trace-key* coordinates (``{trainable name: array}``), units restored.
+
+    This is the composition the framework uses to turn a trace into a parameter
+    gradient, and — with the trace replaced by a bare instantaneous term and the
+    signal replaced by a random projection — it is also exactly
+    :math:`\nu^\top J_f`. Extracted so that
+    :class:`~braintrace._algorithm.random_projection_vjp.RandomProjectionVjpAlgorithm`
+    inherits each primitive's documented regime instead of re-deriving it.
+
+    Parameters
+    ----------
+    relation : HiddenParamOpRelation
+        The relation being solved.
+    group : HiddenGroup
+        The hidden group whose signal is being contracted. ``group.snap`` selects
+        the ``sparse_n`` gather; ``group.trace_state_width`` sizes the trailing
+        axis.
+    dg_hidden : array
+        The hidden-side signal, shaped ``(*varshape, trace_state_width)``.
+    etrace_data : dict
+        The trace (or instantaneous term) in trace coordinates.
+    weight_vals : dict
+        Current ``ParamState`` values; read only by primitives with a dedicated
+        ``solve_drtrl`` rule (LoRA chains the signal through the weights).
+    fast_solve : bool, default True
+        Whether a registered closed-form kernel may be used.
+
+    Returns
+    -------
+    dg_weight_dict : dict
+        ``{trainable name: array}``, ready for
+        :func:`~braintrace._misc._route_grads_by_path`.
+    batch_folded : bool
+        Whether the batch reduction was folded into the closed-form einsum. When
+        true the caller must **not** batch-sum the routed result again; see
+        :func:`reduce_param_batch_axes`.
+    """
+    dt_to_t_rule = ETP_RULES_DT_TO_T[relation.primitive]
+    solve_drtrl_rule = get_solve_drtrl_rule(relation.primitive)
+    eqn_params = relation.eqn_params
+    batched = is_batched_primitive(relation.primitive)
+    # Fast path only for elementwise-yw primitives with no transform hook
+    # (the closed-form solve drops f'(W) — gated by ``fp.applicable``).
+    fp = get_fast_path_rules(relation.primitive)
+    use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
+
+    _call_rule_dict: Callable[..., Any]
+    if solve_drtrl_rule is not None:
+        # Dedicated solve rule (trace structure != parameter structure,
+        # e.g. LoRA's effective-weight trace): chain the learning signal
+        # through the current weights. The rule sees batch-free,
+        # num_state-free slices — the vmap scaffolding below is shared
+        # with the legacy ``dt_to_t`` path.
+        weights_dict = relation_weights_dict(relation, weight_vals)
+
+        def _call_solve_drtrl_dict(
+            d: Any, trace_: Any,
+            _rule: Any = solve_drtrl_rule, _params: Any = eqn_params,
+            _weights: Any = weights_dict,
+        ) -> Any:
+            return _rule(d, trace_, _weights, **_params)
+
+        _call_rule_dict = _call_solve_drtrl_dict
+    else:
+        def _call_dt_to_t_dict(d: Any, trace_: Any, _rule: Any = dt_to_t_rule, _params: Any = eqn_params) -> Any:
+            return _rule(d, trace_, **_params)
+
+        _call_rule_dict = _call_dt_to_t_dict
+
+    dt_to_t = jax.vmap(_call_rule_dict) if batched else _call_rule_dict
+
+    if group.snap is not None:
+        # `sparse_n`: the trace's trailing axis indexes (neighbour, state)
+        # pairs, so the learning signal has to be expressed in the same
+        # coordinates before the contraction.
+        dg_hidden = gather_learning_signal(dg_hidden, group.snap)
+
+    # dimensionless processing (unit strip + restore). Apply per-leaf.
+    etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
+    dg_hidden_unitless, _ = _remove_units(dg_hidden)
+
+    # Under ``brainstate.nn.Vmap(vmap_states='new')`` a batched primitive
+    # (necessarily conv here — dense/lora/sparse dispatch to their
+    # unbatched variants when per-lane) has a per-lane hidden cotangent
+    # that lost its leading batch axis, while the weight trace keeps the
+    # singleton batch from ``init_drtrl``. Both the batched ``dt_to_t`` and
+    # the closed-form solve map a shared leading batch axis, so re-insert
+    # the matching singleton on the cotangent; the trailing solve-time sum
+    # (``has_batched`` branch in :func:`reduce_param_batch_axes`) collapses it
+    # again.
+    if batched:
+        _trace_lead = jax.tree.leaves(etrace_data_unitless)[0].shape[0]
+        dg_hidden_unitless = jax.tree.map(
+            lambda a: a[None] if (a.ndim >= 1 and a.shape[0] != _trace_lead) else a,
+            dg_hidden_unitless,
+        )
+
+    if use_fast:
+        assert fp is not None  # use_fast implies a registered fast path
+        # Upcast a reduced-precision trace to (at least) the learning-
+        # signal dtype so the gradient reduction accumulates in full
+        # precision. ``promote_types`` never downcasts, so this is a
+        # no-op for the default fp32 trace.
+        sig_dtype = jax.tree.leaves(dg_hidden_unitless)[0].dtype
+        etrace_for_solve = jax.tree.map(
+            lambda a: a.astype(jnp.promote_types(a.dtype, sig_dtype)),
+            etrace_data_unitless,
+        )
+        # Closed-form einsum path for mm/mv/elemwise primitives. For a
+        # batched primitive, fold the batch reduction into the einsum so
+        # no (B, I, O) intermediate is materialized; record the routed
+        # paths so the trailing batch-sum skips them (already reduced).
+        dg_weight_dict = fp.solve(
+            dg_hidden_unitless, etrace_for_solve, fold_batch=batched,
+        )
+    elif group.trace_state_width == 1:
+        # width==1 shortcut: skip outer vmap of size 1. Reads the widened
+        # width, not num_state: under `sparse_n` a single-state group
+        # with K > 1 has a size-K trailing axis and must NOT take it.
+        dg_hid_squeezed = jax.tree.map(
+            lambda a: u.math.squeeze(a, axis=-1), dg_hidden_unitless
+        )
+        etr_squeezed = jax.tree.map(
+            lambda a: u.math.squeeze(a, axis=-1), etrace_data_unitless
+        )
+        dg_weight_dict = dt_to_t(dg_hid_squeezed, etr_squeezed)
+    else:
+        dg_weight_dict = jax.tree.map(
+            lambda arr: _sum_dim(arr, axis=-1),
+            jax.vmap(dt_to_t, in_axes=-1, out_axes=-1)(
+                dg_hidden_unitless, etrace_data_unitless
+            ),
+        )
+    return fn_unit_restore(dg_weight_dict), bool(use_fast and batched)
+
+
+def reduce_param_batch_axes(
+    temp_data: Dict[Path, PyTree],
+    weight_vals: Dict[Path, PyTree],
+    folded_paths: set,
+    batched_paths: set,
+) -> None:
+    """Collapse leading batch axes on routed parameter gradients, in place.
+
+    Paths routed through the fast-path einsum (*folded_paths*) were already
+    reduced via ``fold_batch``; unbatched-primitive paths (not in
+    *batched_paths*) never grew a batch axis and must be left intact.
+
+    Parameters
+    ----------
+    temp_data : dict
+        ``{path: gradient}``, mutated in place.
+    weight_vals : dict
+        ``{path: ParamState value}``, used as the rank reference.
+    folded_paths : set
+        Paths whose batch axis was folded into the einsum.
+    batched_paths : set
+        Paths owned by a batched primitive.
+    """
+    for key, val in temp_data.items():
+        if key in folded_paths:
+            continue
+        if key in batched_paths:
+            temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
+        else:
+            # Unbatched-primitive paths usually carry no batch axis. But under
+            # ``brainstate.mixin.Batching()`` a diagonal op with no ``x`` carrier
+            # (``etp_elemwise``: its output is the weight itself, so neither its
+            # input nor output rank reveals the batch) still acquires a leading
+            # batch axis from the batched hidden state it feeds. ``is_batched_
+            # primitive`` does not flag it, so reduce any leading axes the
+            # parameter itself does not have. This is a no-op for genuinely
+            # unbatched paths (e.g. ``etp_mv``) whose gradient already matches
+            # the parameter rank, and for the per-lane vmap path.
+            ref = weight_vals[key]
+            temp_data[key] = jax.tree.map(
+                lambda g, p: (
+                    u.math.sum(g, axis=tuple(range(u.math.ndim(g) - u.math.ndim(p))))
+                    if u.math.ndim(g) > u.math.ndim(p) else g
+                ),
+                val, ref,
+            )
+
+
 def _solve_param_dim_weight_gradients(
     hist_etrace_data: Dict[ETraceWG_Key, PyTree],  # the history etrace data
     dG_weights: Dict[Path, dG_Weight],  # weight gradients
@@ -599,123 +862,23 @@ def _solve_param_dim_weight_gradients(
     # summing the unbatched gradient would collapse its leading (in-feature) axis.
     batched_paths: set = set()
     for relation in weight_hidden_relations:
-        dt_to_t_rule = ETP_RULES_DT_TO_T[relation.primitive]
-        solve_drtrl_rule = get_solve_drtrl_rule(relation.primitive)
-        eqn_params = relation.eqn_params
-        batched = is_batched_primitive(relation.primitive)
-        if batched:
+        if is_batched_primitive(relation.primitive):
             batched_paths.update(relation.trainable_paths.values())
-        # Fast path only for elementwise-yw primitives with no transform hook
-        # (the closed-form solve drops f'(W) — gated by ``fp.applicable``).
-        fp = get_fast_path_rules(relation.primitive)
-        use_fast = fast_solve and fp is not None and fp.applicable(eqn_params)
-
-        _call_rule_dict: Callable[..., Any]
-        if solve_drtrl_rule is not None:
-            # Dedicated solve rule (trace structure != parameter structure,
-            # e.g. LoRA's effective-weight trace): chain the learning signal
-            # through the current weights. The rule sees batch-free,
-            # num_state-free slices — the vmap scaffolding below is shared
-            # with the legacy ``dt_to_t`` path.
-            weights_dict = {
-                key: _extract_leaf(
-                    weight_vals[relation.trainable_paths[key]],
-                    relation.trainable_leaf_indices[key],
-                )
-                for key in relation.trainable_vars
-            }
-
-            def _call_solve_drtrl_dict(
-                d: Any, trace_: Any,
-                _rule: Any = solve_drtrl_rule, _params: Any = eqn_params,
-                _weights: Any = weights_dict,
-            ) -> Any:
-                return _rule(d, trace_, _weights, **_params)
-
-            _call_rule_dict = _call_solve_drtrl_dict
-        else:
-            def _call_dt_to_t_dict(d: Any, trace_: Any, _rule: Any = dt_to_t_rule, _params: Any = eqn_params) -> Any:
-                return _rule(d, trace_, **_params)
-
-            _call_rule_dict = _call_dt_to_t_dict
-
-        dt_to_t = (
-            jax.vmap(_call_rule_dict)
-            if batched
-            else _call_rule_dict
-        )
 
         group: HiddenGroup
         for group in relation.hidden_groups:
 
             w_key = (id(relation.y_var), group.index)
-            etrace_data = hist_etrace_data[w_key]  # Dict[str, Array]
-            dg_hidden = dG_hidden_groups[group.index]
-            if group.snap is not None:
-                # `sparse_n`: the trace's trailing axis indexes (neighbour,
-                # state) pairs, so the learning signal has to be expressed in
-                # the same coordinates before the contraction.
-                dg_hidden = gather_learning_signal(dg_hidden, group.snap)
-
-            # dimensionless processing (unit strip + restore). Apply per-leaf.
-            etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
-            dg_hidden_unitless, _ = _remove_units(dg_hidden)
-
-            # Under ``brainstate.nn.Vmap(vmap_states='new')`` a batched primitive
-            # (necessarily conv here — dense/lora/sparse dispatch to their
-            # unbatched variants when per-lane) has a per-lane hidden cotangent
-            # that lost its leading batch axis, while the weight trace keeps the
-            # singleton batch from ``init_drtrl``. Both the batched ``dt_to_t`` and
-            # the closed-form solve map a shared leading batch axis, so re-insert
-            # the matching singleton on the cotangent; the trailing solve-time sum
-            # (``has_batched`` branch below) collapses it again.
-            if batched:
-                _trace_lead = jax.tree.leaves(etrace_data_unitless)[0].shape[0]
-                dg_hidden_unitless = jax.tree.map(
-                    lambda a: a[None] if (a.ndim >= 1 and a.shape[0] != _trace_lead) else a,
-                    dg_hidden_unitless,
-                )
-
-            if use_fast:
-                assert fp is not None  # use_fast implies a registered fast path
-                # Upcast a reduced-precision trace to (at least) the learning-
-                # signal dtype so the gradient reduction accumulates in full
-                # precision. ``promote_types`` never downcasts, so this is a
-                # no-op for the default fp32 trace.
-                sig_dtype = jax.tree.leaves(dg_hidden_unitless)[0].dtype
-                etrace_for_solve = jax.tree.map(
-                    lambda a: a.astype(jnp.promote_types(a.dtype, sig_dtype)),
-                    etrace_data_unitless,
-                )
-                # Closed-form einsum path for mm/mv/elemwise primitives. For a
-                # batched primitive, fold the batch reduction into the einsum so
-                # no (B, I, O) intermediate is materialized; record the routed
-                # paths so the trailing batch-sum skips them (already reduced).
-                dg_weight_dict = fp.solve(
-                    dg_hidden_unitless, etrace_for_solve,
-                    fold_batch=batched,
-                )
-                if batched:
-                    folded_paths.update(relation.trainable_paths.values())
-            elif group.trace_state_width == 1:
-                # width==1 shortcut: skip outer vmap of size 1. Reads the widened
-                # width, not num_state: under `sparse_n` a single-state group
-                # with K > 1 has a size-K trailing axis and must NOT take it.
-                dg_hid_squeezed = jax.tree.map(
-                    lambda a: u.math.squeeze(a, axis=-1), dg_hidden_unitless
-                )
-                etr_squeezed = jax.tree.map(
-                    lambda a: u.math.squeeze(a, axis=-1), etrace_data_unitless
-                )
-                dg_weight_dict = dt_to_t(dg_hid_squeezed, etr_squeezed)
-            else:
-                dg_weight_dict = jax.tree.map(
-                    lambda arr: _sum_dim(arr, axis=-1),
-                    jax.vmap(dt_to_t, in_axes=-1, out_axes=-1)(
-                        dg_hidden_unitless, etrace_data_unitless
-                    ),
-                )
-            dg_weight_dict = fn_unit_restore(dg_weight_dict)
+            dg_weight_dict, batch_folded = relation_solve_to_param(
+                relation,
+                group,
+                dG_hidden_groups[group.index],
+                hist_etrace_data[w_key],
+                weight_vals,
+                fast_solve=fast_solve,
+            )
+            if batch_folded:
+                folded_paths.update(relation.trainable_paths.values())
 
             # Route per-key to owning ParamState path.
             _route_grads_by_path(relation, dg_weight_dict, weight_vals, temp_data)
@@ -724,34 +887,7 @@ def _solve_param_dim_weight_gradients(
     # Step 3:
     #
     # sum up the batched weight gradients
-    # Check if ANY relation uses a batched primitive
-    # Collapse the leading batch axis on batched-primitive gradients only. Paths
-    # routed through the fast-path einsum (``folded_paths``) were already reduced
-    # via ``fold_batch``; unbatched-primitive paths (not in ``batched_paths``)
-    # never grew a batch axis and must be left intact.
-    for key, val in temp_data.items():
-        if key in folded_paths:
-            continue
-        if key in batched_paths:
-            temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
-        else:
-            # Unbatched-primitive paths usually carry no batch axis. But under
-            # ``brainstate.mixin.Batching()`` a diagonal op with no ``x`` carrier
-            # (``etp_elemwise``: its output is the weight itself, so neither its
-            # input nor output rank reveals the batch) still acquires a leading
-            # batch axis from the batched hidden state it feeds. ``is_batched_
-            # primitive`` does not flag it, so reduce any leading axes the
-            # parameter itself does not have. This is a no-op for genuinely
-            # unbatched paths (e.g. ``etp_mv``) whose gradient already matches
-            # the parameter rank, and for the per-lane vmap path.
-            ref = weight_vals[key]
-            temp_data[key] = jax.tree.map(
-                lambda g, p: (
-                    u.math.sum(g, axis=tuple(range(u.math.ndim(g) - u.math.ndim(p))))
-                    if u.math.ndim(g) > u.math.ndim(p) else g
-                ),
-                val, ref,
-            )
+    reduce_param_batch_axes(temp_data, weight_vals, folded_paths, batched_paths)
 
     # update the weight gradients
     for key, val in temp_data.items():

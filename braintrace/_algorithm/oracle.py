@@ -23,7 +23,7 @@ BPTT differentiates this through an unrolled ``for_loop``; this is the exact
 total gradient any *exact* online algorithm must reproduce.
 """
 
-from typing import Callable
+from typing import Any, Callable, cast
 
 import brainstate
 import brainunit as u
@@ -472,3 +472,308 @@ def assert_direction_aligned(
                 failures.append(f"  {key}: relmag {r:.4f} not in [{lo}, {hi}]")
     if failures:
         raise AssertionError("gradient direction not aligned:\n" + "\n".join(failures))
+
+
+# ---------------------------------------------------------------------------
+# Statistical acceptance: the third paradigm
+# ---------------------------------------------------------------------------
+#
+# Element-wise equality and direction metrics cannot judge an *unbiased but
+# noisy* estimator such as UORO. The obvious substitute -- "the deviation of the
+# seed-mean from the reference shrinks like C/sqrt(N)" -- is not a bias test at
+# all: a fixed multiplicative bias satisfies any such bound at every N a test can
+# afford, because the bound is loosest exactly where the bias is measurable. What
+# distinguishes unbiased-and-noisy from biased-and-noisy is the *sample variance*,
+# so these helpers build a genuine confidence interval out of it.
+#
+# Gradient trees are compared through fixed scalar projections rather than
+# leaf-by-leaf: a per-element interval over thousands of elements would need a
+# multiplicity correction so severe that nothing could fail, while a handful of
+# fixed random directions keeps the correction mild and still exposes any bias
+# with a component along them (a bias orthogonal to all K directions is a measure
+# -zero coincidence, and the directions are seeded, so a failure is reproducible).
+
+
+def seed_gradient_samples(
+    model_factory: Callable[[], brainstate.nn.Module],
+    inputs,
+    *,
+    algo_factory: Callable[[brainstate.nn.Module, int], 'braintrace.ETraceAlgorithm'],
+    seeds,
+    chunk_size: int,
+):
+    """Gradient trees for one model and sequence under many estimator seeds.
+
+    Parameters
+    ----------
+    model_factory : Callable[[], brainstate.nn.Module]
+        Zero-arg factory returning an uninitialized model. Called once per seed,
+        so every sample starts from identical parameters and hidden state -- the
+        only thing that varies between samples is the estimator's own randomness.
+    inputs : jax.Array
+        ``(T, ...)`` input sequence, shared by every sample.
+    algo_factory : Callable[[brainstate.nn.Module, int], ETraceAlgorithm]
+        Builds the algorithm for a given seed.
+    seeds : sequence of int
+        The estimator seeds; ``len(seeds)`` is the sample size ``N``.
+    chunk_size : int
+        Window length, forwarded to :func:`chunked_online_param_gradients`. Must
+        be smaller than ``T``, or the trace never enters the gradient (F-23).
+
+    Returns
+    -------
+    list of dict
+        One path-keyed gradient tree per seed, in ``seeds`` order.
+    """
+    def _bind(s: Any) -> Callable:
+        """Bind ``s`` now, not at call time -- the classic late-binding trap."""
+        return lambda m: algo_factory(m, s)
+
+    return [
+        chunked_online_param_gradients(
+            model_factory, inputs,
+            algo_factory=_bind(seed),
+            chunk_size=chunk_size,
+        )
+        for seed in seeds
+    ]
+
+
+def fixed_gradient_directions(tree, num: int, *, seed: int = 0, keys=None):
+    """``num`` fixed unit directions in the flattened gradient space of ``tree``.
+
+    Parameters
+    ----------
+    tree : dict
+        A representative path-keyed gradient tree; only its leaf labels and
+        shapes are used.
+    num : int
+        How many directions to draw.
+    seed : int, default 0
+        NumPy seed. Fixed so a statistical failure is reproducible.
+    keys : sequence of str, optional
+        Restrict the directions' support to these leaf labels (as produced by
+        :func:`flat_gradient_leaves`). Use it to confine a comparison to the
+        parameter class the axis under test actually touches -- a whole-tree
+        projection can be dominated by leaves the axis never reaches, which is
+        how an acceptance criterion becomes vacuous.
+
+    Returns
+    -------
+    list of dict
+        Each a ``{leaf label: array}`` mapping with joint Euclidean norm 1.
+    """
+    leaves = flat_gradient_leaves(tree)
+    labels = sorted(leaves) if keys is None else list(keys)
+    missing = [k for k in labels if k not in leaves]
+    if missing:
+        raise AssertionError(
+            f'unknown gradient leaf labels {missing}; available: {sorted(leaves)}')
+    rng = np.random.RandomState(seed)
+    out = []
+    for _ in range(num):
+        raw = {k: rng.randn(*np.shape(leaves[k])) for k in labels}
+        norm = np.sqrt(sum(float((v ** 2).sum()) for v in raw.values()))
+        out.append({k: jnp.asarray(v / norm) for k, v in raw.items()})
+    return out
+
+
+def project_gradient(tree, direction) -> float:
+    """Inner product of a gradient tree with one direction from
+    :func:`fixed_gradient_directions`.
+
+    Parameters
+    ----------
+    tree : dict
+        Path-keyed gradient tree.
+    direction : dict
+        ``{leaf label: array}``, as returned by
+        :func:`fixed_gradient_directions`.
+
+    Returns
+    -------
+    float
+        The scalar projection, accumulated in float64.
+    """
+    leaves = flat_gradient_leaves(tree)
+    return float(sum(
+        float((np.asarray(leaves[k], dtype=np.float64)
+               * np.asarray(v, dtype=np.float64)).sum())
+        for k, v in direction.items()
+    ))
+
+
+def assert_unbiased_estimator(
+    samples,
+    reference,
+    *,
+    num_directions: int = 8,
+    seed: int = 0,
+    z: float = 3.5,
+    tightness: float = 0.25,
+    keys=None,
+    directions=None,
+):
+    """Assert a set of gradient samples is an unbiased estimate of ``reference``.
+
+    For each fixed direction ``d``, with ``v_s = <sample_s, d>``, sample mean
+    ``m``, sample standard deviation ``sd`` and ``N = len(samples)``:
+
+    - **unbiasedness** -- ``|m - <reference, d>| <= z * sd / sqrt(N)``;
+    - **non-vacuity** -- ``sd / sqrt(N) <= tightness * ||reference||``.
+
+    Both halves are required. The first alone passes for any estimator whose
+    variance is large enough to swallow its bias; the second is what makes the
+    interval mean something. A biased estimator fails the first as ``N`` grows; a
+    hopelessly noisy one fails the second.
+
+    The non-vacuity scale is the reference's **joint norm over the compared
+    leaves**, not the individual projection ``|<reference, d>|``: a direction that
+    happens to fall nearly orthogonal to the reference gradient has an almost-zero
+    projection, and holding its standard error to a fraction of *that* would be
+    unmeetable however good the estimator is.
+
+    Parameters
+    ----------
+    samples : sequence of dict
+        Per-seed gradient trees, e.g. from :func:`seed_gradient_samples`.
+    reference : dict
+        The quantity the estimator is supposed to be unbiased *for*. For UORO
+        this is the exact within-group influence gradient (saturated SnAp-n
+        through the same finite-window path), not necessarily BPTT.
+    num_directions : int, default 8
+        Number of fixed projections. Ignored when ``directions`` is given.
+    seed : int, default 0
+        Seed for the directions.
+    z : float, default 3.5
+        Interval half-width in standard errors. 3.5 is roughly a two-sided
+        ``5e-4`` normal quantile, i.e. Bonferroni-corrected for eight
+        comparisons at ``4e-3``.
+    tightness : float, default 0.25
+        Largest standard error, as a fraction of the reference gradient's norm,
+        that still counts as an informative interval.
+    keys : sequence of str, optional
+        Restrict to these leaf labels (see :func:`fixed_gradient_directions`).
+    directions : sequence of dict, optional
+        Supply the directions explicitly instead of drawing them.
+
+    Raises
+    ------
+    AssertionError
+        If fewer than two samples are given, or any direction fails either half.
+        The message lists **every** direction with its numbers -- a statistical
+        failure that prints one number is unactionable.
+    """
+    samples = list(samples)
+    if len(samples) < 2:
+        raise AssertionError(
+            f'a confidence interval needs at least 2 samples, got {len(samples)}.')
+    if directions is None:
+        directions = fixed_gradient_directions(
+            reference, num_directions, seed=seed, keys=keys)
+    n = len(samples)
+    ref_leaves = flat_gradient_leaves(reference)
+    support = sorted(directions[0]) if directions else sorted(ref_leaves)
+    scale = float(np.sqrt(sum(
+        float((np.asarray(ref_leaves[k], dtype=np.float64) ** 2).sum())
+        for k in support)))
+    bound = tightness * scale
+    rows = []
+    failures = False
+    for i, d in enumerate(directions):
+        ref = project_gradient(reference, d)
+        vals = np.asarray([project_gradient(s, d) for s in samples], dtype=np.float64)
+        mean = float(vals.mean())
+        # ddof=1: the sample standard deviation, since the mean is estimated too.
+        sd = float(vals.std(ddof=1))
+        stderr = sd / np.sqrt(n)
+        gap = abs(mean - ref)
+        biased = gap > z * stderr
+        wide = stderr > bound
+        note = []
+        if biased:
+            note.append('mean outside its confidence interval')
+        if wide:
+            note.append('interval too wide to be informative')
+        failures = failures or biased or wide
+        rows.append(
+            f'  direction {i}: reference={ref:+.6e} mean={mean:+.6e} '
+            f'gap={gap:.3e} stderr={stderr:.3e} (z*stderr={z * stderr:.3e}, '
+            f'tightness bound={bound:.3e})'
+            + ('  <-- ' + '; '.join(note) if note else '')
+        )
+    if failures:
+        raise AssertionError(
+            f'gradient samples are not an unbiased estimate of the reference '
+            f'(N={n}, z={z}, tightness={tightness}, '
+            f'||reference||={scale:.6e}):\n' + '\n'.join(rows)
+        )
+
+
+def future_hidden_gradients(
+    model_factory: Callable[[], brainstate.nn.Module],
+    inputs,
+    boundaries,
+):
+    """``d(sum_{t >= b} L_t) / d h^b`` at each window boundary ``b``.
+
+    The regression target a DNI synthesiser is trained to predict, and the
+    "pinned to the true value" oracle of the ``learning_signal='bootstrapped'``
+    acceptance criteria. The sum is **strictly future** and the interval
+    half-open: with windows ``[a, b)``, the step that writes ``h^b`` belongs to
+    the window *before* the boundary, so its loss is excluded here and counted
+    inside that window instead. Getting this off by one double-counts one loss
+    per boundary.
+
+    The differentiation route is the *public* one the DNI training recipe
+    documents -- put the hidden states in ``brainstate.transform.grad``'s state
+    set and read the entry they produce -- so the oracle and the recipe cannot
+    drift apart. A raw ``jax.grad`` would not work here at all: the rollout writes
+    ``HiddenState``, which brainstate refuses to let a bare JAX transformation
+    track.
+
+    A *fresh* model is built per boundary, so there is no live state to perturb
+    and nothing to restore.
+
+    Parameters
+    ----------
+    model_factory : Callable[[], brainstate.nn.Module]
+        Zero-arg factory returning an uninitialized model.
+    inputs : jax.Array
+        ``(T, ...)`` input sequence.
+    boundaries : sequence of int
+        Step indices ``b`` at which to evaluate, ``0 <= b <= T``. ``b == T`` has
+        no future loss and yields zeros.
+
+    Returns
+    -------
+    list of dict
+        One ``{hidden state path: cotangent}`` mapping per boundary, in
+        ``boundaries`` order.
+    """
+    total_steps = int(inputs.shape[0])
+    out = []
+    for b in boundaries:
+        model = model_factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        hidden = model.states(brainstate.HiddenState)
+
+        # Roll to the boundary outside the gradient: h^b is a constant here, and
+        # the target is the derivative of the *suffix* loss with respect to it.
+        if b > 0:
+            brainstate.transform.for_loop(lambda x: model(x), inputs[:b])
+
+        if b >= total_steps:
+            # A single-filter `states()` call returns one dict, not the tuple its
+            # union return type also admits.
+            out.append({k: jax.tree.map(u.math.zeros_like, st.value)
+                        for k, st in cast(Any, hidden).items()})
+            continue
+
+        def suffix_loss(_b=b):
+            losses = brainstate.transform.for_loop(
+                lambda x: _sse(model(x)), inputs[_b:])
+            return losses.sum()
+
+        out.append(brainstate.transform.grad(suffix_loss, hidden)())
+    return out

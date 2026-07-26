@@ -598,3 +598,210 @@ def test_assert_param_gradients_close_supports_nested_unit_trees():
     c = {('syn',): {'weight': jnp.full((2, 2), 2.0) * u.mS, 'bias': jnp.zeros(2) * u.mS}}
     with pytest.raises(AssertionError, match='maxabsdiff'):
         assert_param_gradients_close(a, c, atol=1e-6)
+
+
+# --- P4: statistical acceptance infrastructure -------------------------------
+#
+# The roadmap flags this as "statistical test infrastructure the repo does not
+# have". Its job is to accept an *unbiased but noisy* estimator (UORO) and reject
+# a *biased* one, which a decay bound like `deviation <= 4/sqrt(N)` cannot do: a
+# fixed 10% bias satisfies that at every N a test can afford. So the helpers are
+# tested here against estimators whose bias is known by construction.
+
+from braintrace._algorithm.oracle import (  # noqa: E402
+    assert_unbiased_estimator,
+    fixed_gradient_directions,
+    project_gradient,
+)
+
+_REF_TREE = {
+    ('a',): {'weight': jnp.asarray([[1.0, -2.0], [0.5, 3.0]]), 'bias': jnp.asarray([1.0, -1.0])},
+    ('b',): jnp.asarray([2.0, 0.25, -0.5]),
+}
+_A_KEYS = ["a|['weight']", "a|['bias']"]
+_B_KEYS = ['b|']
+
+
+def _flat_labels(tree):
+    from braintrace._algorithm.oracle import flat_gradient_leaves
+    return set(flat_gradient_leaves(tree))
+
+
+def _noisy_samples(n, *, bias=0.0, scale=0.3, seed=0, tree=None):
+    """`n` gradient trees equal to the reference times `(1 + bias)` plus noise."""
+    tree = _REF_TREE if tree is None else tree
+    rng = np.random.RandomState(seed)
+    out = []
+    for _ in range(n):
+        out.append(jax.tree.map(
+            lambda a: jnp.asarray(
+                np.asarray(a) * (1.0 + bias)
+                + scale * np.abs(np.asarray(a)).max() * rng.randn(*np.shape(a))),
+            tree))
+    return out
+
+
+class TestFixedGradientDirections:
+
+    def test_directions_match_the_tree_structure_and_are_unit_norm(self):
+        dirs = fixed_gradient_directions(_REF_TREE, 4, seed=0)
+        assert len(dirs) == 4
+        for d in dirs:
+            assert set(d) == _flat_labels(_REF_TREE)
+            norm = np.sqrt(sum(float((np.asarray(v) ** 2).sum()) for v in d.values()))
+            np.testing.assert_allclose(norm, 1.0, atol=1e-6)
+
+    def test_directions_are_deterministic_in_the_seed(self):
+        a = fixed_gradient_directions(_REF_TREE, 3, seed=7)
+        b = fixed_gradient_directions(_REF_TREE, 3, seed=7)
+        c = fixed_gradient_directions(_REF_TREE, 3, seed=8)
+        for x, y in zip(a, b):
+            for k in x:
+                np.testing.assert_array_equal(np.asarray(x[k]), np.asarray(y[k]))
+        assert any(not np.allclose(np.asarray(a[0][k]), np.asarray(c[0][k]))
+                   for k in a[0])
+
+    def test_keys_restricts_the_support(self):
+        dirs = fixed_gradient_directions(_REF_TREE, 2, seed=0, keys=_B_KEYS)
+        for d in dirs:
+            assert set(d) == set(_B_KEYS)
+
+    def test_projection_is_linear(self):
+        d = fixed_gradient_directions(_REF_TREE, 1, seed=0)[0]
+        doubled = jax.tree.map(lambda a: a * 2.0, _REF_TREE)
+        np.testing.assert_allclose(
+            project_gradient(doubled, d), 2.0 * project_gradient(_REF_TREE, d),
+            rtol=1e-6)
+
+
+def _flat_labels(tree):
+    from braintrace._algorithm.oracle import flat_gradient_leaves
+    return set(flat_gradient_leaves(tree))
+
+
+class TestAssertUnbiasedEstimator:
+
+    def test_accepts_an_unbiased_noisy_estimator(self):
+        samples = _noisy_samples(256, bias=0.0, scale=0.3, seed=1)
+        assert_unbiased_estimator(samples, _REF_TREE, seed=0)
+
+    def test_rejects_a_small_multiplicative_bias(self):
+        # The failure mode `4/sqrt(N)` cannot see. 8% of the reference, with
+        # noise an order of magnitude larger than the bias per sample.
+        samples = _noisy_samples(256, bias=0.08, scale=0.3, seed=1)
+        with pytest.raises(AssertionError, match='outside its confidence interval'):
+            assert_unbiased_estimator(samples, _REF_TREE, seed=0)
+
+    def test_rejects_an_unbiased_but_uselessly_noisy_estimator(self):
+        # Unbiased, but the interval is so wide that passing means nothing; the
+        # tightness clause must catch it or the test is vacuous.
+        samples = _noisy_samples(24, bias=0.0, scale=40.0, seed=2)
+        with pytest.raises(AssertionError, match='too wide'):
+            assert_unbiased_estimator(samples, _REF_TREE, seed=0)
+
+    def test_the_failure_message_prints_every_direction(self):
+        samples = _noisy_samples(128, bias=0.5, scale=0.2, seed=3)
+        with pytest.raises(AssertionError) as info:
+            assert_unbiased_estimator(samples, _REF_TREE, num_directions=5, seed=0)
+        text = str(info.value)
+        # a statistical failure that prints one number is unactionable
+        assert text.count('direction') >= 5
+
+    def test_a_single_sample_is_rejected_rather_than_dividing_by_zero(self):
+        with pytest.raises(AssertionError, match='at least 2'):
+            assert_unbiased_estimator(_noisy_samples(1), _REF_TREE, seed=0)
+
+    def test_keys_restricts_the_comparison(self):
+        # Bias only the ('b',) leaf; restricting to ('a',) must then pass and
+        # restricting to ('b',) must fail. This is the guard against a whole-tree
+        # comparison being dominated by leaves the axis does not touch.
+        rng = np.random.RandomState(4)
+        samples = []
+        for _ in range(256):
+            s = {
+                ('a',): jax.tree.map(
+                    lambda x: jnp.asarray(np.asarray(x) + 0.3 * rng.randn(*np.shape(x))),
+                    _REF_TREE[('a',)]),
+                ('b',): jnp.asarray(np.asarray(_REF_TREE[('b',)]) * 1.4
+                                    + 0.3 * rng.randn(3)),
+            }
+            samples.append(s)
+        assert_unbiased_estimator(samples, _REF_TREE, seed=0, keys=_A_KEYS)
+        with pytest.raises(AssertionError, match='outside its confidence interval'):
+            assert_unbiased_estimator(samples, _REF_TREE, seed=0, keys=_B_KEYS)
+
+    def test_an_exact_deterministic_estimator_passes(self):
+        # Zero variance, zero bias: the interval is degenerate but the test must
+        # not divide by zero or reject it.
+        assert_unbiased_estimator([_REF_TREE] * 8, _REF_TREE, seed=0)
+
+
+class TestFutureHiddenGradients:
+    """The DNI target oracle: ``d(sum_{t >= b} L_t) / d h^b``."""
+
+    def test_matches_a_hand_rolled_suffix_gradient(self):
+        from braintrace._algorithm.oracle import future_hidden_gradients
+        spec = tanh_rnn(n_in=3, n_rec=4)
+        inputs = _inputs(5, 3)
+        got = future_hidden_gradients(spec.factory, inputs, [1, 3])
+
+        # Independent reference: re-derive the recurrence as a *pure* function of
+        # (h, x) with the model's own weights, and differentiate that. This shares
+        # no machinery with the helper -- not the state snapshotting, not the
+        # brainstate gradient route -- so agreement is evidence, not a tautology.
+        probe = spec.factory()
+        brainstate.nn.init_all_states(probe, batch_size=1)
+        params = probe.states(brainstate.ParamState)
+        w = np.asarray(params[('w',)].value)
+        win = np.asarray(params[('win',)].value)
+        h0 = jnp.zeros_like(probe.states(brainstate.HiddenState)[('h',)].value)
+
+        def step(h, x):
+            return jax.nn.tanh(x @ win + h @ w)
+
+        def suffix(h, b):
+            total = 0.0
+            for t in range(b, inputs.shape[0]):
+                h = step(h, inputs[t])
+                total = total + (h ** 2).sum()
+            return total
+
+        for idx, b in enumerate([1, 3]):
+            h_at_b = h0
+            for t in range(b):
+                h_at_b = step(h_at_b, inputs[t])
+            want = jax.grad(suffix)(h_at_b, b)
+            np.testing.assert_allclose(
+                np.asarray(got[idx][('h',)]), np.asarray(want), atol=1e-5)
+
+    def test_the_last_boundary_has_no_future_loss(self):
+        from braintrace._algorithm.oracle import future_hidden_gradients
+        spec = tanh_rnn(n_in=3, n_rec=4)
+        inputs = _inputs(4, 3)
+        got = future_hidden_gradients(spec.factory, inputs, [4])
+        np.testing.assert_allclose(np.asarray(got[0][('h',)]), 0.0, atol=0.0)
+
+    def test_the_boundary_is_half_open(self):
+        # The step that writes h^b belongs to the window *before* b, so its loss
+        # must be excluded here. If it were included, boundary b and boundary
+        # b - 1 would both count L_{b-1} and every DNI target would be wrong by
+        # one loss.
+        from braintrace._algorithm.oracle import future_hidden_gradients
+        spec = tanh_rnn(n_in=3, n_rec=4)
+        inputs = _inputs(4, 3)
+        g3, g4 = future_hidden_gradients(spec.factory, inputs, [3, 4])
+        assert float(np.abs(np.asarray(g3[('h',)])).max()) > 1e-6  # L_3 is future
+        np.testing.assert_allclose(np.asarray(g4[('h',)]), 0.0, atol=0.0)
+
+    def test_it_leaves_a_live_model_untouched(self):
+        # It rolls the model forward internally; leaking that into the states
+        # under test would corrupt every later assertion.
+        from braintrace._algorithm.oracle import future_hidden_gradients
+        spec = tanh_rnn(n_in=3, n_rec=4)
+        inputs = _inputs(4, 3)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        before = np.asarray(model.states(brainstate.HiddenState)[('h',)].value).copy()
+        future_hidden_gradients(spec.factory, inputs, [1, 2])
+        after = np.asarray(model.states(brainstate.HiddenState)[('h',)].value)
+        np.testing.assert_array_equal(before, after)

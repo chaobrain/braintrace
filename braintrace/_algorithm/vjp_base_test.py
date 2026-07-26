@@ -14,8 +14,10 @@
 # ==============================================================================
 
 import brainstate
+import brainunit as u
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import braintrace
@@ -602,7 +604,14 @@ class TestComputeLearningSignalHook:
             )
 
     def test_override_hook_replaces_learning_signal(self):
-        """Subclass override is used instead of reverse-AD dl/dh."""
+        """Subclass override is *used*, not merely called.
+
+        Observing the call and a non-zero gradient is not enough: a base that
+        invoked the hook and then went on using ``dl_autodiff`` would pass both.
+        What pins it is that the parameter gradient is linear in the learning
+        signal, so returning ``k * ones`` must scale the gradient by exactly
+        ``k`` -- and must differ from the un-overridden reverse-AD signal.
+        """
         from braintrace._algorithm.param_dim_vjp import ParamDimVjpAlgorithm
 
         class Mini(brainstate.nn.Module):
@@ -619,26 +628,199 @@ class TestComputeLearningSignalHook:
 
         captured = {}
 
-        class ConstantSignalAlgo(ParamDimVjpAlgorithm):
-            def _compute_learning_signal(self, dl_autodiff, args):
-                captured['autodiff'] = dl_autodiff
-                captured['args'] = args
-                return [jnp.ones_like(a) for a in dl_autodiff]
+        def _w_grad(algo_factory):
+            net = Mini()
+            brainstate.nn.init_all_states(net, batch_size=1)
+            algo = algo_factory(net)
+            x0 = jnp.ones((1, 3))
+            algo.compile_graph(x0)
+            algo.init_etrace_state()
+            grads, _ = brainstate.transform.grad(
+                lambda x: (algo.update(x) ** 2).sum(),
+                algo.param_states, return_value=True,
+            )(x0)
+            return np.asarray(u.get_mantissa(grads[next(iter(grads))]))
 
-        net = Mini()
-        brainstate.nn.init_all_states(net, batch_size=1)
-        algo = ConstantSignalAlgo(net)
-        x0 = jnp.ones((1, 3))
-        algo.compile_graph(x0)
+        def _constant(k):
+            class ConstantSignalAlgo(ParamDimVjpAlgorithm):
+                def _compute_learning_signal(self, dl_autodiff, args):
+                    captured['autodiff'] = dl_autodiff
+                    captured['args'] = args
+                    return [jnp.full_like(a, k) for a in dl_autodiff]
+
+            return ConstantSignalAlgo
+
+        ones = _w_grad(_constant(1.0))
+        assert 'autodiff' in captured, 'the hook was never invoked'
+        assert np.any(ones != 0.0)
+
+        twos = _w_grad(_constant(2.0))
+        np.testing.assert_allclose(twos, 2.0 * ones, rtol=1e-5, atol=1e-7)
+
+        autodiff = _w_grad(ParamDimVjpAlgorithm)
+        assert not np.allclose(ones, autodiff, rtol=1e-3), (
+            'the constant signal produced the reverse-AD gradient, so the '
+            'override was called but its return value was discarded')
+
+# ---------------------------------------------------------------------------
+# P4: the modulator expansion contract, and the two-pass exit-cotangent hooks.
+# ---------------------------------------------------------------------------
+
+class TestExpandModulatorToGroup:
+    """The ``learning_signal='modulatory'`` broadcasting contract."""
+
+    def test_a_scalar_fills_the_whole_group_shape(self):
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        got = expand_modulator_to_group(0.25, (1, 4, 1), group_index=0)
+        assert got.shape == (1, 4, 1)
+        assert jnp.all(got == 0.25)
+
+    def test_a_varshape_modulator_gains_the_trailing_state_axis(self):
+        # The reason this helper exists: NumPy broadcasting aligns *trailing*
+        # axes, so (1, 4) against (1, 4, 1) would raise -- or worse, when
+        # num_state == n_rec, silently align the width against the state axis.
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        m = jnp.asarray([[0.0, 1.0, 2.0, 3.0]])
+        got = expand_modulator_to_group(m, (1, 4, 1), group_index=0)
+        assert got.shape == (1, 4, 1)
+        assert jnp.allclose(got[..., 0], m)
+        with pytest.raises(Exception):
+            jnp.broadcast_to(m, (1, 4, 1))     # the trap, pinned
+
+    def test_a_square_group_is_not_transposed_by_accident(self):
+        # varshape (1, 3) with num_state 3 -> group shape (1, 3, 3). Bare
+        # broadcasting would happily align the modulator's width against the
+        # state axis here; ``expand_to`` must put it on the width axis.
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        m = jnp.asarray([[1.0, 2.0, 3.0]])
+        got = expand_modulator_to_group(m, (1, 3, 3), group_index=0)
+        assert got.shape == (1, 3, 3)
+        for s in range(3):
+            assert jnp.allclose(got[..., s], m)
+
+    def test_a_fully_shaped_modulator_passes_through(self):
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        m = jnp.arange(4.0).reshape(1, 4, 1)
+        got = expand_modulator_to_group(m, (1, 4, 1), group_index=0)
+        assert jnp.array_equal(got, m)
+
+    def test_units_survive_the_expansion(self):
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        got = expand_modulator_to_group(3.0 * u.mV, (1, 2, 1), group_index=0)
+        assert u.get_unit(got) == u.get_unit(3.0 * u.mV)
+        assert u.math.shape(got) == (1, 2, 1)
+
+    def test_a_sequence_is_refused_with_the_anti_osttp_reason(self):
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        with pytest.raises(TypeError, match='per-group'):
+            expand_modulator_to_group(
+                [jnp.ones((1, 4, 1))] * 2, (1, 4, 1), group_index=0)
+
+    def test_a_non_broadcastable_shape_names_the_group_and_both_shapes(self):
+        from braintrace._algorithm.vjp_base import expand_modulator_to_group
+        with pytest.raises(ValueError) as exc:
+            expand_modulator_to_group(
+                jnp.ones((3, 7)), (1, 4, 1), group_index=2,
+                hidden_paths=[('h',)])
+        msg = str(exc.value)
+        assert '(3, 7)' in msg and '(1, 4, 1)' in msg
+        assert 'group 2' in msg and "('h',)" in msg
+
+
+class TestAddFutureForPlainPaths:
+    """The pass-2 routing rule, in isolation."""
+
+    def test_plain_paths_are_added_and_etp_paths_are_not(self):
+        from braintrace._algorithm.vjp_base import _add_future_for_plain_paths
+        base = {('w',): jnp.ones((2,)), ('win',): jnp.ones((2,))}
+        future = {('w',): jnp.full((2,), 10.0), ('win',): jnp.full((2,), 10.0)}
+        got = _add_future_for_plain_paths(base, future, {('w',)})
+        assert jnp.array_equal(got[('w',)], jnp.ones((2,)))
+        assert jnp.array_equal(got[('win',)], jnp.full((2,), 11.0))
+
+    def test_an_absent_pass_is_a_no_op(self):
+        from braintrace._algorithm.vjp_base import _add_future_for_plain_paths
+        base = {('w',): jnp.ones((2,))}
+        assert _add_future_for_plain_paths(base, None, set()) is base
+        assert _add_future_for_plain_paths(base, {}, set()) is base
+
+    def test_a_path_the_first_pass_lacks_raises_instead_of_vanishing(self):
+        """The unreachable branch, kept loud on purpose.
+
+        Both trees are unflattened from one ``in_tree``, so a path in ``future``
+        and not in ``base`` cannot occur. Skipping it quietly would drop exactly
+        the cross-window credit this helper delivers, and every DNI invariance
+        test would still pass -- the failure shape that let F-34 through.
+        """
+        from braintrace._algorithm.vjp_base import _add_future_for_plain_paths
+        base = {('w',): jnp.ones((2,))}
+        future = {('w',): jnp.ones((2,)), ('ghost',): jnp.ones((2,))}
+        with pytest.raises(KeyError, match='ghost'):
+            _add_future_for_plain_paths(base, future, set())
+
+
+class TestTheDefaultHooksAreInert:
+    """Every non-DNI algorithm must pay nothing for the second pass."""
+
+    def test_inject_exit_cotangent_defaults_to_none(self):
+        algo = ConcreteVjpAlgorithm(_make_gru())
+        assert algo._inject_exit_cotangent({}, None) is None
+
+    def test_get_update_aux_defaults_to_none(self):
+        algo = ConcreteVjpAlgorithm(_make_gru())
+        assert algo._get_update_aux() is None
+
+    def test_etp_routed_paths_reads_the_compiled_graph(self):
+        from braintrace._algorithm import oracle_models as om
+        spec = om.plain_and_etp_rnn(n_in=3, n_rec=4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.D_RTRL(model, vjp_method='multi-step')
+        algo.compile_graph(jnp.ones((1, 3)))
+        # `w` goes through braintrace.matmul; `win`/`wout` are plain `@`.
+        assert algo._etp_routed_paths() == {('w',)}
+
+
+class TestTheExitCotangentTemplate:
+    """``_exit_cotangent_grads``: zero everywhere but the exit hiddens."""
+
+    def _algo(self):
+        from braintrace._algorithm import oracle_models as om
+        spec = om.plain_and_etp_rnn(n_in=3, n_rec=4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.D_RTRL(model, vjp_method='multi-step')
+        algo.compile_graph(jnp.ones((1, 3)))
         algo.init_etrace_state()
+        return algo
 
-        def loss(x):
-            out = algo.update(x)
-            return (out ** 2).sum()
+    def _template(self, algo):
+        return (jnp.ones((1, 2)),
+                {p: jnp.ones((1, 4)) for p in algo.hidden_states},
+                {})
 
-        grads, _ = brainstate.transform.grad(
-            loss, algo.param_states, return_value=True
-        )(x0)
-        assert 'autodiff' in captured  # hook was invoked
-        w_grad = grads[next(iter(grads))]
-        assert jnp.any(w_grad != 0.0)
+    def test_everything_but_the_hiddens_is_zeroed(self):
+        algo = self._algo()
+        out, hid, oth = algo._exit_cotangent_grads(
+            self._template(algo), {('h',): jnp.full((1, 4), 0.5)})
+        assert jnp.all(out == 0.0)
+        assert jnp.all(hid[('h',)] == 0.5)
+        assert oth == {}
+
+    def test_an_omitted_path_gets_zeros_not_the_template(self):
+        algo = self._algo()
+        _, hid, _ = algo._exit_cotangent_grads(self._template(algo), {})
+        assert jnp.all(hid[('h',)] == 0.0)
+
+    def test_an_unknown_path_is_refused(self):
+        algo = self._algo()
+        with pytest.raises(ValueError, match='not hidden states'):
+            algo._exit_cotangent_grads(
+                self._template(algo), {('nope',): jnp.zeros((1, 4))})
+
+    def test_a_shape_mismatch_is_refused_naming_both_shapes(self):
+        algo = self._algo()
+        with pytest.raises(ValueError) as exc:
+            algo._exit_cotangent_grads(
+                self._template(algo), {('h',): jnp.zeros((1, 9))})
+        assert '(1, 9)' in str(exc.value) and '(1, 4)' in str(exc.value)

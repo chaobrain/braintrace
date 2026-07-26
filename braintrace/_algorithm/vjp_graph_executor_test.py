@@ -102,5 +102,62 @@ class TestETraceVjpGraphExecutor(unittest.TestCase):
         # self.assertNotEqual(single_result[4], multi_result[4])
 
 
+class TestFullJacobianFlag(unittest.TestCase):
+    """The ``full_jacobian`` constructor flag added for ``random_projection``.
+
+    The flag exists because a rank-1 estimator only pays for itself against the
+    *full* within-group transition: rolling the per-position block diagonal
+    instead converges onto the biased trace, at strictly more variance.
+    """
+
+    def _executor(self, **kwargs):
+        from braintrace._algorithm import oracle_models as om
+        from braintrace._algorithm.vjp_graph_executor import ETraceVjpGraphExecutor
+        spec = om.stacked_tanh_rnn(n_in=4, n_rec=4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        return ETraceVjpGraphExecutor(model, vjp_method='multi-step', **kwargs), spec
+
+    def test_the_flag_defaults_to_off(self):
+        executor, _ = self._executor()
+        self.assertFalse(executor.full_jacobian)
+
+    def test_the_flag_changes_the_jacobian_shape(self):
+        # Diagonal: one entry per hidden position. Full: the whole
+        # (*V, S, *V, S) block, which is what the coupled recursion needs.
+        diag, spec = self._executor(include_recurrent_mixing=True)
+        full, _ = self._executor(include_recurrent_mixing=True, full_jacobian=True)
+        x = spec.make_inputs(1, 4)[0]
+        diag.compile_graph(x)
+        full.compile_graph(x)
+        d_jac = diag.solve_h2w_h2h_jacobian(x)[4]
+        f_jac = full.solve_h2w_h2h_jacobian(x)[4]
+        self.assertEqual(len(d_jac), len(f_jac))
+        for group, d, f in zip(full.graph.hidden_groups, d_jac, f_jac):
+            slab = tuple(group.varshape) + (group.num_state,)
+            # Diagonal: one state-by-state block per position, `(*V, S, S)`.
+            # Full: every position pair, `(*V, S, *V, S)`. The difference is
+            # exactly the cross-position mixing a coupled recursion needs.
+            self.assertEqual(u.math.shape(d), slab + (group.num_state,))
+            self.assertEqual(u.math.shape(f), slab + slab)
+            self.assertNotEqual(u.math.shape(d), u.math.shape(f))
+
+    def test_the_random_projection_engine_turns_the_flag_on(self):
+        # The wiring that matters: the coordinate, not the caller, selects it.
+        from braintrace._algorithm import oracle_models as om
+        spec = om.tanh_rnn(n_in=3, n_rec=4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        self.assertTrue(
+            braintrace.UORO(model, vjp_method='multi-step')
+            .graph_executor.full_jacobian)
+
+        model2 = spec.factory()
+        brainstate.nn.init_all_states(model2, batch_size=1)
+        self.assertFalse(
+            braintrace.D_RTRL(model2, vjp_method='multi-step')
+            .graph_executor.full_jacobian)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -426,7 +426,17 @@ tautological assertions. Lessons 26–30 record what generalises; F-31 in the
 limitations list records the one behaviour that was confirmed as a pre-existing
 property rather than a P3 regression.
 
-### P4 — UORO, three-factor and DNI
+### P4 — UORO, three-factor and DNI — **done**
+
+Spec: [`2026-07-25-p4-uoro-modulatory-dni.md`](2026-07-25-p4-uoro-modulatory-dni.md).
+
+Delivered: `RandomProjectionVjpAlgorithm` + `UORO`, the `modulatory` branch +
+`ThreeFactor`, the `_inject_exit_cotangent` two-pass hook + `SyntheticGradient`,
+`DNI` and `train_synthetic_gradient`. Three new findings (F-32, F-33, F-34) and
+lessons 31–38 below. What each acceptance criterion actually established, and
+what it did not, is recorded in the three suites' docstrings; the honest summary
+is that UORO's unbiasedness and DNI's *routing* are pinned exactly, while DNI's
+*estimate quality* is a demonstration rather than a property.
 
 Three additions that share P2's axes and can proceed in parallel once P2 lands.
 
@@ -845,3 +855,203 @@ for running one.
     degraded and points at F-31 in the limitations list, where the pair and its
     control are recorded. Every axis in this roadmap describes what a trace
     retains; none of them can describe what the trace's index does not denote.
+
+31. **"Unbiased" needs a subject as much as "correct" does (lesson 30 again, one
+    axis over).** UORO is routinely described as *the* unbiased online rule, and
+    the temptation is to write that down and pin it against BPTT. It is unbiased
+    for the recursion **its transition defines** — the exact within-group
+    influence recursion, i.e. the saturating end of the SnAp scale — and nothing
+    more. It does not repair cross-group coupling, the F-31 instantaneous tail, or
+    any primitive's own solve regime. So `uoro_test.py`'s reference is
+    `SnAp(n=4)`, not BPTT, and the BPTT comparison appears only as a second test
+    on the one fixture where the two provably coincide. Writing it the other way
+    round would have produced a test that failed for the right implementation.
+
+32. **Unbiasedness by exhaustive enumeration beats unbiasedness by sampling, when
+    the draw is discrete and small.** The roadmap asked for statistical
+    infrastructure and warned it would be expensive. It was built — and then the
+    sharpest test turned out not to need it: with `H = 2` and two draw steps that
+    still influence the gradient, there are exactly `2^4 = 16` Rademacher sign
+    patterns, so the mean over *all* of them is the expectation **exactly**, to
+    1e-16 rather than to a confidence interval. The sampled interval test is kept
+    for the cases enumeration cannot reach and marked `slow`. Prefer an exact
+    finite average whenever the randomness has small finite support.
+
+33. **A normaliser that cancels is a variance choice, not a correctness one.**
+    UORO's `rho0`/`rho1` look load-bearing; the parity argument shows they are
+    not. The cross terms are odd in the draw while `rho1` is even, so *any*
+    positive draw-independent `rho0` and any positive even `rho1` leave the
+    estimator unbiased. Corollary that saved a debugging session: a wrong
+    normaliser cannot be diagnosed by a bias test, because there is no bias to
+    find — only variance. It also kills an "obvious" optimisation: antithetic
+    sampling leaves the estimate **bit-identical**, because both factors flip
+    together and their product is invariant.
+
+34. **Replace, do not multiply — and let the degenerate case decide.** For
+    `modulatory`, `m * dL/dh` and `m` alone both read as "three-factor". The
+    tie-breaker is not taste: multiplying makes the roadmap's own degenerate
+    criterion — set the modulator to `dL/dh` and recover `symmetric` element-wise
+    — unsatisfiable, leaving the axis with no coordinate at which it reduces to
+    the rule it generalises. When two readings of a spec differ, prefer the one
+    whose degenerate case is checkable.
+
+35. **A hook that only runs under `grad` needs its refusals hoisted out of it.**
+    `_compute_learning_signal` executes inside the `custom_vjp` backward pass, so
+    a malformed modulator passed to a *forward-only* `update()` was accepted in
+    silence and only failed later, from inside JAX, with a traceback pointing
+    nowhere useful. The validation now runs eagerly at the top of `update()`,
+    against each group's declared signal shape, while the authoritative expansion
+    stays where the real shapes are. Test discipline that caught it: the refusal
+    test called `algo(x)` without an outer `grad`, because that is what a user
+    debugging their shapes does first.
+
+36. **Do not infer a category from which container it arrives in.** DNI's whole
+    correctness claim is a split — the synthetic cotangent must reach the plain
+    parameters and must not reach the ETP ones — and the backward pass appears to
+    hand that split over for free, in `dg_etrace_params` versus
+    `dg_non_etrace_params`. It does not (F-34): under multi-step, *every*
+    trainable parameter arrives in `dg_etrace_params`, plain ones included, and
+    `dg_non_etrace_params` is empty. The first implementation therefore added the
+    future term to an empty dictionary and was a **perfect no-op** — every test of
+    the form "M == 0 is a no-op" passed, and so did every ETP invariance test. It
+    was caught only by B1's other half, "a live synthesiser must *change* the
+    plain gradients", which measured a deviation of exactly `0.0`. Name-shaped
+    assumptions about someone else's data structure need a test that fails when
+    they are wrong, and for a *split*, that means testing both sides.
+
+37. **Two coordinates in the same axis can want opposite execution options.**
+    `modulatory` is only meaningful under `single-step` — under multi-step the
+    in-window reverse-AD term stays unmodulated and the rule is half three-factor,
+    half plain loss gradient. `bootstrapped` is only meaningful under
+    `multi-step` — a one-step window has no exit worth estimating. Both refusals
+    are in the base constructor rather than in the presets, so a config-built
+    algorithm gets them too; and `update_schedule` fell out of `ThreeFactor`'s
+    scope as a consequence, not as an omission.
+
+38. **A learned auxiliary predictor needs its data counted, not its epochs.**
+    DNI's synthesiser is a 20-parameter linear map; trained on a `T = 8` sequence
+    at `chunk_size = 2` it sees **four** distinct boundaries, fits them almost
+    perfectly (0.83 → 0.12) and generalises *worse than predicting zero* (0.412
+    against 0.368 deviation from BPTT). Twenty boundaries beat the zero estimate;
+    thirty were worse again. Two lessons, and the second is the uncomfortable one:
+    the number of *boundaries*, not epochs, is the sample size — and a lower
+    auxiliary regression loss does not monotonically buy a better gradient, so
+    B3 is written and labelled as a demonstration at a stated configuration
+    rather than as a property of the method. A third, cheaper trap sits next to
+    it: the fit must use the same `chunk_size` the learner will be driven with,
+    or it predicts the future at boundaries that do not exist.
+
+39. **When an end-to-end criterion fails, add the oracle arm before weakening
+    the claim.** B4 — "DNI beats its controls on a delayed-reward task" — failed
+    three different ways, and each time the tempting move was to soften the
+    assertion into something that would pass. What actually resolved it was
+    inserting a fourth arm whose estimate is *exact*: the true future cotangent
+    of the training objective, recomputed against the current parameters every
+    epoch. That arm separates two questions the failing test had fused — *is the
+    injected credit routed correctly?* and *is a learned linear map a good enough
+    predictor?* — and it is cheap, because B2 already had to build the machinery
+    to pin an oracle synthesiser. With the oracle arm in place the ordering came
+    out `oracle < trained < M ≡ 0` on every seed, so the criterion was true all
+    along and all three failures were harness defects. A criterion that fails for
+    harness reasons and a criterion that fails because the method does not hold
+    are indistinguishable from the assertion alone; the oracle arm is what tells
+    them apart, and it belongs in the test permanently as the ceiling every other
+    arm is measured against.
+
+40. **A helper's convenient default is a trap wherever it must agree with the
+    caller.** `train_synthetic_gradient(loss_fn=...)` defaults to sum-of-squares.
+    B4 descended on `(out - target)²` and left the default in place, so the
+    synthesiser was fitted against the gradient of a *different function at a
+    different scale* — and the injected result was not degraded DNI but noise
+    with the shape of a cotangent, leaving the run measurably worse than
+    switching DNI off (0.577 against 0.140). This is the identical failure to the
+    `chunk_size` hazard already documented one lesson above, in a second
+    parameter, and it went unnoticed precisely because a default *looks* like a
+    decision already made. The rule that generalises: when a helper's parameter
+    has to match something the caller does elsewhere, a default is a liability
+    even when it is the common case. Recorded as F-35, and both halves are now
+    stated in the parameter's own docstring rather than only in prose above it.
+
+41. **A stale approximator is not the method.** The first repair attempt fitted
+    the synthesiser once, against the *initial* model, and then trained the model
+    for fifteen epochs underneath it. That arm won on one seed of three. It is
+    not what DNI is: the target `dL_{≥b}/dh^b` is a function of the parameters,
+    so an estimator of it goes stale exactly as fast as the parameters move.
+    Refitting once per epoch fixed it. Worth stating because the stale version is
+    what the natural reading of a helper named `train_synthetic_gradient` — train
+    it, then use it — produces, and because the failure looks like the method
+    being weak rather than the protocol being wrong.
+
+42. **A fixture's conditioning is load-bearing for any test that trains.**
+    `delayed_reward_rnn` was written as `h ← leak·h + tanh(...)`, an accumulator
+    bounded only by `1/(1-leak) = 20`. Every downstream scale inherits that:
+    outputs `O(10)`, squared errors `O(100)`, and the hidden cotangents the
+    synthesiser regresses against `O(1e5)` — whose fit diverged to `nan`, as did
+    plain-SGD training of the model at every learning rate tried down to `2e-3`.
+    The one-character fix is the convex form, `h ← leak·h + (1-leak)·tanh(...)`,
+    which bounds `|h| ≤ 1` and leaves the credit span untouched because the span
+    comes from the `leak·h` term alone. The fixture's own tests never caught it:
+    they assert *ratios* of early to late credit, which are scale-invariant. A
+    fixture used only for gradient comparisons can get away with poor
+    conditioning; the moment a test runs an optimiser on it, conditioning becomes
+    part of the fixture's contract.
+
+43. **A comment that asserts a shape is a claim, and claims get measured.**
+    The eager modulator pre-flight skipped descended hidden groups, with a comment
+    explaining that a descended group's learning signal "carries a leading substep
+    axis, so its runtime shape is not `(*varshape, num_state)`". Measured on
+    `snn_scan_rnn(loops=40)`, which does descend, the signal is `(1, 4, 1)` — the
+    group shape exactly, because `scan_descent` folds the per-substep Jacobians
+    *inside* the body and the reverse pass hands out one array per group. The skip
+    bought nothing and cost the pre-flight: a malformed modulator was accepted by
+    a forward-only `update()` on any descended model and only failed later from
+    inside JAX. Two lines of probe would have caught it at the time it was
+    written; the plausible-sounding comment is what stopped anyone looking.
+
+44. **Widening a reduction is a dtype change, and a scan carry's dtype is a
+    contract.** `_tree_sq_norm` accumulates in float32-or-wider on purpose — a sum
+    of squares in float16 underflows below about `1e-3` — but the resulting
+    normalisers then set the dtype of `rho0 * d_s + rho1 * nu`, which *is* the scan
+    carry. `jax.lax.scan` rejects that: `carry input and carry output must have
+    equal types`, on the first `MultiStepData` call, for every float16 or
+    (under `jax_enable_x64`) float64 model. The fix is not to narrow the reduction
+    but to narrow its *result*: reduce wide, then `astype` back to the carry's own
+    dtype. Note this is the second dtype bug in the same three lines — the first
+    was allocating the factors at a hard-coded `float32` — which is the tell that
+    "what dtype does this carry" deserved a parametrised test from the start
+    rather than two point fixes.
+
+45. **Observing that a hook was called is not observing that it was used.**
+    `test_override_hook_replaces_learning_signal` captured the hook's argument and
+    asserted the resulting gradient was non-zero. A base class that invoked the
+    override, discarded its return value, and went on using the reverse-AD signal
+    passes both assertions. What pins it is a property of the quantity itself: the
+    parameter gradient is linear in the learning signal, so a hook returning
+    `k · ones` must scale the gradient by exactly `k`, and must differ from the
+    un-overridden run. Same shape as lesson 39 — the assertion has to be sensitive
+    to the thing being claimed, not merely present when it holds.
+
+46. **`io_callback` is not a universal observation seam.** Capturing UORO's
+    production `nu` looked like the direct way to pin draw freshness, but a
+    callback placed inside the stepper never fires: the stepper is traced under
+    `jax.custom_vjp`, where the callback's unused result is dead and gets
+    eliminated. The property was observable anyway, because the freshness does not
+    live in `_draw_projection` at all — that is a deterministic function of one
+    key, which is exactly what makes it a usable test seam. It lives in the
+    caller's schedule (`split_key(len(groups))` per step, carried key advanced).
+    Replaying that schedule in the test and feeding the *production* draw function
+    pins both freshness and cross-group independence, with no tracing involved.
+    When a seam resists observation, check whether the property is actually
+    located where you are looking.
+
+47. **A recursion's first step cannot pin a normaliser that degenerates there.**
+    The hand-computed factor test ran one step, where `s_tilde` and `theta_tilde`
+    are both zero, so `rho0 = sqrt(eps/eps) = 1` regardless of the formula:
+    inverting its ratio or deleting it outright left the test green. Only step 2
+    makes it live. The fixture's conditioning matters as much as the step count —
+    at the suite's default input scale `rho0` lands at 0.92, an 8% departure from
+    the degenerate value, so an inverted ratio would move the expectation by only
+    19%. Saturating the transition (`scale=5.0`) puts `rho0` near 16, where an
+    inversion is off by 264×, and the test asserts that separation explicitly so a
+    later fixture change cannot quietly return it to the degenerate regime.
+

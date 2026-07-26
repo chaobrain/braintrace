@@ -170,6 +170,13 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         Policy governing control-flow canonicalization during graph
         compilation. ``None`` (default) uses
         :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
+    full_jacobian : bool, optional
+        Return each group's **full** ``(*varshape, S, *varshape, S)``
+        hidden-to-hidden Jacobian instead of its per-position block diagonal.
+        Only ``trace_factorization='random_projection'`` consumes this: a rank-1
+        estimator of an already-block-diagonal recursion would be strictly worse
+        than the recursion itself, so UORO rolls the whole transition. Default
+        ``False``.
     """
     __module__ = 'braintrace'
 
@@ -181,6 +188,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         sparse_n: Optional[int] = None,
         snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
         control_flow: Optional[ControlFlowPolicy] = None,
+        full_jacobian: bool = False,
     ):
         super().__init__(
             model,
@@ -196,6 +204,9 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             f'While we got {vjp_method}. '
         )
         self.vjp_method = vjp_method
+        # Whether ``_compute_hid2hid_jacobian`` keeps the full transition
+        # Jacobian rather than extracting per-position blocks.
+        self.full_jacobian = full_jacobian
 
     @property
     def is_single_step_vjp(self) -> bool:
@@ -402,6 +413,23 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         for group in self.graph.hidden_groups:
 
             if group.descent is not None:
+                if self.full_jacobian:
+                    # The descent path analyses a body transition with
+                    # include_recurrent_mixing=False unconditionally, so a "full"
+                    # Jacobian computed here would be full of nothing: exactly the
+                    # mixing the caller asked for would be missing. Refuse rather
+                    # than hand back a silently diagonal rule. The algorithm-level
+                    # gate (``_supports_scan_descent``) normally fires first; this
+                    # is the backstop for a hand-built executor.
+                    raise NotImplementedError(
+                        'full_jacobian=True is not available for a hidden group '
+                        f'descended into a scan (group {group.index}): the '
+                        'descent path builds its transition with '
+                        'include_recurrent_mixing=False, so the full Jacobian '
+                        'would omit the recurrent mixing that asking for it was '
+                        "meant to keep. Use recurrence_scope='diagonal', or keep "
+                        'the recurrent weights outside the scan body.'
+                    )
                 # Descended group (structured scan descent, Phase 4): the
                 # transition jaxpr is body-scoped (one substep); its inputs
                 # are the stacked substep-entry hidden values and transition
@@ -431,7 +459,10 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             input_vals = [intermediate_values[v] for v in group.transition_jaxpr_constvars]
 
             # compute the jacobian
-            jac = group.diagonal_jacobian(hidden_vals, input_vals)
+            if self.full_jacobian:
+                jac = group.full_jacobian(hidden_vals, input_vals)
+            else:
+                jac = group.diagonal_jacobian(hidden_vals, input_vals)
             hid2hid_jacobian.append(jac)
 
         return jax.lax.stop_gradient(hid2hid_jacobian)
