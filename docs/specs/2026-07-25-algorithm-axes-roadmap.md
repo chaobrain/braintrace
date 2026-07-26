@@ -510,8 +510,16 @@ the details are in lessons 49–60:
   coordinate recorded as unreachable that starts running — makes the run
   unpublishable.
 
-The F-22 retirement is not done: the zoo has the nine SNN specs, but the bias
-comparison F-22 asks for has not been run.
+Two things are explicitly **not** done:
+
+- **The F-22 retirement.** The zoo has the nine SNN specs, but the bias
+  comparison F-22 asks for has not been run.
+- **An independent adversarial review.** One was attempted and did not finish
+  (lesson 61); the two defects it surfaced before dying are fixed, but
+  `metrics.compare` and `is_degenerate_pair` under vacuity, engines that might
+  silently ignore a config field, assertions that would pass against a stub, and
+  whether the frozen B4 task protocol biases non-DNI rows have been checked by
+  nothing except the suite's own tests.
 
 ## Three acceptance paradigms
 
@@ -559,9 +567,10 @@ statistical class.
 
 Items 1–9 were recorded during P1, against commit `bc153da`; items 10–17 during
 P2, against `156d058`; items 18–30 during P3, against `100b5be` (18–25 while
-implementing, 26–30 while working through the adversarial review); items 49–60
-during P5, against `da26443`. These are the things the roadmap got wrong or could
-not have known, kept here because later phases rest on them.
+implementing, 26–30 while working through the adversarial review); items 49–61
+during P5, against `da26443` (49–60 while implementing, 61 from a review that
+did not finish). These are the things the roadmap got wrong or could not have
+known, kept here because later phases rest on them.
 
 1. **The instrument was the defect, not the compiler.** P1 was scoped as
    compiler work on multi-timescale and heterogeneous populations. Every one of
@@ -1203,17 +1212,34 @@ for running one.
     no loss. DNI's evidence lives in the task column; the gradient column for
     that coordinate needs a caveat, not a number.
 
-54. **`persistent_state_bytes` is blind to `recurrence_scope`.** Measured across
+54. **A persistent-state metric is blind to the coupled scope, and was nearly
+    half-blind to `sparse_n` for a completely different reason.** Measured across
     `tanh_rnn`, `two_state_rnn`, `sparse_ring_rnn` and
     `sparse_ring_two_state_rnn`: the diagonal and coupled footprints are
     byte-for-byte identical. F-32's dense `(*V,S,*V,S)` transition Jacobian is
     materialised inside the step and discarded, so it never appears in any
-    persistent state. The memory column separates `trace_factorization` and says
-    nothing whatever about scope — and printing the two side by side invites the
-    reader to conclude that coupled scope is free, which is exactly the opposite
-    of the truth this axis is about. A peak-memory instrument would be a
-    different measurement, not a better one, and the roadmap's P5 sketch asked
-    for "peak memory" without noticing the difference.
+    persistent state. Printing that column next to `recurrence_scope` invites the
+    reader to conclude that coupled scope is free, which is the opposite of the
+    truth this axis is about. A peak-memory instrument would be a different
+    measurement, not a better one, and the roadmap's P5 sketch asked for "peak
+    memory" without noticing the difference.
+
+    The `sparse_n` half of the same axis fails the other way, and I got this
+    wrong on the first pass: the widened rule's neighbourhood index —
+    `SnapPattern.neighbours` and `.valid`, both `(P, K)` — *is* persistent and
+    *does* scale with the axis, but it hangs off the compiled graph rather than
+    sitting in a `State`. Measured on `sparse_ring_rnn` at `sparse_n=2`: 96 bytes
+    of index against a 104-byte State footprint. Worse than being uncounted, it
+    was unflagged, because the "anything I don't recognise goes in `unaccounted`"
+    escape hatch only sees what the enumeration already walks.
+
+    The generalisable part is the shape of the error, not the byte count. A
+    memory metric is a claim about a *boundary* — what belongs to the rule — and
+    both failures here are boundary errors in opposite directions: the coupled
+    Jacobian is inside the step when the reader assumes it persists, and the snap
+    index persists outside the object the enumeration was pointed at. Neither is
+    visible from the total. Only naming the parts makes them visible, which is
+    why the column is now split rather than summed.
 
 55. **Ownership of state has to be decided by identity, not by path.** The
     obvious rule for "what does the algorithm own" — subtract everything whose
@@ -1224,15 +1250,23 @@ for running one.
     memory claim is the most interesting. Comparing `State` objects by `id` is
     both simpler and right.
 
-56. **Three leaf kinds do not answer `.nbytes`, and one buffer is not a
-    `State`.** A Python `int` (`running_index`), a typed PRNG key
-    (`projection_rng`, dtype `key<fry>` — `np.asarray` refuses it outright, and
-    it needs `jax.random.key_data`), and a `brainunit.Quantity` (whose mantissa
-    carries the bytes) all appear in the state trees being measured. Separately,
-    `FixedRandomFeedback`'s `_random_feedback` is a plain attribute rather than a
-    `State`, so a `State`-only enumeration reports every random-feedback
-    coordinate as costing nothing extra — a zero in the column that the axis
-    exists to populate.
+56. **Three leaf kinds do not answer `.nbytes`, and the memory an axis pays for
+    keeps turning out not to be a `State`.** A Python `int` (`running_index`), a
+    typed PRNG key (`projection_rng`, dtype `key<fry>` — `np.asarray` refuses it
+    outright, and it needs `jax.random.key_data`), and a `brainunit.Quantity`
+    (whose mantissa carries the bytes) all appear in the state trees being
+    measured.
+
+    The second half is the one that recurred. `FixedRandomFeedback`'s
+    `_random_feedback` is a plain attribute, so a `State`-only enumeration
+    reports every random-feedback coordinate as costing nothing extra;
+    `SnapPattern`'s index arrays live on the compiled graph, so the same
+    enumeration reports `sparse_n` at roughly half its cost (lesson 54). Two
+    axes, two different hiding places, the same zero in the column the axis
+    exists to populate. The prior worth carrying into P6: for any axis whose
+    selling point is memory, assume its memory is *not* in a `State` until
+    located, and make the enumeration name what it found rather than only what
+    it totalled.
 
 57. **The environment is part of the model.** Every SNN spec in the zoo needs
     `brainstate.environ`'s `dt` and fails with a `KeyError` raised from inside a
@@ -1269,3 +1303,33 @@ for running one.
     would report every rule as exact. This is lesson 10 seen from the other
     side, and it is the strongest argument in the roadmap for the multi-model
     zoo: one model cannot tell you whether a number is about the rule.
+
+61. **An adversarial review that reports only at the end reports nothing when it
+    dies.** The P5 implementation review ran for roughly three hours, read most
+    of the library and all of the suite, and was lost while composing its final
+    answer when the connection dropped; a second attempt could not start at all
+    because the endpoint was returning 502. What survived was only what happened
+    to be visible in its progress log while it worked — and two of those partial
+    leads were real defects that are now fixed (lessons 50 and 54).
+
+    That ratio is the lesson. A long review is a long-running job with no
+    checkpoint, and the fix is the same as for any such job: have it append each
+    finding to a file the moment it is confirmed, rather than accumulating them
+    for a final report. The second attempt was set up that way and never got far
+    enough to write anything, which does not make the instruction wrong.
+
+    The other half is what to do with a partial result. Two leads were verified
+    against source and became fixes; a third — that `random_projection` occupies
+    only 4 of the 144 coordinates, which looks like a coverage hole — was checked
+    and **rejected**: the library requires `recurrence_scope='coupled'` for that
+    factorization, coupled requires `temporal_recursion='jacobian'`, and
+    `trace_filter='kappa'` requires `per_param`, so four is the complete legal
+    subspace. A review's finding is a hypothesis with a good prior, and the
+    verification is not optional even when the reviewer is usually right.
+
+    **P5's review debt is therefore open, not discharged.** The areas the first
+    review had reached but not reported on when it died — `metrics.compare` and
+    `is_degenerate_pair` under vacuity, engines silently ignoring a config field,
+    assertions that would pass against a stub, and whether the frozen B4 task
+    protocol biases non-DNI rows — have not been independently reviewed by
+    anything except the implementation's own tests.
