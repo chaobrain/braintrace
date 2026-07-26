@@ -33,6 +33,56 @@ ready-to-``update`` learner in a single call.
    compile
 
 
+Axis Coordinates
+----------------
+
+The named algorithms below are *coordinates* in a six-axis space, not separate
+implementations. :class:`ETraceConfig` names that space explicitly, so a rule
+with no preset name is as constructible as one with a name:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Axis
+     - Values
+   * - ``trace_factorization``
+     - ``'per_param'`` (:math:`O(P \cdot H)`), ``'io_factorized'`` (:math:`O(I+O)`)
+   * - ``temporal_recursion``
+     - ``'jacobian'``, ``'scalar_leak'``, ``'none'`` — a ``(x, f)`` pair under ``'io_factorized'``
+   * - ``recurrence_scope``
+     - ``'diagonal'``, ``'coupled'``
+   * - ``learning_signal``
+     - ``'symmetric'``, ``'random_feedback'``
+   * - ``trace_filter``
+     - ``'none'``, ``'kappa'``
+   * - ``update_schedule``
+     - ``'per_step'``
+
+Illegal combinations are rejected at construction with an error naming the
+legal pairings, and coordinates that denote the same rule are canonicalised to
+one form (a zero decay, for instance, collapses to ``temporal_recursion='none'``).
+Pass a config wherever :func:`compile` accepts an algorithm name:
+
+.. code-block:: python
+
+    # an x-side leak with an instantaneous f-side
+    learner = braintrace.compile(
+        model,
+        braintrace.ETraceConfig(trace_factorization='io_factorized',
+                                temporal_recursion=('scalar_leak', 'none'),
+                                decay=(0.9, 0.0)),
+        x0,
+    )
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   ETraceConfig
+
+
 Base Classes
 ------------
 
@@ -135,13 +185,9 @@ regime makes them exact); know the regime before relying on their gradients.
    EProp
    OSTLRecurrent
    OSTLFeedforward
-   OTPE
-   OTTT
-   OSTTP
 
 Trace helpers reused across the SNN algorithms — a frozen random-feedback
-projection, an output-side low-pass filter, and a leaky presynaptic
-accumulator:
+projection and an output-side low-pass filter:
 
 .. autosummary::
    :toctree: generated/
@@ -150,7 +196,6 @@ accumulator:
 
    FixedRandomFeedback
    KappaFilter
-   PresynapticTrace
 
 
 Algorithm Comparison
@@ -180,15 +225,30 @@ Algorithm Comparison
      - depends on regime
      - depends on regime
      - ``OSTLRecurrent`` ('with-H', D-RTRL) keeps the recurrent Jacobian; ``OSTLFeedforward`` ('without-H', pp_prop) drops it.
-   * - ``OTPE``
-     - :math:`O(B \cdot I \cdot O)` (full) / :math:`O(B(I+O))` (approx)
-     - :math:`O(B \cdot I \cdot O)`
-     - Deep SNNs; F-OTPE trades rank for memory
-   * - ``OTTT``
-     - :math:`O(B \cdot I)`
-     - :math:`O(B \cdot I \cdot O)`
-     - Very large SNNs; presynaptic λ-trace only
-   * - ``OSTTP``
-     - :math:`O(B \cdot |\theta|)`
-     - :math:`O(B \cdot I \cdot O)`
-     - Target-projection via fixed random feedback
+
+Each name above is a thin factory over an :class:`ETraceConfig`; the axes that
+distinguish them are:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 26 74
+
+   * - Algorithm
+     - Coordinates (fields left at their default are omitted)
+   * - ``D_RTRL``
+     - the default coordinate
+   * - ``pp_prop`` / ``ES_D_RTRL``
+     - ``trace_factorization='io_factorized'``, ``decay=<decay_or_rank>``
+   * - ``EProp``
+     - ``trace_filter='kappa'``, ``kappa=<kappa_filter_decay>``; with
+       ``feedback='random'``, ``learning_signal='random_feedback'``
+   * - ``OSTLRecurrent``
+     - ``recurrence_scope='coupled'``
+   * - ``OSTLFeedforward``
+     - ``trace_factorization='io_factorized'``, ``decay=1e-6`` (by default)
+
+Because these are coordinates rather than classes, the axes compose beyond the
+named presets — random feedback on the :math:`O(I+O)` trace, or a coupled
+recurrence scope with an ``io_factorized`` factorization, are both reachable
+even though no preset spells them.
+

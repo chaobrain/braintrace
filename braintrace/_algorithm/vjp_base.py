@@ -40,7 +40,10 @@ from braintrace._typing import (
     dG_Hidden,
     dG_State,
 )
-from braintrace._compiler import ControlFlowPolicy
+from braintrace._compiler import ControlFlowPolicy, DEFAULT_MAX_JACOBIAN_ELEMENTS
+from braintrace._op import is_snap_anchored
+from ._common import FixedRandomFeedback
+from .axes import ETraceConfig
 from .base import ETraceAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
@@ -109,13 +112,17 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     __module__ = 'braintrace'
     graph_executor: ETraceVjpGraphExecutor
 
-    #: Hidden-group grouping mode for the hidden-to-hidden transition. ``False``
-    #: (default) excludes recurrent ETP mixing primitives from the transition
-    #: (bounded D-RTRL / e-prop diagonal approximation). Recurrence-defining
-    #: algorithms that keep the full temporal term (RTRL-exact "with-H", e.g.
-    #: :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`) override
-    #: this to ``True``. Not a user-facing constructor argument by design.
-    _include_recurrent_mixing: bool = False
+    #: The learning-rule coordinate this algorithm implements. Subclasses set a
+    #: default; callers may pass one explicitly. See :class:`ETraceConfig`.
+    config: ETraceConfig
+
+    #: Default coordinate when the caller passes no ``config``. Subclasses
+    #: override this with their own preset coordinate.
+    _default_config: ETraceConfig = ETraceConfig()
+
+    #: ``group index -> fixed random projection``, allocated by
+    #: :meth:`init_etrace_state` when ``learning_signal='random_feedback'``.
+    _random_feedback: Dict[int, FixedRandomFeedback]
 
     def __init__(
         self,
@@ -123,6 +130,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         name: Optional[str] = None,
         vjp_method: str = 'single-step',
         control_flow: Optional[ControlFlowPolicy] = None,
+        config: Optional[ETraceConfig] = None,
+        random_feedback_key: Optional[jax.Array] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     ):
 
         # the VJP method
@@ -132,11 +142,31 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         )
         self.vjp_method = vjp_method
 
+        # the learning-rule coordinate
+        if config is None:
+            config = self._default_config
+        elif not isinstance(config, ETraceConfig):
+            raise TypeError(
+                f'config must be an ETraceConfig, got {type(config).__name__}.')
+        self.config = config
+        self._random_feedback_key = random_feedback_key
+        self._random_feedback = {}
+        if (config.learning_signal == 'random_feedback'
+                and random_feedback_key is None):
+            raise ValueError(
+                "learning_signal='random_feedback' needs a "
+                '`random_feedback_key` to draw the fixed projection matrices '
+                'from, so the run is reproducible. Pass one, e.g. '
+                'random_feedback_key=jax.random.PRNGKey(0).'
+            )
+
         # graph
         graph_executor = ETraceVjpGraphExecutor(
             model,
             vjp_method=vjp_method,
-            include_recurrent_mixing=self._include_recurrent_mixing,
+            include_recurrent_mixing=config.include_recurrent_mixing,
+            sparse_n=config.sparse_n,
+            snap_max_jacobian_elements=snap_max_jacobian_elements,
             control_flow=control_flow,
         )
 
@@ -153,6 +183,202 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     def _assert_compiled(self) -> None:
         if not self.is_compiled:
             raise ValueError('The etrace algorithm has not been compiled. Please call `compile_graph()` first. ')
+
+    # ------------------------------------------------------------------ #
+    # axis: recurrence_scope
+    # ------------------------------------------------------------------ #
+
+    def compile_graph(self, *args: Any) -> None:
+        super().compile_graph(*args)
+        if self.is_compiled:
+            self._assert_recurrence_scope_is_honoured()
+            self._assert_relations_are_snap_anchored()
+
+    def _assert_recurrence_scope_is_honoured(self) -> None:
+        """Raise if a non-diagonal ``recurrence_scope`` cannot be delivered.
+
+        ``_compiler/scan_descent.py`` analyses a descended scan body with
+        ``include_recurrent_mixing=False`` unconditionally: the per-substep
+        trace fold consumes diagonal Jacobians, so recurrent ETP mixing traced
+        into a body transition would have no consumer. That is defensible while
+        the flag is private, but ``recurrence_scope`` is a public axis — asking
+        for ``'coupled'`` and silently getting ``'diagonal'`` inside the scan is
+        exactly the silent-degradation failure the axis decomposition exists to
+        remove.
+
+        ``'sparse_n'`` inherits the same limitation, and for a second reason on
+        top of the first: a descended group's per-substep Jacobian is folded
+        before the trace ever sees it, so there is no single transition jaxpr
+        for the position analysis to read. ``_attach_snap_pattern`` therefore
+        skips descended groups outright, which would leave the requested order
+        silently unapplied.
+        """
+        scope = self.config.recurrence_scope
+        if scope not in ('coupled', 'sparse_n'):
+            return
+        # A descended *group* can exist without any descended relation (all body
+        # weights routed through plain ops), so check both — as
+        # ``ETraceAlgorithm.compile_graph`` does for its own scan-descent gate.
+        relations = sum(
+            r.control_flow_context is not None
+            for r in self.graph.hidden_param_op_relations
+        )
+        groups = sum(g.descent is not None for g in self.graph.hidden_groups)
+        if relations or groups:
+            raise NotImplementedError(
+                f"recurrence_scope={scope!r} is not honoured inside a "
+                f'descended scan ({relations} ETP relation(s) and {groups} '
+                f'hidden group(s) were discovered inside a scan body, whose '
+                f'transition is always analysed with diagonal recurrence). Use '
+                f"recurrence_scope='diagonal', or keep the recurrent weights "
+                f"outside the scan body, or set "
+                f"ControlFlowPolicy(scan_descent='off')."
+            )
+
+    def _assert_relations_are_snap_anchored(self) -> None:
+        """Raise if ``sparse_n`` meets a primitive with no well-defined anchor.
+
+        SnAp-n widens each trace slot into ``(neighbour, state)`` pairs relative
+        to *the one hidden position the slot's instantaneous term lands on*. A
+        primitive that spreads one weight entry across several hidden positions
+        — ``etp_einsum`` with a shared axis, ``etp_embedding``'s gathered row —
+        has no such position, so the widened representation is not merely
+        approximate for it, it is undefined.
+
+        Whether a primitive has an anchor is a property of the primitive, so it
+        is declared in the operator protocol (``register_etp_rules(
+        snap_anchor=...)``) and *default-deny*: a newly added primitive is
+        rejected here until it says otherwise, rather than silently producing a
+        gradient nobody derived.
+
+        The check also fires for ``SnAp(n=1)``, whose coordinate canonicalises
+        to ``'coupled'``. That is deliberate. ``coupled`` itself needs no
+        anchor — it takes the per-position block diagonal of the full Jacobian
+        and never asks where an instantaneous term lands — so plain
+        ``recurrence_scope='coupled'`` stays legal on every model. But SnAp-1 is
+        *defined* as the instantaneous nonzero pattern of ``∂h/∂θ``, and on a
+        primitive that spreads one weight entry across positions that pattern is
+        not a single position: ``coupled`` then drops cross-position
+        instantaneous terms which true SnAp-1 retains. Accepting the request
+        silently would hand back a rule the caller did not ask for, so the
+        preset carries its provenance (``_requested_snap_order``) and is checked
+        on it rather than on the canonicalised scope.
+        """
+        requested = getattr(self, '_requested_snap_order', None)
+        if self.config.recurrence_scope != 'sparse_n' and requested is None:
+            return
+        order = self.config.sparse_n if requested is None else requested
+        offenders = sorted({
+            relation.primitive.name
+            for relation in self.graph.hidden_param_op_relations
+            if not is_snap_anchored(relation.primitive, relation.eqn_params)
+        })
+        if offenders:
+            raise NotImplementedError(
+                f"recurrence_scope='sparse_n' (sparse_n="
+                f'{order}) requires every eligibility-trace '
+                f'relation to anchor on a single hidden position, but '
+                f'{", ".join(offenders)} does not declare a SnAp anchor: one '
+                f'weight entry of it reaches several hidden positions, so a '
+                f'widened trace slot has no position to be a neighbourhood of. '
+                f"Use recurrence_scope='coupled' or 'diagonal' for this model."
+            )
+
+    # ------------------------------------------------------------------ #
+    # axis: temporal_recursion
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _substitutes_hidden_jacobians(self) -> bool:
+        """Whether :attr:`config` asks for anything other than the raw ``D``."""
+        recursion = (
+            self.config.recursion_f if self.config.is_factorized
+            else self.config.temporal_recursion
+        )
+        return recursion != 'jacobian'
+
+    def _substitute_hidden_jacobians(
+        self,
+        jacobians: Sequence[jax.Array],
+    ) -> Sequence[jax.Array]:
+        """Realise ``temporal_recursion`` by replacing the transition operator.
+
+        The whole axis reduces to *which array the trace roll multiplies by*, so
+        it is implemented once here rather than per primitive: the fast path,
+        the legacy nested-vmap path, the chunk-factorised roll
+        (``suffix_products`` of ``lam * I`` is ``lam**k * I``), the
+        descended-scan substep fold and both engines all consume the substituted
+        array without knowing it was substituted.
+
+        Parameters
+        ----------
+        jacobians : sequence of jax.Array
+            The executor's per-hidden-group hidden-to-hidden Jacobians. Reached
+            two ways: as the executor's return value on the non-fused path, and
+            as the stepper's per-step argument on the fused one (see
+            :meth:`_wrap_etrace_stepper`).
+
+        Returns
+        -------
+        sequence of jax.Array
+            The substituted Jacobians, or the input unchanged under
+            ``temporal_recursion='jacobian'``.
+
+        Notes
+        -----
+        The substitution differs per engine, and the difference is load-bearing.
+        Under ``per_param`` the roll is ``eps <- D @ eps + instant``, so a leak
+        must be carried by the substituted array itself (``lam * I``). Under
+        ``io_factorized`` the f-side applies ``D`` first and *then* smooths by
+        ``alpha_f``, so substituting ``lam * I`` there would yield
+        ``alpha_f * lam`` — an accidental ``alpha_f ** 2``. The f-side leak
+        already lives in ``alpha_f``, so its substitution is the bare identity.
+
+        Replacements are built from ``D.shape``, never from a fixed rank: the
+        leading axes vary by path — ``(*varshape, S, S)`` single-step,
+        ``(T, *varshape, S, S)`` stacked multi-step, and ``(L, *varshape, S, S)``
+        for descended-scan groups.
+        """
+        if not self._substitutes_hidden_jacobians:
+            return jacobians
+        recursion = (
+            self.config.recursion_f if self.config.is_factorized
+            else self.config.temporal_recursion
+        )
+        if recursion == 'none':
+            return [jnp.zeros_like(d) for d in jacobians]
+        # 'scalar_leak'
+        coefficient = 1.0 if self.config.is_factorized else self.config.decay
+        return [
+            jnp.broadcast_to(
+                jnp.asarray(coefficient, dtype=d.dtype)
+                * jnp.eye(d.shape[-1], dtype=d.dtype),
+                jnp.shape(d),
+            )
+            for d in jacobians
+        ]
+
+    def _wrap_etrace_stepper(self, weight_vals: WeightVals) -> Optional[Callable]:
+        """Build the fused stepper with the Jacobian substitution installed.
+
+        The trace roll fuses into the executor's over-time scan when the input
+        is multi-step, in which case :meth:`_update_etrace_data` is never called
+        and the substitution has to happen inside the stepper instead. This
+        wrapper is the *only* place that happens; the engines' internal calls to
+        their own steppers stay unwrapped, so every path substitutes exactly
+        once. Do not wrap :meth:`_make_etrace_stepper` itself.
+        """
+        stepper = self._make_etrace_stepper(weight_vals)
+        if stepper is None or not self._substitutes_hidden_jacobians:
+            return stepper
+
+        def substituted_stepper(carry: Any, step_inputs: Any) -> Any:
+            xs, dfs, hid2hid_jac = step_inputs
+            return stepper(
+                carry, (xs, dfs, self._substitute_hidden_jacobians(hid2hid_jac))
+            )
+
+        return substituted_stepper
 
     def update(self, *args: Any) -> Any:
         r"""
@@ -263,8 +489,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # etrace data
         last_etrace_vals = self._get_etrace_data()
 
-        # Optional per-call auxiliary data (e.g. OSTTP's `y_target`) that a
-        # subclass needs inside `_compute_learning_signal` but that must not be
+        # Optional per-call auxiliary data (e.g. a neuromodulatory signal) that
+        # a subclass needs inside `_compute_learning_signal` but that must not be
         # forwarded to the model itself. Read synchronously here -- before the
         # custom_vjp machinery runs -- so it becomes a genuine argument of
         # `_true_update_fun` rather than an instance-attribute side channel:
@@ -366,7 +592,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # (multi-step input + a fusable subclass), hand the per-step stepper down
         # so the executor updates the trace in-loop and returns the final trace,
         # avoiding a second scan over stacked Jacobians.
-        etrace_stepper = self._make_etrace_stepper(weight_vals) if input_is_multi_step else None
+        etrace_stepper = self._wrap_etrace_stepper(weight_vals) if input_is_multi_step else None
 
         # necessary jacobian information of the weights
         (
@@ -395,7 +621,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 running_index,
                 etrace_vals,
                 hid2weight_jac_single_or_multi_steps,
-                hid2hid_jac_single_or_multi_steps,
+                # `temporal_recursion`: the non-fused half of the substitution.
+                self._substitute_hidden_jacobians(hid2hid_jac_single_or_multi_steps),
                 weight_vals,
                 input_is_multi_step,
             )
@@ -452,7 +679,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # the executor rolls the trace inside the same scan that builds the VJP
         # residual. The trace carry is detached (stop_gradient), so it never enters
         # the residual jaxpr.
-        etrace_stepper = self._make_etrace_stepper(weight_vals) if input_is_multi_step else None
+        etrace_stepper = self._wrap_etrace_stepper(weight_vals) if input_is_multi_step else None
 
         # necessary gradients of the weights
         (
@@ -482,7 +709,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 running_index,
                 etrace_vals,
                 hid2weight_jac_single_or_multi_steps,
-                hid2hid_jac_single_or_multi_steps,
+                # `temporal_recursion`: the non-fused half of the substitution.
+                self._substitute_hidden_jacobians(hid2hid_jac_single_or_multi_steps),
                 weight_vals,
                 input_is_multi_step
             )
@@ -626,7 +854,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         #
         # Hook: subclasses may replace the reverse-AD learning signal with an
-        # alternative (e.g. target projection in OSTTP, κ-filtered signal in EProp).
+        # alternative (e.g. the κ-filtered signal in EProp).
         #
         # `aux` (see `_get_update_aux`) is appended to `args` here, not inside
         # `args` itself, so it never reaches the model's own forward call --
@@ -655,7 +883,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         )
 
         # Note that there are no gradients flowing through the etrace data, the
-        # running index, or the auxiliary data (e.g. OSTTP's y_target).
+        # running index, or the auxiliary data.
         dg_etrace = None
         dg_running_index = None
         dg_aux = None
@@ -686,10 +914,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         lazy read would silently observe a cleared/stale value.
 
         Default returns `None` (unused). Subclasses that need auxiliary data
-        not already part of the model's own forward arguments (e.g. OSTTP's
-        `y_target`, which must not be forwarded to the model call) should
-        override this and read whatever they stashed on `self` during their
-        own `update()` override, at this exact call site.
+        not already part of the model's own forward arguments (e.g. a reward or
+        neuromodulatory signal, which must not be forwarded to the model call)
+        should override this and read whatever they stashed on `self` during
+        their own `update()` override, at this exact call site.
 
         Returns:
             Any pytree (or `None`). Appended to the `args` tuple seen by
@@ -698,15 +926,57 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         """
         return None
 
+    # ------------------------------------------------------------------ #
+    # axis: learning_signal
+    # ------------------------------------------------------------------ #
+
+    def init_etrace_state(self, *args: Any, **kwargs: Any) -> None:
+        """Allocate the axis-side state.
+
+        Concrete here, unlike :meth:`ETraceAlgorithm.init_etrace_state`, which
+        raises: the lifted axes own state of their own, and every engine must
+        reach it. Engines override this to build their traces and then call
+        ``super().init_etrace_state(...)`` **as the last statement**.
+
+        Parameters
+        ----------
+        *args, **kwargs
+            The example inputs, forwarded from :meth:`compile_graph`. Unused
+            here; engines size their traces from the compiled graph.
+        """
+        self._random_feedback = {}
+        if self.config.learning_signal != 'random_feedback':
+            return
+        # Collect the (group index -> width) pairs first so every draw happens
+        # inside one seeded scope, using `brainstate.random` throughout.
+        widths: Dict[int, int] = {}
+        for relation in self.graph.hidden_param_op_relations:
+            for group in relation.hidden_groups:
+                widths.setdefault(group.index, int(group.varshape[-1]))
+        with brainstate.random.seed_context(self._random_feedback_key):
+            for group_index, width in widths.items():
+                # n_target == n_layer: a square projection over the reverse-AD
+                # signal. See F-28 for why the readout width is not visible here.
+                self._random_feedback[group_index] = FixedRandomFeedback(
+                    n_target=width,
+                    n_layer=width,
+                    key=brainstate.random.split_key(),
+                    init_scale=0.1,
+                )
+
     def _compute_learning_signal(
         self,
         dl_to_hidden_from_autodiff: Sequence[jax.Array],
         args: tuple,
     ) -> Sequence[jax.Array]:
-        """Override hook. Return the learning signal used by `_solve_weight_gradients`.
+        """Return the learning signal used by `_solve_weight_gradients`.
 
-        Default returns the reverse-AD gradient unchanged. Subclasses that need
-        target projection (OSTTP) or any other alternative can override this.
+        Implements the ``learning_signal`` axis. ``'symmetric'`` returns the
+        reverse-AD gradient unchanged; ``'random_feedback'`` projects it through
+        a frozen random matrix (feedback alignment). Because the hook only sees
+        per-hidden-group signals, which carry no trace-factorization structure,
+        this works identically on both engines — the IO-dim engine gains random
+        feedback from the lift for free.
 
         Args:
             dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
@@ -714,16 +984,49 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             args: The `*args` tuple passed to the most recent `update()` call,
                 with the per-call auxiliary data from `_get_update_aux` appended
                 as the trailing element. Subclasses that override
-                `_get_update_aux` (e.g. OSTTP) can pull their auxiliary tensor
-                (e.g. ``y_target``) from there (see `extract_y_target` in
-                `_common.py`); subclasses that don't (the default `None`) can
-                ignore `args` entirely, as the base implementation does.
+                `_get_update_aux` can pull their auxiliary tensor from there;
+                subclasses that don't (the default `None`) can ignore `args`
+                entirely, as this implementation does.
 
         Returns:
             Sequence of per-hidden-group gradient arrays, one per HiddenGroup. Must
             match the shape and length of ``dl_to_hidden_from_autodiff``.
+
+        Raises:
+            RuntimeError: If ``learning_signal='random_feedback'`` but no
+                projection was allocated. Returning the symmetric signal there
+                would quietly compute a *different rule* than the one
+                configured.
         """
-        return dl_to_hidden_from_autodiff
+        if self.config.learning_signal == 'symmetric':
+            return dl_to_hidden_from_autodiff
+
+        signals = list(dl_to_hidden_from_autodiff)
+        if not self._random_feedback:
+            raise RuntimeError(
+                "learning_signal='random_feedback' was configured but no "
+                'feedback matrices were allocated, so the signal would '
+                'silently fall back to symmetric — a different learning rule. '
+                'Call `init_etrace_state()` (or `compile_graph()`, which calls '
+                'it) before `update()`.'
+            )
+
+        # `dl[g].shape == (*varshape, num_state)`; varshape[-1] is the hidden
+        # width, i.e. axis -2 of the full array. `s` is proportional to the
+        # *real* readout weights (reverse-AD only ever exposes `W_out.T @ delta`,
+        # never `delta` itself), so projecting through any fixed B cannot remove
+        # that dependency. L2-normalising per num_state channel over the width
+        # axis strips the magnitude dependence on W_out — keeping direction and
+        # the per-state axis untouched — before the frozen projection.
+        def _project(B: Any, s: Any) -> Any:
+            norm = jnp.sqrt(jnp.sum(jnp.square(s), axis=-2, keepdims=True))
+            return jnp.einsum('...lj,lk->...kj', s / (norm + 1e-8), B)
+
+        return [
+            _project(self._random_feedback[gid].B, s)
+            if gid in self._random_feedback else s
+            for gid, s in enumerate(signals)
+        ]
 
     def _solve_weight_gradients(
         self,

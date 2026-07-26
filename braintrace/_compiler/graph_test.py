@@ -416,3 +416,78 @@ class TestVmappedModelCompilation:
         g_vmapped = build_and_grads(self._VmappedCell)
         for a, b in zip(jax.tree.leaves(g_native), jax.tree.leaves(g_vmapped)):
             assert jnp.allclose(a, b, atol=1e-5), (a - b)
+
+
+class TestCompileEtraceGraphSparseNGuards(unittest.TestCase):
+    """``compile_etrace_graph(..., sparse_n=...)`` must not degrade silently.
+
+    The compiler is a *public* entry point, and it takes ``sparse_n`` and
+    ``include_recurrent_mixing`` as independent keywords. Nothing about the
+    combination ``sparse_n=2, include_recurrent_mixing=False`` fails: the mixing
+    primitive stays out of the transition, the position analysis finds no
+    cross-position coupling, every neighbourhood collapses to ``K = 1`` and the
+    caller gets the diagonal rule with a SnAp label on it. Same class of failure
+    as the algorithm-level guardrails, one layer lower.
+    """
+
+    @staticmethod
+    def _model():
+        class Net(brainstate.nn.Module):
+            def __init__(self, n_in=3, n_rec=4):
+                super().__init__()
+                with brainstate.random.seed_context(0):
+                    self.w = brainstate.ParamState(
+                        brainstate.random.randn(n_rec, n_rec) * 0.5)
+                    self.win = brainstate.ParamState(
+                        brainstate.random.randn(n_in, n_rec) * 0.5)
+                self.h = brainstate.HiddenState(jnp.zeros((n_rec,)))
+
+            def update(self, x):
+                rec = braintrace.matmul(self.h.value, self.w.value)
+                self.h.value = jax.nn.tanh(rec + x @ self.win.value)
+                return self.h.value
+
+        model = Net()
+        brainstate.nn.init_all_states(model)
+        return model, jnp.zeros((3,))
+
+    def test_sparse_n_without_recurrent_mixing_raises(self):
+        model, x = self._model()
+        with self.assertRaises(braintrace.NotSupportedError) as ctx:
+            braintrace.compile_etrace_graph(model, x, sparse_n=2)
+        msg = str(ctx.exception)
+        assert 'include_recurrent_mixing' in msg and 'K=1' in msg
+
+    def test_sparse_n_with_recurrent_mixing_widens(self):
+        model, x = self._model()
+        graph = braintrace.compile_etrace_graph(
+            model, x, sparse_n=2, include_recurrent_mixing=True)
+        # negative control for the test above: the same order *does* widen once
+        # the mixing primitive is in the transition, so the guard is rejecting a
+        # degenerate configuration rather than a valid one.
+        assert [g.snap.num_neighbour for g in graph.hidden_groups] == [4]
+
+    def test_boolean_sparse_n_is_rejected(self):
+        # ``bool`` is a subclass of ``int``, so ``sparse_n=True`` would pass an
+        # ``isinstance(..., int)`` check and be read as SnAp-1.
+        model, x = self._model()
+        with self.assertRaises(TypeError):
+            braintrace.compile_etrace_graph(
+                model, x, sparse_n=True, include_recurrent_mixing=True)
+
+    def test_non_integer_and_out_of_range_sparse_n_are_rejected(self):
+        model, x = self._model()
+        with self.assertRaises(TypeError):
+            braintrace.compile_etrace_graph(
+                model, x, sparse_n=2.0, include_recurrent_mixing=True)
+        with self.assertRaises(ValueError):
+            braintrace.compile_etrace_graph(
+                model, x, sparse_n=0, include_recurrent_mixing=True)
+
+    def test_jacobian_ceiling_is_reachable_from_the_compiler(self):
+        model, x = self._model()
+        with self.assertRaises(braintrace.NotSupportedError) as ctx:
+            braintrace.compile_etrace_graph(
+                model, x, sparse_n=2, include_recurrent_mixing=True,
+                snap_max_jacobian_elements=8)
+        assert 'snap_max_jacobian_elements' in str(ctx.exception)

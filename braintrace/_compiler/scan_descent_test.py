@@ -13,7 +13,7 @@ import pytest
 
 import braintrace
 from braintrace import ControlFlowPolicy
-from braintrace._compatible_imports import is_scan_primitive
+from braintrace._compatible_imports import is_scan_primitive, scan_num_consts_carry
 from braintrace._compiler.module_info import extract_module_info
 from braintrace._compiler.scan_descent import (
     _descent_blockers,
@@ -131,15 +131,15 @@ class TestAddScanYs:
         # hoist: the tanh intermediate (a body-computed var) and the carry invar
         tanh_var = next(e.outvars[0] for e in body_jaxpr.eqns
                         if e.primitive.name == 'tanh')
-        num_consts, num_carry = eqn.params['num_consts'], eqn.params['num_carry']
+        num_consts, num_carry = scan_num_consts_carry(eqn)
         carry_invar = body_jaxpr.invars[num_consts]
 
         new_eqn, stacked = add_scan_ys(eqn, [tanh_var, carry_invar])
         assert list(new_eqn.outvars[:len(eqn.outvars)]) == list(eqn.outvars)
         assert stacked[tanh_var].aval.shape == (4,)
         assert stacked[carry_invar].aval.shape == (4,)
-        assert new_eqn.params['num_carry'] == num_carry
-        assert new_eqn.params['num_consts'] == num_consts
+        # the input structure (consts/carry) is preserved; only ys grow
+        assert scan_num_consts_carry(new_eqn) == (num_consts, num_carry)
         assert new_eqn.params['length'] == eqn.params['length']
         # body eqns preserved by identity
         assert new_eqn.params['jaxpr'].jaxpr.eqns == body_jaxpr.eqns
@@ -178,7 +178,8 @@ class TestAddScanYs:
         closed = jax.make_jaxpr(
             lambda xs: jax.lax.scan(body, jnp.zeros(()), xs))(jnp.arange(4.0))
         eqn = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
-        carry_invar = eqn.params['jaxpr'].jaxpr.invars[eqn.params['num_consts']]
+        num_consts, _ = scan_num_consts_carry(eqn)
+        carry_invar = eqn.params['jaxpr'].jaxpr.invars[num_consts]
         new_eqn, stacked = add_scan_ys(eqn, [carry_invar, carry_invar])
         assert len(stacked) == 1
         assert len(new_eqn.outvars) == len(eqn.outvars) + 1

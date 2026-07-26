@@ -23,7 +23,14 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._compiler import ControlFlowPolicy, HiddenParamOpRelation, HiddenGroup
+from braintrace._compiler import (
+    ControlFlowPolicy,
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    HiddenGroup,
+    HiddenParamOpRelation,
+    gather_learning_signal,
+    widen_instant_term,
+)
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -58,6 +65,7 @@ from ._common import (
     _update_dict,
 )
 from .base import EligibilityTrace
+from .axes import ETraceConfig
 from .vjp_base import ETraceVjpAlgorithm
 
 __all__ = [
@@ -114,11 +122,16 @@ def _init_param_dim_state(
             init_kw['group'] = group
         elif relation.primitive is etp_conv_p:
             init_kw['eqn_params'] = relation.eqn_params
+        # ``trace_state_width`` is ``num_state`` at every recurrence_scope but
+        # ``sparse_n``, where the trailing state axis carries the SnAp-n
+        # neighbourhood as well: ``M = K * num_state``. Every per-primitive rule
+        # is generic in the size of that axis, so widening is a sizing change
+        # here and nowhere else.
         init_val = init_fn(
             relation.x_var,
             relation.y_var,
             relation.trainable_vars,
-            group.num_state,
+            group.trace_state_width,
             **init_kw,
         )
         if not isinstance(init_val, dict):
@@ -393,6 +406,12 @@ def _apply_relation_step(
         for group in relation.hidden_groups:
 
             df = etrace_ys_at_t[etrace_df_key(relation.y, group.index)]
+            if group.snap is not None:
+                # `sparse_n`: the instantaneous term lands on the position the
+                # relation anchors at, i.e. neighbour slot 0. Padding it here --
+                # rather than inside each primitive's `instant` rule -- keeps
+                # every rule generic in the width of the trailing axis.
+                df = widen_instant_term(df, group.snap.num_neighbour)
 
             # Instantaneous term: diag(D_f^t) ⊗ x^t  (Dict[str, Array]).
             # Cast the update inputs to ``trace_dtype`` (no-op when None) so the
@@ -419,10 +438,11 @@ def _apply_relation_step(
                 new_bwg_pre = fp.recurrent(
                     _cast_to_dtype(diag, trace_dtype),
                     old_bwg,
-                    group.num_state,
+                    group.trace_state_width,
                 )
             else:
-                new_bwg_pre = _comp_recurrent_legacy(diag, old_bwg, group.num_state)
+                new_bwg_pre = _comp_recurrent_legacy(
+                    diag, old_bwg, group.trace_state_width)
 
             # new_bwg_pre + phg_to_pw per-leaf.
             new_bwg = jax.tree.map(
@@ -500,19 +520,23 @@ def _update_param_dim_etrace_chunked(
         for group in relation.hidden_groups:
             gi = group.index
             if gi not in p_cache:
-                p_seq, m_full = suffix_products(diags_seq[gi], group.num_state)
+                p_seq, m_full = suffix_products(
+                    diags_seq[gi], group.trace_state_width)
                 p_cache[gi] = (
                     _cast_to_dtype(p_seq, trace_dtype),
                     _cast_to_dtype(m_full, trace_dtype),
                 )
             p_seq, m_full = p_cache[gi]
-            df_seq = _cast_to_dtype(
-                dfs_seq[etrace_df_key(relation.y_var, gi)], trace_dtype
-            )
+            df_seq = dfs_seq[etrace_df_key(relation.y_var, gi)]
+            if group.snap is not None:
+                # same widening as the per-step body; ``df_seq`` is stacked over
+                # time but the padded axis is still the trailing one.
+                df_seq = widen_instant_term(df_seq, group.snap.num_neighbour)
+            df_seq = _cast_to_dtype(df_seq, trace_dtype)
             w_key = (id(relation.y_var), gi)
             new_etrace_bwg[w_key] = fp.chunk(
                 x_seq, df_seq, p_seq, m_full,
-                hist_etrace_vals[w_key], group.num_state,
+                hist_etrace_vals[w_key], group.trace_state_width,
             )
 
     if legacy:
@@ -627,6 +651,11 @@ def _solve_param_dim_weight_gradients(
             w_key = (id(relation.y_var), group.index)
             etrace_data = hist_etrace_data[w_key]  # Dict[str, Array]
             dg_hidden = dG_hidden_groups[group.index]
+            if group.snap is not None:
+                # `sparse_n`: the trace's trailing axis indexes (neighbour,
+                # state) pairs, so the learning signal has to be expressed in
+                # the same coordinates before the contraction.
+                dg_hidden = gather_learning_signal(dg_hidden, group.snap)
 
             # dimensionless processing (unit strip + restore). Apply per-leaf.
             etrace_data_unitless, fn_unit_restore = _remove_units(etrace_data)
@@ -668,8 +697,10 @@ def _solve_param_dim_weight_gradients(
                 )
                 if batched:
                     folded_paths.update(relation.trainable_paths.values())
-            elif group.num_state == 1:
-                # num_state==1 shortcut: skip outer vmap of size 1.
+            elif group.trace_state_width == 1:
+                # width==1 shortcut: skip outer vmap of size 1. Reads the widened
+                # width, not num_state: under `sparse_n` a single-state group
+                # with K > 1 has a size-K trailing axis and must NOT take it.
                 dg_hid_squeezed = jax.tree.map(
                     lambda a: u.math.squeeze(a, axis=-1), dg_hidden_unitless
                 )
@@ -903,6 +934,12 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     # batch of weight gradients
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State]
 
+    #: ``trace_filter='kappa'`` state, keyed exactly like :attr:`etrace_bwg`
+    #: (``ETraceWG_Key == (id(y_var), group.index)``): one filter per trainable
+    #: weight / HiddenGroup relation, holding a PyTree that mirrors the raw
+    #: trace's own structure and shape. Empty under ``trace_filter='none'``.
+    _trace_filters: Dict[ETraceWG_Key, brainstate.State]
+
     _supports_scan_descent = True
     """Structured scan descent (Phase 4): the param-dim trace update folds
     per-substep injections with an inner scan; see
@@ -917,9 +954,22 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         trace_dtype: Optional[DTypeLike] = None,
         chunked_trace: bool = True,
         control_flow: Optional[ControlFlowPolicy] = None,
+        config: Optional[ETraceConfig] = None,
+        random_feedback_key: Optional[jax.Array] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     ) -> None:
         super().__init__(model, name=name, vjp_method=vjp_method,
-                         control_flow=control_flow)
+                         control_flow=control_flow, config=config,
+                         random_feedback_key=random_feedback_key,
+                         snap_max_jacobian_elements=snap_max_jacobian_elements)
+        if self.config.trace_factorization != 'per_param':
+            raise ValueError(
+                f'{type(self).__name__} is the per-parameter trace engine, but '
+                f'the config asks for '
+                f'trace_factorization={self.config.trace_factorization!r}. Use '
+                f'the engine matching the factorization, or '
+                f"braintrace.compile(model, config, ...) which picks it for you."
+            )
         # ``fast_solve=True`` enables closed-form einsum kernels for
         # mm/mv/elemwise primitives, replacing the nested-vmap legacy path.
         # Conv / sparse / LoRA primitives always use the legacy path.
@@ -955,6 +1005,21 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
                 self.etrace_bwg, relation, self.trace_dtype, self.fast_solve,
             )
 
+        # `trace_filter`: one filter per raw-trace key, initialised to zeros
+        # with the exact PyTree structure/shape of that trace (batch axis,
+        # weight shape, and the trailing num_state axis all included) -- no
+        # reduction, so per-state channels never mix. It mirrors the trace
+        # pytree and so cannot be sized before the traces exist.
+        self._trace_filters = {}
+        if self.config.trace_filter == 'kappa':
+            for trace_key, trace_state in self.etrace_bwg.items():
+                self._trace_filters[trace_key] = brainstate.ShortTermState(
+                    jax.tree.map(jnp.zeros_like, trace_state.value)
+                )
+
+        # Last: the base allocates the axis-side state that is not ours.
+        super().init_etrace_state(*args, **kwargs)
+
     def reset_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         """Reset the eligibility trace states.
 
@@ -965,6 +1030,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         """
         self.running_index.value = 0
         _reset_state_in_a_dict(self.etrace_bwg, batch_size)
+        _reset_state_in_a_dict(self._trace_filters, batch_size)
 
     def get_etrace_of(self, weight: brainstate.ParamState | Path) -> Dict:
         """Get the eligibility trace of the given weight.
@@ -1200,6 +1266,29 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         Returns:
             Dict[Path, PyTree]: Dictionary mapping parameter paths to their gradient values.
         """
+        # `trace_filter`: low-pass the raw trace before it is contracted with the
+        # learning signal. Applied elementwise (`jax.tree.map` over the trace's
+        # own PyTree, including its trailing num_state axis) so multi-state
+        # HiddenGroups are filtered independently per state -- never summed
+        # across states and broadcast back.
+        #
+        #     e_bar^t_{ji} = kappa * e_bar^{t-1}_{ji} + e^t_{ji}
+        #
+        if self._trace_filters:
+            kappa = self.config.kappa
+            filtered: Dict[ETraceWG_Key, PyTree] = {}
+            for key, trace in etrace_h2w_at_t.items():
+                flt = self._trace_filters.get(key)
+                if flt is None:
+                    filtered[key] = trace
+                    continue
+                new_val = jax.tree.map(
+                    lambda prev, e: kappa * prev + e, flt.value, trace
+                )
+                flt.value = new_val
+                filtered[key] = new_val
+            etrace_h2w_at_t = filtered
+
         dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
 
         # update the etrace weight gradients

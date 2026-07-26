@@ -28,20 +28,18 @@ import brainunit as u
 from braintrace._typing import ArrayLike, PyTree
 
 __all__ = [
-    'PresynapticTrace',
     'KappaFilter',
     'FixedRandomFeedback',
-    'extract_y_target',
 ]
 
 
 class _ZeroResetState(brainstate.ShortTermState):
     """``ShortTermState`` that records its init shape/dtype and resets to zeros.
 
-    Both :class:`PresynapticTrace` and :class:`KappaFilter` are leaky scalar-rate
-    accumulators that share the same reset semantics: on ``reset_state`` they are
-    re-zeroed at the original shape, optionally with the leading dimension swapped
-    for ``batch_size`` (or prepended for scalar-shaped states).
+    :class:`KappaFilter` is a leaky scalar-rate accumulator built on these reset
+    semantics: on ``reset_state`` it is re-zeroed at the original shape, optionally
+    with the leading dimension swapped for ``batch_size`` (or prepended for
+    scalar-shaped states).
     """
 
     def __init__(self, init_value: Any) -> None:
@@ -69,65 +67,6 @@ class _ZeroResetState(brainstate.ShortTermState):
         else:
             shape = (batch_size, *self._init_shape[1:])
         self.value = jnp.zeros(shape, dtype=self._init_dtype)
-
-
-class PresynapticTrace(_ZeroResetState):
-    r"""Leaky presynaptic accumulator used by OTTT and OTPE-Approx.
-
-    The trace accumulates the presynaptic input with a multiplicative decay,
-    following :math:`\hat{a} \leftarrow \lambda \cdot \hat{a} + x_t`.
-
-    Parameters
-    ----------
-    init_value : jax.Array
-        Initial value; also dictates the shape and dtype of the trace.
-    leak : float
-        Decay factor :math:`\lambda` in ``(0, 1)``. Pulled from the neuron's
-        membrane leak in SNN usage.
-
-    Raises
-    ------
-    ValueError
-        If ``leak`` is not strictly inside the open interval ``(0, 1)``.
-
-    Examples
-    --------
-    .. code-block:: python
-
-        >>> import jax.numpy as jnp
-        >>> import braintrace
-        >>> trace = braintrace.PresynapticTrace(jnp.zeros(3), leak=0.5)
-        >>> out = trace.update(jnp.ones(3))
-        >>> print(out)
-        [1. 1. 1.]
-        >>> out = trace.update(jnp.ones(3))
-        >>> print(out)
-        [1.5 1.5 1.5]
-    """
-
-    __module__ = 'braintrace'
-
-    def __init__(self, init_value: Any, leak: float) -> None:
-        super().__init__(init_value)
-        if not (0.0 < leak < 1.0):
-            raise ValueError(f'leak must be in (0, 1); got {leak}')
-        self.leak = float(leak)
-
-    def update(self, x: ArrayLike) -> Any:
-        r"""Apply one accumulation step :math:`\hat{a} \leftarrow \lambda \cdot \hat{a} + x`.
-
-        Parameters
-        ----------
-        x : jax.Array
-            The new presynaptic input added to the decayed trace.
-
-        Returns
-        -------
-        jax.Array
-            The updated trace value.
-        """
-        self.value = self.leak * self.value + x
-        return self.value
 
 
 class KappaFilter(_ZeroResetState):
@@ -198,8 +137,9 @@ class FixedRandomFeedback:
     r"""Frozen random feedback matrix with a stop-gradient guard.
 
     The feedback matrix :math:`B \in \mathbb{R}^{n_{\mathrm{target}} \times n_{\mathrm{layer}}}`
-    is sampled once at construction and frozen via :func:`jax.lax.stop_gradient`. It is used by
-    OSTTP (per-HiddenGroup target projection) and EProp-random-feedback.
+    is sampled once at construction and frozen via :func:`jax.lax.stop_gradient`. It backs
+    EProp's random-feedback mode, and is the intended home for any rule that replaces the
+    symmetric learning signal with a fixed random projection.
 
     Parameters
     ----------
@@ -258,17 +198,6 @@ class FixedRandomFeedback:
             The projection ``y_target @ B`` with ``B`` frozen.
         """
         return y_target @ self.B
-
-
-def extract_y_target(args: tuple, *, index: int = -1) -> Optional[jax.Array]:
-    """Fetch the target tensor from a positional-args tuple.
-
-    Returns ``None`` if ``args`` is empty. ``index`` defaults to the last position
-    (OSTTP's convention: ``algo.update(x, y_target)``).
-    """
-    if not args:
-        return None
-    return args[index]
 
 
 def _reset_state_in_a_dict(

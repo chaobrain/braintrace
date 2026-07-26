@@ -3,6 +3,100 @@
 
 ## UNRELEASED
 
+### Breaking changes
+
+- **Removed `OTTT`, `OSTTP` and `OTPE`.** `braintrace` is a framework for online
+  learning in brain simulation, and a framework should ship *general*
+  mechanisms. These three rules were not model-agnostic: all of them whitelisted
+  dense-matmul primitives (`_SUPPORTED_PRIMITIVES = {etp_mm_p, etp_mv_p}`) and
+  raised `NotImplementedError` for lora / sparse / convolutional /
+  element-wise relations, and all of them were single-step only. `OTPE`
+  additionally assumed a single global time constant, was feed-forward only,
+  was gradient-exact for one hidden layer, and rejected `num_state > 1`
+  outright — ruling out ALIF and any adaptation variable. `OSTTP` bound
+  `B_list` to the HiddenGroup count and threaded `y_target` through a bespoke
+  path.
+
+  Their coordinates remain reachable: the planned axis decomposition
+  (`trace_factorization` × `temporal_recursion` × `learning_signal` ×
+  `trace_filter` × `update_schedule`) expresses each of them as a configuration
+  that works for **every** ETP primitive, not just dense matmul. See
+  `docs/specs/2026-07-25-algorithm-axes-roadmap.md`.
+
+  Also removed with them: `PresynapticTrace` (used only by `OTTT`) and the
+  internal `extract_y_target` helper (used only by `OSTTP`). `KappaFilter` and
+  `FixedRandomFeedback` are unaffected. The `'ottt'`, `'osttp'` and `'otpe'`
+  names no longer resolve in `braintrace.compile`.
+
+  **Migration:** `OTTT` → `pp_prop` (same `io_factorized` trace, keeps the
+  temporal term instead of dropping it); `OTPE` → `D_RTRL` or `pp_prop`;
+  `OSTTP` → `EProp(feedback='random')`, which is random feedback on the error
+  rather than on the target.
+
+- **`IODimVjpAlgorithm.decay` is now a read-only property.** The x-side and
+  f-side decays became independent (see `ETraceConfig` below), so a single
+  `decay` attribute is only meaningful when the two agree. Reading it when they
+  differ raises `AttributeError` naming `decay_x` / `decay_f`; assigning to it
+  is no longer possible. `decay_or_rank=0.9` remains element-wise identical to
+  the new `(0.9, 0.9)`.
+
+- **`decay_or_rank=0.0` is now accepted** by `IODimVjpAlgorithm` (the bound
+  relaxed from `0 < decay < 1` to `0 <= decay < 1`). Zero is the coordinate for
+  "no temporal accumulation on this side" and canonicalises to
+  `temporal_recursion='none'`; it was previously rejected as invalid input.
+
+### New features
+
+- **`ETraceConfig` — learning rules as explicit axis coordinates.** The new
+  `braintrace.ETraceConfig` describes a learning rule as a point in a six-axis
+  space (`trace_factorization`, `temporal_recursion`, `recurrence_scope`,
+  `learning_signal`, `trace_filter`, `update_schedule`) plus the coefficients
+  those axes need (`decay`, `kappa`, `feedback_scale`, `sparsity`). Illegal
+  combinations are rejected at construction with an error naming the legal
+  pairings, and coordinates that mean the same rule are canonicalised to one
+  form (e.g. a zero decay collapses to `temporal_recursion='none'`).
+
+  `braintrace.compile` accepts a config wherever it accepts an algorithm name,
+  so a rule with no name is as constructible as one with a name:
+
+  ```python
+  # an x-side leak with an instantaneous f-side
+  learner = braintrace.compile(
+      model,
+      braintrace.ETraceConfig(trace_factorization='io_factorized',
+                              temporal_recursion=('scalar_leak', 'none'),
+                              decay=(0.9, 0.0)),
+      x0,
+  )
+  ```
+
+  The named algorithms are now thin factories over coordinates rather than
+  separate implementations: `D_RTRL`, `pp_prop`, `EProp`, `OSTLRecurrent` and
+  `OSTLFeedforward` all construct a config and delegate. Their gradients are
+  unchanged — the migration is pinned by 24 frozen golden gradients spanning
+  all three trace paths (chunked, fused multi-step, single-step).
+
+- **`temporal_recursion` works for every ETP primitive.** The recursion is
+  realised by substituting the executor's per-hidden-group hidden→hidden
+  Jacobian (`λ·I` for `scalar_leak`, zeros for `none`) rather than by
+  special-casing operators, so it applies to dense, conv, sparse, lora and
+  element-wise relations alike. The removed `OTTT`'s coordinate — x-side leak,
+  f-side instantaneous — is reachable again this way, and is now
+  primitive-generic, which the deleted implementation never was.
+
+- **Random feedback and the κ-filter are no longer `EProp`-only.**
+  `learning_signal='random_feedback'` and `trace_filter='kappa'` moved onto the
+  base engine, so random feedback now composes with the O(I+O) `io_factorized`
+  trace as well as the O(P·H) one. A configuration that cannot be honoured
+  (random feedback requested but no feedback matrices allocated) now raises
+  rather than silently computing the symmetric rule.
+
+- **`recurrence_scope` is a public axis.** What was the private
+  `_include_recurrent_mixing` class attribute is now `recurrence_scope`
+  (`'diagonal'` / `'coupled'`), and asking for `'coupled'` on a model whose
+  compilation descends into a `scan` raises instead of silently degrading to
+  `'diagonal'`.
+
 ### Improvements
 
 - **`sparse_matmul` migrates off brainevent's deprecated trace protocol.**

@@ -23,14 +23,14 @@ import brainstate
 from ._misc import CompilationError
 from ._algorithm import (
     ETraceAlgorithm,
+    ETraceConfig,
+    IODimVjpAlgorithm,
+    ParamDimVjpAlgorithm,
     D_RTRL,
     pp_prop,
     EProp,
     OSTLRecurrent,
     OSTLFeedforward,
-    OTPE,
-    OTTT,
-    OSTTP,
 )
 
 __all__ = ['compile']
@@ -47,23 +47,29 @@ _ALGORITHM_REGISTRY: dict[str, type[ETraceAlgorithm]] = {
     'e_prop': EProp,
     'ostl_recurrent': OSTLRecurrent,
     'ostl_feedforward': OSTLFeedforward,
-    'otpe': OTPE,
-    'ottt': OTTT,
-    'osttp': OSTTP,
+}
+
+
+#: ``trace_factorization -> engine class``. The factorization axis *is* the
+#: engine choice, so this is the whole of config-to-class resolution.
+_FACTORIZATION_TO_ENGINE: dict[str, type[ETraceAlgorithm]] = {
+    'per_param': ParamDimVjpAlgorithm,
+    'io_factorized': IODimVjpAlgorithm,
 }
 
 
 def _resolve_algorithm(
-    algorithm: Union[str, Type[ETraceAlgorithm]]
+    algorithm: Union[str, ETraceConfig, Type[ETraceAlgorithm]]
 ) -> Type[ETraceAlgorithm]:
     """Resolve ``algorithm`` to an :class:`ETraceAlgorithm` subclass.
 
     Parameters
     ----------
-    algorithm : type or str
-        Either an :class:`ETraceAlgorithm` subclass (returned unchanged) or a
-        registered string name (case-insensitive), e.g. ``'D_RTRL'``,
-        ``'eprop'``, ``'ottt'``.
+    algorithm : type, str or ETraceConfig
+        An :class:`ETraceAlgorithm` subclass (returned unchanged), a registered
+        string name (case-insensitive), e.g. ``'D_RTRL'``, ``'eprop'``,
+        ``'ostl_recurrent'``, or an :class:`ETraceConfig` whose
+        ``trace_factorization`` selects the engine.
 
     Returns
     -------
@@ -76,8 +82,12 @@ def _resolve_algorithm(
         If ``algorithm`` is a string that is not a registered name.
     TypeError
         If ``algorithm`` is a class that is not an ``ETraceAlgorithm`` subclass,
-        or is neither a class nor a string.
+        or is neither a class, a string, nor an ``ETraceConfig``.
     """
+    if isinstance(algorithm, ETraceConfig):
+        # Unimplemented factorizations are already rejected by ETraceConfig's
+        # compatibility matrix, so a missing key here is a registry bug.
+        return _FACTORIZATION_TO_ENGINE[algorithm.trace_factorization]
     if isinstance(algorithm, type):
         if issubclass(algorithm, ETraceAlgorithm):
             return algorithm
@@ -95,14 +105,14 @@ def _resolve_algorithm(
                 f'Or pass an ETraceAlgorithm subclass directly.'
             )
     raise TypeError(
-        f'algorithm must be an ETraceAlgorithm subclass or a registered string name, '
-        f'got {type(algorithm)}.'
+        f'algorithm must be an ETraceAlgorithm subclass, a registered string '
+        f'name, or an ETraceConfig, got {type(algorithm)}.'
     )
 
 
 def compile(
     model: brainstate.nn.Module,
-    algorithm: Union[str, Type[ETraceAlgorithm]],
+    algorithm: Union[str, ETraceConfig, Type[ETraceAlgorithm]],
     *example_inputs: Any,
     batch_size: int | None = None,
     seed: int | None = None,
@@ -122,10 +132,14 @@ def compile(
     model : brainstate.nn.Module
         The recurrent / spiking model defining one-step behavior. It does **not**
         need to be pre-initialized; ``compile`` always (re)initializes its states.
-    algorithm : type or str
-        An :class:`ETraceAlgorithm` subclass, or a registered case-insensitive
-        name, e.g. ``'D_RTRL'``, ``'es_d_rtrl'``, ``'eprop'``, ``'otpe'``,
-        ``'ottt'``, ``'osttp'``, ``'ostl_recurrent'``, ``'ostl_feedforward'``.
+    algorithm : type, str or ETraceConfig
+        An :class:`ETraceAlgorithm` subclass, a registered case-insensitive
+        name, e.g. ``'D_RTRL'``, ``'es_d_rtrl'``, ``'eprop'``,
+        ``'ostl_recurrent'``, ``'ostl_feedforward'``, or an
+        :class:`ETraceConfig` naming the learning-rule coordinate directly. A
+        config selects the engine through its ``trace_factorization`` and is
+        forwarded to the constructor, so any coordinate the compatibility
+        matrix admits can be compiled without a named preset.
     *example_inputs
         Example call inputs (arrays / :class:`SingleStepData` /
         :class:`MultiStepData`) matching what ``learner.update(...)`` will
@@ -205,19 +219,24 @@ def compile(
     - ``'eprop'`` — ``feedback`` (default ``'symmetric'``), ``kappa_filter_decay``
       (default ``0.0``), ``random_feedback_key`` (default ``None``),
       ``vjp_method``, ``fast_solve``, ``name``.
-    - ``'otpe'`` — ``leak`` (**required**, keyword-only), ``mode`` (default
-      ``'full'``), ``trace_clip_abs`` (default ``None``), ``vjp_method``,
-      ``name``.
-    - ``'ottt'`` — ``leak`` (**required**, keyword-only), ``mode`` (default
-      ``'A'``), ``vjp_method``, ``name``.
-    - ``'osttp'`` — ``B_list`` (**required**: per-layer feedback matrices),
-      ``target_timing`` (default ``'per-step'``), ``vjp_method``, ``fast_solve``,
-      ``name``.
     - ``'ostl_recurrent'`` — ``vjp_method``, ``fast_solve``, ``trace_dtype``,
       ``name``.
     - ``'ostl_feedforward'`` — ``decay_or_rank`` (default ``1e-6``), ``name``.
 
     Calling ``compile`` twice on the same model re-initializes its states.
+
+    **Axis coordinates.** Passing an :class:`ETraceConfig` in the ``algorithm``
+    position compiles a coordinate that may have no preset name:
+
+    .. code-block:: python
+
+        # an x-side leak with an instantaneous f-side
+        learner = braintrace.compile(
+            model,
+            braintrace.ETraceConfig(
+                trace_factorization='io_factorized', decay=(0.9, 0.0)),
+            x0,
+        )
 
     Examples
     --------
@@ -241,6 +260,18 @@ def compile(
         >>> y = learner.update(x0)               # forward pass + eligibility-trace update
     """
     cls = _resolve_algorithm(algorithm)
+    if isinstance(algorithm, ETraceConfig):
+        if 'config' in options:
+            raise TypeError(
+                'compile() got a config both in the `algorithm` position and as '
+                'a `config=` option. Pass it once.'
+            )
+        options['config'] = algorithm
+        if cls is IODimVjpAlgorithm:
+            # The engine's `decay_or_rank` stays a required argument (it is the
+            # documented user-facing spelling); source it from the config's
+            # already-canonical (x, f) pair rather than asking twice.
+            options.setdefault('decay_or_rank', algorithm.decay)
     if len(example_inputs) == 0:
         raise ValueError(
             'compile() needs at least one example input to build the graph '

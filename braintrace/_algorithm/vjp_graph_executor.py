@@ -50,7 +50,13 @@ from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
 from braintrace._compatible_imports import Var, wrap_init
-from braintrace._compiler import ControlFlowPolicy, compile_etrace_graph, HiddenGroup, HiddenParamOpRelation
+from braintrace._compiler import (
+    ControlFlowPolicy,
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    HiddenGroup,
+    HiddenParamOpRelation,
+    compile_etrace_graph,
+)
 from braintrace._input_data import (
     get_single_step_data,
     split_input_data_types,
@@ -155,6 +161,11 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     include_recurrent_mixing : bool, optional
         Hidden-group grouping mode for the hidden-to-hidden transition; see
         ``compile_etrace_graph(..., include_recurrent_mixing=...)``.
+    sparse_n : int, optional
+        SnAp order for ``recurrence_scope='sparse_n'``. Default ``None``.
+    snap_max_jacobian_elements : int, optional
+        Ceiling on each group's widened block Jacobian, ``P * (K * S) ** 2``
+        elements; only consulted when *sparse_n* is given.
     control_flow : ControlFlowPolicy, optional
         Policy governing control-flow canonicalization during graph
         compilation. ``None`` (default) uses
@@ -167,11 +178,15 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         model: brainstate.nn.Module,
         vjp_method: str = 'single-step',
         include_recurrent_mixing: bool = False,
+        sparse_n: Optional[int] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
         control_flow: Optional[ControlFlowPolicy] = None,
     ):
         super().__init__(
             model,
             include_recurrent_mixing=include_recurrent_mixing,
+            sparse_n=sparse_n,
+            snap_max_jacobian_elements=snap_max_jacobian_elements,
             control_flow=control_flow,
         )
 
@@ -228,6 +243,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             self.model, *args,
             include_hidden_perturb=self.is_single_step_vjp,
             include_recurrent_mixing=self.include_recurrent_mixing,
+            sparse_n=self.sparse_n,
+            snap_max_jacobian_elements=self.snap_max_jacobian_elements,
             control_flow=self.control_flow,
         )
 

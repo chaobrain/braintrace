@@ -87,35 +87,6 @@ def test_algorithm_is_usable_end_to_end(name):
     assert bool(jnp.all(jnp.isfinite(y)))
 
 
-# --- Task 3: SNN algos requiring leak + OSTTP B_list contract ----------------
-
-def test_ottt_otpe_require_explicit_leak():
-    model = tanh_rnn(seed=0).factory()
-    brainstate.nn.init_all_states(model, batch_size=1)
-    with pytest.raises(TypeError):
-        braintrace.OTTT(model)          # leak is keyword-only & required
-    with pytest.raises(TypeError):
-        braintrace.OTPE(model)
-
-
-def test_ottt_otpe_construct_with_leak():
-    for ctor in (lambda m: braintrace.OTTT(m, leak=0.9),
-                 lambda m: braintrace.OTPE(m, leak=0.9)):
-        model = tanh_rnn(seed=0).factory()
-        brainstate.nn.init_all_states(model, batch_size=1)
-        algo = ctor(model)
-        assert algo is not None
-
-
-def test_osttp_constructs_with_B_list():
-    model = tanh_rnn(n_in=3, n_rec=4, seed=0).factory()
-    brainstate.nn.init_all_states(model, batch_size=1)
-    # OSTTP needs one random-feedback matrix per HiddenGroup; B.shape[1] == n_l (=4).
-    B_list = [jnp.eye(4, dtype='float32')]
-    algo = braintrace.OSTTP(model, B_list)
-    assert algo is not None
-
-
 # --- Task 4: dynamic weight assignment raises NotSupportedError --------------
 
 def test_dynamic_weight_assignment_raises_not_supported():

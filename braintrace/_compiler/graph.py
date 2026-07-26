@@ -20,7 +20,9 @@ from typing import Dict, Sequence, Tuple, Optional, NamedTuple
 
 import brainstate
 import jax
+import numpy as np
 
+from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     Inputs,
     Path,
@@ -39,6 +41,7 @@ from .hidden_group import (
     find_hidden_groups_from_minfo,
     HiddenGroup,
 )
+from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS
 from .hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     HiddenPerturbation,
@@ -279,11 +282,63 @@ def compiler_context(name: str):
         context.compilers.pop()
 
 
+def _check_sparse_n_request(
+    sparse_n: Optional[int],
+    include_recurrent_mixing: bool,
+) -> None:
+    """Reject a ``sparse_n`` request the compiler cannot honour.
+
+    Both checks guard *silent degradation* rather than a crash. Without them
+    ``sparse_n`` still compiles: with ``include_recurrent_mixing=False`` the
+    recurrent mixing primitive never enters the transition, the position
+    analysis finds no cross-position coupling, every neighbourhood collapses to
+    ``K = 1`` and the result is the diagonal rule under a SnAp label. And
+    because ``bool`` is a subclass of ``int``, ``sparse_n=True`` would sail
+    through a plain ``isinstance`` check and be read as SnAp-1.
+
+    Parameters
+    ----------
+    sparse_n : int or None
+        The requested SnAp order.
+    include_recurrent_mixing : bool
+        Whether recurrent ETP mixing primitives are traced into the transition.
+
+    Raises
+    ------
+    TypeError
+        If *sparse_n* is a ``bool`` or not an integer.
+    ValueError
+        If *sparse_n* is below 1.
+    NotSupportedError
+        If *sparse_n* is requested without ``include_recurrent_mixing=True``.
+    """
+    if sparse_n is None:
+        return
+    if isinstance(sparse_n, bool) or not isinstance(sparse_n, (int, np.integer)):
+        raise TypeError(
+            f'sparse_n must be an integer SnAp order or None, got '
+            f'{sparse_n!r} ({type(sparse_n).__name__}).'
+        )
+    if int(sparse_n) < 1:
+        raise ValueError(f'sparse_n must be at least 1, got {sparse_n}.')
+    if not include_recurrent_mixing:
+        raise NotSupportedError(
+            f'sparse_n={sparse_n} needs include_recurrent_mixing=True: the '
+            'widened SnAp operator is gathered out of the coupled transition '
+            "Jacobian, so with the mixing primitive excluded there is no "
+            'cross-position coupling left to retain and every neighbourhood '
+            'would collapse to K=1 -- the diagonal rule under a SnAp label. '
+            'Pass include_recurrent_mixing=True, or drop sparse_n.'
+        )
+
+
 def compile_etrace_graph(
     model: brainstate.nn.Module,
     *model_args: Tuple,
     include_hidden_perturb: bool = True,
     include_recurrent_mixing: bool = False,
+    sparse_n: Optional[int] = None,
+    snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     control_flow: Optional[ControlFlowPolicy] = None,
 ) -> ETraceGraph:
     """Construct the eligibility-trace graph for a given model and inputs.
@@ -313,7 +368,20 @@ def compile_etrace_graph(
         recurrence"), those primitives are traced into the transition, the
         recurrence becomes coupled, and the true per-position block-diagonal
         Jacobian is extracted (RTRL-exact temporal credit, e.g. for
-        :class:`~braintrace.OSTLRecurrent` / :class:`~braintrace.OSTTP`).
+        :class:`~braintrace.OSTLRecurrent`).
+    sparse_n : int, optional
+        SnAp order for ``recurrence_scope='sparse_n'``. When given, every hidden
+        group carries the ``n``-step position neighbourhood derived from its own
+        transition (:mod:`~braintrace._compiler.position_graph`) in
+        ``HiddenGroup.snap``, and its trace's trailing state axis widens to
+        ``K * num_state``. Requires ``include_recurrent_mixing=True`` -- the
+        widened operator is gathered out of the coupled transition's Jacobian --
+        and raises rather than degrading to ``K = 1`` if it is not set.
+        ``None`` (default) for every other scope.
+    snap_max_jacobian_elements : int, optional
+        Ceiling on each group's widened block Jacobian, ``P * (K * S) ** 2``
+        elements. Only consulted when *sparse_n* is given. Default
+        :data:`~braintrace._compiler.position_graph.DEFAULT_MAX_JACOBIAN_ELEMENTS`.
     control_flow : ControlFlowPolicy or None, optional
         Policy governing control-flow canonicalization and downstream
         handling, forwarded to :func:`~braintrace.extract_module_info` and
@@ -379,6 +447,8 @@ def compile_etrace_graph(
         1
     """
 
+    _check_sparse_n_request(sparse_n, include_recurrent_mixing)
+
     with compiler_context('compile_graph'), diagnostic_context() as reporter:
 
         assert isinstance(model_args, tuple)
@@ -401,6 +471,8 @@ def compile_etrace_graph(
         # ---       evaluating the relationship for hidden-to-hidden        --- #
         hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(
             minfo, include_recurrent_mixing=include_recurrent_mixing,
+            sparse_n=sparse_n,
+            snap_max_jacobian_elements=snap_max_jacobian_elements,
             descended_scan_eqn_ids=descended_eqn_ids,
             descended_hidden_paths=descended_paths,
         )

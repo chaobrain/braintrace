@@ -17,28 +17,28 @@
 
 Groups the core ETrace infrastructure (``ETraceAlgorithm``, ``EligibilityTrace``,
 ``ETraceGraphExecutor``), VJP-based algorithms (D-RTRL, pp_prop / ES-D-RTRL),
-and paper-faithful SNN algorithms (EProp, OSTLRecurrent, OSTLFeedforward, OTPE,
-OTTT, OSTTP).
+and paper-faithful SNN algorithms (EProp, OSTLRecurrent, OSTLFeedforward).
 """
 
 from __future__ import annotations
 
-from ._common import FixedRandomFeedback, KappaFilter, PresynapticTrace
+from ._common import FixedRandomFeedback, KappaFilter
+from .axes import ETraceConfig
 from .base import ETraceAlgorithm, EligibilityTrace
 from .d_rtrl import D_RTRL
 from .e_prop import EProp
 from .graph_executor import ETraceGraphExecutor
 from .ostl import OSTLFeedforward, OSTLRecurrent
-from .osttp import OSTTP
-from .otpe import OTPE
-from .ottt import OTTT
 from .io_dim_vjp import IODimVjpAlgorithm
 from .param_dim_vjp import ParamDimVjpAlgorithm
 from .pp_prop import ES_D_RTRL, pp_prop  # ES_D_RTRL: back-compat alias
+from .snap_n import SnAp
 from .vjp_base import ETraceVjpAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 __all__ = [
+    # axes
+    'ETraceConfig',
     # core
     'ETraceAlgorithm',
     'EligibilityTrace',
@@ -51,14 +51,11 @@ __all__ = [
     'pp_prop',
     'ES_D_RTRL',
     'IODimVjpAlgorithm',
+    'SnAp',
     # SNN
     'EProp',
     'OSTLRecurrent',
     'OSTLFeedforward',
-    'OTPE',
-    'OTTT',
-    'OSTTP',
     'FixedRandomFeedback',
     'KappaFilter',
-    'PresynapticTrace',
 ]

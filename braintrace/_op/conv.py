@@ -758,7 +758,35 @@ etp_conv_p = register_primitive(
     trainable_invars_fn=_conv_trainable_invars,
     x_invar_index=0,
 )
+def _conv_snap_anchor(eqn_params: dict) -> bool:
+    """Declare the SnAp-n trace anchor for ``etp_conv``.
+
+    The kernel is *shared* across spatial positions, but the anchor is a
+    property of the trace layout, not of the parameter: the D-RTRL trace keeps
+    one kernel-shaped slot per spatial output position
+    (``(batch, *spatial_out, *kernel, S)``) and defers the spatial sum to
+    :func:`_conv_solve_drtrl`. Every slot therefore has exactly one output
+    position its instantaneous term lands on.
+
+    ``etp_conv`` registers no ``snap_adjacency`` rule: a receptive-field
+    adjacency is derivable in principle but is not attempted here, so a
+    convolutional group takes the conservative all-to-all pattern.
+
+    Parameters
+    ----------
+    eqn_params : dict
+        The equation parameters (unused).
+
+    Returns
+    -------
+    bool
+        Always ``True``.
+    """
+    return True
+
+
 etp_conv_p.register_etp_rules(
+    snap_anchor=_conv_snap_anchor,
     dt_to_t=_conv_dt_to_t,
     xy_to_dw=_conv_xy_to_dw,
     init_drtrl=_conv_init_drtrl,

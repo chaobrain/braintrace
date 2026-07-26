@@ -51,6 +51,8 @@ from braintrace._compiler.hidden_group import (
     HiddenGroup,
     find_hidden_groups_from_minfo,
     find_hidden_groups_from_module,
+    gather_learning_signal,
+    widen_instant_term,
 )
 from braintrace._compiler.hidden_pertubation import (
     HiddenPerturbation,
@@ -60,4 +62,9 @@ from braintrace._compiler.hidden_pertubation import (
 from braintrace._compiler.module_info import (
     ModuleInfo,
     extract_module_info,
+)
+from braintrace._compiler.position_graph import (
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    SnapPattern,
+    build_snap_pattern,
 )

@@ -39,11 +39,9 @@ downward:
 3. **Graph executor** — :class:`ETraceGraphExecutor` /
    :class:`ETraceVjpGraphExecutor`, which run the forward pass and the
    hidden->weight / hidden->hidden Jacobian computations.
-4. **Algorithms** — online-learning orchestrators: the compiler-driven
-   estimators :class:`D_RTRL` and :class:`pp_prop` (historically exposed as
-   :class:`ES_D_RTRL`), and the SNN-specific family
-   :class:`EProp`, :class:`OSTLRecurrent`, :class:`OSTLFeedforward`,
-   :class:`OTPE`, :class:`OTTT`, :class:`OSTTP`.
+4. **Algorithms** — online-learning orchestrators: the exact algorithms
+   :class:`D_RTRL` / :func:`pp_prop` / :class:`ES_D_RTRL`, and the SNN family
+   :class:`EProp`, :class:`OSTLRecurrent`, :class:`OSTLFeedforward`.
 
 The :mod:`braintrace.nn` subpackage provides ready-made ETP-wired layers
 (linear maps, convolutions, recurrent cells, read-outs).
@@ -74,6 +72,7 @@ from typing import TYPE_CHECKING, Any
 from . import nn
 from ._compile import compile
 from ._algorithm import (
+    ETraceConfig,
     ETraceAlgorithm,
     EligibilityTrace,
     ETraceGraphExecutor,
@@ -84,15 +83,12 @@ from ._algorithm import (
     pp_prop,
     ES_D_RTRL,
     IODimVjpAlgorithm,
+    SnAp,
     EProp,
     OSTLRecurrent,
     OSTLFeedforward,
-    OTPE,
-    OTTT,
-    OSTTP,
     FixedRandomFeedback,
     KappaFilter,
-    PresynapticTrace,
 )
 from ._compiler import (
     ControlFlowPolicy,
@@ -157,6 +153,9 @@ __all__ = [
     '__version__',
     '__version_info__',
 
+    # learning-rule axes
+    'ETraceConfig',
+
     # algorithms
     'ETraceAlgorithm',
     'EligibilityTrace',
@@ -167,6 +166,7 @@ __all__ = [
     'pp_prop',
     'ES_D_RTRL',
     'IODimVjpAlgorithm',
+    'SnAp',
 
     # one-call entry point
     'compile',
@@ -221,12 +221,8 @@ __all__ = [
     'EProp',
     'OSTLRecurrent',
     'OSTLFeedforward',
-    'OTPE',
-    'OTTT',
-    'OSTTP',
     'FixedRandomFeedback',
     'KappaFilter',
-    'PresynapticTrace',
 
     # errors
     'NotSupportedError',

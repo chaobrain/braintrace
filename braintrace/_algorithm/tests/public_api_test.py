@@ -20,13 +20,27 @@ class TestPublicAPI(unittest.TestCase):
     def test_subpackage_exports(self):
         import braintrace._algorithm as pkg
         for name in (
-                'EProp', 'OSTLRecurrent', 'OSTLFeedforward', 'OTPE', 'OTTT', 'OSTTP',
-                'FixedRandomFeedback', 'KappaFilter', 'PresynapticTrace',
+                'EProp', 'OSTLRecurrent', 'OSTLFeedforward',
+                'FixedRandomFeedback', 'KappaFilter',
         ):
             assert hasattr(pkg, name), f'missing export: {name}'
 
     def test_top_level_exports(self):
         import braintrace
-        for name in ('EProp', 'OSTLRecurrent', 'OSTLFeedforward', 'OTPE', 'OTTT', 'OSTTP'):
+        for name in ('EProp', 'OSTLRecurrent', 'OSTLFeedforward'):
             assert hasattr(braintrace, name), f'missing top-level export: {name}'
             assert name in braintrace.__all__
+
+    def test_removed_algorithms_are_gone(self):
+        """OTTT / OSTTP / OTPE were removed in 0.3.0 (see docs/specs roadmap).
+
+        They whitelisted dense-matmul primitives and were not model-agnostic, so
+        they no longer belong in a general framework. Their coordinates remain
+        reachable through the axis configuration space.
+        """
+        import braintrace
+        import braintrace._algorithm as pkg
+        for name in ('OTTT', 'OSTTP', 'OTPE', 'PresynapticTrace'):
+            assert not hasattr(braintrace, name), f'{name} should have been removed'
+            assert name not in braintrace.__all__
+            assert not hasattr(pkg, name), f'{name} should have been removed'
