@@ -1183,6 +1183,15 @@ for running one.
     laundering runs the safe way. That was worth checking rather than assuming,
     and it does not remove the need to report the sd and the range.
 
+    This is not a hypothetical about an artificial protocol. On a 288-row
+    full-grid run at four draws per stochastic row, all under the normal chunked
+    protocol, seven rows have a per-draw sd above 0.1 — and the worst,
+    `random_projection` + `coupled` + `modulatory` on `two_state_rnn`, ranges
+    over [−0.320, 0.583]. Its pooled cosine is a single number straddling zero.
+    Five of the seven involve `random_projection` or `random_feedback`, which is
+    the bias F-22 says a real zoo is needed to expose, showing up as variance
+    before it shows up as bias.
+
 53. **An untrained DNI measures the truncated rule, so `bootstrapped` cannot be
     ranked in a gradient-quality table at all.** `SyntheticGradient` is
     zero-initialised by design — that is what makes "DNI off" and "DNI
