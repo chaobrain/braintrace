@@ -1055,3 +1055,27 @@ for running one.
     inversion is off by 264×, and the test asserts that separation explicitly so a
     later fixture change cannot quietly return it to the degenerate regime.
 
+48. **"That rule is about the model, not about training loops" is usually a
+    rationalisation.** I pushed back on a review finding that
+    `train_synthetic_gradient`'s per-window Python loop violated AGENTS.md
+    rule 10, on the grounds that the rule targets *driving the model over time*
+    and this was a grad-plus-optimiser-step loop like any training loop. Both
+    halves were true and the conclusion was still wrong: the loop body drives the
+    learner — `learner(_as_window(...))` under `grad` — so it re-traced the whole
+    `custom_vjp` machinery once per window. Measured with a trace counter on the
+    synthesiser's `apply`: 14 traces for 4 windows, 38 for 12, against a constant
+    count under `for_loop`. The repo's own quickstart already had the right
+    shape — Python loop over epochs, `scan` over steps, optimiser inside — so the
+    idiom argument pointed the other way too. The tell I missed: I was arguing
+    about which *category* the loop belonged to instead of asking what the body
+    actually did.
+
+    Two things fell out of the conversion that were worth more than the speed.
+    A ragged final window cannot exist under `for_loop`, which forced the
+    question of what a short window *meant* — it fits the synthesiser against a
+    shorter future than any window the learner will ever be driven with, the same
+    mismatch F-35 documents, introduced by the helper rather than the caller. It
+    is now refused. And `_fit_one` had to stop calling `float()` on its error,
+    which is what made the per-window concretisation visible: every window was
+    forcing a device sync to build a list that got averaged one line later.
+
