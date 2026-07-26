@@ -478,6 +478,49 @@ random-feedback approximations is the same model zoo this suite needs.
 
 Grows as P3 and P4 land.
 
+**Status: implemented, out of tree.** The suite lives in a separate repository
+(`braintrace-alg-exp`) rather than under `braintrace/`, because it depends on the
+library the way a user does and should break when a user would break. It imports
+`braintrace`'s private API from exactly four modules, each listed and enforced by
+an AST scan in both directions, so the private-API debt is a number rather than a
+habit.
+
+Four things in the sketch above turned out to be wrong or under-specified, and
+the details are in lessons 49–60:
+
+- **"peak memory" is not the measurement this roadmap wants.** What separates the
+  axes is *persistent* state, and the two differ precisely where F-32 lives: the
+  dense coupled transition Jacobian is built inside the step and discarded, so
+  peak memory sees it and persistent state does not. The suite reports persistent
+  bytes and says so; the coupled-vs-diagonal footprints are identical (lesson 54).
+- **"for a fixed model" is the one thing it must not do.** Every axis effect
+  measured so far is a property of a *(rule, model)* pair, in both directions:
+  coordinates that collapse onto each other on one model separate on another
+  (lesson 10), and coordinates that are *exactly* BPTT on one model are only
+  approximately so on another (lesson 60).
+- **Not every coordinate can be ranked in the gradient column.** `bootstrapped`
+  measures the truncated rule unless its synthesiser is fitted, and a fit is
+  valid only for one `(loss_fn, chunk_size)` pair (lesson 53). `modulatory` is
+  driven under a different protocol from every other row, and while that protocol
+  is nearly neutral for the trace axes it is not neutral for the learning-signal
+  axis (lesson 51). Rows carry caveats naming which of these applies.
+- **The refusals are as much of the result as the numbers.** 70 of 288 rows in a
+  two-model full-grid run are legitimate refusals. Each row records the status it
+  was *expected* to have, and a deviation in either direction — including a
+  coordinate recorded as unreachable that starts running — makes the run
+  unpublishable.
+
+Two things are explicitly **not** done:
+
+- **The F-22 retirement.** The zoo has the nine SNN specs, but the bias
+  comparison F-22 asks for has not been run.
+- **An independent adversarial review.** One was attempted and did not finish
+  (lesson 61); the two defects it surfaced before dying are fixed, but
+  `metrics.compare` and `is_degenerate_pair` under vacuity, engines that might
+  silently ignore a config field, assertions that would pass against a stub, and
+  whether the frozen B4 task protocol biases non-DNI rows have been checked by
+  nothing except the suite's own tests.
+
 ## Three acceptance paradigms
 
 Mixing these up is the most likely way to get this roadmap wrong:
@@ -524,9 +567,10 @@ statistical class.
 
 Items 1–9 were recorded during P1, against commit `bc153da`; items 10–17 during
 P2, against `156d058`; items 18–30 during P3, against `100b5be` (18–25 while
-implementing, 26–30 while working through the adversarial review). These are the
-things the roadmap got wrong or could not have known, kept here because later
-phases rest on them.
+implementing, 26–30 while working through the adversarial review); items 49–61
+during P5, against `da26443` (49–60 while implementing, 61 from a review that
+did not finish). These are the things the roadmap got wrong or could not have
+known, kept here because later phases rest on them.
 
 1. **The instrument was the defect, not the compiler.** P1 was scoped as
    compiler work on multi-timescale and heterogeneous populations. Every one of
@@ -1079,3 +1123,213 @@ for running one.
     which is what made the per-window concretisation visible: every window was
     forcing a device sync to build a list that got averaged one line later.
 
+
+49. **A benchmark of an API is a second implementation of its preconditions.**
+    Two of the 144 canonical coordinates cannot run at all without something the
+    *caller* must supply, and neither refusal is reachable from any unit test.
+    `learning_signal='modulatory'` needs a modulator (`vjp_base.py:1359`);
+    `learning_signal='bootstrapped'` needs a synthesiser attached
+    (`dni.py:333`). Both are correct — the library refuses rather than
+    substituting a default and reporting a number for a rule nobody ran — and
+    both surfaced only on the first real full-grid run, after the suite was
+    green. The generalisation is uncomfortable: anything that drives every point
+    of a configuration space ends up restating that space's preconditions, and
+    the restatement is only validated by running the whole space.
+
+    The corollary is the design rule that caught them. Classify only the
+    failures whose meaning you know and re-raise the rest. A harness that maps
+    every exception to a skip turns a grid of skips into a completed run, and
+    the row that broke for an unanticipated reason is the row worth reading.
+
+50. **An exception class is not a meaning.** `NotSupportedError` is raised from
+    four sites with three different consequences: the
+    `snap_max_jacobian_elements` ceiling (`_compiler/position_graph.py:595`),
+    which is a *budget the caller set* and not a property of the coordinate;
+    `sparse_n` without `include_recurrent_mixing` (`_compiler/graph.py:325`),
+    which is an illegal point in the space; and a rewritten `ParamState`
+    (`_compiler/module_info.py:60`) or inconsistent hidden shapes
+    (`_compiler/hidden_group.py:287`), which are properties of the model. A
+    consumer that switches on the class alone files "we told it not to spend the
+    memory" as "this coordinate is unsupported", and the resulting table is
+    wrong about the axis instead of about the budget. Reading the message is
+    fragile and correct; the fragility is handled by re-raising an unrecognised
+    message so a refusal the library grows later stops the run.
+
+    Related: a status nothing can produce is a smell. `resource_limit` sat in
+    the vocabulary for the whole implementation with only `MemoryError` mapped
+    to it, and `MemoryError` is not how this library says "too big".
+
+51. **`random_feedback`'s usefulness is a property of the update window, not of
+    the rule.** Measured on `per_param` + `random_feedback`, t=8, chunk=2, eight
+    seeds, ETP-restricted cosine against BPTT:
+
+    | protocol | tanh_rnn | two_state_rnn |
+    |---|---|---|
+    | chunked, window 2 | 0.982 ± 0.018 | 0.982 ± 0.009 |
+    | step by step | −0.187 ± 0.596 | 0.066 ± 0.577 |
+
+    Per-seed values under the step-by-step protocol run from −0.69 to +0.93: the
+    sign of the gradient is close to a coin flip. Averaged over a window the
+    feedback matrix's error largely cancels; step by step it does not.
+
+    What makes this a lesson rather than a curiosity is that the effect is
+    *specific to the learning signal*. The same two protocols move `per_param`
+    from 0.99986 to 0.9924 and `io_factorized` from 0.99959 to 0.9821 — both
+    essentially protocol-insensitive. So "the protocol is a confound" is too
+    coarse a statement to be useful; the confound is an interaction between
+    `learning_signal` and `vjp_method`, and it is invisible to any experiment
+    that varies one of them at a time.
+
+52. **A pooled number over random draws needs its spread beside it.** The
+    natural summary for a stochastic coordinate — average the gradients over
+    seeds, then compare once against the reference — is a defensible point
+    estimate, and on its own it is unreadable. Both rows above pool to a single
+    cosine, and one of them stands for eight draws that agreed to within 0.02
+    while the other stands for eight draws that disagreed about the direction.
+
+    Pooling is at least not a whitewash: on the scattered case the cosine of the
+    mean (−0.52) is *worse* than the mean of the cosines (−0.19), so the
+    laundering runs the safe way. That was worth checking rather than assuming,
+    and it does not remove the need to report the sd and the range.
+
+    This is not a hypothetical about an artificial protocol. On a 288-row
+    full-grid run at four draws per stochastic row, all under the normal chunked
+    protocol, seven rows have a per-draw sd above 0.1 — and the worst,
+    `random_projection` + `coupled` + `modulatory` on `two_state_rnn`, ranges
+    over [−0.320, 0.583]. Its pooled cosine is a single number straddling zero.
+    Five of the seven involve `random_projection` or `random_feedback`, which is
+    the bias F-22 says a real zoo is needed to expose, showing up as variance
+    before it shows up as bias.
+
+53. **An untrained DNI measures the truncated rule, so `bootstrapped` cannot be
+    ranked in a gradient-quality table at all.** `SyntheticGradient` is
+    zero-initialised by design — that is what makes "DNI off" and "DNI
+    untrained" the same run, which is B1's no-op criterion — so a synthesiser
+    that has never been fitted predicts exactly zero and the row measures the
+    plain truncated rule under a DNI label. Fitting it first does not rescue the
+    column either, because a fit is valid only for the exact `(loss_fn,
+    chunk_size)` pair it was given (F-35), and the gradient-quality protocol has
+    no loss. DNI's evidence lives in the task column; the gradient column for
+    that coordinate needs a caveat, not a number.
+
+54. **A persistent-state metric is blind to the coupled scope, and was nearly
+    half-blind to `sparse_n` for a completely different reason.** Measured across
+    `tanh_rnn`, `two_state_rnn`, `sparse_ring_rnn` and
+    `sparse_ring_two_state_rnn`: the diagonal and coupled footprints are
+    byte-for-byte identical. F-32's dense `(*V,S,*V,S)` transition Jacobian is
+    materialised inside the step and discarded, so it never appears in any
+    persistent state. Printing that column next to `recurrence_scope` invites the
+    reader to conclude that coupled scope is free, which is the opposite of the
+    truth this axis is about. A peak-memory instrument would be a different
+    measurement, not a better one, and the roadmap's P5 sketch asked for "peak
+    memory" without noticing the difference.
+
+    The `sparse_n` half of the same axis fails the other way, and I got this
+    wrong on the first pass: the widened rule's neighbourhood index —
+    `SnapPattern.neighbours` and `.valid`, both `(P, K)` — *is* persistent and
+    *does* scale with the axis, but it hangs off the compiled graph rather than
+    sitting in a `State`. Measured on `sparse_ring_rnn` at `sparse_n=2`: 96 bytes
+    of index against a 104-byte State footprint. Worse than being uncounted, it
+    was unflagged, because the "anything I don't recognise goes in `unaccounted`"
+    escape hatch only sees what the enumeration already walks.
+
+    The generalisable part is the shape of the error, not the byte count. A
+    memory metric is a claim about a *boundary* — what belongs to the rule — and
+    both failures here are boundary errors in opposite directions: the coupled
+    Jacobian is inside the step when the reader assumes it persists, and the snap
+    index persists outside the object the enumeration was pointed at. Neither is
+    visible from the total. Only naming the parts makes them visible, which is
+    why the column is now split rather than summed.
+
+55. **Ownership of state has to be decided by identity, not by path.** The
+    obvious rule for "what does the algorithm own" — subtract everything whose
+    state path is under the model — is correct on every engine but one.
+    `random_projection` files the model's own states under `('_param_states',
+    ...)` while the others use `('model4compile', ...)`, so a prefix rule
+    attributes the model's weights to the algorithm on exactly the engine whose
+    memory claim is the most interesting. Comparing `State` objects by `id` is
+    both simpler and right.
+
+56. **Three leaf kinds do not answer `.nbytes`, and the memory an axis pays for
+    keeps turning out not to be a `State`.** A Python `int` (`running_index`), a
+    typed PRNG key (`projection_rng`, dtype `key<fry>` — `np.asarray` refuses it
+    outright, and it needs `jax.random.key_data`), and a `brainunit.Quantity`
+    (whose mantissa carries the bytes) all appear in the state trees being
+    measured.
+
+    The second half is the one that recurred. `FixedRandomFeedback`'s
+    `_random_feedback` is a plain attribute, so a `State`-only enumeration
+    reports every random-feedback coordinate as costing nothing extra;
+    `SnapPattern`'s index arrays live on the compiled graph, so the same
+    enumeration reports `sparse_n` at roughly half its cost (lesson 54). Two
+    axes, two different hiding places, the same zero in the column the axis
+    exists to populate. The prior worth carrying into P6: for any axis whose
+    selling point is memory, assume its memory is *not* in a `State` until
+    located, and make the enumeration name what it found rather than only what
+    it totalled.
+
+57. **The environment is part of the model.** Every SNN spec in the zoo needs
+    `brainstate.environ`'s `dt` and fails with a `KeyError` raised from inside a
+    synapse's `update` without it. The in-tree tests satisfy this by wrapping
+    each test body in `brainstate.environ.context(dt=...)`, which is a
+    convention a separate package does not inherit and cannot discover from the
+    spec. A model zoo entry that carries only a factory is under-specified; the
+    environment has to travel with it.
+
+58. **`ModelSpec.etp_param_keys` is empty on all nine SNN specs.** Anything that
+    keys the ETP/plain split on that field silently restricts to nothing on
+    exactly the models this roadmap most wants measured, and lesson 19's
+    correction — compare against BPTT only on ETP-routed paths — then reads as a
+    whole-tree comparison wearing the right label. The authority is the compiled
+    graph's `hidden_param_op_relations` (F-34).
+
+59. **The two sides of a two-sided axis have to vary independently.**
+    Hand-enumerating `(temporal_recursion, decay)` as matched pairs yields 112
+    coordinates and silently omits 32 legal `io_factorized` points where the x-
+    and f-sides differ. The other half of the same lesson: canonicalisation
+    collapses up to 72 distinct spellings onto a single rule, so a grid that
+    enumerates spellings reports coverage it does not have. 620,856 spellings,
+    144 canonical coordinates.
+
+60. **A deviation of exactly zero is not always the vacuity alarm.** F-23 gives
+    the well-known route to a table of perfect scores — at `chunk_size >= t` a
+    multi-step VJP *is* BPTT — but there is a second route that is a real result:
+    a `(rule, model)` pair on which the trace is genuinely exact. Measured at
+    t=8, chunk=2, well inside the separating regime, seven of 218 rows return
+    bitwise-identical gradients, and five of them are `per_param` on
+    `two_state_rnn` (including under `coupled` and `sparse_n` scope), where the
+    same coordinate on `tanh_rnn` gives 0.99986. So "zero deviation" cannot be
+    wired to an automatic warning, and a suite run only on a model of that shape
+    would report every rule as exact. This is lesson 10 seen from the other
+    side, and it is the strongest argument in the roadmap for the multi-model
+    zoo: one model cannot tell you whether a number is about the rule.
+
+61. **An adversarial review that reports only at the end reports nothing when it
+    dies.** The P5 implementation review ran for roughly three hours, read most
+    of the library and all of the suite, and was lost while composing its final
+    answer when the connection dropped; a second attempt could not start at all
+    because the endpoint was returning 502. What survived was only what happened
+    to be visible in its progress log while it worked — and two of those partial
+    leads were real defects that are now fixed (lessons 50 and 54).
+
+    That ratio is the lesson. A long review is a long-running job with no
+    checkpoint, and the fix is the same as for any such job: have it append each
+    finding to a file the moment it is confirmed, rather than accumulating them
+    for a final report. The second attempt was set up that way and never got far
+    enough to write anything, which does not make the instruction wrong.
+
+    The other half is what to do with a partial result. Two leads were verified
+    against source and became fixes; a third — that `random_projection` occupies
+    only 4 of the 144 coordinates, which looks like a coverage hole — was checked
+    and **rejected**: the library requires `recurrence_scope='coupled'` for that
+    factorization, coupled requires `temporal_recursion='jacobian'`, and
+    `trace_filter='kappa'` requires `per_param`, so four is the complete legal
+    subspace. A review's finding is a hypothesis with a good prior, and the
+    verification is not optional even when the reviewer is usually right.
+
+    **P5's review debt is therefore open, not discharged.** The areas the first
+    review had reached but not reported on when it died — `metrics.compare` and
+    `is_degenerate_pair` under vacuity, engines silently ignoring a config field,
+    assertions that would pass against a stub, and whether the frozen B4 task
+    protocol biases non-DNI rows — have not been independently reviewed by
+    anything except the implementation's own tests.
