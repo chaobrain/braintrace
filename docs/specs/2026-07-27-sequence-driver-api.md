@@ -90,6 +90,12 @@ Six probes, run against the baseline commit. The first three use a small
 | P5 | grep for `MultiStepData` across `examples/` | **zero hits** — windowed driving is unexercised in the repo; `05-vjp-multi-step.py` uses `vjp_method='multi-step'` with single-step driving |
 | P6 | gradient unit vs parameter unit for a `u.mA`-valued `braintrace.nn.Linear` weight | gradient is **also `mA`**; `zeros_like(param) + grad` succeeds |
 
+And one read of the existing public API, which fixes this spec's encoding:
+
+| # | fact | source |
+| --- | --- | --- |
+| P7 | `chunk_size` is **already** the public name for this quantity, and **`chunk_size=1` already means the plain single-step path** — `_as_window` returns `seq[0]` unwrapped at 1 and `MultiStepData(seq)` above it | `dni.py:410` (`train_synthetic_gradient(..., chunk_size: int = 1)`), `dni.py:663-667`; also `oracle.py:145` |
+
 Consequences, all load-bearing below:
 
 1. **Windowed *gradients* require `vjp_method='multi-step'`** (P1). The API
@@ -100,8 +106,13 @@ Consequences, all load-bearing below:
 3. **Windowing was never a free knob** (P3). Raising it already means editing
    `compile(...)` and adopting a materially different rule — which is why the
    step-function design's shape change is affordable.
-4. **`chunk_size=None` and `chunk_size=1` must agree to round-off** on a
-   multi-step learner (P2). A free consistency test, not a coincidence.
+4. **`chunk_size=1` means the plain path here too, and window mode starts at
+   `k >= 2`** (P7). Diverging would give one public parameter name two opposite
+   meanings at the same value, at exactly the F-35 boundary where users are
+   instructed to match the two APIs. Nothing is lost: P2 shows a length-1 window
+   is the same computation as the plain call anyway, so the configuration the
+   driver stops exposing was never one worth choosing — and it would have been
+   refused on single-step learners for no gain.
 5. **The accumulator may be built from parameter values** (P6). See "Gradient
    accumulator initialization".
 6. **Refusing window mode under `ETraceVmap` breaks no existing code** (P5).
@@ -197,13 +208,13 @@ contracts, not a parameterization of one:
 
 | `chunk_size` | slice handed to `step_fn` | `step_fn` returns | requires |
 | --- | --- | --- | --- |
-| `None` (default) | `seq[t]` | a **scalar** | nothing — legal on either `vjp_method` |
-| `int k >= 1` | `seq[t:t+k]`, shape `(k, ...)` | a **`(k,)`** vector of per-step losses | `vjp_method='multi-step'`; `T % k == 0`; not an `ETraceVmap` |
+| `None` (default) or `1` | `seq[t]` | a **scalar** | nothing — legal on either `vjp_method` |
+| `int k >= 2` | `seq[t:t+k]`, shape `(k, ...)` | a **`(k,)`** vector of per-step losses | `vjp_method='multi-step'`; `T % k == 0`; not an `ETraceVmap` |
 
 Window mode changes five things at once, which is a real cost of the knob and is
 listed here rather than discovered:
 
-| what changes | `chunk_size=None` | `chunk_size=k` |
+| what changes | `chunk_size` of `None` or `1` | `chunk_size=k >= 2` |
 | --- | --- | --- |
 | slice shape into `step_fn` | `seq[t]` | `(k, ...)` |
 | `step_fn` return | scalar | `(k,)` |
@@ -214,6 +225,27 @@ listed here rather than discovered:
 In window mode the user wraps their own model inputs. The API does **not** wrap,
 because it cannot know which of the passed sequences are model inputs and which
 are targets — that is `step_fn`'s business, and the price of it deciding.
+
+**Why `1` is the plain path and not a length-1 window.** `chunk_size` is not a
+new parameter: `train_synthetic_gradient` already takes one, defaulted to `1`,
+and `dni.py:663-667` resolves `chunk_size == 1` to `seq[0]` — the unwrapped,
+plain single-step call — reserving `MultiStepData` for `k >= 2` (P7). The driver
+adopts that encoding exactly. The alternative — `1` meaning a genuine length-1
+`MultiStepData` window — would give one public name two opposite meanings at the
+same value, and the seam would fall on F-35, the one place this spec instructs
+users to match `chunk_size` across the two APIs. Someone fitting at the default
+`chunk_size=1` and driving at `etrace_grad(chunk_size=1)` must be right to
+believe they matched.
+
+`None` is retained as the default because it says *no chunking* more clearly
+than `1` does, and because it is the value every migrated call site passes
+implicitly. The two spellings are exactly synonymous; `None` is what the
+docstrings use.
+
+Note that `oracle.chunked_online_param_gradients` does **not** special-case `1`
+(it always wraps, and tolerates a short final chunk). It is test support, per its
+own docstring, and the user-facing DNI encoding is the one to match. The two
+agree for every `k >= 2`, which is the range where the driver uses windows.
 
 **`mask`** — a `(T,)` array of **per-step loss weights**. `None` means all-ones.
 Values need not be binary: `mask` is a weight vector, `0` and `1` are simply its
@@ -269,10 +301,10 @@ objective* — and removes the trailing `.mean()` from the call site.
 under `'scalar'`. In window mode the `(n, k)` stack reshapes to `(T,)` cleanly
 precisely because the `(k,)` return contract is strict.
 
-`aux` stacks over **windows**, leading axis `T // k` (which is `T` when
-`chunk_size=None`). No reshape magic is applied to it — the driver cannot know
-whether a user's aux carries a step axis. A user wanting per-step aux in window
-mode returns a `(k, ...)` aux and reshapes it themselves.
+`aux` stacks over **windows**, leading axis `T // k` (which is `T` in plain
+mode). No reshape magic is applied to it — the driver cannot know whether a
+user's aux carries a step axis. A user wanting per-step aux in window mode
+returns a `(k, ...)` aux and reshapes it themselves.
 
 #### What `grads` is, precisely
 
@@ -334,8 +366,8 @@ refuses:
 
 | | `vjp_method='single-step'` | `vjp_method='multi-step'` |
 | --- | --- | --- |
-| `chunk_size=None` | legal | legal |
-| `chunk_size=k` | **legal** — P4; contrast `etrace_grad`, which refuses | legal |
+| `chunk_size` of `None` or `1` | legal | legal |
+| `chunk_size=k >= 2` | **legal** — P4; contrast `etrace_grad`, which refuses | legal |
 
 Under `ETraceVmap`, window mode is refused for both methods (next section).
 
@@ -396,9 +428,9 @@ Both methods are **continuations, not sessions**:
 - They leave the final state installed, so consecutive calls compose —
   `evolve(a); grad(b)` drives `a` then `b` over one continuous trajectory. This
   is what makes the warm-up idiom work.
-- `running_index` advances once per `update()` call, i.e. `T` times under
-  `chunk_size=None` and `T // k` times under window mode. This asymmetry is the
-  subject of the F-30 interaction below.
+- `running_index` advances once per `update()` call, i.e. `T` times in plain
+  mode and `T // k` times under window mode. This asymmetry is the subject of
+  the F-30 interaction below.
 - **On failure, state is not restored.** A `step_fn` that raises mid-`scan`
   leaves the learner partially advanced, because `brainstate.transform.scan`
   writes state as it goes. Callers who need transactional behaviour snapshot
@@ -458,7 +490,7 @@ complexity to optimize a case the `etrace_evolve` split already covers.
 
 ### Window mode mechanics
 
-With `chunk_size = k` and `n = T // k`:
+With `chunk_size = k >= 2` and `n = T // k`:
 
 1. Every leaf of every sequence and of `mask` is reshaped `(T, ...) -> (n, k, ...)`.
 2. Each window calls `step_fn` once with the `(k, ...)` slices; `step_fn` calls
@@ -507,7 +539,7 @@ the algorithms it drives. Concretely:
 - A driver-level regression test pins the consequence, so a future F-30 fix is
   detected here rather than only in `io_dim_vjp_test.py`.
 - F-30's row in known-limitations gains a sentence noting that
-  `etrace_grad(chunk_size=k)` is now a first-class way to reach it.
+  `etrace_grad(chunk_size=k >= 2)` is now a first-class way to reach it.
 
 ### DNI: matching the synthesizer's deployment contract
 
@@ -522,8 +554,15 @@ was fit against. The correspondence, which the docstrings must state:
 
 | `train_synthetic_gradient` | `etrace_grad` |
 | --- | --- |
-| `chunk_size` | `chunk_size` — must be **equal**, including `None` vs `1` |
+| `chunk_size=1` (the default) | `chunk_size=None` (the default) or `1` — synonyms |
+| `chunk_size=k >= 2` | `chunk_size=k` — the same integer, meaning the same thing |
 | `loss_fn(output)` | the objective `step_fn` actually descends, *after* `reduction` and `mask` |
+
+The `chunk_size` correspondence is **literal equality at every value passable to
+both**, which is the entire reason the driver adopts DNI's encoding rather than
+its own (P7). A user who reads "match the `chunk_size` you fit with" and types
+the same number is correct, with no mental mapping at the exact point where
+being wrong is silent.
 
 The trap specific to this driver: fitting against a plain summed loss and then
 deploying with `reduction='mean'` rescales the cotangent by `1/sum(mask)`, and a
@@ -550,8 +589,8 @@ Stated here rather than discovered later:
    `MultiStepData` call, hidden states hold the **final** state of the window,
    not a `(k, ...)` history. A per-step firing-rate regularizer that reads hidden
    states therefore cannot generally produce the required `(k,)` losses. The
-   generality claim for `step_fn` is scoped to `chunk_size=None`; in window mode
-   an objective must be computable from the stacked `(k, ...)` **outputs**.
+   generality claim for `step_fn` is scoped to plain mode; in window mode an
+   objective must be computable from the stacked `(k, ...)` **outputs**.
 3. **Window mode is refused under `ETraceVmap`** — see above.
 4. **No transactional state.** A raising `step_fn` leaves the learner partially
    advanced.
@@ -614,7 +653,7 @@ carries `mA` as well, and `zeros_like(param) + grad` succeeds. `brainunit`'s
 gradient convention preserves the operand's unit rather than producing its
 reciprocal.
 
-Test 20 pins this. Should a future `brainunit` change break it, the replacement
+Test 32 pins this. Should a future `brainunit` change break it, the replacement
 is an accumulator whose structure comes from `jax.eval_shape` of the
 window-gradient function rather than from parameter values — not "use the first
 computed gradient", which cannot work because `scan` fixes the carry structure
@@ -628,12 +667,14 @@ before the loop runs.
 | a sequence is a `SingleStepData` / `MultiStepData` | `TypeError` naming the fix: wrap inside `step_fn` |
 | sequence leaves with mismatched leading lengths | `ValueError` naming the offending leaf |
 | `T == 0` | `ValueError` — an empty sequence has no defined objective |
-| `chunk_size` an int `< 1` | `ValueError` |
-| `chunk_size` an int and `T % chunk_size != 0` | `ValueError` — refused, never truncated, matching `train_synthetic_gradient`'s existing contract |
-| `chunk_size` an int and `_seq_vjp_method != 'multi-step'` (**`etrace_grad` only**) | `ValueError` naming the fix (`compile(..., vjp_method='multi-step')`), raised **before** any tracing |
-| `chunk_size` an int on an `ETraceVmap` (**both methods**) | `ValueError` naming the batched non-vmap mode as the alternative |
-| `chunk_size=None` and `step_fn` returns a non-scalar | `ValueError` stating the scalar contract |
-| `chunk_size=k` and `step_fn` returns anything but shape `(k,)` | `ValueError` naming both the expected and the received shape |
+| `chunk_size` neither `None` nor an int | `TypeError` |
+| `chunk_size` an int `< 1` | `ValueError` — same bound and message shape as `dni.py:528` |
+| `chunk_size=1` | **accepted, and identical to `None`** — the plain path (P7) |
+| `chunk_size >= 2` and `T % chunk_size != 0` | `ValueError` — refused, never truncated, matching `train_synthetic_gradient`'s existing contract |
+| `chunk_size >= 2` and `_seq_vjp_method != 'multi-step'` (**`etrace_grad` only**) | `ValueError` naming the fix (`compile(..., vjp_method='multi-step')`), raised **before** any tracing |
+| `chunk_size >= 2` on an `ETraceVmap` (**both methods**) | `ValueError` naming the batched non-vmap mode as the alternative |
+| plain mode and `step_fn` returns a non-scalar | `ValueError` stating the scalar contract |
+| `chunk_size=k >= 2` and `step_fn` returns anything but shape `(k,)` | `ValueError` naming both the expected and the received shape |
 | `mask` shape not `(T,)` | `ValueError` naming both shapes |
 | `mask` non-binary | **accepted** — `mask` is a weight vector |
 | `reduction` / `loss_output` not a legal value | `ValueError` listing the legal ones |
@@ -658,87 +699,104 @@ Co-located at `braintrace/_algorithm/sequence_test.py` (AGENTS.md rule 9).
 
 **The two driving modes**
 
-4. On a `vjp_method='multi-step'` learner, `chunk_size=None` and `chunk_size=1`
-   agree to float32 round-off (measured `2.4e-07`, P2). This pins the claim that
-   the mode split is a contract difference, not a numerical one.
-5. On a `vjp_method='single-step'` learner, `etrace_grad(chunk_size=1)` raises
-   `ValueError` before tracing — not the executor's `NotImplementedError`.
-6. On the same learner, `etrace_evolve(chunk_size=1)` **succeeds** (P4). The two
+4. `chunk_size=1` is **exactly** `chunk_size=None` — identical gradients,
+   identical losses, identical learner state afterwards — on a single-step *and*
+   a multi-step learner. Not "agrees to round-off": the same code path. This is
+   the test that pins the P7 alignment, and the one that fails loudly if someone
+   later re-splits the two.
+5. The driver's plain path agrees to float32 round-off with a length-1
+   `MultiStepData` **constructed directly**, outside the driver, on a multi-step
+   learner (measured `2.4e-07`, P2). This is the evidence that the configuration
+   the driver stops exposing was never worth exposing; it is a test *about* the
+   library, not about the driver's surface.
+6. On a `vjp_method='single-step'` learner, `etrace_grad(chunk_size=2)` raises
+   `ValueError` before tracing — not the executor's `NotImplementedError` — while
+   `etrace_grad(chunk_size=1)` does **not** raise. The pair is what makes the
+   `1`-is-plain encoding observable.
+7. On the same learner, `etrace_evolve(chunk_size=2)` **succeeds** (P4). The two
    matrices differ, and this is the test that says so.
-7. A learner whose `_seq_vjp_method` is `None` is refused in window mode.
-8. `chunk_size` divides `T` is enforced; a ragged length raises.
-9. `step_fn` sees `seq[t]` under `None` and `(k, ...)` under `k` — asserted by a
-   `step_fn` that records the shape it was handed.
-10. A `step_fn` returning the wrong rank for its mode raises the documented
+8. A learner whose `_seq_vjp_method` is `None` is refused at `chunk_size >= 2`.
+9. `chunk_size` divides `T` is enforced at `k >= 2`; a ragged length raises.
+   `chunk_size=1` can never trigger it, and is asserted not to.
+10. `chunk_size=0`, a negative `chunk_size`, and a non-int `chunk_size` each
+    raise, with the same bound as `dni.py:527-528`.
+11. `step_fn` sees `seq[t]` under both `None` and `1`, and `(k, ...)` under
+    `k >= 2` — asserted by a `step_fn` that records the shape it was handed.
+12. A `step_fn` returning the wrong rank for its mode raises the documented
     `ValueError`.
-11. Gradients at `chunk_size=None` and `chunk_size=k>1` differ for an approximate
+13. Gradients at plain mode and `chunk_size=k >= 2` differ for an approximate
     algorithm (they must — the window is a real knob) and agree for an exact one
     under the regime its math guarantees. Per AGENTS.md, the approximate
     assertions go through the finite-window path, never a whole-sequence VJP.
 
 **Masking**
 
-12. The evolve/mask equivalence, **using two identically seeded learners**,
+14. The evolve/mask equivalence, **using two identically seeded learners**,
     element-wise.
-13. A mid-sequence mask is *not* equal to concatenating gradients from two
+15. A mid-sequence mask is *not* equal to concatenating gradients from two
     independent sequences — the negative control proving the trace crosses the
     zero-weighted span.
-14. All-zero mask on a finite, differentiable loss → exactly zero, finite.
-15. A non-binary mask reweights as documented.
+16. All-zero mask on a finite, differentiable loss → exactly zero, finite.
+17. A non-binary mask reweights as documented.
 
 **vmap**
 
-16. `ETraceVmap.etrace_grad` matches the unbatched learner's per-lane gradients
-    at `chunk_size=None`.
-17. `ETraceVmap.etrace_grad(chunk_size=k)` and `etrace_evolve(chunk_size=k)` both
-    raise `ValueError`, **tested at `B != k` and at `B == k`** — the latter being
-    the case that would otherwise pass silently.
-18. `compile(..., vmap=True)` still satisfies `isinstance(..., brainstate.nn.Vmap)`.
+18. `ETraceVmap.etrace_grad` matches the unbatched learner's per-lane gradients
+    in plain mode.
+19. `ETraceVmap.etrace_grad(chunk_size=k)` and `etrace_evolve(chunk_size=k)` both
+    raise `ValueError` at `k >= 2`, **tested at `B != k` and at `B == k`** — the
+    latter being the case that would otherwise pass silently. At `chunk_size=1`
+    neither raises, since that is plain mode.
+20. `compile(..., vmap=True)` still satisfies `isinstance(..., brainstate.nn.Vmap)`.
 
 **Surface**
 
-19. All four `(return_value, has_aux)` combinations return the documented arity;
+21. All four `(return_value, has_aux)` combinations return the documented arity;
     `losses` is `(T,)` under `'per_step'`/`'masked'` and **scalar** under
     `'scalar'`; `aux` stacks to leading `T // k`.
-20. All three `loss_output` values return the documented thing, including that
+22. All three `loss_output` values return the documented thing, including that
     `'per_step'` reports a real number on a zero-weighted step where `'masked'`
     reports zero.
-21. `weights=` restricted to a subset returns only those keys and leaves the rest
+23. `weights=` restricted to a subset returns only those keys and leaves the rest
     untouched.
-22. Three sequences are sliced in lockstep and passed positionally in order.
-23. A `SingleStepData` / `MultiStepData` passed as a sequence raises `TypeError`.
-24. A `step_fn` supervising one head of a two-head model works at
-    `chunk_size=None`; a hidden-state-reading regularizer works at
-    `chunk_size=None` and is documented as unsupported in window mode
-    (limitation 2).
+24. Three sequences are sliced in lockstep and passed positionally in order.
+25. A `SingleStepData` / `MultiStepData` passed as a sequence raises `TypeError`.
+26. A `step_fn` supervising one head of a two-head model works in plain mode; a
+    hidden-state-reading regularizer works in plain mode and is documented as
+    unsupported in window mode (limitation 2).
 
 **State lifecycle**
 
-25. `evolve(a); grad(b)` composes into one trajectory: equal to `grad` over the
-    concatenation with a zero-weight prefix (this is test 12 read from the other
+27. `evolve(a); grad(b)` composes into one trajectory: equal to `grad` over the
+    concatenation with a zero-weight prefix (this is test 14 read from the other
     side, kept separate because it pins *composition*, not masking).
-26. Repeated `etrace_grad` calls continue rather than reset; `running_index`
-    advances `T` times under `None` and `T // k` times under window mode.
+28. Repeated `etrace_grad` calls continue rather than reset; `running_index`
+    advances `T` times in plain mode and `T // k` times under window mode.
 
 **Algorithm interactions**
 
-27. F-30: on an IO-factorized engine, `chunk_size=k` produces the lagged bias
-    correction the limitation describes. A regression test, so a future F-30 fix
-    surfaces here.
-28. F-35: a `reduction` mismatch between `train_synthetic_gradient` and
+29. F-30: on an IO-factorized engine, `chunk_size=k >= 2` produces the lagged
+    bias correction the limitation describes. A regression test, so a future F-30
+    fix surfaces here.
+30. F-35: a `reduction` mismatch between `train_synthetic_gradient` and
     `etrace_grad` degrades DNI, in the shape of the existing window-size test.
+31. The F-35 `chunk_size` correspondence is an identity: fitting with
+    `train_synthetic_gradient(chunk_size=c)` and driving with
+    `etrace_grad(chunk_size=c)` is the matched case for every `c`, including
+    `c=1` against the driver's `None`. This is the test that would catch a future
+    divergence between the two encodings.
 
 **Robustness**
 
-29. `brainunit`-valued weights survive the accumulator, the mask multiply and the
+32. `brainunit`-valued weights survive the accumulator, the mask multiply and the
     mean division — pinning P6.
-30. Each error-table row raises the stated type with a message naming the
+33. Each error-table row raises the stated type with a message naming the
     offending value.
-31. `etrace_evolve` with `step_fn=None` drives the learner and, under window
+34. `etrace_evolve` with `step_fn=None` drives the learner and, under window
     mode, wraps in `MultiStepData` itself; with a custom `step_fn` it does not.
-32. `etrace_evolve(return_outputs=True)` stacks to leading `T // k`, and
+35. `etrace_evolve(return_outputs=True)` stacks to leading `T // k`, and
     `return_outputs=False` returns `None`.
-33. Both methods work inside an outer `brainstate.transform.jit` and eagerly.
+36. Both methods work inside an outer `brainstate.transform.jit` and eagerly.
 
 ## Migration
 
@@ -774,7 +832,7 @@ def f_train(inputs, targets):
 - **Every migrated site stays at `chunk_size=None`.** Per P5 no example uses
   `MultiStepData` today, and migration is not the place to change a learning
   rule. Window mode therefore ships exercised only by `sequence_test.py`, which
-  is why tests 4–11 carry it.
+  is why tests 4–13 carry it.
 - BPTT baselines are **not** touched. They have no learner and no trace.
 - `docs/quickstart/rnn_online_learning.ipynb`,
   `docs/quickstart/snn_online_learning.ipynb`, `docs/tutorials/batching.ipynb`,
@@ -810,10 +868,32 @@ the two modes one. Impossible for gradients: the default
 `vjp_method='single-step'` refuses it (P1). Note this is *not* true for evolution
 (P4), which is why the two methods have separate matrices.
 
-**`chunk_size=1` meaning the plain single-step path**, with window mode starting
-at 2. Rejected in favour of `None`, which makes the mode a *type* distinction
-rather than a special case carved out of the integer range — and which leaves
-`chunk_size=1` free to mean the genuine degenerate window that test 4 exercises.
+**`chunk_size=1` meaning a genuine length-1 `MultiStepData` window**, with `None`
+as the only spelling of the plain path. This was the previous draft's choice, on
+the grounds that `None`-versus-int makes the mode a *type* distinction rather
+than a special case carved out of the integer range. Reversed on reading
+`dni.py:663-667`, where `chunk_size == 1` already resolves to the unwrapped
+plain call in the shipped public API (P7). Keeping the distinction would have
+given one parameter name two opposite meanings at the same value, precisely at
+the F-35 boundary where users are told to match the two APIs. The `None`-versus-
+int type distinction survives anyway — `None` is still the default and still the
+spelling the docstrings use; `1` is now a synonym for it rather than a rival
+meaning. What is genuinely lost is the ability to request a length-1 window
+*through the driver*, which P2 shows is the same computation as the plain call
+and which would have been refused on single-step learners for no gain. Test 5
+keeps that measurement by constructing the wrapper directly.
+
+**Renaming `chunk_size` to `window_size`.** The review's objection — that the
+name says how much rather than what it selects, and understates that window mode
+changes the learning rule — is fair on its own terms and was rejected on
+codebase-consistency grounds: `chunk_size` is already the public name for this
+quantity in `train_synthetic_gradient` (`dni.py:410`) and
+`chunked_online_param_gradients` (`oracle.py:145`), and `dni_test.py:422` is
+titled after the trap the parameter exists to prevent. A second name for one
+concept would put the seam on F-35, where a mismatch is silent and produces
+noise shaped like a cotangent — and `dni.py`'s `chunk_size` carries the same
+"changes the learning rule" property while being documented, not renamed. The
+objection is answered by the "what window mode changes" table instead.
 
 **A user-applied transpose to make window mode work under `ETraceVmap`.**
 Rejected: silently wrong if omitted, and undetectable when `B == k`. Refusal
@@ -826,12 +906,16 @@ machinery is unverified complexity for a problem that does not currently exist.
 
 ## Open questions
 
-**One, for the spec's owner:** should `chunk_size` be renamed?
+None. The naming question is resolved in "Rejected alternatives": the name stays
+`chunk_size`, matching `train_synthetic_gradient` and
+`chunked_online_param_gradients`, and the encoding is aligned to DNI's so that
+`chunk_size=1` means the plain path in both.
 
-The review's remaining objection is that one keyword changes five things at once
-(now tabulated under "Public API") and that `None` versus `1` reads as a
-degenerate case rather than a mode switch. A name like `window_size` or
-`vjp_window_size` would say what it selects; `chunk_size` says only how much.
-The rename is cosmetic and cheap now, expensive after release. It is left open
-because the current name was chosen deliberately, and the substance of the
-objection is answered by the table regardless of the name.
+Deferred to future work, each with its reason recorded above rather than left
+undecided:
+
+- Window mode under `ETraceVmap`, which needs an explicit transpose adapter and
+  an `in_axes` naming the batch axis, plus a test at `B != k`.
+- Lane-aware masks, which need the mask to enter inside the vmapped region.
+- Skipping the VJP backward on zero-weighted steps, which the `etrace_evolve`
+  split already covers for the contiguous case.
