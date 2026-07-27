@@ -390,7 +390,7 @@ class ETraceAlgorithm(brainstate.nn.Module):
         *args
             The input arguments.
         **kwargs
-            Per-call options, not model inputs. See :meth:`__call__`.
+            Per-call options, not model inputs. See ``__call__``.
 
         Returns
         -------

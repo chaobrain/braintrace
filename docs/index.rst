@@ -108,7 +108,7 @@ Choose the entry point that matches your next task.
       :class-card: braintrace-learn-card
 
    .. grid-item-card:: :material-regular:`data_exploration;2em` API Reference
-      :link: apis/index
+      :link: apis/concepts
       :link-type: doc
       :class-card: braintrace-learn-card
 
@@ -122,13 +122,14 @@ Learning path
 Follow the central path from top to bottom. Branches mark the RNN/SNN workflow
 and the two algorithm tutorials.
 
-.. figure:: _static/braintrace-learning-map.svg
+.. image:: _static/braintrace-learning-map.svg
    :alt: Numbered dependency map of the BrainTrace documentation modules
    :align: center
    :width: 430px
-   :figclass: braintrace-roadmap
 
-   A dependency guide, not a required linear syllabus.
+.. container:: text-center
+
+   *A dependency guide, not a required linear syllabus.*
 
 .. container:: braintrace-path-nav
 
@@ -136,7 +137,7 @@ and the two algorithm tutorials.
       **1** :doc:`Quickstart <quickstart/quickstart>` · **2**
       :doc:`Core Concepts <quickstart/concepts>`
 
-   Training workflows
+   Online Training
       **3** :doc:`RNN Online Learning <quickstart/rnn_online_learning>` · **4**
       :doc:`SNN Online Learning <quickstart/snn_online_learning>`
 
@@ -146,8 +147,8 @@ and the two algorithm tutorials.
       :doc:`pp-prop <tutorials/pp_prop>`
 
    Internals and application
-      **8** :doc:`ETP Primitives <tutorials/etp_primitives>` · **9**
-      :doc:`Compiler and Runtime <advanced/compiler_internals>` · **10**
+      **8** :doc:`ETP Operator Fundamentals <tutorials/five_primitive_functions>` · **9**
+      :doc:`Graph Compilation <tutorials/graph_compilation>` · **10**
       :doc:`Examples and Advanced Topics <examples/snn_examples>`
 
 
@@ -174,6 +175,22 @@ differentiable ecosystem for full-scale brain simulation.
    quickstart/concepts.ipynb
 
 
+.. Tutorial grouping metadata is consumed by docs/conf.py. The toctree below
+.. remains the only owner of the actual document links.
+
+.. braintrace-tutorial-group: Online Training
+   :members: RNN Online Learning | SNN Online Learning
+
+.. braintrace-tutorial-group: Algorithm Tutorials
+   :members: D-RTRL: diagonal online gradient learning | pp_prop: input/output-factorized online gradients
+
+.. braintrace-tutorial-group: Foundations
+   :members: ETP Operator Fundamentals | braintrace.nn Layers | Hidden State Management
+
+.. braintrace-tutorial-group: Compiler & Runtime
+   :members: Graph Compilation | Visualization
+
+
 .. toctree::
    :hidden:
    :maxdepth: 1
@@ -183,10 +200,11 @@ differentiable ecosystem for full-scale brain simulation.
    quickstart/snn_online_learning.ipynb
    tutorials/drtrl.ipynb
    tutorials/pp_prop.ipynb
-   tutorials/customizing_primitive_transforms.ipynb
+   tutorials/five_primitive_functions.ipynb
+   tutorials/neural_network_layers.ipynb
    tutorials/hidden_states.ipynb
-   tutorials/graph_visualization.ipynb
-   tutorials/batching.ipynb
+   tutorials/graph_compilation.ipynb
+   tutorials/visualization.ipynb
 
 
 .. toctree::
@@ -194,7 +212,9 @@ differentiable ecosystem for full-scale brain simulation.
    :maxdepth: 2
    :caption: Advanced
 
+   advanced/batching.ipynb
    tutorials/etp_primitives.ipynb
+   advanced/customizing_primitive_transforms.ipynb
    advanced/compiler_internals.ipynb
    advanced/custom_algorithms.ipynb
    advanced/limitations.ipynb
@@ -213,20 +233,12 @@ differentiable ecosystem for full-scale brain simulation.
 
 .. toctree::
    :hidden:
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: API Reference
 
-   API Overview <apis/index.rst>
+   Release Notes <changelog.md>
    ETP Operators <apis/concepts.rst>
    Compiler and Executor <apis/compiler.rst>
    Algorithms <apis/algorithms.rst>
    Neural Network Layers <apis/nn.rst>
    Others <apis/primitives.rst>
-
-
-.. toctree::
-   :hidden:
-   :maxdepth: 1
-   :caption: Project
-
-   changelog.md

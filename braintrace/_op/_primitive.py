@@ -158,19 +158,19 @@ class ETPPrimitive(Primitive):
         fast_path : FastPathRules, optional
             Closed-form param-dim D-RTRL fast-path kernel bundle (instant /
             recurrent / solve kernels plus the ``applicable`` gate). Registered
-            into :data:`ETP_FAST_PATH_RULES`. Supplied only by primitives with
+            into ``ETP_FAST_PATH_RULES``. Supplied only by primitives with
             an elementwise ``dt_to_t`` rule (mm / mv / elemwise); ``None``
             leaves the primitive without a fast path. Default ``None``.
         pp_x_repr : Callable, optional
             IO-dim x-trace representation rule
             ``(x, weight_avals) -> x_repr``. Registered into
-            :data:`ETP_RULES_PP_X_REPR`. Supply it when the raw ``x`` is not
+            ``ETP_RULES_PP_X_REPR``. Supply it when the raw ``x`` is not
             the operand the op is linear in (e.g. ``etp_emb_p`` filters the
             one-hot encoding of its integer indices); ``None`` leaves the
             IO-dim trace filtering the raw ``x``. Default ``None``.
         snap_anchor : Callable, optional
             SnAp-n anchor declaration ``eqn_params -> bool``. Registered into
-            :data:`ETP_RULES_SNAP_ANCHOR`. Declares that the primitive's trace
+            ``ETP_RULES_SNAP_ANCHOR``. Declares that the primitive's trace
             layout keeps, for every slot, one well-defined hidden position the
             slot's instantaneous term lands on -- the precondition for widening
             the trailing state axis into a ``(neighbour, state)`` axis.
@@ -178,7 +178,7 @@ class ETPPrimitive(Primitive):
             ``recurrence_scope='sparse_n'`` rejects it loudly.
         snap_adjacency : Callable, optional
             SnAp-n position-adjacency rule ``(eqn_params, size) -> pattern``.
-            Registered into :data:`ETP_RULES_SNAP_ADJACENCY`. Supply it only
+            Registered into ``ETP_RULES_SNAP_ADJACENCY``. Supply it only
             when the primitive's cross-position coupling is fully determined by
             static equation parameters; ``None`` (the default) makes the
             position analysis conservative for this primitive. Default ``None``.
@@ -258,7 +258,7 @@ def register_primitive(
     - **transpose** — derived by JAX from the JVP.
     - **batching** — identity-preserving: when only ``x`` is mapped and a
       batched counterpart is registered
-      (:func:`~braintrace._op._registries.register_batched_counterpart`),
+      (``register_batched_counterpart``),
       the counterpart primitive is bound with the batch axis leading;
       otherwise falls back to ``jax.vmap(impl)`` with a ``UserWarning``
       (the decomposed weight drops out of eligibility-trace compilation).

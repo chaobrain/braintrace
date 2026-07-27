@@ -63,7 +63,7 @@ def test_docs_limitations_good_model_lax_select():
 
 
 def test_docs_graphviz_conv_rnn():
-    """docs/tutorials/graph_visualization.ipynb — recurrent Conv2d (etp_conv)."""
+    """docs/tutorials/visualization.ipynb — recurrent Conv2d (etp_conv)."""
 
     class ConvRNN(brainstate.nn.Module):
         def __init__(self):
@@ -193,7 +193,7 @@ def test_docs_batching_gru_vmap_batched():
 
 
 def test_docs_graphviz_single_layer_rnn_unbatched_structure():
-    """docs/tutorials/graph_visualization.ipynb — unbatched structure (etp_mv, (32,))."""
+    """docs/tutorials/visualization.ipynb — unbatched structure (etp_mv, (32,))."""
 
     class SingleLayerRNN(brainstate.nn.Module):
         def __init__(self, n_in, n_rec, n_out):

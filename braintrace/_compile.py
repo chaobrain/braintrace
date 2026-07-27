@@ -153,12 +153,12 @@ def compile(
         :class:`MultiStepData`) matching what ``learner.update(...)`` will
         receive. At least one is required.
     batch_size : int or None, optional
-        Forwarded to :func:`brainstate.nn.init_all_states`. ``None`` (default)
+        Forwarded to ``brainstate.nn.init_all_states``. ``None`` (default)
         initializes unbatched states. Must match the batch dimension of
         ``example_inputs``.
     seed : int or None, optional
         If given, state initialization runs inside
-        :func:`brainstate.random.seed_context` for reproducibility; the global
+        ``brainstate.random.seed_context`` for reproducibility; the global
         RNG is restored afterwards. ``None`` (default) leaves the RNG untouched.
         Weights created at model-construction time are outside this scope.
     verbose : int, optional

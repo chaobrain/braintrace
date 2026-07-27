@@ -659,8 +659,9 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     r"""Online gradient algorithm with diagonal approximation and input-output-dimension complexity.
 
     This algorithm computes the gradients of the weights with the diagonal
-    approximation and the input-output dimensional complexity. It is based on the
-    RTRL algorithm (Real-Time Recurrent Learning).
+    approximation and the input-output dimensional complexity. It implements
+    the input/output-factorized estimator of Wang et al. [1]_ on the RTRL
+    foundation of Williams and Zipser [2]_.
 
     Parameters
     ----------
@@ -686,7 +687,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
-        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
+        ``ControlFlowPolicy()``.
     name : str, optional
         The name of the etrace algorithm.
     mode : braintrace.mixin.Mode, optional
@@ -712,7 +713,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     Jacobian, and :math:`\mathbf{x}^t` the presynaptic input.
 
     :math:`\mathbf{D}_f^t` is read off by
-    :meth:`~braintrace._algorithm.vjp_graph_executor.ETraceVjpGraphExecutor._compute_hid2weight_jacobian`
+    ``ETraceVjpGraphExecutor._compute_hid2weight_jacobian``
     from a single all-ones-tangent ``jax.jvp`` of the ``y -> hidden`` map; see
     that method's docstring for when this is exact (elementwise maps) versus
     an approximation (non-elementwise maps, e.g. a normalization layer
@@ -844,7 +845,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         """Initialize the eligibility trace states of the etrace algorithm.
 
         This method is needed after compiling the etrace graph. See
-        :meth:`compile_graph` for the details.
+        :meth:`~braintrace.ETraceAlgorithm.compile_graph` for the details.
         """
         # The states of weight spatial gradients:
         #   1. x

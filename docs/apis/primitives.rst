@@ -19,7 +19,7 @@ machinery.
 
 
 Registration
------------
+------------
 
 Call :func:`register_primitive` to obtain an :class:`ETPPrimitive`, then attach
 the four ETP rules via its ``register_*`` methods (or all at once with
@@ -38,8 +38,8 @@ compiler:
 * ``y_outvar_index`` — position of the output ``y`` in ``eqn.outvars``.
 
 The call populates the four global rule registries
-(:data:`ETP_RULES_DT_TO_T`, :data:`ETP_RULES_XY_TO_DW`,
-:data:`ETP_RULES_INIT_DRTRL`, :data:`ETP_RULES_INIT_PP`) and returns a
+(``ETP_RULES_DT_TO_T``, ``ETP_RULES_XY_TO_DW``,
+``ETP_RULES_INIT_DRTRL``, ``ETP_RULES_INIT_PP``) and returns a
 fully-functional :class:`ETPPrimitive`.
 
 
@@ -95,7 +95,7 @@ algorithms look up the rule for a primitive at compile time.
      - pp_prop / ES-D-RTRL trace initialiser. Returns a zero array shaped to
        hold the IO-dim trace.
 
-The four registries live in :mod:`braintrace._op` and are populated by
+The four registries live in ``braintrace._op`` and are populated by
 :func:`register_primitive`.
 
 

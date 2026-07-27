@@ -194,8 +194,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
     The term ``VJP`` comes from two aspects. First, this module is designed to be
     compatible with JAX's VJP mechanism, so the gradient is computed according to the
-    reverse-mode differentiation interface, like :func:`jax.grad`, :func:`jax.vjp`, or
-    :func:`jax.jacrev`. The true update function is defined as a custom VJP function
+    reverse-mode differentiation interface, like ``jax.grad``, ``jax.vjp``, or
+    ``jax.jacrev``. The true update function is defined as a custom VJP function
     ``._true_update_fun()``, which receives the inputs, the hidden states, other states,
     and etrace variables at the last time step, and returns the outputs, the hidden
     states, other states, and etrace variables at the current time step. Second, the
@@ -222,7 +222,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
-        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
+        ``ControlFlowPolicy()``.
 
     Notes
     -----
@@ -581,9 +581,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             The input arguments.
         modulator : array_like or Quantity, optional
             The per-call modulatory signal for ``learning_signal='modulatory'``,
-            taking precedence over the :attr:`modulator` attribute for this call
+            taking precedence over the ``modulator`` attribute for this call
             only. It is **not** forwarded to the model's forward call; it reaches
-            the rule through :meth:`_get_update_aux`. Ignored on every other
+            the rule through ``_get_update_aux``. Ignored on every other
             ``learning_signal``.
 
         Returns

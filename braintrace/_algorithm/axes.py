@@ -613,7 +613,7 @@ class ETraceConfig:
     def include_recurrent_mixing(self) -> bool:
         """Whether the compiler should trace hidden-to-hidden ETP mixing.
 
-        The graph executor's spelling of :attr:`recurrence_scope`.
+        The graph executor's spelling of ``recurrence_scope``.
 
         ``True`` for both non-diagonal scopes: ``'coupled'`` needs the coupled
         transition to take its per-position block diagonal, and ``'sparse_n'``

@@ -33,6 +33,21 @@ graph object it returns.
    ETraceGraph
 
 
+Control-Flow Policy
+-------------------
+
+:class:`ControlFlowPolicy` configures compiler handling of JAX control-flow
+primitives, including conditional conversion, scan unrolling, and structured
+scan descent.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   ControlFlowPolicy
+
+
 Module Info
 -----------
 

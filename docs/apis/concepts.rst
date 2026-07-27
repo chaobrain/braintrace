@@ -103,14 +103,8 @@ Eligibility Trace State
 -----------------------
 
 The state object that stores the eligibility trace carried forward across time
-steps during online learning.
-
-.. autosummary::
-   :toctree: generated/
-   :nosignatures:
-   :template: classtemplate.rst
-
-   EligibilityTrace
+steps during online learning is :class:`EligibilityTrace`. Its canonical API
+page is indexed with the online-learning algorithms that create and update it.
 
 
 Gradient Utilities

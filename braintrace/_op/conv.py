@@ -820,7 +820,7 @@ def conv(
     Computes :math:`y = \mathrm{conv}(x, kernel) \; (+ b)` by routing the
     kernel (and optional bias) through an ETP primitive so they participate
     in eligibility-trace computation. The full keyword surface of
-    :func:`jax.lax.conv_general_dilated` is preserved. Always expects a
+    ``jax.lax.conv_general_dilated`` is preserved. Always expects a
     batch dimension on ``x``.
 
     Parameters

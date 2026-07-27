@@ -954,8 +954,9 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     r"""Online gradient algorithm with diagonal approximation and parameter-dimension complexity.
 
     This algorithm computes the gradients of the weights with the diagonal
-    approximation and the parameter-dimension complexity. It is based on the RTRL
-    algorithm (Real-Time Recurrent Learning).
+    approximation and the parameter-dimension complexity. It implements the
+    linear-memory estimator of Wang et al. [1]_ on the RTRL foundation of
+    Williams and Zipser [2]_.
 
     Parameters
     ----------
@@ -992,7 +993,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
-        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
+        ``ControlFlowPolicy()``.
     name : str, optional
         The name of the etrace algorithm.
     mode : braintrace.mixin.Mode, optional
@@ -1016,7 +1017,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     signal back-propagated from the loss at each step.
 
     :math:`\mathbf{D}_f^t` is read off by
-    :meth:`~braintrace._algorithm.vjp_graph_executor.ETraceVjpGraphExecutor._compute_hid2weight_jacobian`
+    ``ETraceVjpGraphExecutor._compute_hid2weight_jacobian``
     from a single all-ones-tangent ``jax.jvp`` of the ``y -> hidden`` map; see
     that method's docstring for when this is exact (elementwise maps) versus
     an approximation (non-elementwise maps, e.g. a normalization layer
@@ -1152,7 +1153,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         """Initialize the eligibility trace states of the etrace algorithm.
 
         This method is needed after compiling the etrace graph. See
-        :meth:`compile_graph` for the details.
+        :meth:`~braintrace.ETraceAlgorithm.compile_graph` for the details.
         """
         # The states of batched weight gradients
         self.etrace_bwg = dict()

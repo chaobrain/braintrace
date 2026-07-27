@@ -57,7 +57,8 @@ __all__ = ['SnAp']
 class SnAp(ParamDimVjpAlgorithm):
     r"""Sparse n-step Approximation of RTRL.
 
-    RTRL carries the full influence matrix
+    SnAp-:math:`n` [1]_ sparsifies the full influence matrix carried by RTRL
+    [2]_. In the unapproximated construction, RTRL carries
     :math:`\mathbf{J}^t_{q,\theta} = \partial h^t_q / \partial \theta` and rolls
     it with
 

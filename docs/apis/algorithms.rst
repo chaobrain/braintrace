@@ -188,6 +188,43 @@ sparse.
    SnAp
 
 
+UORO - Random-projection estimator
+----------------------------------
+
+:class:`UORO` carries a rank-one random projection of the full recurrent
+Jacobian. The projection is an unbiased estimator of the RTRL trace, trading
+variance for linear carrier storage. :class:`RandomProjectionVjpAlgorithm` is
+the shared engine for algorithms that use this factorization.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   RandomProjectionVjpAlgorithm
+   UORO
+
+
+Three-Factor And Bootstrapped Signals
+-------------------------------------
+
+:class:`ThreeFactor` replaces the symmetric hidden-state learning signal with
+a user-supplied modulatory signal. :class:`DNI` uses a learned synthetic
+gradient to carry credit across finite online windows;
+:class:`SyntheticGradient` is its predictor module, and
+:func:`train_synthetic_gradient` updates that predictor.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   ThreeFactor
+   DNI
+   SyntheticGradient
+   train_synthetic_gradient
+
+
 SNN Online-Learning Algorithms
 ------------------------------
 
