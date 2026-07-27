@@ -260,10 +260,9 @@ class ModuleInfo(NamedTuple):
         discovery, hidden perturbation) consult this same policy so opaque
         control-flow handling is consistent across the whole compilation.
 
-        See Also
-        --------
-        braintrace._compiler.scan_descent : Structured descent of
-            ETP-relevant scans above the unroll limit (Phase 4).
+        Structured descent of ETP-relevant scans above the unroll limit is
+        implemented by the internal ``braintrace._compiler.scan_descent``
+        module.
 
     See Also
     --------
@@ -519,8 +518,8 @@ def extract_module_info(
         The positional arguments of the model.
     control_flow : ControlFlowPolicy or None, optional
         Policy governing control-flow canonicalization (``cond``
-        if-conversion and inner-``scan`` unrolling; see
-        :func:`~braintrace._compiler.canonicalize.canonicalize_control_flow`)
+        if-conversion and inner-``scan`` unrolling; see the internal
+        ``canonicalize_control_flow`` helper)
         and downstream handling of un-flattened control flow. ``None``
         (default) uses the default policy, which converts every ETP-relevant
         ``cond``, unrolls every ETP-relevant ``scan`` of static length at

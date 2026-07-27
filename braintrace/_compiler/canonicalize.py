@@ -90,9 +90,9 @@ class ControlFlowPolicy:
         warning).
     scan_unroll_limit : int, optional
         Maximum static length of an ETP-relevant inner ``scan`` that
-        :func:`unroll_inner_scans` unrolls into flat equations. Longer (or
+        ``unroll_inner_scans`` unrolls into flat equations. Longer (or
         effectful, or ``while``-containing) scans stay opaque with a
-        :attr:`~braintrace.DiagnosticKind.SCAN_UNROLL_SKIPPED` warning, and
+        ``DiagnosticKind.SCAN_UNROLL_SKIPPED`` warning, and
         the existing control-flow restrictions apply. ``0`` (or negative)
         disables unrolling entirely. Default ``16``.
     while_hidden : str, optional
@@ -103,7 +103,7 @@ class ControlFlowPolicy:
         whole equation is embedded in the hidden-to-hidden transition and
         its Jacobian is extracted in forward mode (``while`` has no
         reverse-mode rule), recorded as a
-        :attr:`~braintrace.DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD` INFO
+        ``DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD`` INFO
         diagnostic. ``'error'`` restores the pre-opaque-forward behaviour of
         raising ``NotImplementedError``.
     etp_in_control_flow : str, optional
@@ -112,7 +112,7 @@ class ControlFlowPolicy:
         raises ``NotImplementedError`` — that weight would otherwise
         silently drop out of online learning. ``'exclude'`` restores the
         previous behaviour of a loud warning
-        (:attr:`~braintrace.DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW`)
+        (``DiagnosticKind.PRIMITIVE_INSIDE_CONTROL_FLOW``)
         plus exclusion of the weight from ETP relations.
     scan_descent : str, optional
         How ETP-relevant scans too long to unroll are handled. ``'auto'``
@@ -145,8 +145,8 @@ class ControlFlowPolicy:
     For branches whose values and Jacobians are finite, the canonicalized
     jaxpr is exact in both value and derivative. Branches with effects,
     containing ``while``, or containing a ``scan`` that
-    :func:`unroll_inner_scans` could not unroll, are never converted (see
-    :func:`if_convert_conds`). Scan unrolling itself has no semantics
+    ``unroll_inner_scans`` could not unroll, are never converted (see
+    ``if_convert_conds``). Scan unrolling itself has no semantics
     change: the unrolled equations compute exactly what the loop computed.
 
     Examples

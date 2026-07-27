@@ -84,7 +84,7 @@ class ETraceGraphExecutor:
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
-        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
+        ``ControlFlowPolicy()``.
     """
     __module__ = 'braintrace'
 

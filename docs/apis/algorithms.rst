@@ -170,6 +170,61 @@ it does not allocate multiple rank factors.
 ``ES_D_RTRL`` is an alias for :class:`pp_prop`.
 
 
+SnAp — Sparse n-step RTRL approximation
+---------------------------------------
+
+:class:`SnAp` retains the recurrent influence entries reachable within an
+``n``-step position neighbourhood. It interpolates from the coupled,
+within-position scope at ``n=1`` toward full within-group RTRL as the
+neighbourhood saturates. Dense recurrence therefore saturates immediately;
+the method is most useful when the recurrent position graph is structurally
+sparse.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   SnAp
+
+
+UORO - Random-projection estimator
+----------------------------------
+
+:class:`UORO` carries a rank-one random projection of the full recurrent
+Jacobian. The projection is an unbiased estimator of the RTRL trace, trading
+variance for linear carrier storage. :class:`RandomProjectionVjpAlgorithm` is
+the shared engine for algorithms that use this factorization.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   RandomProjectionVjpAlgorithm
+   UORO
+
+
+Three-Factor And Bootstrapped Signals
+-------------------------------------
+
+:class:`ThreeFactor` replaces the symmetric hidden-state learning signal with
+a user-supplied modulatory signal. :class:`DNI` uses a learned synthetic
+gradient to carry credit across finite online windows;
+:class:`SyntheticGradient` is its predictor module, and
+:func:`train_synthetic_gradient` updates that predictor.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   ThreeFactor
+   DNI
+   SyntheticGradient
+   train_synthetic_gradient
+
+
 SNN Online-Learning Algorithms
 ------------------------------
 
@@ -225,6 +280,10 @@ Algorithm Comparison
      - depends on regime
      - depends on regime
      - ``OSTLRecurrent`` ('with-H', D-RTRL) keeps the recurrent Jacobian; ``OSTLFeedforward`` ('without-H', pp_prop) drops it.
+   * - ``SnAp``
+     - depends on the retained ``n``-step neighbourhood
+     - depends on recurrent graph sparsity and ``n``
+     - Recurrent position graphs whose structural sparsity remains useful over the requested neighbourhood.
 
 Each name above is a thin factory over an :class:`ETraceConfig`; the axes that
 distinguish them are:
@@ -246,9 +305,10 @@ distinguish them are:
      - ``recurrence_scope='coupled'``
    * - ``OSTLFeedforward``
      - ``trace_factorization='io_factorized'``, ``decay=1e-6`` (by default)
+   * - ``SnAp``
+     - ``recurrence_scope='sparse_n'``, ``sparse_n=n``
 
 Because these are coordinates rather than classes, the axes compose beyond the
 named presets — random feedback on the :math:`O(I+O)` trace, or a coupled
 recurrence scope with an ``io_factorized`` factorization, are both reachable
 even though no preset spells them.
-

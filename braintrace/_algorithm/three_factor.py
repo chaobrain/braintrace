@@ -63,7 +63,7 @@ class ThreeFactor(ParamDimVjpAlgorithm):
     spelling: binding the signal to the hidden-group decomposition, whose size is
     a property of the compiled graph rather than of the task, is what made OSTTP
     non-general. Expansion follows
-    :func:`~braintrace._algorithm.vjp_base.expand_modulator_to_group` -- shape
+    ``expand_modulator_to_group`` -- shape
     driven, never group indexed.
 
     **Single-step only, and it raises otherwise.** Under multi-step,
@@ -86,7 +86,7 @@ class ThreeFactor(ParamDimVjpAlgorithm):
         Must be ``'single-step'`` (the default); anything else raises.
     modulator : array_like or Quantity, optional
         The initial standing modulator, equivalent to assigning
-        :attr:`~braintrace._algorithm.vjp_base.ETraceVjpAlgorithm.modulator`
+        ``ETraceVjpAlgorithm.modulator``
         after construction. A scalar, an array shaped like a group's
         ``varshape``, or an array broadcastable to ``(*varshape, num_state)``.
         Leaving it ``None`` is fine as long as one is supplied before the first

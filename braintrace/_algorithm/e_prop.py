@@ -47,10 +47,10 @@ __all__ = ['EProp']
 class EProp(ParamDimVjpAlgorithm):
     r"""Eligibility Propagation (e-prop) for recurrent spiking networks.
 
-    E-prop approximates the gradient of a loss :math:`\mathcal{L}` with respect
-    to a recurrent weight :math:`W_{ji}` by the product of a *local* eligibility
-    trace and a *global* learning signal, dropping the temporally non-local
-    terms of BPTT:
+    E-prop [1]_ approximates the gradient of a loss :math:`\mathcal{L}` with
+    respect to a recurrent weight :math:`W_{ji}` by the product of a *local*
+    eligibility trace and a *global* learning signal, dropping the temporally
+    non-local terms of BPTT:
 
     .. math::
 
