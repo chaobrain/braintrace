@@ -420,31 +420,26 @@ class OnlineTrainer(Trainer):
             loss = braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean()
             return loss, out
 
-        def _etrace_step(prev_grads, x):
-            # no need to return weights and states, since they are generated then no longer needed
-            f_grad = brainstate.transform.grad(_etrace_grad, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, out = f_grad(x)
-            next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-            return next_grads, (out, local_loss)
-
         def _etrace_train(inputs_):
-            # forward propagation
-            grads = jax.tree.map(u.math.zeros_like, weights.to_dict_values())
-            grads, (outs, losses) = brainstate.transform.scan(_etrace_step, grads, inputs_)
-            # gradient updates. The scan *sums* the per-step gradients, but the
-            # optimised/reported objective is ``losses.mean()`` — so divide by the
-            # number of accumulated steps to make the update the gradient of that
-            # mean (the scale BPTT differentiates). A global-norm clip to 1.0 here
-            # instead couples every parameter (the large recurrent eligibility
-            # trace dominates the norm and starves the small readout gradient),
+            # ``reduction='mean'`` is the correction this used to write by hand:
+            # accumulating per-step gradients sums them, while the
+            # optimised/reported objective is the per-step mean, so the update
+            # has to be divided by the number of accumulated steps to sit at the
+            # scale BPTT differentiates. A global-norm clip to 1.0 here instead
+            # couples every parameter (the large recurrent eligibility trace
+            # dominates the norm and starves the small readout gradient),
             # pinning accuracy at chance.
-            grads = jax.tree.map(lambda g: g / losses.shape[0], grads)
+            grads, losses, outs = model.etrace_grad(
+                inputs_, step_fn=_etrace_grad, reduction='mean',
+                has_aux=True, return_value=True)
             self.opt.update(grads)
             # accuracy
             return losses.mean(), outs
 
+        # Free-run the prefix: hidden states and the eligibility trace advance,
+        # no loss is computed.
         if self.n_sim > 0:
-            brainstate.transform.for_loop(lambda inp: model(inp), inputs[:self.n_sim])
+            model.etrace_evolve(inputs[:self.n_sim])
         loss, outs = _etrace_train(inputs[self.n_sim:])
 
         # returns

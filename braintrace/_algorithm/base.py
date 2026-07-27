@@ -27,6 +27,7 @@ import brainstate
 
 from braintrace._compiler import ETraceGraph, CompilationReport
 from .graph_executor import ETraceGraphExecutor
+from .sequence import SequenceDriverMixin
 from .._typing import Path
 
 __all__ = [
@@ -58,7 +59,7 @@ class EligibilityTrace(brainstate.ShortTermState):
     __module__ = 'braintrace'
 
 
-class ETraceAlgorithm(brainstate.nn.Module):
+class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
     r"""
     The base class for the eligibility trace algorithm.
 
@@ -216,6 +217,21 @@ class ETraceAlgorithm(brainstate.nn.Module):
             self._split_state()
         assert self._other_states is not None
         return self._other_states
+
+    @property
+    def _seq_param_states(self) -> brainstate.util.FlattedDict:
+        """Sequence-driver hook: the default set of weights to differentiate."""
+        return self.param_states
+
+    @property
+    def _seq_vjp_method(self) -> Optional[str]:
+        """Sequence-driver hook: this learner's ``vjp_method``, or ``None``.
+
+        ``None`` means the subclass declares no VJP unrolling mode, which the
+        driver treats as "windowing support unverified" and refuses -- rather
+        than assuming multi-step. Every shipped algorithm sets the attribute.
+        """
+        return getattr(self, 'vjp_method', None)
 
     def _split_state(self) -> None:
         # --- the state separation --- #

@@ -75,18 +75,14 @@ def main(*, n_epochs: int = 20, batch_size: int = 16, plot: bool = True) -> dict
 
     def step_loss(inp, tar):
         out = om(inp)
-        return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean(), out
-
-    def grad_step(prev_grads, pair):
-        inp, tar = pair
-        f_grad = brainstate.transform.grad(step_loss, w_online, has_aux=True, return_value=True)
-        cur_grads, loss, _ = f_grad(inp, tar)
-        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), loss
+        return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean()
 
     @brainstate.transform.jit
     def online_step(inputs, targets):
-        init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in w_online.items()})
-        grads, step_losses = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
+        # reduction='sum' preserves the accumulated-gradient scale this example
+        # was tuned at; the reported loss stays the per-step mean.
+        grads, step_losses = om.etrace_grad(
+            inputs, targets, step_fn=step_loss, reduction='sum', return_value=True)
         opt_online.update(grads)
         return step_losses.mean()
 

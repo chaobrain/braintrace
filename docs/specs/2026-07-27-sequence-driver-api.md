@@ -90,11 +90,16 @@ Six probes, run against the baseline commit. The first three use a small
 | P5 | grep for `MultiStepData` across `examples/` | **zero hits** — windowed driving is unexercised in the repo; `05-vjp-multi-step.py` uses `vjp_method='multi-step'` with single-step driving |
 | P6 | gradient unit vs parameter unit for a `u.mA`-valued `braintrace.nn.Linear` weight | gradient is **also `mA`**; `zeros_like(param) + grad` succeeds |
 
-And one read of the existing public API, which fixes this spec's encoding:
+And two more, established while building the driver:
 
 | # | fact | source |
 | --- | --- | --- |
 | P7 | `chunk_size` is **already** the public name for this quantity, and **`chunk_size=1` already means the plain single-step path** — `_as_window` returns `seq[0]` unwrapped at 1 and `MultiStepData(seq)` above it | `dni.py:410` (`train_synthetic_gradient(..., chunk_size: int = 1)`), `dni.py:663-667`; also `oracle.py:145` |
+| P8 | with a fitted DNI synthesizer attached, `reduction='mean'` equals `reduction='sum'` divided by `T` **exactly** (`|mean − sum/T| = 0`), while a synthesizer fit at `chunk_size=1` and deployed at `chunk_size=2` moves the gradient 1.9% relative | measured against the implementation; see "DNI" below |
+| P9 | a model whose ETP op receives an *unbatched* input while its hidden state is batched has a trace state that changes shape on first `update()` (e.g. `(3,4,2) → (1,3,4,2)`), so it cannot be driven under `scan`/`for_loop` **at all** — the hand-written block fails identically | `oracle_models.unit_weight_rnn` under `D_RTRL`; verified the status-quo block fails the same way |
+| P10 | a `step_fn` that raises mid-loop leaves the learner **untouched**, not partially advanced: `running_index` stayed `0` and the hidden state was unchanged after an exception at step 3, and the learner was still usable | measured on a real learner; functional `scan` semantics — see "State lifecycle" |
+| P11 | `compile(vmap=True)` cannot batch a model that allocates its `HiddenState` in `__init__` (`BatchAxisError` on the first call); the fixture must defer state creation to `init_state`, as `braintrace.nn.ValinaRNNCell` does | `oracle_models.tanh_rnn` fails; `ValinaRNNCell` + a plain readout works |
+| P12 | under `vjp_method='single-step'` every **plain** (non-ETP) parameter's gradient is exactly zero (F-33), so any fixture asserting on a plain key must run `'multi-step'` or the assertion is vacuous | `docs/specs/2026-07-25-known-limitations.md` F-33; reproduced through the driver (`win` = `0.0` vs BPTT `0.65`) |
 
 Consequences, all load-bearing below:
 
@@ -431,11 +436,17 @@ Both methods are **continuations, not sessions**:
 - `running_index` advances once per `update()` call, i.e. `T` times in plain
   mode and `T // k` times under window mode. This asymmetry is the subject of
   the F-30 interaction below.
-- **On failure, state is not restored.** A `step_fn` that raises mid-`scan`
-  leaves the learner partially advanced, because `brainstate.transform.scan`
-  writes state as it goes. Callers who need transactional behaviour snapshot
-  state themselves. The driver does not add a rollback, which would mean copying
-  every trace state on every call.
+- **On failure, state is left untouched.** A `step_fn` that raises mid-loop
+  aborts before anything is written back: the body is traced into a functional
+  `brainstate.transform.scan`, so state reaches the learner only when the whole
+  transform completes. Measured — an exception at step 3 of a real learner left
+  `running_index == 0` and the hidden state unchanged, and the learner was
+  still usable afterwards.
+
+  This is the opposite of the draft's claim that the learner is left
+  "partially advanced", which assumed the scan wrote state as it went. The
+  driver needs no rollback to get transactional behaviour; it inherits it.
+  (P10)
 
 ### Masking and the trace
 
@@ -548,9 +559,23 @@ F-35 records that a `train_synthetic_gradient` fit is valid only for the exact
 deployment matches**, and that a mismatch is not degraded DNI but noise shaped
 like a cotangent — measurably worse than leaving DNI off.
 
-This driver adds new ways to mismatch, because it introduces `reduction`, `mask`
-and `loss_output` between the user's `step_fn` and the objective the synthesizer
-was fit against. The correspondence, which the docstrings must state:
+The driver's new parameters are **not** all new ways to mismatch, and an earlier
+draft of this section was wrong about which are. Measured (P8): with a fitted
+synthesizer attached, `reduction='mean'` and `reduction='sum'` differ by exactly
+`1/T` — `|mean − sum/T| = 0`, not merely small. `reduction` divides the
+*accumulated* gradient after the scan; it never enters the differentiated
+objective, so it cannot desynchronize a synthesizer. It is a learning-rate
+rescale, not an F-35 surface.
+
+What does remain an F-35 surface:
+
+- **`chunk_size`**, the documented one. Measured (P8): a synthesizer fit at
+  `chunk_size=1` and deployed at `chunk_size=2` moves the gradient by 1.9%
+  relative against one fit at `chunk_size=2`.
+- **`mask`**, which *does* enter the differentiated objective — a zero-weighted
+  step changes the loss the synthesizer's cotangent is predicting the future of.
+
+The correspondence, which the docstrings must state:
 
 | `train_synthetic_gradient` | `etrace_grad` |
 | --- | --- |
@@ -564,15 +589,17 @@ its own (P7). A user who reads "match the `chunk_size` you fit with" and types
 the same number is correct, with no mental mapping at the exact point where
 being wrong is silent.
 
-The trap specific to this driver: fitting against a plain summed loss and then
-deploying with `reduction='mean'` rescales the cotangent by `1/sum(mask)`, and a
-`mask` that was not present during fitting changes which steps contribute at all.
-Both are F-35 mismatches wearing new clothes.
+The trap specific to this driver is therefore a `mask` that was not present
+during fitting: it changes which steps contribute to the objective at all, so
+the synthesizer's cotangent predicts the future of a loss that is no longer the
+one being descended. That is an F-35 mismatch wearing new clothes.
 
 The driver does not enforce the match — per F-35 the learner never sees the
-caller's objective — but `dni_test.py` gains a driver-level case in the shape of
-`TestALearnedSynthesiserHelps::test_training_on_the_wrong_window_size_is_worse_than_not_training`,
-covering a `reduction` mismatch introduced through `etrace_grad`.
+caller's objective. `sequence_test.py` pins both halves: that a `chunk_size`
+mismatch moves the gradient, and that `reduction` does **not** — the latter being
+the more valuable regression, since moving the reduction inside the
+differentiated objective would be a natural-looking refactor that silently
+breaks DNI.
 
 ## Declared limitations
 
@@ -680,8 +707,8 @@ before the loop runs.
 | `reduction` / `loss_output` not a legal value | `ValueError` listing the legal ones |
 | `has_aux=True` and `step_fn` returns a non-pair | error from the underlying `grad`, not silently mis-unpacked |
 | all-zero `mask` | zero gradients **for finite, differentiable step losses**; the `max(mask.sum(), 1)` denominator prevents division by zero but cannot prevent `0 · NaN = NaN`, nor a NaN arriving through a zero cotangent on an undefined derivative |
-| `step_fn` raises mid-loop | propagates; learner left partially advanced (see State lifecycle) |
-| learner not compiled | the existing `RuntimeError` from `_assert_compiled` |
+| `step_fn` raises mid-loop | propagates; learner state **untouched** — the functional `scan` never writes back (see State lifecycle) |
+| learner not compiled | the existing `ValueError` (`"The etrace algorithm has not been compiled"`); the driver adds no guard of its own |
 
 ## Test plan
 

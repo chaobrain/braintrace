@@ -76,6 +76,7 @@ from ._algorithm import (
     ETraceAlgorithm,
     EligibilityTrace,
     ETraceGraphExecutor,
+    ETraceVmap,
     ETraceVjpAlgorithm,
     ETraceVjpGraphExecutor,
     ParamDimVjpAlgorithm,
@@ -165,6 +166,7 @@ __all__ = [
     # algorithms
     'ETraceAlgorithm',
     'EligibilityTrace',
+    'ETraceVmap',
     'ETraceVjpAlgorithm',
     'ETraceVjpGraphExecutor',
     'ParamDimVjpAlgorithm',

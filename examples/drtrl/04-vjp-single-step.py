@@ -43,23 +43,18 @@ def main(*, n_epochs: int = 50, batch_size: int = 32, plot: bool = True) -> dict
 
     def step_loss(inp, tar):
         out = online(inp)
-        return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean(), out
-
-    def grad_step(prev_grads, pair):
-        inp, tar = pair
-        f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
-        cur_grads, local_loss, _ = f_grad(inp, tar)
-        return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
+        return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean()
 
     warmup_len = time_lag + 20 - 10  # seq_length - output_window
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        brainstate.transform.for_loop(lambda inp: online(inp), inputs[:warmup_len])
-        init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
-        grads, step_losses = brainstate.transform.scan(
-            grad_step, init_grads, (inputs[warmup_len:], targets)
-        )
+        # Free-run the prefix: hidden states and the eligibility trace advance,
+        # no loss is computed. etrace_grad then continues from that state.
+        online.etrace_evolve(inputs[:warmup_len])
+        grads, step_losses = online.etrace_grad(
+            inputs[warmup_len:], targets, step_fn=step_loss,
+            reduction='sum', return_value=True)
         opt.update(grads)
         return step_losses.mean()
 

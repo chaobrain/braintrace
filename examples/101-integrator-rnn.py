@@ -156,28 +156,15 @@ def train_online(n_epochs=5, num_batch=512, num_hidden=100, n_batches_per_epoch=
             l2 = sum(jnp.sum(leaf ** 2) for leaf in jax.tree.leaves(
                 {k: v.value for k, v in weights.items()}
             ))
-            return mse + l2_reg * l2, out
+            return mse + l2_reg * l2
 
-        # Accumulate gradients over timesteps
-        def grad_step(prev_grads, x):
-            inp, tar = x
-            f_grad = brainstate.transform.grad(
-                step_loss, weights, has_aux=True, return_value=True
-            )
-            cur_grads, local_loss, out = f_grad(inp, tar)
-            next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-            return next_grads, local_loss
-
-        # Initialize gradient accumulators to zeros
-        grads = jax.tree.map(
-            lambda a: jnp.zeros_like(a),
-            {k: v.value for k, v in weights.items()}
-        )
-
-        # Scan over all timesteps, accumulating online gradients
-        grads, step_losses = brainstate.transform.scan(
-            grad_step, grads, (inputs, targets)
-        )
+        # Accumulate online gradients over the sequence. The L2 term lives
+        # inside step_loss and needs no special handling: step_fn owns the
+        # model call, so any objective expressible in Python is expressible
+        # here. reduction='sum' preserves the gradient scale this example was
+        # tuned at; the reported loss stays the per-step mean.
+        grads, step_losses = vmap_model.etrace_grad(
+            inputs, targets, step_fn=step_loss, reduction='sum', return_value=True)
 
         # Update weights
         opt.update(grads)

@@ -45,19 +45,14 @@ def _grad_run(model, weights, inputs, targets, *, fast_solve: bool):
 
     def step_loss(inp, tar):
         out = online(inp)
-        return braintools.metric.squared_error(out, tar).mean(), out
-
-    def grad_step(prev_grads, pair):
-        inp, tar = pair
-        f = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
-        cur, l, _ = f(inp, tar)
-        return jax.tree.map(lambda a, b: a + b, prev_grads, cur), l
+        return braintools.metric.squared_error(out, tar).mean()
 
     @brainstate.transform.jit
     def f_grad(inputs, targets):
-        init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
-        grads, _ = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
-        return grads
+        # reduction='sum': this knob comparison is about the solve path, so the
+        # gradient scale must stay exactly what it was.
+        return online.etrace_grad(
+            inputs, targets, step_fn=step_loss, reduction='sum')
 
     return f_grad(inputs, targets)
 
