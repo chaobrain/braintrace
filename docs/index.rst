@@ -170,7 +170,7 @@ differentiable ecosystem for full-scale brain simulation.
    :caption: Get started
 
    quickstart/installation.ipynb
-   quickstart/quickstart
+   quickstart/quickstart.ipynb
    quickstart/concepts.ipynb
 
 

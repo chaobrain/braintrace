@@ -47,15 +47,22 @@ def _reader_text(notebook: dict) -> str:
     return "\n".join(chunks)
 
 
-def test_quickstart_stores_and_references_loss_figure():
-    source = (_DOCS / "quickstart" / "quickstart.rst").read_text(encoding="utf-8")
-    image = _DOCS / "_static" / "quickstart_loss.png"
+def test_quickstart_stores_native_notebook_loss_evidence():
+    notebook = _notebook("quickstart", "quickstart")
+    source = _code_source(notebook)
+    text = _reader_text(notebook)
+    png_outputs = [
+        output
+        for output in _outputs(notebook)
+        if "image/png" in output.get("data", {})
+    ]
 
-    assert ".. image:: /_static/quickstart_loss.png" in source
-    assert image.stat().st_size > 1_000
-    assert 'fig.savefig("quickstart_loss.png"' in source
-    assert "initial loss:" in source
-    assert "final loss:" in source
+    assert "fig.savefig" not in source
+    assert "plt.show()" in source
+    assert "initial loss:" in text
+    assert "final loss:" in text
+    assert len(png_outputs) == 1
+    assert not (_DOCS / "_static" / "quickstart_loss.png").exists()
 
 
 def test_core_concepts_stores_online_and_bptt_results():

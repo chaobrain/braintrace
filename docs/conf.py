@@ -137,8 +137,6 @@ html_last_updated_fmt = ""
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
-html_css_files = ["css/braintrace-docs.css"]
-html_js_files = ["js/tutorial-groups.js"]
 nb_execution_mode = "off"
 thebe_config = {
     "repository_url": "https://github.com/binder-examples/jupyter-stacks-datascience",

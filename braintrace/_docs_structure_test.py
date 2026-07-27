@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import re
-import textwrap
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -79,16 +78,14 @@ def test_installation_and_homepage_use_concise_platform_commands():
 
 def test_current_tutorial_titles_are_concise_and_consistent():
     homepage = (_DOCS / "index.rst").read_text(encoding="utf-8")
-    quickstart = (_DOCS / "quickstart" / "quickstart.rst").read_text(
-        encoding="utf-8"
-    )
+    quickstart = _all_source(_DOCS / "quickstart" / "quickstart.ipynb")
     etp = _all_source(_DOCS / "tutorials" / "etp_primitives.ipynb")
     concepts = _all_source(_DOCS / "quickstart" / "concepts.ipynb")
     transforms = _all_source(
         _DOCS / "tutorials" / "customizing_primitive_transforms.ipynb"
     )
 
-    assert quickstart.splitlines()[0] == "Quickstart"
+    assert quickstart.splitlines()[0] == "# Quickstart"
     assert "Five-minute Quickstart" not in homepage
     assert "Quickstart" in homepage
     assert etp.splitlines()[0] == "# ETP Primitives"
@@ -104,7 +101,7 @@ def test_root_navigation_exposes_the_learning_path():
     expected = (
         ":caption: Get started",
         "quickstart/installation.ipynb",
-        "quickstart/quickstart",
+        "quickstart/quickstart.ipynb",
         "quickstart/concepts.ipynb",
         ":caption: Tutorial",
         "quickstart/rnn_online_learning.ipynb",
@@ -180,29 +177,14 @@ def test_learning_map_is_accessible_and_complete():
         assert f">{number}<" in source
 
 
-def test_tutorial_groups_are_progressive_enhancement():
+def test_docs_use_native_theme_navigation_without_custom_assets():
     conf = (_DOCS / "conf.py").read_text(encoding="utf-8")
-    script = (_DOCS / "_static" / "js" / "tutorial-groups.js").read_text(
-        encoding="utf-8"
-    )
 
-    assert '"css/braintrace-docs.css"' in conf
-    assert '"js/tutorial-groups.js"' in conf
-    assert "Training workflows" in script
-    assert "Algorithm tutorials" in script
-    assert "Compiler & runtime" in script
-    for filename in (
-        "rnn_online_learning.html",
-        "snn_online_learning.html",
-        "drtrl.html",
-        "pp_prop.html",
-        "customizing_primitive_transforms.html",
-        "hidden_states.html",
-        "graph_visualization.html",
-        "batching.html",
-    ):
-        assert filename in script
-    assert "etp_primitives.html" not in script
+    assert "html_static_path" in conf
+    assert "html_css_files" not in conf
+    assert "html_js_files" not in conf
+    assert not (_DOCS / "_static" / "css" / "braintrace-docs.css").exists()
+    assert not (_DOCS / "_static" / "js" / "tutorial-groups.js").exists()
 
 
 def test_sphinx_uses_current_notebook_options_and_excludes_internal_specs():
@@ -216,7 +198,8 @@ def test_sphinx_uses_current_notebook_options_and_excludes_internal_specs():
 
 
 def test_quickstart_has_current_reproducible_online_learning_primitives():
-    source = (_DOCS / "quickstart" / "quickstart.rst").read_text(encoding="utf-8")
+    notebook = _DOCS / "quickstart" / "quickstart.ipynb"
+    source = _all_source(notebook)
 
     for required in (
         "brainstate.random.seed",
@@ -231,27 +214,19 @@ def test_quickstart_has_current_reproducible_online_learning_primitives():
     assert "jax.random" not in source
     assert "jax.lax.scan" not in source
     assert "online_scan" not in source
+    assert "fig.savefig" not in source
     assert not re.search(r"^\s*for\s+\w+\s+in\s+range\(", source, re.MULTILINE)
+    assert notebook.exists()
+    assert not (_DOCS / "quickstart" / "quickstart.rst").exists()
+    assert not (_DOCS / "_static" / "quickstart_loss.png").exists()
 
 
-def test_quickstart_executes_and_reduces_loss(capsys, monkeypatch, tmp_path):
-    source = (_DOCS / "quickstart" / "quickstart.rst").read_text(encoding="utf-8")
-    directive = source.index(".. code-block:: python")
-    indented = source[directive:].splitlines()[2:]
-    code_lines = []
-    for line in indented:
-        if line.startswith("   ") or not line:
-            code_lines.append(line)
-        else:
-            break
-
-    monkeypatch.chdir(tmp_path)
-    exec(compile(textwrap.dedent("\n".join(code_lines)), "quickstart.rst", "exec"), {})
+def test_quickstart_executes_and_reduces_loss(capsys):
+    _execute_notebook_code(_DOCS / "quickstart" / "quickstart.ipynb")
     output = capsys.readouterr().out
     initial = float(re.search(r"initial loss:\s*([0-9.eE+-]+)", output).group(1))
     final = float(re.search(r"final loss:\s*([0-9.eE+-]+)", output).group(1))
     assert final < initial
-    assert (tmp_path / "quickstart_loss.png").stat().st_size > 1_000
 
 
 def test_core_concepts_has_one_step_three_and_two_column_algorithm_table():
