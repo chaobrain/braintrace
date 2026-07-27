@@ -41,7 +41,7 @@ per-sample ``vmap`` execution:
 Use these scripts for implementation benchmarking, not as evidence that two
 algorithms have equivalent gradient accuracy.
 
-Begin with the :doc:`SNN Online Learning </quickstart/snn_online_learning>`
+Begin with the :doc:`SNN Online Learning </tutorials/snn_online_learning>`
 workflow before moving to dataset-scale scripts.
 
 Related API

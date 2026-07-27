@@ -83,12 +83,12 @@ Choose the entry point that matches your next task.
       :class-card: braintrace-learn-card
 
    .. grid-item-card:: :material-regular:`memory;2em` RNN Online Learning
-      :link: quickstart/rnn_online_learning
+      :link: tutorials/rnn_online_learning
       :link-type: doc
       :class-card: braintrace-learn-card
 
    .. grid-item-card:: :material-regular:`bolt;2em` SNN Online Learning
-      :link: quickstart/snn_online_learning
+      :link: tutorials/snn_online_learning
       :link-type: doc
       :class-card: braintrace-learn-card
 
@@ -138,8 +138,8 @@ and the two algorithm tutorials.
       :doc:`Core Concepts <quickstart/concepts>`
 
    Online Training
-      **3** :doc:`RNN Online Learning <quickstart/rnn_online_learning>` · **4**
-      :doc:`SNN Online Learning <quickstart/snn_online_learning>`
+      **3** :doc:`RNN Online Learning <tutorials/rnn_online_learning>` · **4**
+      :doc:`SNN Online Learning <tutorials/snn_online_learning>`
 
    Algorithm selection
       **5** :doc:`Choose an Algorithm <apis/algorithms>` · **6**
@@ -196,8 +196,8 @@ differentiable ecosystem for full-scale brain simulation.
    :maxdepth: 1
    :caption: Tutorial
 
-   quickstart/rnn_online_learning.ipynb
-   quickstart/snn_online_learning.ipynb
+   tutorials/rnn_online_learning.ipynb
+   tutorials/snn_online_learning.ipynb
    tutorials/drtrl.ipynb
    tutorials/pp_prop.ipynb
    tutorials/five_primitive_functions.ipynb
@@ -213,7 +213,7 @@ differentiable ecosystem for full-scale brain simulation.
    :caption: Advanced
 
    advanced/batching.ipynb
-   tutorials/etp_primitives.ipynb
+   advanced/etp_primitives.ipynb
    advanced/customizing_primitive_transforms.ipynb
    advanced/compiler_internals.ipynb
    advanced/custom_algorithms.ipynb

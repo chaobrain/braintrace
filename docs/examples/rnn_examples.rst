@@ -16,7 +16,7 @@ The comparisons demonstrate behavior on the stated model and task. They do
 not establish general gradient equivalence, because ``D_RTRL`` retains a
 diagonal hidden-Jacobian approximation.
 
-Begin with the :doc:`RNN Online Learning </quickstart/rnn_online_learning>`
+Begin with the :doc:`RNN Online Learning </tutorials/rnn_online_learning>`
 workflow for the complete training sequence.
 
 Related API

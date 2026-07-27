@@ -176,5 +176,5 @@ path to ``h`` passes through it is correctly excluded from ETP, because
 per-primitive ETP rules cannot express the "weight-then-weight-then-hidden"
 composition.
 
-See :doc:`/tutorials/etp_primitives` for a full walk-through and
+See :doc:`/advanced/etp_primitives` for a full walk-through and
 :doc:`/advanced/compiler_internals` for the underlying invariant.
