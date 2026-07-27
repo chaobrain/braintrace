@@ -1376,6 +1376,21 @@ class TestRobustness:
         with pytest.raises(ValueError, match='empty|zero|T'):
             learner.etrace_grad(_inputs(t=0), step_fn=lambda x: 0.0)
 
+    @pytest.mark.parametrize('empty', [{}, (), [], {'a': {}}])
+    def test_an_empty_pytree_is_refused_with_a_real_error(self, empty):
+        """Spec test 33, continued -- length-0 in the *pytree* sense, not the array sense.
+
+        An empty container holds no leaf, so the length scan never runs and
+        ``length`` stays ``None``. That used to fall through to an internal
+        ``assert``, which is a stack trace about the driver's invariants rather
+        than a message about the caller's argument.
+        """
+        learner = _learner()
+        with pytest.raises(ValueError, match='empty pytree'):
+            learner.etrace_grad(empty, step_fn=lambda x: 0.0)
+        with pytest.raises(ValueError, match='empty pytree'):
+            learner.etrace_evolve(empty)
+
     def test_a_bad_mask_shape_is_refused(self):
         """Spec test 33, continued."""
         learner = _learner()

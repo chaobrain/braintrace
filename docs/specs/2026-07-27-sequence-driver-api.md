@@ -59,7 +59,12 @@ before the learning window opens.
 3. `braintrace.ETraceVmap` — a `brainstate.nn.Vmap` subclass carrying the same
    two methods, returned by `compile(..., vmap=True)` so the call site is
    identical in batched and unbatched mode.
-4. Migration of all 25 call sites in `examples/` and the docs.
+4. `braintrace.SequenceDriverMixin` — exported because it is where the two
+   methods' docstrings live, so `docs/apis/algorithms.rst` has something to
+   point `autosummary` at. Added after the draft, which listed only
+   `ETraceVmap`: leaving it private would have meant the reference docs could
+   not render the API they document.
+5. Migration of all 25 call sites in `examples/` and the docs.
 
 **Out:**
 

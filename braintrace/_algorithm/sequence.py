@@ -95,7 +95,14 @@ def _sequence_length(sequences: tuple) -> int:
     length: Optional[int] = None
     origin = None
     for pos, seq in enumerate(sequences):
-        for path, leaf in jax.tree.leaves_with_path(seq):
+        leaves_with_path = jax.tree.leaves_with_path(seq)
+        if not leaves_with_path:
+            raise ValueError(
+                f'sequence {pos} is an empty pytree ({seq!r}), so it holds no '
+                f'array to take a leading length from. Pass the time-major '
+                f'arrays you want sliced, or drop the argument entirely.'
+            )
+        for path, leaf in leaves_with_path:
             shape = jnp.shape(leaf)
             if len(shape) == 0:
                 raise ValueError(
@@ -302,6 +309,35 @@ class SequenceDriverMixin:
             shape ``(k,)`` in window mode. If the learner has not been
             compiled, the existing guard raises before any of these.
 
+        Warnings
+        --------
+        Two known limitations are *reachable through this method*. Neither is a
+        driver defect -- both belong to the engines it drives -- but
+        ``chunk_size`` is what makes them easy to hit by accident, so they are
+        named here rather than only in the limitations document.
+
+        **F-30, window mode on an IO-factorized engine.** ``pp_prop`` /
+        ``ES_D_RTRL`` / ``OSTLFeedforward``, and any
+        ``trace_factorization='io_factorized'`` config, undo the warm-up bias
+        of their f-side smoothing with a factor indexed by ``running_index``,
+        which counts ``update()`` calls. A ``k``-step window advances the trace
+        ``k`` times but ``running_index`` once, so the correction lags the trace
+        by a factor of ``k``. Measured at ``T=6, k=2, decay=0.9``: 2.1e-03
+        relative against the same run indexed by true trace steps. Driving with
+        ``chunk_size=None`` avoids it entirely.
+
+        **F-35, DNI and the synthesizer's deployment contract.** A
+        :func:`train_synthetic_gradient` fit is valid only for the exact
+        ``(loss_fn, chunk_size)`` pair it was trained on, and **nothing checks
+        that deployment matches**. Fit and drive at the same ``chunk_size`` --
+        note that ``1`` and ``None`` are the same path on both sides. A mismatch
+        is not degraded DNI but noise shaped like a cotangent: fitting at ``1``
+        and deploying at ``2`` moves the gradient 2.0e-02 relative. ``mask`` is
+        the other half of the contract, since it changes the objective the
+        synthesizer is predicting the future of. ``reduction`` is **not**: it
+        divides once after the loop and never enters the differentiated
+        objective.
+
         Notes
         -----
         ``grads`` is the learner's **online-gradient estimate** of the reduced
@@ -315,6 +351,12 @@ class SequenceDriverMixin:
         --------
         .. code-block:: python
 
+            >>> import braintools
+            >>> import braintrace
+            >>> learner = braintrace.compile(model, 'D_RTRL', inputs[0], batch_size=1)
+            >>> opt = braintools.optim.Adam(1e-3)
+            >>> opt.register_trainable_weights(learner.param_states)
+            >>>
             >>> def step_loss(inp, tar):
             ...     out = learner(inp)
             ...     return braintools.metric.squared_error(out, tar).mean()
@@ -459,6 +501,10 @@ class SequenceDriverMixin:
         --------
         .. code-block:: python
 
+            >>> import braintrace
+            >>> learner = braintrace.compile(model, 'D_RTRL', xs[0], batch_size=1)
+            >>> warmup_inputs, xs, ys = inputs[:20], inputs[20:], targets[20:]
+            >>>
             >>> learner.etrace_evolve(warmup_inputs)          # free-running prefix
             >>> grads = learner.etrace_grad(xs, ys, step_fn=step_loss)
         """
@@ -492,8 +538,15 @@ class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
 
     Returned by ``braintrace.compile(..., vmap=True)`` so the call site is
     identical in batched and unbatched mode. Because it *is* a
-    ``brainstate.nn.Vmap``, existing uses of the ``vmap=True`` return value keep
-    working; only the added methods are new.
+    ``brainstate.nn.Vmap``, calling it, its attributes and every
+    ``isinstance(x, brainstate.nn.Vmap)`` check keep working; only the added
+    methods are new.
+
+    One thing does change: ``type(x) is brainstate.nn.Vmap`` is now ``False``,
+    so a caller dispatching on the *exact* runtime type takes a different
+    branch, and ``repr`` reads ``ETraceVmap``. Use ``isinstance``. (Pickling is
+    unaffected -- a bare ``Vmap`` was already unpicklable, for the same
+    ``weakref`` reason.)
 
     Reaching into ``.module`` is not an equivalent: ``learner.module.etrace_grad(...)``
     would drive the **unbatched** learner and silently produce per-lane-wrong
