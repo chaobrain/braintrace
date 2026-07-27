@@ -38,7 +38,7 @@ The exported building blocks fall into four groups:
 Activation, normalisation and pooling layers are intentionally not
 re-implemented here; accessing them through ``braintrace.nn`` emits a
 :class:`DeprecationWarning` and forwards to :mod:`brainstate.nn` /
-:mod:`brainstate.state`.
+:mod:`brainpy.state`.
 """
 
 from __future__ import annotations
@@ -70,12 +70,12 @@ def __getattr__(name: str) -> Any:
     import warnings
     if name in ['IF', 'LIF', 'ALIF', 'Expon', 'Alpha', 'DualExpon', 'STP', 'STD']:
         warnings.warn(
-            f'braintrace.nn.{name} is deprecated. Use brainstate.state.{name} instead.',
+            f'braintrace.nn.{name} is deprecated. Use brainpy.state.{name} instead.',
             DeprecationWarning,
             stacklevel=2
         )
-        import brainstate.state
-        return getattr(brainstate.state, name)
+        import brainpy.state
+        return getattr(brainpy.state, name)
 
     if name in [
         'ReLU', 'RReLU', 'Hardtanh', 'ReLU6', 'Sigmoid', 'Hardsigmoid',

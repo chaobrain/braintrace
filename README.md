@@ -19,7 +19,7 @@ It has been integrated into our establishing [brain modeling ecosystem](https://
 
 ## Installation
 
-``braintrace`` can run on Python 3.10+ installed on Linux, MacOS, and Windows. You can install ``braintrace`` via pip:
+``braintrace`` requires Python 3.11 or newer and supports Linux, macOS, and Windows. You can install ``braintrace`` via pip:
 
 ```bash
 pip install braintrace --upgrade

@@ -46,7 +46,7 @@ so both parameter sets end up in the trace.
   init + compile in a `vmap_new_states` scope, then `brainstate.nn.Vmap`.
   **Default choice.**
 - [`03-batching-batched.py`](../../examples/drtrl/03-batching-batched.py) —
-  `D_RTRL(..., mode=brainstate.mixin.Batching())`, init once with
+  `D_RTRL(...)`, init once with
   `batch_size=...`. Pick when the algorithm needs the batch axis exposed.
 
 ## 5. VJP methods

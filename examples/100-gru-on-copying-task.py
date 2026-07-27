@@ -129,7 +129,7 @@ class OnlineTrainer(Trainer):
         elif self.batch_train_method == 'batch':
             # kept manual: re-initializes states inside @jit every batch; braintrace.compile must live outside jit
             model = braintrace.ParamDimVjpAlgorithm(
-                self.target, vjp_method=self.vjp_method, mode=brainstate.mixin.Batching())
+                self.target, vjp_method=self.vjp_method)
             brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])
             model.compile_graph(inputs[0])
 
