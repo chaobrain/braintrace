@@ -193,19 +193,14 @@ class ETraceGraphExecutor:
 
         This method is crucial for constructing the graph used in the eligibility trace
         algorithm, which is essential for calculating weight spatial gradients and the
-        hidden state Jacobian.
+        hidden state Jacobian. It initializes the compiled graph attribute of the
+        instance.
 
         Parameters
         ----------
         *args
             Positional arguments for the model, which may include inputs, parameters, or
             other necessary data required for graph compilation.
-
-        Returns
-        -------
-        None
-            This method does not return any value. It initializes the compiled graph
-            attribute of the instance.
         """
 
         # invalidate cached mappings on recompilation

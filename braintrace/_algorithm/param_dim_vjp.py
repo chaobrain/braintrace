@@ -166,23 +166,30 @@ def _update_param_dim_etrace_scan_fn(
     trace values by applying vector-Jacobian products and incorporating the current
     Jacobian values.
 
-    Args:
-        hist_etrace_vals (Dict[ETraceWG_Key, jax.Array]): A dictionary containing
-            historical eligibility trace values for the weight gradients, keyed by
-            ETraceWG_Key.
-        jacobians (Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array], Sequence[jax.Array]]):
-            A tuple containing dictionaries of current Jacobian values for the weight x
-            and df, and a sequence of hidden group Jacobians.
-        weight_path_to_vals (Dict[Path, PyTree]): A dictionary mapping weight paths to
-            their corresponding PyTree values.
-        hidden_param_op_relations: A sequence of HiddenParamOpRelation objects representing
-            the relationships between hidden parameters and operations.
-        mode (brainstate.mixin.Mode): The mode indicating whether batching is enabled.
+    Parameters
+    ----------
+    hist_etrace_vals : Dict[ETraceWG_Key, jax.Array]
+        A dictionary containing historical eligibility trace values for the
+        weight gradients, keyed by ETraceWG_Key.
+    jacobians : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array], Sequence[jax.Array]]
+        A tuple containing dictionaries of current Jacobian values for the weight x
+        and df, and a sequence of hidden group Jacobians.
+    weight_path_to_vals : Dict[Path, PyTree]
+        A dictionary mapping weight paths to their corresponding PyTree values.
+    hidden_param_op_relations : Any
+        A sequence of HiddenParamOpRelation objects representing the
+        relationships between hidden parameters and operations.
+    fast_solve : bool, optional
+        Whether to use the per-primitive fast contraction instead of the legacy
+        vmap path.
+    trace_dtype : DTypeLike, optional
+        Optional dtype override for the updated trace values.
 
-    Returns:
-        Tuple[Dict[ETraceWG_Key, jax.Array], None]: A tuple containing a dictionary of
-        updated eligibility trace values for the weight gradients, keyed by ETraceWG_Key,
-        and None.
+    Returns
+    -------
+    Tuple[Dict[ETraceWG_Key, jax.Array], None]
+        A tuple containing a dictionary of updated eligibility trace values for
+        the weight gradients, keyed by ETraceWG_Key, and None.
     """
     # --- the data --- #
 
@@ -833,21 +840,27 @@ def _solve_param_dim_weight_gradients(
 
     This function calculates the weight gradients by utilizing the eligibility trace data and the
     hidden-to-hidden Jacobians. It applies a correction factor to avoid exponential smoothing bias
-    at the beginning of the computation.
+    at the beginning of the computation, and updates the ``dG_weights`` dictionary in place.
 
-    Args:
-        hist_etrace_data (Dict[ETraceWG_Key, PyTree]): A dictionary containing historical eligibility
-            trace data for the weight gradients, keyed by ETraceWG_Key.
-        dG_weights (Dict[Path, dG_Weight]): A dictionary to store the computed weight gradients,
-            keyed by the path of the weight.
-        dG_hidden_groups (Sequence[jax.Array]): A sequence of hidden group gradients, with the same
-            length as the total number of hidden groups.
-        weight_hidden_relations (Sequence[HiddenParamOpRelation]): A sequence of HiddenParamOpRelation
-            objects representing the relationships between hidden parameters and operations.
-        mode (brainstate.mixin.Mode): The mode indicating whether batching is enabled.
-
-    Returns:
-        None: The function updates the dG_weights dictionary in place with the computed weight gradients.
+    Parameters
+    ----------
+    hist_etrace_data : Dict[ETraceWG_Key, PyTree]
+        A dictionary containing historical eligibility trace data for the weight
+        gradients, keyed by ETraceWG_Key.
+    dG_weights : Dict[Path, dG_Weight]
+        A dictionary to store the computed weight gradients, keyed by the path
+        of the weight.
+    dG_hidden_groups : Sequence[jax.Array]
+        A sequence of hidden group gradients, with the same length as the total
+        number of hidden groups.
+    weight_hidden_relations : Sequence[HiddenParamOpRelation]
+        A sequence of HiddenParamOpRelation objects representing the
+        relationships between hidden parameters and operations.
+    weight_vals : Dict[Path, PyTree]
+        Current ParamState pytree values, used as the structure template.
+    fast_solve : bool, optional
+        Whether to use the per-primitive fast contraction instead of the legacy
+        vmap path.
     """
     # update the etrace weight gradients
     temp_data: Dict[Path, PyTree] = dict()
@@ -902,13 +915,20 @@ def _remove_units(xs_maybe_quantity: PyTree) -> Any:
     with the same structure but without units. It also returns a function that can be used to restore the
     original units to the unitless PyTree.
 
-    Args:
-        xs_maybe_quantity (PyTree): A PyTree structure containing quantities with units.
+    Parameters
+    ----------
+    xs_maybe_quantity : PyTree
+        A PyTree structure containing quantities with units.
 
-    Returns:
-        Tuple[PyTree, Callable]: A tuple containing:
-            - A PyTree with the same structure as the input, but with units removed from each quantity.
-            - A function that takes a unitless PyTree and restores the original units to it.
+    Returns
+    -------
+    Tuple[PyTree, Callable]
+        A tuple containing:
+
+        - A PyTree with the same structure as the input, but with units removed
+          from each quantity.
+        - A function that takes a unitless PyTree and restores the original
+          units to it.
     """
     leaves, treedef = jax.tree.flatten(xs_maybe_quantity, is_leaf=u.math.is_quantity)
     new_leaves, units = [], []
@@ -1228,11 +1248,13 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         This is an internal method used in the parameter dimension eligibility trace algorithm
         to access the current trace state for updates and gradient calculations.
 
-        Returns:
-            Dict[ETraceWG_Key, jax.Array]: A dictionary mapping eligibility trace keys to
-                their current values. Each key represents a specific trace component
-                (typically involving a parameter and hidden state relationship), and
-                the corresponding value represents the accumulated eligibility trace.
+        Returns
+        -------
+        Dict[ETraceWG_Key, jax.Array]
+            A dictionary mapping eligibility trace keys to their current values.
+            Each key represents a specific trace component (typically involving a
+            parameter and hidden state relationship), and the corresponding value
+            represents the accumulated eligibility trace.
         """
         return {
             k: v.value
@@ -1252,14 +1274,12 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         stores traces in a single dictionary rather than separate ones for inputs
         and differential functions.
 
-        Args:
-            etrace_vals: Dict[ETraceWG_Key, jax.Array]
-                Dictionary mapping eligibility trace keys to their updated values.
-                Each key represents a specific parameter-hidden state relationship,
-                and the value represents the updated eligibility trace value.
-
-        Returns:
-            None
+        Parameters
+        ----------
+        etrace_vals : Dict[ETraceWG_Key, jax.Array]
+            Dictionary mapping eligibility trace keys to their updated values.
+            Each key represents a specific parameter-hidden state relationship,
+            and the value represents the updated eligibility trace value.
         """
         for x, val in etrace_vals.items():
             self.etrace_bwg[x].value = val
@@ -1313,23 +1333,29 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         combines them with current Jacobians to compute updated traces according to the
         parameter-dimension approximation approach.
 
-        Args:
-            running_index: Optional[int]
-                Current timestep counter, used for correcting exponential smoothing bias.
-            hist_etrace_vals: Dict[ETraceWG_Key, PyTree]
-                Dictionary containing historical eligibility trace values from previous timestep.
-                Keys are tuples identifying parameter-hidden state relationships.
-            hid2weight_jac_single_or_multi_times: Hid2WeightJacobian
-                Jacobians of hidden states with respect to weights at the current timestep.
-                Contains input gradients and differential function gradients.
-            hid2hid_jac_single_or_multi_times: HiddenGroupJacobian
-                Jacobians between hidden states (recurrent connections) at the current timestep.
-            weight_vals: Dict[Path, PyTree]
-                Dictionary mapping paths to current weight values in the model.
+        Parameters
+        ----------
+        running_index : int, optional
+            Current timestep counter, used for correcting exponential smoothing bias.
+        hist_etrace_vals : Dict[ETraceWG_Key, PyTree]
+            Dictionary containing historical eligibility trace values from previous timestep.
+            Keys are tuples identifying parameter-hidden state relationships.
+        hid2weight_jac_single_or_multi_times : Hid2WeightJacobian
+            Jacobians of hidden states with respect to weights at the current timestep.
+            Contains input gradients and differential function gradients.
+        hid2hid_jac_single_or_multi_times : HiddenGroupJacobian
+            Jacobians between hidden states (recurrent connections) at the current timestep.
+        weight_vals : Dict[Path, PyTree]
+            Dictionary mapping paths to current weight values in the model.
+        input_is_multi_step : bool
+            Whether the Jacobian inputs span multiple time steps, selecting the
+            scan (or chunked) path over the single-step path.
 
-        Returns:
-            Dict[ETraceWG_Key, PyTree]: Updated eligibility trace values dictionary with the
-                same structure as hist_etrace_vals but containing new values for the current timestep.
+        Returns
+        -------
+        Dict[ETraceWG_Key, PyTree]
+            Updated eligibility trace values dictionary with the same structure as
+            ``hist_etrace_vals`` but containing new values for the current timestep.
         """
 
         jacobians = (
@@ -1383,24 +1409,27 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         Where ε represents the eligibility traces and ∂L/∂h are the gradients of the loss
         with respect to hidden states.
 
-        Args:
-            running_index: int
-                Current timestep counter used for bias correction.
-            etrace_h2w_at_t: Dict[ETraceWG_Key, PyTree]
-                Eligibility trace values at the current timestep, mapping parameter-hidden
-                state relationship keys to trace values.
-            dl_to_hidden_groups: Sequence[jax.Array]
-                Gradients of the loss with respect to hidden states at the current timestep.
-            weight_vals: Dict[WeightID, PyTree]
-                Current values of all weights in the model.
-            dl_to_nonetws_at_t: Dict[Path, PyTree]
-                Gradients of non-eligibility trace parameters at the current timestep.
-            dl_to_etws_at_t: Optional[Dict[Path, PyTree]]
-                Optional additional gradients for eligibility trace parameters at the
-                current timestep.
+        Parameters
+        ----------
+        running_index : int
+            Current timestep counter used for bias correction.
+        etrace_h2w_at_t : Dict[ETraceWG_Key, PyTree]
+            Eligibility trace values at the current timestep, mapping parameter-hidden
+            state relationship keys to trace values.
+        dl_to_hidden_groups : Sequence[jax.Array]
+            Gradients of the loss with respect to hidden states at the current timestep.
+        weight_vals : Dict[Path, PyTree]
+            Current values of all weights in the model.
+        dl_to_nonetws_at_t : Dict[Path, PyTree]
+            Gradients of non-eligibility trace parameters at the current timestep.
+        dl_to_etws_at_t : Dict[Path, PyTree], optional
+            Optional additional gradients for eligibility trace parameters at the
+            current timestep.
 
-        Returns:
-            Dict[Path, PyTree]: Dictionary mapping parameter paths to their gradient values.
+        Returns
+        -------
+        Dict[Path, PyTree]
+            Dictionary mapping parameter paths to their gradient values.
         """
         # `trace_filter`: low-pass the raw trace before it is contracted with the
         # learning signal. Applied elementwise (`jax.tree.map` over the trace's

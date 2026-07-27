@@ -219,37 +219,47 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
 
-    Args:
-        closed_jaxpr: The closed jaxpr for the model.
-        outvar_to_hidden_path: The mapping from the outvar to the state id.
-        hidden_outvar_to_invar: The mapping from the hidden output variable to the hidden input variable.
-        weight_invars: The weight input variables.
-        invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
-        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
-            opaque control-flow handling.
-        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten
-            by structured scan descent (Phase 4); exempt from the
-            unsupported-op checks.
+    Parameters
+    ----------
+    closed_jaxpr : ClosedJaxpr
+        The closed jaxpr for the model.
+    outvar_to_hidden_path : dict
+        The mapping from the outvar to the state id.
+    hidden_outvar_to_invar : dict
+        The mapping from the hidden output variable to the hidden input variable.
+    weight_invars : set
+        The weight input variables.
+    invar_to_hidden_path : dict
+        The mapping from the weight input variable to the hidden state path.
+    control_flow : ControlFlowPolicy
+        The :class:`~braintrace.ControlFlowPolicy` governing opaque
+        control-flow handling.
+    descended_scan_eqn_ids : frozenset of int
+        ``id()`` values of scan equations rewritten by structured scan descent
+        (Phase 4); exempt from the unsupported-op checks.
 
-    Returns:
+    Returns
+    -------
+    HiddenPerturbation
         The revised closed jaxpr with the perturbations.
 
-    Notes:
-        A hidden-producing ``while`` equation gets special treatment: every
-        ``Var`` input of the loop is detached with ``stop_gradient`` in the
-        perturbed jaxpr (JAX has no transpose rule for ``while``, so an
-        undetached loop would make the VJP of the perturbed step
-        untraceable). The perturbation add ``h = fresh + p`` stays *outside*
-        the detach, so the loop's *own* hidden group keeps an exact per-step
-        learning signal ``dL/dp``. Consequence: any *reverse-mode* path
-        through the loop body within the same step contributes zero — the
-        loop's temporal credit is carried instead by the forward-computed
-        hidden-to-hidden Jacobian ``D^t`` (see
-        ``hidden_group.jacfwd_last_dim``), but a parameter or *other* hidden
-        group whose only same-step path to the loss crosses the loop (e.g.
-        an upstream layer feeding the loop) receives a ZERO learning signal.
-        A WARNING-level ``CONTROL_FLOW_OPAQUE_FWD`` diagnostic
-        (``site='perturbation'``) records every detach.
+    Notes
+    -----
+    A hidden-producing ``while`` equation gets special treatment: every
+    ``Var`` input of the loop is detached with ``stop_gradient`` in the
+    perturbed jaxpr (JAX has no transpose rule for ``while``, so an
+    undetached loop would make the VJP of the perturbed step
+    untraceable). The perturbation add ``h = fresh + p`` stays *outside*
+    the detach, so the loop's *own* hidden group keeps an exact per-step
+    learning signal ``dL/dp``. Consequence: any *reverse-mode* path
+    through the loop body within the same step contributes zero — the
+    loop's temporal credit is carried instead by the forward-computed
+    hidden-to-hidden Jacobian ``D^t`` (see
+    ``hidden_group.jacfwd_last_dim``), but a parameter or *other* hidden
+    group whose only same-step path to the loss crosses the loop (e.g.
+    an upstream layer feeding the loop) receives a ZERO learning signal.
+    A WARNING-level ``CONTROL_FLOW_OPAQUE_FWD`` diagnostic
+    (``site='perturbation'``) records every detach.
     """
     __module__ = 'braintrace'
 
@@ -513,23 +523,32 @@ def add_hidden_perturbation_in_jaxpr(
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
 
-    Args:
-        closed_jaxpr: The closed jaxpr for the model.
-        outvar_to_hidden_path: The mapping from the outvar to the state id.
-        hidden_outvar_to_invar: The mapping from the hidden output variable to the hidden input variable.
-        weight_invars: The weight input variables.
-        invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
-        path_to_state: The mapping from the hidden state path to the state.
-        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
-            opaque control-flow handling. Under the default policy a
-            hidden-producing ``while`` is kept and its inputs are detached
-            in the perturbed jaxpr (see
-            :class:`JaxprEvalForHiddenPerturbation`).
-        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten
-            by structured scan descent (Phase 4); exempt from the
-            unsupported-op checks.
+    Parameters
+    ----------
+    closed_jaxpr : ClosedJaxpr
+        The closed jaxpr for the model.
+    hidden_outvar_to_invar : dict
+        The mapping from the hidden output variable to the hidden input variable.
+    weight_invars : set
+        The weight input variables.
+    invar_to_hidden_path : dict
+        The mapping from the weight input variable to the hidden state path.
+    outvar_to_hidden_path : dict
+        The mapping from the outvar to the state id.
+    path_to_state : dict
+        The mapping from the hidden state path to the state.
+    control_flow : ControlFlowPolicy, optional
+        The :class:`~braintrace.ControlFlowPolicy` governing opaque
+        control-flow handling. Under the default policy a hidden-producing
+        ``while`` is kept and its inputs are detached in the perturbed jaxpr
+        (see :class:`JaxprEvalForHiddenPerturbation`).
+    descended_scan_eqn_ids : frozenset of int, optional
+        ``id()`` values of scan equations rewritten by structured scan descent
+        (Phase 4); exempt from the unsupported-op checks.
 
-    Returns:
+    Returns
+    -------
+    HiddenPerturbation
         The revised closed jaxpr with the perturbations.
     """
     return JaxprEvalForHiddenPerturbation(

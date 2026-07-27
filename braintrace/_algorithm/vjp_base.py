@@ -1240,11 +1240,16 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         Implementations must apply `jax.lax.stop_gradient` to their estimate, or
         the online loss will train the synthesiser through the wrong path.
 
-        Args:
-            exit_hiddens: Hidden-path-keyed window-exit values, `h^exit`.
-            aux: Per-call auxiliary data from `_get_update_aux`.
+        Parameters
+        ----------
+        exit_hiddens : Any
+            Hidden-path-keyed window-exit values, `h^exit`.
+        aux : Any
+            Per-call auxiliary data from `_get_update_aux`.
 
-        Returns:
+        Returns
+        -------
+        dict or None
             A hidden-path-keyed mapping of cotangents shaped like the
             corresponding entry of `exit_hiddens`, or `None` for "no injection"
             (the default, and the zero-cost path: no second pass runs).
@@ -1254,19 +1259,25 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     def _exit_cotangent_grads(self, grads_wo_etrace: tuple, exit_cotangent: Any) -> tuple:
         """Build the pass-2 cotangent tuple: zero everywhere but the exit hiddens.
 
-        Args:
-            grads_wo_etrace: The incoming `(dg_out, dg_hiddens, dg_oth_states)`
-                triple, used purely as a shape/unit/dtype template so the result
-                flattens to the same tree the transposed jaxpr expects.
-            exit_cotangent: The hidden-path-keyed synthetic cotangents.
+        Parameters
+        ----------
+        grads_wo_etrace : tuple
+            The incoming `(dg_out, dg_hiddens, dg_oth_states)` triple, used
+            purely as a shape/unit/dtype template so the result flattens to the
+            same tree the transposed jaxpr expects.
+        exit_cotangent : Any
+            The hidden-path-keyed synthetic cotangents.
 
-        Returns:
+        Returns
+        -------
+        tuple
             A triple with the same structure as `grads_wo_etrace`.
 
-        Raises:
-            ValueError: If a synthetic cotangent's shape does not match the
-                hidden cotangent it replaces, or if it is keyed by a path that is
-                not a hidden state.
+        Raises
+        ------
+        ValueError
+            If a synthetic cotangent's shape does not match the hidden cotangent
+            it replaces, or if it is keyed by a path that is not a hidden state.
         """
         dg_out, dg_hiddens, dg_oth = grads_wo_etrace
 
@@ -1340,15 +1351,19 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         should override this and read whatever they stashed on `self` during
         their own `update()` override, at this exact call site.
 
-        Returns:
+        Returns
+        -------
+        Any
             Any pytree (or `None`). Appended to the `args` tuple seen by
             `_compute_learning_signal` (see below); never forwarded to the
             model's forward call.
 
-        Raises:
-            RuntimeError: If `learning_signal='modulatory'` but no modulator was
-                supplied. Falling back to the symmetric signal there would
-                silently compute a different learning rule.
+        Raises
+        ------
+        RuntimeError
+            If `learning_signal='modulatory'` but no modulator was supplied.
+            Falling back to the symmetric signal there would silently compute a
+            different learning rule.
         """
         if self.config.learning_signal != 'modulatory':
             return None
@@ -1446,25 +1461,30 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         different time than replacing a boundary signal. See
         :meth:`_inject_exit_cotangent`.
 
-        Args:
-            dl_to_hidden_from_autodiff: Sequence of per-hidden-group gradients produced
-                by reverse-AD inside `_update_fn_bwd`.
-            args: The `*args` tuple passed to the most recent `update()` call,
-                with the per-call auxiliary data from `_get_update_aux` appended
-                as the trailing element. Subclasses that override
-                `_get_update_aux` can pull their auxiliary tensor from there;
-                subclasses that don't (the default `None`) can ignore `args`
-                entirely, as this implementation does.
+        Parameters
+        ----------
+        dl_to_hidden_from_autodiff : Sequence[jax.Array]
+            Sequence of per-hidden-group gradients produced by reverse-AD inside
+            `_update_fn_bwd`.
+        args : tuple
+            The `*args` tuple passed to the most recent `update()` call, with the
+            per-call auxiliary data from `_get_update_aux` appended as the
+            trailing element. Subclasses that override `_get_update_aux` can pull
+            their auxiliary tensor from there; subclasses that don't (the default
+            `None`) can ignore `args` entirely, as this implementation does.
 
-        Returns:
+        Returns
+        -------
+        Sequence[jax.Array]
             Sequence of per-hidden-group gradient arrays, one per HiddenGroup. Must
             match the shape and length of ``dl_to_hidden_from_autodiff``.
 
-        Raises:
-            RuntimeError: If ``learning_signal='random_feedback'`` but no
-                projection was allocated. Returning the symmetric signal there
-                would quietly compute a *different rule* than the one
-                configured.
+        Raises
+        ------
+        RuntimeError
+            If ``learning_signal='random_feedback'`` but no projection was
+            allocated. Returning the symmetric signal there would quietly compute
+            a *different rule* than the one configured.
         """
         # `bootstrapped` leaves the boundary signal exactly alone -- its whole
         # effect is the extra cotangent injected at the window *exit*, which
@@ -1567,17 +1587,23 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                                               + \frac{\partial L^t}{\partial W^t}
 
 
-        Args:
-          running_index: Optional[int], the running index.
-          etrace_h2w_at_t: Any, the eligibility trace data (which track the hidden-to-weight Jacobian)
-              that have accumulated util the time ``t``.
-          dl_to_hidden_groups: Dict[HiddenOutVar, jax.Array], the gradients of the loss-to-hidden
-              at the time ``t``.
-          weight_vals: Dict[WeightID, PyTree], the weight values.
-          dl_to_nonetws_at_t: List[PyTree], the gradients of the loss-to-non-etrace parameters
-              at the time ``t``, i.e., :math:``\partial L^t / \partial W^t``.
-          dl_to_etws_at_t: List[PyTree], the gradients of the loss-to-etrace parameters
-              at the time ``t``, i.e., :math:``\partial L^t / \partial W^t``.
+        Parameters
+        ----------
+        running_index : int, optional
+            The running index.
+        etrace_h2w_at_t : Any
+            The eligibility trace data (which track the hidden-to-weight Jacobian)
+            that have accumulated util the time ``t``.
+        dl_to_hidden_groups : Dict[HiddenOutVar, jax.Array]
+            The gradients of the loss-to-hidden at the time ``t``.
+        weight_vals : Dict[WeightID, PyTree]
+            The weight values.
+        dl_to_nonetws_at_t : List[PyTree]
+            The gradients of the loss-to-non-etrace parameters at the time ``t``,
+            i.e., :math:``\partial L^t / \partial W^t``.
+        dl_to_etws_at_t : List[PyTree]
+            The gradients of the loss-to-etrace parameters at the time ``t``,
+            i.e., :math:``\partial L^t / \partial W^t``.
         """
         raise NotImplementedError
 
@@ -1625,15 +1651,25 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
             This is the protocol method that should be implemented in the subclass.
 
-        Args:
-          running_index: Optional[int], the running index.
-          etrace_vals_util_t_1: ETraceVals, the history eligibility trace data that have accumulated util :math:`t-1`.
-          hid2weight_jac_single_or_multi_times: ETraceVals, the current eligibility trace data at the time :math:`t`.
-          hid2hid_jac_single_or_multi_times: The data for computing the hidden-to-hidden Jacobian at the time :math:`t`.
-          weight_vals: Dict[WeightID, PyTree], the weight values.
+        Parameters
+        ----------
+        running_index : int, optional
+            The running index.
+        etrace_vals_util_t_1 : ETraceVals
+            The history eligibility trace data that have accumulated util :math:`t-1`.
+        hid2weight_jac_single_or_multi_times : ETraceVals
+            The current eligibility trace data at the time :math:`t`.
+        hid2hid_jac_single_or_multi_times : Sequence[jax.Array]
+            The data for computing the hidden-to-hidden Jacobian at the time :math:`t`.
+        weight_vals : Dict[WeightID, PyTree]
+            The weight values.
+        input_is_multi_step : bool
+            Whether the Jacobian inputs span multiple time steps.
 
-        Returns:
-          ETraceVals, the updated eligibility trace data that have accumulated util :math:`t`.
+        Returns
+        -------
+        ETraceVals
+            The updated eligibility trace data that have accumulated util :math:`t`.
         """
         raise NotImplementedError
 
@@ -1645,8 +1681,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
             This is the protocol method that should be implemented in the subclass.
 
-        Returns:
-            ETraceVals, the eligibility trace data.
+        Returns
+        -------
+        ETraceVals
+            The eligibility trace data.
         """
         raise NotImplementedError
 
@@ -1658,7 +1696,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
             This is the protocol method that should be implemented in the subclass.
 
-        Args:
-          etrace_vals: ETraceVals, the eligibility trace data.
+        Parameters
+        ----------
+        etrace_vals : ETraceVals
+            The eligibility trace data.
         """
         raise NotImplementedError

@@ -505,21 +505,26 @@ def jacrev_last_dim(
     with respect to the last dimension of the input 'hid_vals'. It uses
     JAX's vector-Jacobian product (vjp) and vmap for efficient computation.
 
-    Args:
-        fn (Callable[[...], jax.Array]): The function for which to compute
-            the Jacobian. It should take a JAX array as input and return
-            a JAX array.
-        hid_vals (jax.Array): The input values for which to compute the
-            Jacobian. The last dimension is considered as the dimension
-            of interest.
+    Parameters
+    ----------
+    fn : Callable[..., jax.Array]
+        The function for which to compute the Jacobian. It should take a JAX
+        array as input and return a JAX array.
+    hid_vals : jax.Array
+        The input values for which to compute the Jacobian. The last dimension
+        is considered as the dimension of interest.
 
-    Returns:
-        jax.Array: The Jacobian matrix. Its shape is (*varshape, num_state, num_state),
-        where varshape is the shape of the input excluding the last dimension,
-        and num_state is the size of the last dimension.
+    Returns
+    -------
+    jax.Array
+        The Jacobian matrix. Its shape is ``(*varshape, num_state, num_state)``,
+        where ``varshape`` is the shape of the input excluding the last
+        dimension, and ``num_state`` is the size of the last dimension.
 
-    Raises:
-        AssertionError: If the number of input and output states are not the same.
+    Raises
+    ------
+    AssertionError
+        If the number of input and output states are not the same.
     """
     new_hid_vals, f_vjp = jax.vjp(fn, hid_vals)
     num_state = new_hid_vals.shape[-1]
@@ -977,12 +982,18 @@ class HiddenToHiddenGroupTracer(NamedTuple):
     plain ``set`` iteration follows memory-address hashes for jaxpr ``Var``
     objects.
 
-    Attributes:
-        hidden_invar (Var): The input variable representing the hidden state.
-        connected_hidden_outvars (Dict[Var, None]): Ordered set of output variables representing the connected hidden states.
-        other_invars (Dict[Var, None]): Ordered set of other input variables involved in the tracing.
-        invar_needed_in_oth_eqns (Dict[Var, None]): Ordered set of variables needed in other equations for trace analysis.
-        trace (List[JaxprEqn]): A list of JAX equations representing the trace of operations.
+    Attributes
+    ----------
+    hidden_invar : Var
+        The input variable representing the hidden state.
+    connected_hidden_outvars : Dict[Var, None]
+        Ordered set of output variables representing the connected hidden states.
+    other_invars : Dict[Var, None]
+        Ordered set of other input variables involved in the tracing.
+    invar_needed_in_oth_eqns : Dict[Var, None]
+        Ordered set of variables needed in other equations for trace analysis.
+    trace : List[JaxprEqn]
+        A list of JAX equations representing the trace of operations.
     """
     hidden_invar: Var
     connected_hidden_outvars: Dict[Var, None]
@@ -1014,13 +1025,22 @@ class Hidden2GroupTransition(NamedTuple):
     the connected output hidden states, and the JAX program representation (jaxpr) that
     defines the transition.
 
-    Attributes:
-        hidden_invar (Var): The input variable representing the hidden state at the previous time step.
-        hidden_path (Path): The path to the hidden state in the model hierarchy.
-        connected_hidden_outvars (List[Var]): A list of output variables representing the connected hidden states at the current time step.
-        connected_hidden_paths (List[Path]): A list of paths to the connected hidden states in the model hierarchy.
-        transition_jaxpr (Jaxpr): The JAX program representation for computing the hidden state transitions.
-        other_invars (List[Var]): A list of other input variables required for evaluating the transition_jaxpr.
+    Attributes
+    ----------
+    hidden_invar : Var
+        The input variable representing the hidden state at the previous time step.
+    hidden_path : Path
+        The path to the hidden state in the model hierarchy.
+    connected_hidden_outvars : List[Var]
+        A list of output variables representing the connected hidden states at
+        the current time step.
+    connected_hidden_paths : List[Path]
+        A list of paths to the connected hidden states in the model hierarchy.
+    transition_jaxpr : Jaxpr
+        The JAX program representation for computing the hidden state transitions.
+    other_invars : List[Var]
+        A list of other input variables required for evaluating the
+        ``transition_jaxpr``.
     """
 
     # the hidden state h_i^{t-1}
@@ -1049,13 +1069,19 @@ class Hidden2GroupTransition(NamedTuple):
         """
         Computing the hidden state transitions :math:`h^t = f(h_i^t, x)`.
 
-        Args:
-          old_hidden_val: The old hidden state value.
-          other_input_vals: The input values.
-          return_index: index of the hidden state to return.
+        Parameters
+        ----------
+        old_hidden_val : jax.Array
+            The old hidden state value.
+        other_input_vals : PyTree
+            The input values.
+        return_index : int, optional
+            Index of the hidden state to return.
 
-        Returns:
-          The new hidden state values.
+        Returns
+        -------
+        list of jax.Array or jax.Array
+            The new hidden state values.
         """
         new_hidden_vals = jax.core.eval_jaxpr(self.transition_jaxpr, other_input_vals, old_hidden_val)
         if return_index is not None:
@@ -1111,15 +1137,23 @@ def _simplify_hid2hid_tracer(
     """
     Simplifying the hidden-to-hidden state tracer.
 
-    Args:
-        tracer: The hidden-to-hidden state tracer.
-        hidden_invar_to_path: The mapping from the hidden input variable to the hidden state path.
-        hidden_outvar_to_path: The mapping from the hidden output variable to the hidden state path.
-        path_to_state: The mapping from the hidden state path to the state.
-        debug_info: The debug info threaded from the source model jaxpr onto the
-            simplified transition jaxpr (avoids the missing-DebugInfo deprecation).
+    Parameters
+    ----------
+    tracer : HiddenToHiddenGroupTracer
+        The hidden-to-hidden state tracer.
+    hidden_invar_to_path : dict
+        The mapping from the hidden input variable to the hidden state path.
+    hidden_outvar_to_path : dict
+        The mapping from the hidden output variable to the hidden state path.
+    path_to_state : dict
+        The mapping from the hidden state path to the state.
+    debug_info : optional
+        The debug info threaded from the source model jaxpr onto the simplified
+        transition jaxpr (avoids the missing-DebugInfo deprecation).
 
-    Returns:
+    Returns
+    -------
+    Hidden2GroupTransition or None
         The hidden-to-hidden state transition.
     """
     #
@@ -1208,23 +1242,35 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
     """
     Evaluating the jaxpr for extracting the hidden state ``hidden-to-hidden`` relationships.
 
-    Args:
-        jaxpr: The jaxpr for the model.
-        hidden_outvar_to_invar: The mapping from the hidden output variable to the hidden input variable.
-        weight_invars: The weight input variables.
-        invar_to_hidden_path: The mapping from the weight input variable to the hidden state path.
-        outvar_to_hidden_path: The mapping from the hidden output variable to the hidden state path.
-        path_to_state: The mapping from the hidden state path to the state.
-        include_recurrent_mixing: Whether recurrent ETP mixing primitives are
-            traced into the hidden-to-hidden transition jaxpr.
-        sparse_n: SnAp order for ``recurrence_scope='sparse_n'``; ``None``
-            (default) leaves every group's ``snap`` pattern unset.
-        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing
-            opaque control-flow handling (see ``base.check_unsupported_op``).
-        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten by
-            structured scan descent; those equations are skipped by this walker.
-        descended_hidden_paths: Hidden-state paths covered by descended scan
-            bodies; excluded from the zero-recurrence fallback grouping.
+    Parameters
+    ----------
+    jaxpr : Jaxpr
+        The jaxpr for the model.
+    hidden_outvar_to_invar : dict
+        The mapping from the hidden output variable to the hidden input variable.
+    weight_invars : set
+        The weight input variables.
+    invar_to_hidden_path : dict
+        The mapping from the weight input variable to the hidden state path.
+    outvar_to_hidden_path : dict
+        The mapping from the hidden output variable to the hidden state path.
+    path_to_state : dict
+        The mapping from the hidden state path to the state.
+    include_recurrent_mixing : bool
+        Whether recurrent ETP mixing primitives are traced into the
+        hidden-to-hidden transition jaxpr.
+    sparse_n : int or None, optional
+        SnAp order for ``recurrence_scope='sparse_n'``; ``None`` (default)
+        leaves every group's ``snap`` pattern unset.
+    control_flow : ControlFlowPolicy
+        The :class:`~braintrace.ControlFlowPolicy` governing opaque
+        control-flow handling (see ``base.check_unsupported_op``).
+    descended_scan_eqn_ids : frozenset of int
+        ``id()`` values of scan equations rewritten by structured scan descent;
+        those equations are skipped by this walker.
+    descended_hidden_paths : set of Path
+        Hidden-state paths covered by descended scan bodies; excluded from the
+        zero-recurrence fallback grouping.
     """
     __module__ = 'braintrace'
 
@@ -1901,14 +1947,19 @@ def group_merging(groups, version: int = 1) -> List[frozenset[HiddenOutVar]]:
     any common hidden states. The merging process is controlled by the specified
     version of the algorithm.
 
-    Args:
-        groups: A list of hidden groups, where each group is a collection of
-            hidden states represented as frozensets.
-        version: An integer specifying the version of the merging algorithm to use.
-            Default is 1. Version 0 and 1 are supported, with version 1 being
-            more efficient and readable.
+    Parameters
+    ----------
+    groups : list
+        A list of hidden groups, where each group is a collection of hidden
+        states represented as frozensets.
+    version : int, optional
+        An integer specifying the version of the merging algorithm to use.
+        Default is 1. Version 0 and 1 are supported, with version 1 being
+        more efficient and readable.
 
-    Returns:
+    Returns
+    -------
+    list of frozenset
         A list of merged hidden groups, where each group is a frozenset of
         HiddenOutVar objects. The groups are merged based on shared hidden states.
     """
@@ -1979,41 +2030,62 @@ def find_hidden_groups_from_jaxpr(
     """
     Find hidden groups from the jaxpr.
 
-    Args:
-        jaxpr: The jaxpr for the model.
-        hidden_outvar_to_invar: Mapping from hidden output variable to hidden input variable.
-        weight_invars: Set of weight input variables.
-        invar_to_hidden_path: Mapping from weight input variable to hidden state path.
-        outvar_to_hidden_path: Mapping from hidden output variable to hidden state path.
-        path_to_state: Mapping from hidden state path to state.
-        include_recurrent_mixing: Whether to trace recurrent ETP *mixing* primitives
-            (``etp_mv``/``etp_mm``/``etp_conv``) into the hidden-to-hidden
-            transition jaxpr.
+    Parameters
+    ----------
+    jaxpr : Jaxpr
+        The jaxpr for the model.
+    hidden_outvar_to_invar : dict
+        Mapping from hidden output variable to hidden input variable.
+    weight_invars : set
+        Set of weight input variables.
+    invar_to_hidden_path : dict
+        Mapping from weight input variable to hidden state path.
+    outvar_to_hidden_path : dict
+        Mapping from hidden output variable to hidden state path.
+    path_to_state : dict
+        Mapping from hidden state path to state.
+    include_recurrent_mixing : bool, optional
+        Whether to trace recurrent ETP *mixing* primitives
+        (``etp_mv``/``etp_mm``/``etp_conv``) into the hidden-to-hidden
+        transition jaxpr.
 
-            - ``False`` (default, "without recurrence"): these primitives are
-              treated as boundaries and excluded, so the transition keeps only
-              element-wise (and non-ETP) state-to-state paths. The recurrent
-              weight's temporal credit is carried by its eligibility trace. This
-              keeps the recurrent Jacobian ``D^t`` contractive and the trace
-              bounded (the standard D-RTRL / e-prop diagonal approximation).
-            - ``True`` ("with recurrence"): the mixing primitives are traced into
-              the transition, so ``D^t`` carries the full per-step recurrent
-              coupling. The resulting (coupled) Jacobian is extracted per
-              position via :func:`block_diagonal_last_dim` (selected automatically
-              by :attr:`HiddenGroup.is_diagonal_recurrence`).
-        control_flow: The :class:`~braintrace.ControlFlowPolicy` governing how
-            opaque control-flow equations touching hidden states are handled
-            (``'opaque-fwd'`` keeps a weight-free while/scan/cond as an opaque
-            forward node; ``'error'`` raises as before Phase 3).
-        descended_scan_eqn_ids: ``id()`` values of scan equations rewritten by
-            structured scan descent (Phase 4); skipped by this walker.
-        descended_hidden_paths: Hidden-state paths covered by descended scan
-            bodies; excluded from the zero-recurrence fallback grouping.
+        - ``False`` (default, "without recurrence"): these primitives are
+          treated as boundaries and excluded, so the transition keeps only
+          element-wise (and non-ETP) state-to-state paths. The recurrent
+          weight's temporal credit is carried by its eligibility trace. This
+          keeps the recurrent Jacobian ``D^t`` contractive and the trace
+          bounded (the standard D-RTRL / e-prop diagonal approximation).
+        - ``True`` ("with recurrence"): the mixing primitives are traced into
+          the transition, so ``D^t`` carries the full per-step recurrent
+          coupling. The resulting (coupled) Jacobian is extracted per
+          position via :func:`block_diagonal_last_dim` (selected automatically
+          by :attr:`HiddenGroup.is_diagonal_recurrence`).
+    sparse_n : int or None, optional
+        SnAp order for ``recurrence_scope='sparse_n'``; ``None`` (default)
+        leaves every group's ``snap`` pattern unset.
+    snap_max_jacobian_elements : int, optional
+        Ceiling on each hidden group's widened block Jacobian,
+        ``P * (K * S) ** 2`` elements. Configurations exceeding it are
+        refused with :class:`~braintrace.NotSupportedError`.
+    control_flow : ControlFlowPolicy, optional
+        The :class:`~braintrace.ControlFlowPolicy` governing how opaque
+        control-flow equations touching hidden states are handled
+        (``'opaque-fwd'`` keeps a weight-free while/scan/cond as an opaque
+        forward node; ``'error'`` raises as before Phase 3).
+    descended_scan_eqn_ids : frozenset of int, optional
+        ``id()`` values of scan equations rewritten by structured scan descent
+        (Phase 4); skipped by this walker.
+    descended_hidden_paths : frozenset of Path, optional
+        Hidden-state paths covered by descended scan bodies; excluded from the
+        zero-recurrence fallback grouping.
 
-    Returns:
+    Returns
+    -------
+    tuple
         A tuple containing:
-        - Sequence of HiddenGroup objects
-        - PrettyDict mapping hidden state paths to hidden groups
+
+        - Sequence of HiddenGroup objects.
+        - PrettyDict mapping hidden state paths to hidden groups.
     """
     evaluator = JaxprEvalForHiddenGroup(
         jaxpr=jaxpr,

@@ -68,11 +68,15 @@ def order_hidden_group_index(
     matches its position in the sequence. This validation is important for maintaining
     the correct ordering of hidden groups in the eligibility trace compilation process.
 
-    Args:
-        hidden_groups (Sequence[HiddenGroup]): A sequence of HiddenGroup objects to validate.
+    Parameters
+    ----------
+    hidden_groups : Sequence[HiddenGroup]
+        A sequence of HiddenGroup objects to validate.
 
-    Raises:
-        AssertionError: If any hidden group's index doesn't match its position in the sequence.
+    Raises
+    ------
+    AssertionError
+        If any hidden group's index doesn't match its position in the sequence.
     """
     for i, group in enumerate(hidden_groups):
         assert group.index == i, f"Hidden group index {group.index} should be equal to its position {i}."
@@ -257,14 +261,20 @@ def compiler_context(name: str):
     This function manages the context for compiling eligibility trace graphs, ensuring
     that recursive graph compilations are detected and handled appropriately.
 
-    Args:
-        name (str): The name of the compiler to be added to the context.
+    Parameters
+    ----------
+    name : str
+        The name of the compiler to be added to the context.
 
-    Yields:
-        None: This context manager does not yield any value.
+    Yields
+    ------
+    None
+        This context manager does not yield any value.
 
-    Raises:
-        NotImplementedError: If a recursive call to "compile_graph" is detected.
+    Raises
+    ------
+    NotImplementedError
+        If a recursive call to "compile_graph" is detected.
     """
     try:
         # add the compiler to the context
