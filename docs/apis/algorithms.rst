@@ -170,6 +170,24 @@ it does not allocate multiple rank factors.
 ``ES_D_RTRL`` is an alias for :class:`pp_prop`.
 
 
+SnAp — Sparse n-step RTRL approximation
+---------------------------------------
+
+:class:`SnAp` retains the recurrent influence entries reachable within an
+``n``-step position neighbourhood. It interpolates from the coupled,
+within-position scope at ``n=1`` toward full within-group RTRL as the
+neighbourhood saturates. Dense recurrence therefore saturates immediately;
+the method is most useful when the recurrent position graph is structurally
+sparse.
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
+   SnAp
+
+
 SNN Online-Learning Algorithms
 ------------------------------
 
@@ -225,6 +243,10 @@ Algorithm Comparison
      - depends on regime
      - depends on regime
      - ``OSTLRecurrent`` ('with-H', D-RTRL) keeps the recurrent Jacobian; ``OSTLFeedforward`` ('without-H', pp_prop) drops it.
+   * - ``SnAp``
+     - depends on the retained ``n``-step neighbourhood
+     - depends on recurrent graph sparsity and ``n``
+     - Recurrent position graphs whose structural sparsity remains useful over the requested neighbourhood.
 
 Each name above is a thin factory over an :class:`ETraceConfig`; the axes that
 distinguish them are:
@@ -246,9 +268,10 @@ distinguish them are:
      - ``recurrence_scope='coupled'``
    * - ``OSTLFeedforward``
      - ``trace_factorization='io_factorized'``, ``decay=1e-6`` (by default)
+   * - ``SnAp``
+     - ``recurrence_scope='sparse_n'``, ``sparse_n=n``
 
 Because these are coordinates rather than classes, the axes compose beyond the
 named presets — random feedback on the :math:`O(I+O)` trace, or a coupled
 recurrence scope with an ``io_factorized`` factorization, are both reachable
 even though no preset spells them.
-

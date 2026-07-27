@@ -20,9 +20,8 @@ layers built on top.
      - What it does
      - Reference
    * - **Operators**
-     - User-facing ETP ops that mark weights for online learning, and the
-       machinery to register your own primitives.
-     - :doc:`concepts`, :doc:`primitives`
+     - User-facing ETP operations that mark weights for online learning.
+     - :doc:`concepts`
    * - **Compiler**
      - Walks the JAX ``jaxpr``, identifies ETP primitives by type, and connects
        each parameter to the hidden states it influences.
@@ -32,12 +31,15 @@ layers built on top.
        Jacobians the algorithms consume.
      - :doc:`compiler`
    * - **Algorithms**
-     - Online-learning orchestrators: the exact D-RTRL / ES-D-RTRL family and
-       the SNN algorithms (EProp, OSTL).
+     - Online-learning orchestrators including D-RTRL, pp-prop, EProp, OSTL,
+       and SnAp.
      - :doc:`algorithms`
    * - **Layers**
      - Drop-in ``brainstate.nn``-style layers pre-wired through ETP primitives.
      - :doc:`nn`
+   * - **Others**
+     - Extension interfaces for registering custom ETP primitives.
+     - :doc:`primitives`
 
 The fastest way in is the one-call :func:`braintrace.compile` entry point,
 documented in :doc:`algorithms`.

@@ -77,6 +77,9 @@ extensions = [
 
 
 html_baseurl = 'https://brainx.chaobrain.com/braintrace/'
+# Keep relative documentation assets local when previewing a built index page.
+# Production already serves the canonical path with a trailing slash.
+brainx_inject_base = False
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -120,7 +123,7 @@ myst_enable_extensions = [
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ['_build', 'specs', 'Thumbs.db', '.DS_Store']
 
 html_theme = "sphinx_book_theme"
 html_logo = "https://brainx.chaobrain.com/images/braintrace.webp"
@@ -134,7 +137,9 @@ html_last_updated_fmt = ""
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ["_static"]
-jupyter_execute_notebooks = "off"
+html_css_files = ["css/braintrace-docs.css"]
+html_js_files = ["js/tutorial-groups.js"]
+nb_execution_mode = "off"
 thebe_config = {
     "repository_url": "https://github.com/binder-examples/jupyter-stacks-datascience",
     "repository_branch": "master",
@@ -146,7 +151,7 @@ html_theme_options = {
 
 # -- Options for myst ----------------------------------------------
 # Notebook cell execution timeout; defaults to 30.
-execution_timeout = 200
+nb_execution_timeout = 200
 
 autodoc_default_options = {
     'exclude-members': '....,default_rng',

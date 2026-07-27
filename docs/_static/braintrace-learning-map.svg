@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 720" role="img" aria-labelledby="learning-map-title learning-map-description">
+  <title id="learning-map-title">BrainTrace documentation learning path</title>
+  <desc id="learning-map-description">A top-to-bottom dependency map from Quickstart and Core Concepts through the RNN and SNN workflows, algorithm selection, D-RTRL and pp-prop, ETP primitives, compiler internals, and examples.</desc>
+  <defs>
+    <style>
+      .edge { fill: none; stroke: #334155; stroke-width: 2.5; stroke-linecap: round; }
+      .node { fill: #ffffff; stroke: #172235; stroke-width: 2.6; }
+      .workflow { fill: #ecfdf5; stroke: #27715b; }
+      .algorithm { fill: #eff6ff; stroke: #2468a2; }
+      .advanced { fill: #faf5ff; stroke: #75539b; }
+      .number { fill: #172235; font-family: Georgia, 'Times New Roman', serif; font-size: 24px; text-anchor: middle; dominant-baseline: middle; }
+    </style>
+  </defs>
+
+  <path class="edge" d="M380 68 L380 94"/>
+  <path class="edge" d="M362 143 C326 166 292 177 264 192"/>
+  <path class="edge" d="M398 143 C434 166 468 177 496 192"/>
+  <path class="edge" d="M270 242 C294 270 328 287 362 299"/>
+  <path class="edge" d="M490 242 C466 270 432 287 398 299"/>
+  <path class="edge" d="M362 340 C326 365 292 382 264 397"/>
+  <path class="edge" d="M398 340 C434 365 468 382 496 397"/>
+  <path class="edge" d="M270 447 C294 474 328 491 362 503"/>
+  <path class="edge" d="M490 447 C466 474 432 491 398 503"/>
+  <path class="edge" d="M380 548 L380 574"/>
+  <path class="edge" d="M380 626 L380 652"/>
+
+  <circle class="node" cx="380" cy="42" r="26"/>
+  <text class="number" x="380" y="43">1</text>
+  <circle class="node" cx="380" cy="120" r="26"/>
+  <text class="number" x="380" y="121">2</text>
+
+  <circle class="node workflow" cx="245" cy="215" r="28"/>
+  <text class="number" x="245" y="216">3</text>
+  <circle class="node workflow" cx="515" cy="215" r="28"/>
+  <text class="number" x="515" y="216">4</text>
+
+  <circle class="node" cx="380" cy="315" r="28"/>
+  <text class="number" x="380" y="316">5</text>
+
+  <circle class="node algorithm" cx="245" cy="420" r="28"/>
+  <text class="number" x="245" y="421">6</text>
+  <circle class="node algorithm" cx="515" cy="420" r="28"/>
+  <text class="number" x="515" y="421">7</text>
+
+  <circle class="node advanced" cx="380" cy="520" r="28"/>
+  <text class="number" x="380" y="521">8</text>
+  <circle class="node advanced" cx="380" cy="600" r="26"/>
+  <text class="number" x="380" y="601">9</text>
+  <ellipse class="node advanced" cx="380" cy="680" rx="38" ry="28"/>
+  <text class="number" x="380" y="681">10</text>
+</svg>
