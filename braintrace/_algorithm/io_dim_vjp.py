@@ -83,23 +83,30 @@ def _format_decay_and_rank(decay_or_rank: Any) -> Tuple[float, int]:
     If the input is an integer, it is treated as the number of ranks, and the decay factor
     is calculated.
 
-    Args:
-        decay_or_rank (float or int): The decay factor (a float in ``[0, 1)``) or the
-                                      number of approximation ranks (a positive integer).
+    Parameters
+    ----------
+    decay_or_rank : float or int
+        The decay factor (a float in ``[0, 1)``) or the number of approximation
+        ranks (a positive integer).
 
-    Returns:
-        Tuple[float, int]: A tuple containing the decay factor and the number of approximation ranks.
+    Returns
+    -------
+    tuple of (float, int)
+        A tuple containing the decay factor and the number of approximation ranks.
 
-    Raises:
-        ValueError: If the input is neither a float nor an integer, or if the float is not in the range [0, 1),
-                    or if the integer is not greater than 0.
+    Raises
+    ------
+    ValueError
+        If the input is neither a float nor an integer, or if the float is not
+        in the range [0, 1), or if the integer is not greater than 0.
 
-    Notes:
-        The lower bound is inclusive so that ``temporal_recursion='none'`` is
-        expressible as a float. It introduces no new numerical regime: decay 0
-        was already reachable as ``decay_or_rank=1`` (rank 1 -> decay 0), and the
-        bias correction's exponent ``running_index + 1`` is always >= 1, so
-        ``0 ** k`` is 0 and the correction factor is exactly 1.
+    Notes
+    -----
+    The lower bound is inclusive so that ``temporal_recursion='none'`` is
+    expressible as a float. It introduces no new numerical regime: decay 0
+    was already reachable as ``decay_or_rank=1`` (rank 1 -> decay 0), and the
+    bias correction's exponent ``running_index + 1`` is always >= 1, so
+    ``0 ** k`` is 0 and the correction factor is exactly 1.
     """
     # number of approximation rank and the decay factor
     if isinstance(decay_or_rank, float):
@@ -122,15 +129,20 @@ def _format_decays(decay_or_rank: Any) -> Tuple[float, float]:
     either a float decay in ``[0, 1)`` or an integer rank ``>= 1`` mapping
     through ``decay = (rank - 1) / (rank + 1)``.
 
-    Args:
-        decay_or_rank: A scalar or a two-entry sequence.
+    Parameters
+    ----------
+    decay_or_rank : Any
+        A scalar or a two-entry sequence.
 
-    Returns:
-        Tuple[float, float]: The x-side and f-side decays.
+    Returns
+    -------
+    tuple of (float, float)
+        The x-side and f-side decays.
 
-    Raises:
-        ValueError: If a pair does not have exactly two entries, or an entry is
-            out of range.
+    Raises
+    ------
+    ValueError
+        If a pair does not have exactly two entries, or an entry is out of range.
     """
     if isinstance(decay_or_rank, (tuple, list)):
         if len(decay_or_rank) != 2:
@@ -153,14 +165,20 @@ def _expon_smooth(old: Any, new: Any, decay: Any) -> Any:
     with the new value. If the new value is None, the function returns the old
     value scaled by the decay factor.
 
-    Args:
-        old: The old value to be smoothed.
-        new: The new value to be incorporated into the smoothing. If None, only
-             the old value scaled by the decay factor is returned.
-        decay: The decay factor, a float between 0 and 1, that determines the
-               weight of the old value in the smoothing process.
+    Parameters
+    ----------
+    old : Any
+        The old value to be smoothed.
+    new : Any
+        The new value to be incorporated into the smoothing. If None, only the
+        old value scaled by the decay factor is returned.
+    decay : Any
+        The decay factor, a float between 0 and 1, that determines the weight
+        of the old value in the smoothing process.
 
-    Returns:
+    Returns
+    -------
+    Any
         The smoothed value, which is a combination of the old and new values
         weighted by the decay factor.
     """
@@ -214,19 +232,23 @@ def _init_IO_dim_state(
     the df, and records the target paths of the weight x if it is used
     repeatedly in the graph.
 
-    Args:
-        etrace_xs (Dict[ETraceX_Key, brainstate.State]): A dictionary to store the
-            eligibility trace states for the weight x, keyed by ETraceX_Key.
-        etrace_dfs (Dict[ETraceDF_Key, brainstate.State]): A dictionary to store the
-            eligibility trace states for the differential functions, keyed by
-            ETraceDF_Key.
-        relation (HiddenParamOpRelation): The relation object containing
-            information about the weights and hidden groups involved in the
-            computation.
+    Parameters
+    ----------
+    etrace_xs : Dict[ETraceX_Key, brainstate.State]
+        A dictionary to store the eligibility trace states for the weight x,
+        keyed by ETraceX_Key.
+    etrace_dfs : Dict[ETraceDF_Key, brainstate.State]
+        A dictionary to store the eligibility trace states for the differential
+        functions, keyed by ETraceDF_Key.
+    relation : HiddenParamOpRelation
+        The relation object containing information about the weights and hidden
+        groups involved in the computation.
 
-    Raises:
-        ValueError: If a relation with the same key has already been added to
-            the eligibility trace states.
+    Raises
+    ------
+    ValueError
+        If a relation with the same key has already been added to the
+        eligibility trace states.
     """
     # For the relation
     #
@@ -333,25 +355,31 @@ def _update_IO_dim_etrace_scan_fn(
     They are equal for every shipped preset; the split exists so an asymmetric
     coordinate is expressible.
 
-    Args:
-        hist_etrace_vals (Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]):
-            A tuple containing dictionaries of historical eligibility trace
-            values for the weight x and df, keyed by ETraceX_Key and
-            ETraceDF_Key, respectively.
-        jacobians (Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array], Sequence[jax.Array]]):
-            A tuple containing dictionaries of current Jacobian values for the
-            weight x and df, and a sequence of hidden group Jacobians.
-        hid_weight_op_relations (Sequence[HiddenParamOpRelation]):
-            A sequence of HiddenParamOpRelation objects representing the
-            relationships between hidden parameters and operations.
-        decay (float): The decay factor used in the low-pass filter, a value
-            between 0 and 1.
+    Parameters
+    ----------
+    hist_etrace_vals : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
+        A tuple containing dictionaries of historical eligibility trace values
+        for the weight x and df, keyed by ETraceX_Key and ETraceDF_Key,
+        respectively.
+    jacobians : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array], Sequence[jax.Array]]
+        A tuple containing dictionaries of current Jacobian values for the
+        weight x and df, and a sequence of hidden group Jacobians.
+    hid_weight_op_relations : Sequence[HiddenParamOpRelation]
+        A sequence of HiddenParamOpRelation objects representing the
+        relationships between hidden parameters and operations.
+    decay_x : float
+        The decay factor applied to the presynaptic input trace in the low-pass
+        filter, a value between 0 and 1.
+    decay_f : float
+        The decay factor applied to the Jacobian-propagated output trace in the
+        low-pass filter, a value between 0 and 1.
 
-    Returns:
-        Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]:
-            A tuple containing dictionaries of updated eligibility trace values
-            for the weight x and df, keyed by ETraceX_Key and ETraceDF_Key,
-            respectively.
+    Returns
+    -------
+    Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
+        A tuple containing dictionaries of updated eligibility trace values for
+        the weight x and df, keyed by ETraceX_Key and ETraceDF_Key,
+        respectively.
     """
     # --- the data --- #
 
@@ -507,33 +535,34 @@ def _solve_IO_dim_weight_gradients(
 
     This function calculates the weight gradients by utilizing the eligibility trace data and the
     hidden-to-hidden Jacobians. It applies a correction factor to avoid exponential smoothing bias
-    at the beginning of the computation.
+    at the beginning of the computation, and updates the ``dG_weights`` dictionary in place.
 
-    Args:
-        hist_etrace_data (Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]):
-            A tuple containing dictionaries of historical eligibility trace values for the weight x
-            and differential functions (df), keyed by ETraceX_Key and ETraceDF_Key, respectively.
-        dG_weights (Dict[Path, dG_Weight]):
-            A dictionary to store the computed weight gradients, keyed by the path of the weight.
-        dG_hidden_groups (Sequence[jax.Array]):
-            A sequence of hidden group Jacobians, with the same length as the total number of hidden groups.
-        weight_hidden_relations (Sequence[HiddenParamOpRelation]):
-            A sequence of HiddenParamOpRelation objects representing the relationships between hidden
-            parameters and operations.
-        weight_vals (Dict[Path, WeightVals]):
-            A dictionary containing the current values of the weights, keyed by their paths.
-        running_index (int):
-            The current index in the running sequence, used to compute the correction factor.
-            See F-30 in ``docs/specs/2026-07-25-known-limitations.md``: this counts
-            ``update()`` calls, not trace steps, so the correction is exact only for
-            single-step input.
-        decay_f (float):
-            The f-side decay factor used in the exponential smoothing process, a value
-            in ``[0, 1)``. Only the f-side is corrected: the x-side low-pass has no
-            ``(1 - alpha)`` input weight and therefore no warm-up bias to undo.
-
-    Returns:
-        None: The function updates the dG_weights dictionary in place with the computed weight gradients.
+    Parameters
+    ----------
+    hist_etrace_data : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
+        A tuple containing dictionaries of historical eligibility trace values for the weight x
+        and differential functions (df), keyed by ETraceX_Key and ETraceDF_Key, respectively.
+    dG_weights : Dict[Path, dG_Weight]
+        A dictionary to store the computed weight gradients, keyed by the path of the weight.
+    dG_hidden_groups : Sequence[jax.Array]
+        A sequence of hidden group Jacobians, with the same length as the total number of hidden groups.
+    weight_hidden_relations : Sequence[HiddenParamOpRelation]
+        A sequence of HiddenParamOpRelation objects representing the relationships between hidden
+        parameters and operations.
+    weight_vals : Dict[Path, WeightVals]
+        A dictionary containing the current values of the weights, keyed by their paths.
+    running_index : int
+        The current index in the running sequence, used to compute the correction factor.
+        See F-30 in ``docs/specs/2026-07-25-known-limitations.md``: this counts
+        ``update()`` calls, not trace steps, so the correction is exact only for
+        single-step input.
+    decay_f : float
+        The f-side decay factor used in the exponential smoothing process, a value
+        in ``[0, 1)``. Only the f-side is corrected: the x-side low-pass has no
+        ``(1 - alpha)`` input weight and therefore no warm-up bias to undo.
+    fast_solve : bool, optional
+        Whether to use the per-primitive fast contraction instead of the legacy
+        vmap path.
     """
     # Bias correction for exponential smoothing
     #   ε_f^t = α ε_f^{t-1} + (1-α) x_t  =>  E[ε_f^t] = x · (1 - α^{t+1})
@@ -908,8 +937,10 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
             This is the protocol method that should be implemented in the subclass.
 
-        Returns:
-            ETraceVals, the eligibility trace data.
+        Returns
+        -------
+        ETraceVals
+            The eligibility trace data.
         """
         etrace_xs = {k: v.value for k, v in self.etrace_xs.items()}
         etrace_dfs = {k: v.value for k, v in self.etrace_dfs.items()}
@@ -928,8 +959,10 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
             This is the protocol method that should be implemented in the subclass.
 
-        Args:
-            hist_etrace_vals: ETraceVals, the eligibility trace data.
+        Parameters
+        ----------
+        hist_etrace_vals : ETraceVals
+            The eligibility trace data.
         """
         #
         # For any operation:
@@ -989,25 +1022,31 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         trace values along with current Jacobians to compute the updated eligibility
         traces according to the algorithm's update rules.
 
-        Args:
-            running_index: Optional[int]
-                The current timestep index. Used for decay correction factors.
-            hist_etrace_vals: Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
-                The eligibility trace values from the previous timestep, containing:
-                - Dictionary mapping weight inputs to their trace values
-                - Dictionary mapping differential functions to their trace values
-            hid2weight_jac_single_or_multi_times: Hid2WeightJacobian
-                The current hidden-to-weight Jacobians at time t (or t-1 depending on vjp_method).
-            hid2hid_jac_single_or_multi_times: HiddenGroupJacobian
-                The current hidden-to-hidden Jacobians for propagating gradients.
-            weight_vals: WeightVals
-                The current values of the model weights.
+        Parameters
+        ----------
+        running_index : int, optional
+            The current timestep index. Used for decay correction factors.
+        hist_etrace_vals : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
+            The eligibility trace values from the previous timestep, containing:
 
-        Returns:
-            Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]:
-                Updated eligibility trace values for both input traces and differential
-                function traces, computed according to the exponential smoothing rules
-                of the algorithm.
+            - Dictionary mapping weight inputs to their trace values.
+            - Dictionary mapping differential functions to their trace values.
+        hid2weight_jac_single_or_multi_times : Hid2WeightJacobian
+            The current hidden-to-weight Jacobians at time t (or t-1 depending on vjp_method).
+        hid2hid_jac_single_or_multi_times : HiddenGroupJacobian
+            The current hidden-to-hidden Jacobians for propagating gradients.
+        weight_vals : WeightVals
+            The current values of the model weights.
+        input_is_multi_step : bool
+            Whether the Jacobian inputs span multiple time steps, selecting the
+            scan path over the single-step path.
+
+        Returns
+        -------
+        Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
+            Updated eligibility trace values for both input traces and differential
+            function traces, computed according to the exponential smoothing rules
+            of the algorithm.
         """
         #
         # "running_index":
@@ -1076,24 +1115,28 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         where ϵ represents the eligibility traces and ∂L/∂h are the gradients of
         the loss with respect to hidden states.
 
-        Args:
-            running_index: int
-                The current timestep index, used for correction factor calculation.
-            etrace_h2w_at_t: Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
-                The eligibility trace data at the current timestep, containing:
-                - Dictionary mapping weight inputs to their trace values
-                - Dictionary mapping differential functions to their trace values
-            dl_to_hidden_groups: Sequence[jax.Array]
-                Gradients of the loss with respect to each hidden group/state.
-            weight_vals: Dict[Path, PyTree]
-                Current values of the model weights.
-            dl_to_nonetws_at_t: Dict[Path, PyTree]
-                Gradients for non-eligibility trace weights computed through standard backprop.
-            dl_to_etws_at_t: Optional[Dict[Path, PyTree]]
-                Optional additional gradients for eligibility trace weights.
+        Parameters
+        ----------
+        running_index : int
+            The current timestep index, used for correction factor calculation.
+        etrace_h2w_at_t : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
+            The eligibility trace data at the current timestep, containing:
 
-        Returns:
-            Dict[Path, jax.Array]: Computed gradients for all weights in the model.
+            - Dictionary mapping weight inputs to their trace values.
+            - Dictionary mapping differential functions to their trace values.
+        dl_to_hidden_groups : Sequence[jax.Array]
+            Gradients of the loss with respect to each hidden group/state.
+        weight_vals : Dict[Path, PyTree]
+            Current values of the model weights.
+        dl_to_nonetws_at_t : Dict[Path, PyTree]
+            Gradients for non-eligibility trace weights computed through standard backprop.
+        dl_to_etws_at_t : Dict[Path, PyTree], optional
+            Optional additional gradients for eligibility trace weights.
+
+        Returns
+        -------
+        Dict[Path, jax.Array]
+            Computed gradients for all weights in the model.
         """
 
         #

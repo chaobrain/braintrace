@@ -113,21 +113,35 @@ class Trainer(object):
     including accuracy calculation, batch evaluation, and epoch-wise training/testing.
     Subclasses should implement the `batch_train` method for specific training algorithms.
 
-    Args:
-        target (brainstate.nn.Module): The neural network model to be trained.
-        opt (braintools.optim.Optimizer): Optimizer for updating model parameters.
-        train_loader (Iterable): DataLoader for training data.
-        test_loader (Iterable): DataLoader for test data.
-        x_fun (Callable): Function to preprocess input data batches.
-        n_epoch (int, optional): Number of training epochs. Default is 30.
+    Parameters
+    ----------
+    target : brainstate.nn.Module
+        The neural network model to be trained.
+    opt : braintools.optim.Optimizer
+        Optimizer for updating model parameters.
+    train_loader : Iterable
+        DataLoader for training data.
+    test_loader : Iterable
+        DataLoader for test data.
+    x_fun : Callable
+        Function to preprocess input data batches.
+    n_epoch : int, optional
+        Number of training epochs. Default is 30.
 
-    Attributes:
-        train_loader (Iterable): Training data loader.
-        test_loader (Iterable): Test data loader.
-        x_fun (Callable): Input preprocessing function.
-        target (brainstate.nn.Module): The model being trained.
-        opt (braintools.optim.Optimizer): Optimizer instance.
-        n_epoch (int): Number of epochs to train.
+    Attributes
+    ----------
+    train_loader : Iterable
+        Training data loader.
+    test_loader : Iterable
+        Test data loader.
+    x_fun : Callable
+        Input preprocessing function.
+    target : brainstate.nn.Module
+        The model being trained.
+    opt : braintools.optim.Optimizer
+        Optimizer instance.
+    n_epoch : int
+        Number of epochs to train.
     """
 
     def __init__(

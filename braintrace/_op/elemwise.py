@@ -121,11 +121,16 @@ def _elemwise_dt_to_t(hidden_dim: Any, trace: dict[str, Any], *,
     This is invoked per hidden-state slice; both operands share shape
     ``(*y_shape,)``.
 
-    Args:
-        hidden_dim: Cotangent :math:`\partial h / \partial y`, shape matches weight.
-        trace: ``{'weight': ...}``, array of the same shape.
+    Parameters
+    ----------
+    hidden_dim : Any
+        Cotangent :math:`\partial h / \partial y`, shape matches weight.
+    trace : dict
+        ``{'weight': ...}``, array of the same shape.
 
-    Returns:
+    Returns
+    -------
+    dict
         ``{'weight': hidden_dim ⊙ trace['weight']}``.
     """
     return {'weight': trace['weight'] * hidden_dim}
@@ -153,15 +158,22 @@ def _elemwise_xy_to_dw(x: Any, hidden_dim: Any, weights: dict[str, Any], *,
     leading axes (e.g. a batch axis under :class:`brainstate.mixin.Batching`),
     which the unbatched VJP would reject as a shape mismatch.
 
-    Args:
-        x: Unused (``x_invar_index=None``).
-        hidden_dim: Cotangent :math:`\partial h / \partial y`. Shape matches the
-            weight, optionally with extra leading axes (e.g. a batch axis).
-        weights: Dict with key 'weight' (the raw weight mantissa).
-        weight_fn: Element-wise function applied inside the primitive. When
-            ``None``, behaves as identity.
+    Parameters
+    ----------
+    x : Any
+        Unused (``x_invar_index=None``).
+    hidden_dim : Any
+        Cotangent :math:`\partial h / \partial y`. Shape matches the weight,
+        optionally with extra leading axes (e.g. a batch axis).
+    weights : dict
+        Dict with key 'weight' (the raw weight mantissa).
+    weight_fn : WeightFn or None, optional
+        Element-wise function applied inside the primitive. When ``None``,
+        behaves as identity.
 
-    Returns:
+    Returns
+    -------
+    dict
         ``{'weight': hidden_dim ⊙ weight_fn'(w)}``, or
         ``{'weight': hidden_dim}`` when ``weight_fn is None``.
     """
@@ -199,18 +211,26 @@ def _elemwise_init_drtrl(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     instantaneous term ``df`` (shape ``(*group.varshape, n_state)``) so the scan
     carry stays well-typed.
 
-    Args:
-        x_var: Unused (``x_invar_index=None``).
-        y_var: Output variable descriptor with shape.
-        weight_vars: Dict with key 'weight'. Only its dtype is consulted
-            (unused otherwise); falls back to ``y_var``'s dtype alone when
-            ``None`` (e.g. direct unit tests).
-        num_hidden_state: Number of hidden states :math:`n_{\text{state}}`.
-        group: The owning :class:`HiddenGroup`. When supplied, its (possibly
-            batched) ``varshape`` is used for the trace leading axes; falls back
-            to ``y_var`` shape when ``None`` (e.g. direct unit tests).
+    Parameters
+    ----------
+    x_var : Any
+        Unused (``x_invar_index=None``).
+    y_var : Any
+        Output variable descriptor with shape.
+    weight_vars : dict
+        Dict with key 'weight'. Only its dtype is consulted (unused otherwise);
+        falls back to ``y_var``'s dtype alone when ``None`` (e.g. direct unit
+        tests).
+    num_hidden_state : int
+        Number of hidden states :math:`n_{\text{state}}`.
+    group : Any, optional
+        The owning :class:`HiddenGroup`. When supplied, its (possibly batched)
+        ``varshape`` is used for the trace leading axes; falls back to ``y_var``
+        shape when ``None`` (e.g. direct unit tests).
 
-    Returns:
+    Returns
+    -------
+    dict
         ``{'weight': zeros(*leading_shape, n_state)}``.
 
     Notes
@@ -245,7 +265,9 @@ def _elemwise_init_pp(x_var: Any, y_var: Any, weight_vars: dict[str, Any],
     leading axes come from ``group.varshape`` so the trace carries the batch
     axis under :class:`brainstate.mixin.Batching`.
 
-    Returns:
+    Returns
+    -------
+    Array
         Single array of shape ``(*leading_shape, n_state)``.
     """
     leading = tuple(group.varshape) if group is not None else tuple(y_var.aval.shape)

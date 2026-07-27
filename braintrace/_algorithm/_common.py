@@ -208,19 +208,18 @@ def _reset_state_in_a_dict(
     Reset the values in a dictionary of states to zero.
 
     This function iterates over a dictionary of states and resets each state's
-    value to a zero array. The shape of the zero array is determined by the
-    original shape of the state's value and the specified batch size.
+    value to a zero array, modifying ``state_dict`` in place. The shape of the
+    zero array is determined by the original shape of the state's value and the
+    specified batch size.
 
-    Args:
-        state_dict (Dict[Any, brainstate.State]): A dictionary where keys are any
-            type and values are brainstate.State objects. Each state's value will be
-            reset to a zero array.
-        batch_size (Optional[int]): The size of the batch. If provided, the
-            zero array will include a batch dimension; otherwise, it will not.
-
-    Returns:
-        None: The function modifies the state_dict in place, resetting each
-        state's value to a zero array.
+    Parameters
+    ----------
+    state_dict : Dict[Any, brainstate.State]
+        A dictionary where keys are any type and values are brainstate.State
+        objects. Each state's value will be reset to a zero array.
+    batch_size : int, optional
+        The size of the batch. If provided, the zero array will include a batch
+        dimension; otherwise, it will not.
     """
     for k, v in state_dict.items():
         state_dict[k].value = jax.tree.map(partial(_zeros_like_batch_or_not, batch_size), v.value)
@@ -238,17 +237,21 @@ def _zeros_like_batch_or_not(
     of the input array `x`. If a batch size is provided, the zeros array will
     include an additional batch dimension at the beginning.
 
-    Args:
-        batch_size (Optional[int]): The size of the batch. If provided, the
-            zeros array will include a batch dimension. If None, the zeros
-            array will have the same shape as `x`.
-        x (jax.Array): The input array whose shape and data type are used as
-            a reference for creating the zeros array.
+    Parameters
+    ----------
+    batch_size : int, optional
+        The size of the batch. If provided, the zeros array will include a
+        batch dimension. If None, the zeros array will have the same shape
+        as `x`.
+    x : jax.Array
+        The input array whose shape and data type are used as a reference for
+        creating the zeros array.
 
-    Returns:
-        jax.Array: A zeros array with the same shape and data type as the
-        input array, optionally including a batch dimension if `batch_size`
-        is provided.
+    Returns
+    -------
+    jax.Array
+        A zeros array with the same shape and data type as the input array,
+        optionally including a batch dimension if `batch_size` is provided.
     """
     if batch_size is not None:
         assert isinstance(batch_size, int), 'The batch size should be an integer. '
@@ -271,18 +274,22 @@ def _batched_zeros_like(
     states. If a batch size is provided, the zeros array will also include
     a batch dimension.
 
-    Args:
-        batch_size (Optional[int]): The size of the batch. If None, the
-            batch dimension is not included.
-        num_state (int): The number of hidden states, which determines the
-            size of the additional dimension in the zeros array.
-        x (jax.Array): The input array whose shape is used as a reference
-            for creating the zeros array.
+    Parameters
+    ----------
+    batch_size : int, optional
+        The size of the batch. If None, the batch dimension is not included.
+    num_state : int
+        The number of hidden states, which determines the size of the
+        additional dimension in the zeros array.
+    x : jax.Array
+        The input array whose shape is used as a reference for creating the
+        zeros array.
 
-    Returns:
-        jax.Array: A zeros array with the same shape as the input array,
-        extended by the number of hidden states, and optionally including
-        a batch dimension.
+    Returns
+    -------
+    jax.Array
+        A zeros array with the same shape as the input array, extended by the
+        number of hidden states, and optionally including a batch dimension.
     """
     if batch_size is None:
         return u.math.zeros((*x.shape, num_state), x.dtype)
@@ -298,13 +305,18 @@ def _sum_dim(xs: jax.Array, axis: int = -1) -> Any:
     within a PyTree structure. It is useful for reducing the dimensionality of
     arrays by aggregating values along the specified axis.
 
-    Args:
-        xs (jax.Array): A PyTree of arrays where each array will have its last
-                        dimension summed.
+    Parameters
+    ----------
+    xs : jax.Array
+        A PyTree of arrays where each array will have its last dimension summed.
+    axis : int, optional
+        The axis to sum over. Defaults to ``-1`` (the last dimension).
 
-    Returns:
-        jax.Array: A PyTree with the same structure as the input, where each array
-                   has been reduced by summing over its last dimension.
+    Returns
+    -------
+    jax.Array
+        A PyTree with the same structure as the input, where each array has
+        been reduced by summing over its last dimension.
     """
     return jax.tree.map(lambda x: u.math.sum(x, axis=axis), xs)
 
@@ -390,14 +402,18 @@ def _route_grads_by_path(
     into ``per_path``, then wrap with ``_wrap_leaves_as_pytree`` and merge into
     ``target_dict`` via ``_update_dict``.
 
-    Args:
-        relation: HiddenParamOpRelation — provides ``trainable_paths`` and
-            ``trainable_leaf_indices``.
-        per_key_grads: Dict[str, Array] — gradient contributions keyed by
-            trainable invar name (e.g. ``'weight'``, ``'lora_b'``).
-        weight_vals: Dict[Path, PyTree] — current ParamState pytree values;
-            used as the structure template for ``_wrap_leaves_as_pytree``.
-        target_dict: Dict[Path, PyTree] — accumulation target, modified in place.
+    Parameters
+    ----------
+    relation : HiddenParamOpRelation
+        Provides ``trainable_paths`` and ``trainable_leaf_indices``.
+    per_key_grads : Dict[str, jax.Array]
+        Gradient contributions keyed by trainable invar name (e.g.
+        ``'weight'``, ``'lora_b'``).
+    weight_vals : Dict[Path, PyTree]
+        Current ParamState pytree values; used as the structure template for
+        ``_wrap_leaves_as_pytree``.
+    target_dict : Dict[Path, PyTree]
+        Accumulation target, modified in place.
     """
     per_path: Dict[Any, Dict[int, jax.Array]] = {}
     for key, grad in per_key_grads.items():
@@ -420,12 +436,16 @@ def _update_dict(
     If the key exists, then add the value to the existing value.
     Otherwise, create a new key-value pair.
 
-    Args:
-      the_dict: The dictionary.
-      key: The key.
-      value: The value.
-      error_when_no_key: bool, whether to raise an error when the key does not exist.
-
+    Parameters
+    ----------
+    the_dict : Dict
+        The dictionary.
+    key : Any
+        The key.
+    value : PyTree
+        The value.
+    error_when_no_key : bool, optional
+        Whether to raise an error when the key does not exist.
     """
     if key not in the_dict:
         if error_when_no_key:

@@ -150,18 +150,25 @@ def abstractify_model(
     Abstracts a model into a stateful representation suitable for compilation and state extraction.
 
     This function ensures that the model is an instance of `brainstate.nn.Module` and compiles it into a
-    stateful function. It retrieves the model's states and checks for consistency between the 
+    stateful function. It retrieves the model's states and checks for consistency between the
     compiled states and the retrieved states.
 
-    Args:
-        model (brainstate.nn.Module): The model to be abstracted. It must be an instance of `brainstate.nn.Module`.
-        *model_args: Positional arguments to be passed to the model during compilation.
-        **model_kwargs: Keyword arguments to be passed to the model during compilation.
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        The model to be abstracted. It must be an instance of `brainstate.nn.Module`.
+    *model_args : Any
+        Positional arguments to be passed to the model during compilation.
+    **model_kwargs : Any
+        Keyword arguments to be passed to the model during compilation.
 
-    Returns:
-        Tuple[brainstate.transform.StatefulFunction, Dict[Path, brainstate.State]]:
-            - A stateful function representing the compiled model.
-            - A dictionary of the model's retrieved states with their paths.
+    Returns
+    -------
+    tuple of (brainstate.transform.StatefulFunction, dict)
+        A two-element tuple containing:
+
+        - A stateful function representing the compiled model.
+        - A dictionary of the model's retrieved states with their paths.
     """
     assert isinstance(model, brainstate.nn.Module), (
         "The model should be an instance of brainstate.nn.Module. "

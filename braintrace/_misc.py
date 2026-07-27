@@ -39,11 +39,15 @@ def _remove_quantity(tree: Any) -> Any:
     """
     Remove the quantity from the tree.
 
-    Args:
-      tree: The tree.
+    Parameters
+    ----------
+    tree : Any
+        The tree.
 
-    Returns:
-      The tree without the quantity.
+    Returns
+    -------
+    Any
+        The tree without the quantity.
     """
 
     def fn(x: Any) -> Any:

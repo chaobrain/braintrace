@@ -107,11 +107,6 @@ class GradExpon(brainstate.nn.Module):
         grads : PyTree
             The new gradients to incorporate into the accumulated gradients.
             Must match the pytree structure of the accumulator.
-
-        Returns
-        -------
-        None
-            The ``self.gradients`` attribute is updated in place.
         """
         self.gradients.value = jax.tree.map(
             lambda x, y: x * self.decay + y,

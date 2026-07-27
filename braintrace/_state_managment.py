@@ -43,10 +43,6 @@ def assign_dict_state_values(
     write : bool, optional
         A flag indicating whether to assign (`True`) or restore (`False`) the values.
         Defaults to `True`.
-
-    Returns
-    --------
-    None
     """
     if set(states.keys()) != set(state_values.keys()):
         raise ValueError('The keys of states and state_values must be the same.')
@@ -82,10 +78,6 @@ def assign_state_values_v2(
     write : bool, optional
         A flag indicating whether to assign (`True`) or restore (`False`) the values.
         Defaults to `True`.
-
-    Returns
-    --------
-    None
     """
     if set(states.keys()) != set(state_values.keys()):
         raise ValueError(

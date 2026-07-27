@@ -102,11 +102,16 @@ class VjpResiduals:
     """
     The residuals for storing the backward pass data in a VJP function.
 
-    Args:
-      jaxpr: The jaxpr for the backward pass.
-      in_tree: The input tree structure.
-      out_tree: The output tree structure.
-      consts: The constants for the backward pass.
+    Parameters
+    ----------
+    jaxpr : Any
+        The jaxpr for the backward pass.
+    in_tree : Any
+        The input tree structure.
+    out_tree : Any
+        The output tree structure.
+    consts : Any
+        The constants for the backward pass.
     """
 
     def __init__(
@@ -269,10 +274,14 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         """
         Computing the weight x and df values for the spatial gradients.
 
-        Args:
-            intermediate_values: The intermediate values of the model.
+        Parameters
+        ----------
+        intermediate_values : Dict[Var, jax.Array]
+            The intermediate values of the model.
 
-        Returns:
+        Returns
+        -------
+        tuple
             The weight x and df values.
 
         Notes
@@ -401,10 +410,14 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         """
         Computing the hidden group-to-hidden group Jacobian according to the given intermediate values.
 
-        Args:
-            intermediate_values: The intermediate values of the model.
+        Parameters
+        ----------
+        intermediate_values : Dict[Var, jax.Array]
+            The intermediate values of the model.
 
-        Returns:
+        Returns
+        -------
+        HiddenGroupJacobian
             The hidden group-to-hidden group Jacobian.
         """
 
