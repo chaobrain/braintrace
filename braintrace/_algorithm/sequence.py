@@ -281,6 +281,27 @@ class SequenceDriverMixin:
             Mirrors :func:`brainstate.transform.grad`: ``grads``,
             ``(grads, losses)``, ``(grads, aux)`` or ``(grads, losses, aux)``.
 
+        Raises
+        ------
+        TypeError
+            If ``step_fn`` is not given; if *chunk_size* is not ``None`` or a
+            Python ``int`` (a traced or numpy value is refused, since the value
+            has to be known at trace time); or if a sequence is a
+            :class:`SingleStepData` / :class:`MultiStepData` wrapper. The
+            wrappers are registered pytree nodes, so slicing one would
+            decompose the wrapper rather than the data.
+        ValueError
+            If no sequences are given, if their leading lengths disagree, or if
+            ``T == 0`` -- there is nothing to slice. If *chunk_size* is below
+            ``1``; if ``k >= 2`` but the learner's ``vjp_method`` is not
+            ``'multi-step'`` (the executor would raise three frames down), the
+            learner is vmapped (``in_axes=0`` would map time as the batch
+            axis), or ``T % k != 0``. If *mask* is not shape ``(T,)``. If
+            *reduction* or *loss_output* is not one of its legal values. If
+            ``step_fn`` returns a non-scalar in plain mode, or anything but
+            shape ``(k,)`` in window mode. If the learner has not been
+            compiled, the existing guard raises before any of these.
+
         Notes
         -----
         ``grads`` is the learner's **online-gradient estimate** of the reduced
@@ -420,6 +441,19 @@ class SequenceDriverMixin:
         Returns
         -------
         None or stacked outputs
+            ``None`` when ``return_outputs=False``; otherwise the stacked
+            per-step (or per-window) return values of the driven call.
+
+        Raises
+        ------
+        TypeError
+            As in :meth:`etrace_grad`, for *chunk_size* and for wrapped
+            sequences.
+        ValueError
+            As in :meth:`etrace_grad`, **except** that a window is *not*
+            refused for being on a single-step learner -- no loss VJP is taken
+            here, so the restriction does not apply. Windows are still refused
+            under a vmapped learner, and ``T % chunk_size == 0`` still holds.
 
         Examples
         --------
