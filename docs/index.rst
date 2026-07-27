@@ -175,36 +175,15 @@ differentiable ecosystem for full-scale brain simulation.
    quickstart/concepts.ipynb
 
 
-.. Tutorial grouping metadata is consumed by docs/conf.py. The toctree below
-.. remains the only owner of the actual document links.
-
-.. braintrace-tutorial-group: Online Training
-   :members: RNN Online Learning | SNN Online Learning
-
-.. braintrace-tutorial-group: Algorithm Tutorials
-   :members: D-RTRL: diagonal online gradient learning | pp_prop: input/output-factorized online gradients
-
-.. braintrace-tutorial-group: Foundations
-   :members: ETP Operator Fundamentals | braintrace.nn Layers | Hidden State Management
-
-.. braintrace-tutorial-group: Compiler & Runtime
-   :members: Graph Compilation | Visualization
-
-
 .. toctree::
    :hidden:
-   :maxdepth: 1
+   :maxdepth: 2
    :caption: Tutorial
 
-   tutorials/rnn_online_learning.ipynb
-   tutorials/snn_online_learning.ipynb
-   tutorials/drtrl.ipynb
-   tutorials/pp_prop.ipynb
-   tutorials/five_primitive_functions.ipynb
-   tutorials/neural_network_layers.ipynb
-   tutorials/hidden_states.ipynb
-   tutorials/graph_compilation.ipynb
-   tutorials/visualization.ipynb
+   tutorials/online_training.rst
+   tutorials/algorithm_tutorials.rst
+   tutorials/foundations.rst
+   tutorials/compiler_runtime.rst
 
 
 .. toctree::
