@@ -101,8 +101,8 @@ Consequences, all load-bearing below:
 
 ```python
 learner.etrace_grad(
-    step_fn,
     *sequences,
+    step_fn,
     mask=None,
     chunk_size=None,
     weights=None,
@@ -112,6 +112,13 @@ learner.etrace_grad(
     return_value=False,
 )
 ```
+
+Both methods share one signature shape — `(*sequences, step_fn=..., <mode args>)`
+— so the two read the same at every call site. `step_fn` is keyword-only in
+both: required here (there is no default loss), optional in `etrace_evolve`
+(where the default is simply calling the learner). Omitting it raises Python's
+own `TypeError: etrace_grad() missing 1 required keyword-only argument:
+'step_fn'`.
 
 **`step_fn`** — the user's own step function. It **runs the model itself** and
 returns the loss:
@@ -141,8 +148,21 @@ contracts, not a parameterization of one:
 
 | `chunk_size` | slice handed to `step_fn` | `step_fn` returns | requires |
 | --- | --- | --- | --- |
-| `None` (default) | `seq[t]` | a **scalar** | nothing — works with the default `vjp_method='single-step'` |
+| `None` (default) | `seq[t]` | a **scalar** | nothing — legal on **either** `vjp_method` |
 | `int k >= 1` | `seq[t:t+k]`, shape `(k, ...)` | a **`(k,)`** vector of per-step losses | `vjp_method='multi-step'`, and `T % k == 0` |
+
+The two axes are independent, and only one of the four combinations is refused:
+
+| | `vjp_method='single-step'` | `vjp_method='multi-step'` |
+| --- | --- | --- |
+| `chunk_size=None` | legal — the default configuration | legal — single-step *driving* of a multi-step *rule*, and the baseline that test 4 compares `chunk_size=1` against |
+| `chunk_size=k` | **`ValueError`** — the executor refuses `MultiStepData` here | legal |
+
+`chunk_size` chooses how many steps are fed per `update()` call; `vjp_method`
+chooses how the learner unrolls the loss-to-hidden VJP. Driving one step at a
+time on a multi-step learner is a real and useful configuration — it is not a
+degenerate spelling of the single-step rule, which the measured `6.0` gradient
+difference between the two `vjp_method`s makes clear.
 
 In window mode the user wraps their own model inputs:
 `learner(braintrace.MultiStepData(x_win))`. The API does **not** wrap, because
@@ -268,10 +288,11 @@ where each `loss_t` is evaluated on a learner that has been driven through
 
 ```python
 learner.etrace_evolve(xs[:a])
-g1 = learner.etrace_grad(step_fn, xs[a:], ys[a:])
+g1 = learner.etrace_grad(xs[a:], ys[a:], step_fn=step_fn)
 
 # is exactly
-g2 = learner.etrace_grad(step_fn, xs, ys, mask=concat([zeros(a), ones(T - a)]))
+g2 = learner.etrace_grad(xs, ys, step_fn=step_fn,
+                         mask=concat([zeros(a), ones(T - a)]))
 ```
 
 including the `reduction='mean'` normalizer, which is `T - a` on both sides. In
@@ -458,7 +479,7 @@ def step_loss(inp, tar):                       # unchanged from today
 @brainstate.transform.jit
 def f_train(inputs, targets):
     grads, loss = learner.etrace_grad(
-        step_loss, inputs, targets,
+        inputs, targets, step_fn=step_loss,
         loss_output='scalar', return_value=True,
     )
     opt.update(grads)
