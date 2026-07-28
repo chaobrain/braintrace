@@ -1,9 +1,9 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
 """02 Batching with the canonical public learner workflow.
 
-``braintrace.compile(..., vmap=True)`` creates one eligibility-trace learner
-per batch lane. Drive the returned learner directly with ``etrace_grad`` so
-each sample keeps its own hidden and eligibility-trace state.
+``braintrace.compile(..., vmap=True)`` wraps the model in
+``brainstate.nn.Map``, initializes independent per-sample states, and returns
+the compiled learner. Drive that learner directly with ``etrace_grad``.
 """
 
 import pathlib
@@ -63,7 +63,7 @@ def main(*, n_epochs: int = 30, batch_size: int = 64, plot: bool = True) -> dict
         plt.plot(losses);
         plt.xlabel('epoch');
         plt.ylabel('MSE')
-        plt.title('02 Batching via public learner workflow');
+        plt.title('02 Batching via public Map-backed learner workflow');
         plt.show()
     return {"losses": losses}
 

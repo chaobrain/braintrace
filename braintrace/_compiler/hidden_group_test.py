@@ -15,7 +15,6 @@
 
 
 import unittest
-import warnings
 from pprint import pprint
 
 import brainstate
@@ -1497,12 +1496,10 @@ class TestWhileRecurrentMixingGuard:
         cell = WhileMixingCell(n)
         brainstate.nn.init_all_states(cell)
         x = brainstate.random.rand(n)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            with diagnostic_context() as reporter:
-                groups, path_to_group = find_hidden_groups_from_module(
-                    cell, x, include_recurrent_mixing=include_recurrent_mixing,
-                )
+        with diagnostic_context() as reporter:
+            groups, path_to_group = find_hidden_groups_from_module(
+                cell, x, include_recurrent_mixing=include_recurrent_mixing,
+            )
         return cell, x, groups, reporter
 
     def test_default_mode_falls_back_to_zero_recurrence(self):
@@ -1582,10 +1579,8 @@ class TestWhileRecurrentMixingGuard:
         cell = WhileJitMixingCell(4)
         brainstate.nn.init_all_states(cell)
         x = brainstate.random.rand(4)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            with diagnostic_context() as reporter:
-                groups, _pg = find_hidden_groups_from_module(cell, x)
+        with diagnostic_context() as reporter:
+            groups, _pg = find_hidden_groups_from_module(cell, x)
         assert len(groups) == 1
         group = groups[0]
         # zero-recurrence fallback, exactly like the un-jitted mixing cell

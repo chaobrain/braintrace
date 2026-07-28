@@ -26,11 +26,10 @@ Coverage:
 
 
 
-import warnings
-
 import brainstate
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import braintrace
 from braintrace._legacy import (
@@ -172,14 +171,8 @@ class TestDeprecationWarnings:
     # and not when importing from the private ``braintrace._legacy`` submodule.
 
     def test_etrace_param_access_warns(self):
-        with warnings.catch_warnings(record=True) as captured:
-            warnings.simplefilter('always')
+        with pytest.warns(DeprecationWarning, match='ETraceParam'):
             _ = braintrace.ETraceParam
-        assert any(
-            issubclass(w.category, DeprecationWarning)
-            and 'ETraceParam' in str(w.message)
-            for w in captured
-        )
 
 
 # ---------------------------------------------------------------------------

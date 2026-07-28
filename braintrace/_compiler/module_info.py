@@ -74,12 +74,32 @@ def _check_consistent_states_between_model_and_compiler(
         id(st): st
         for st in compiled_model_states
     }
-    id_to_path = {
-        id(st): path
-        for path, st in retrieved_model_states.items()
-    }
+    id_to_path = {}
+    for path, st in retrieved_model_states.items():
+        state_id = id(st)
+        previous = id_to_path.get(state_id)
+        if previous is None:
+            id_to_path[state_id] = path
+            continue
 
-    paths_to_remove = []
+        # Map exposes mapped states through both its internal registry and the
+        # wrapped module. Prefer the module-facing path: numeric registry keys
+        # look like layer boundaries to hidden-state grouping.
+        internal_depth = sum(part == 'dict_vmap_states' for part in path)
+        previous_internal_depth = sum(
+            part == 'dict_vmap_states' for part in previous
+        )
+        if internal_depth < previous_internal_depth:
+            id_to_path[state_id] = path
+
+    # Graph traversal may expose the same state through more than one path.
+    # Keep the canonical path selected above so each compiled state has exactly
+    # one model path.
+    paths_to_remove = [
+        path
+        for path, st in retrieved_model_states.items()
+        if id_to_path[id(st)] != path
+    ]
     for id_ in id_to_path:
         if id_ not in id_to_compiled_state:
             path = id_to_path[id_]
@@ -175,6 +195,9 @@ def abstractify_model(
         "Since it allows the explicit definition of the model structure."
     )
     model_retrieved_states = brainstate.graph.states(model)
+    if isinstance(model, brainstate.nn.Map):
+        for path, state in brainstate.graph.states(model.module).items():
+            model_retrieved_states[('module', *path)] = state
 
     # --- stateful model, for extracting states, weights, and variables --- #
     #

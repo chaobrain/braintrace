@@ -39,8 +39,6 @@ zero). The analytical reference takes the same view.
 
 
 
-import warnings
-
 import brainstate
 import jax
 import jax.numpy as jnp
@@ -54,10 +52,8 @@ from braintrace._compiler.scenario_catalog import (
 )
 
 
-def _silent_compile(model, *args):
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', UserWarning)
-        return compile_etrace_graph(model, *args, include_hidden_perturb=False)
+def _compile(model, *args):
+    return compile_etrace_graph(model, *args, include_hidden_perturb=False)
 
 
 def _transition_callable(rel, group, const_vals):
@@ -90,7 +86,7 @@ class TestOracle_TanhTail:
         brainstate.nn.init_all_states(model)
         inp = jnp.array([0.3, -0.7, 1.1])
 
-        graph = _silent_compile(model, inp)
+        graph = _compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
 
         rel = graph.hidden_param_op_relations[0]
@@ -122,7 +118,7 @@ class TestOracle_ElemwiseTail:
         brainstate.nn.init_all_states(model)
         inp = jnp.array([0.5, -0.2, 0.9, -1.0])
 
-        graph = _silent_compile(model, inp)
+        graph = _compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
 
         rel = graph.hidden_param_op_relations[0]
@@ -165,7 +161,7 @@ class TestOracle_PartialPathDirectOnly:
         brainstate.nn.init_all_states(model)
         inp = jnp.array([0.4, -0.6, 1.2])
 
-        graph = _silent_compile(model, inp)
+        graph = _compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
 
         by_path = {r.path: r for r in graph.hidden_param_op_relations}
@@ -190,7 +186,7 @@ class TestOracle_PartialPathDirectOnly:
         brainstate.nn.init_all_states(model)
         inp = jnp.array([0.4, -0.6, 1.2])
 
-        graph = _silent_compile(model, inp)
+        graph = _compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
 
         by_path = {r.path: r for r in graph.hidden_param_op_relations}
@@ -237,7 +233,7 @@ class TestOracle_FiniteDifference:
         brainstate.nn.init_all_states(model)
         inp = jnp.array([0.1, 0.2, -0.3])
 
-        graph = _silent_compile(model, inp)
+        graph = _compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
         rel = graph.hidden_param_op_relations[0]
         self._check_fd(rel, rel.hidden_groups[0], temps)
@@ -247,7 +243,7 @@ class TestOracle_FiniteDifference:
         brainstate.nn.init_all_states(model)
         inp = jnp.array([0.05, -0.1, 0.2])
 
-        graph = _silent_compile(model, inp)
+        graph = _compile(model, inp)
         _, _, _, temps = graph.module_info.jaxpr_call(inp)
         rel = next(
             r for r in graph.hidden_param_op_relations

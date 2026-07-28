@@ -36,7 +36,6 @@ database for replay. Verified bit-exact (batch within float32 round-off) on
 """
 
 import importlib.util
-import warnings
 
 import pytest
 
@@ -82,10 +81,8 @@ def _drtrl(model):
 
 def _assert_exact_equals_bptt(spec, inputs):
     """D_RTRL multi-step gradient == BPTT gradient for every ParamState."""
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        expected = bptt_param_gradients(spec.factory, inputs)
-        actual = online_param_gradients(spec.factory, inputs, algo_factory=_drtrl)
+    expected = bptt_param_gradients(spec.factory, inputs)
+    actual = online_param_gradients(spec.factory, inputs, algo_factory=_drtrl)
     assert_param_gradients_close(actual, expected, atol=ATOL)
 
 
@@ -163,12 +160,10 @@ def test_batch_invariance_over_dims(n_in, n_rec, batch, seq_len, seed):
     summed per-step SSE loss over the batch axis."""
     seq = jnp.asarray(
         np.random.RandomState(seed).randn(seq_len, batch, n_in).astype('float32'))
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        batched = _batched_multistep_grad(n_in, n_rec, batch, seq, seed)
-        summed = None
-        for b in range(batch):
-            sub = seq[:, b:b + 1, :]
-            g = _batched_multistep_grad(n_in, n_rec, 1, sub, seed)
-            summed = g if summed is None else {k: summed[k] + g[k] for k in g}
+    batched = _batched_multistep_grad(n_in, n_rec, batch, seq, seed)
+    summed = None
+    for b in range(batch):
+        sub = seq[:, b:b + 1, :]
+        g = _batched_multistep_grad(n_in, n_rec, 1, sub, seed)
+        summed = g if summed is None else {k: summed[k] + g[k] for k in g}
     assert_param_gradients_close(batched, summed, atol=ATOL)

@@ -246,25 +246,15 @@ class OnlineVmapTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
-        # One call replaces init_all_states + compile_graph + Vmap. Pass the
-        # batched single step inputs[0]; compile strips axis 0 to recover the
-        # per-sample example, so this is the same graph the manual expansion in
-        # examples/drtrl/02-batching-vmap.py builds by hand.
-        # model = braintrace.compile(self.target, braintrace.ES_D_RTRL, inputs[0],
-        #                            batch_size=inputs.shape[1], vmap=True,
-        #                            decay_or_rank=self.decay_or_rank)
+        # compile wraps the model with Map, initializes per-sample states, and
+        # builds the graph from the batched single-step input.
         with brainstate.environ.context(fit=True):
             model = braintrace.compile(
                 self.target, braintrace.D_RTRL, inputs[0],
                 batch_size=inputs.shape[1], vmap=True,
             )
 
-        # show_graph() is a post-compile diagnostic and lives on the learner, not
-        # on the vmap wrapper -- ETraceVmap forwards the drivers, not the
-        # introspection surface. Reading through .module is fine here; only
-        # *driving* through it would be wrong (it would drive the unbatched
-        # learner and give per-lane-wrong results).
-        model.module.show_graph()
+        model.show_graph()
 
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):

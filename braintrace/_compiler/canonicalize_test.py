@@ -13,7 +13,6 @@
 # limitations under the License.
 # ==============================================================================
 
-import warnings
 
 import brainstate
 import jax
@@ -808,21 +807,20 @@ class TestUnrollInnerScans:
         kinds = [r.kind for r in reporter.records()]
         assert kinds.count(DiagnosticKind.SCAN_UNROLL_SKIPPED) == 1
 
-    def test_skip_length_exceeds_limit_info_under_descent_auto(self):
+    def test_skip_length_exceeds_limit_info_under_descent_auto(self, recwarn):
         # Phase 4: with scan_descent='auto' an over-limit scan is no longer a
         # dead end, so the skip record downgrades to INFO (no UserWarning)
         # and points at the descent path.
         f, closed, w, h0, xs = self._etp_scan_jaxpr()
         with diagnostic_context() as reporter:
-            with warnings.catch_warnings():
-                warnings.simplefilter('error')
-                conv = _unroll(
-                    closed,
-                    weights=[closed.jaxpr.invars[0]],
-                    policy=ControlFlowPolicy(scan_unroll_limit=self.L - 1,
-                                             scan_descent='auto'),
-                )
+            conv = _unroll(
+                closed,
+                weights=[closed.jaxpr.invars[0]],
+                policy=ControlFlowPolicy(scan_unroll_limit=self.L - 1,
+                                         scan_descent='auto'),
+            )
         assert 'scan' in _primitive_names(conv)
+        assert not any(issubclass(w.category, UserWarning) for w in recwarn)
         recs = [r for r in reporter.records()
                 if r.kind is DiagnosticKind.SCAN_UNROLL_SKIPPED]
         assert len(recs) == 1
@@ -1229,9 +1227,7 @@ class TestScanModelCompilation:
                 return h
 
         with pytest.raises(NotImplementedError, match='while'):
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', UserWarning)
-                self._graph_for(WhileCell)
+            self._graph_for(WhileCell)
 
     def test_drtrl_gradient_parity_with_unrolled_model(self):
         def build_and_grads(cell_cls):

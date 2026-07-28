@@ -34,7 +34,7 @@ if sklearn is missing).
 | 02 | `02-neurons-alif-dms.py`            | ALIF (adaptive threshold) on delayed-match-to-sample    |
 | 03 | `03-neurons-gif-working-memory.py`  | GIF with heterogeneous tau_I2 on working-memory recall  |
 | 04 | `04-neurons-coba-ei-rsnn.py`        | Dale-law E/I RSNN on small Poisson-MNIST                |
-| 05 | `05-batching-vmap.py`               | Batching via `brainstate.nn.Vmap(vmap_states='new')`    |
+| 05 | `05-batching-vmap.py`               | Batching via `brainstate.nn.Map`                        |
 | 06 | `06-batching-batched.py`            | Batching via the batched ETP primitive path             |
 | 07 | `07-vjp-single-step.py`             | `vjp_method='single-step'` (default)                    |
 | 08 | `08-vjp-multi-step.py`              | `vjp_method='multi-step'` for temporal credit           |

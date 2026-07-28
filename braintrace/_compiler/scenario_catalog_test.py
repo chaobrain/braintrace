@@ -34,8 +34,6 @@ The scenarios target the three core principles stated in ``CLAUDE.md``:
   - ``W -> non-gradient-enabled W -> h`` excludes the preceding weight.
 """
 
-import warnings
-
 import brainstate
 import jax
 import jax.numpy as jnp
@@ -56,14 +54,8 @@ from braintrace._op import (
 
 
 def _compile(model, *inputs):
-    """Compile, suppressing expected weight-exclusion UserWarnings.
-
-    Tests still assert on the structured ``DiagnosticKind`` records, so we
-    silence the warning-stream duplicate for readability.
-    """
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', UserWarning)
-        return compile_etrace_graph(model, *inputs, include_hidden_perturb=False)
+    """Compile a model and retain both warnings and structured diagnostics."""
+    return compile_etrace_graph(model, *inputs, include_hidden_perturb=False)
 
 
 def _relation_set(graph):
@@ -969,11 +961,7 @@ class TestCategoryN_ControlFlow:
     def test_scan_body_full_pipeline_unrolls(self):
         model = ScanBodyRNN(4, loops=3)
         brainstate.nn.init_all_states(model)
-        with warnings.catch_warnings():
-            # Earlier sub-steps' weights are excluded per the
-            # weight->weight->hidden invariant and warn about it.
-            warnings.simplefilter('ignore', UserWarning)
-            graph = compile_etrace_graph(model, jnp.ones(4))
+        graph = compile_etrace_graph(model, jnp.ones(4))
         names = [eqn.primitive.name for eqn in graph.module_info.jaxpr.eqns]
         assert 'scan' not in names
         # Only the final sub-step's two ETP ops are relations; the earlier
@@ -1009,10 +997,8 @@ class TestCategoryN_ControlFlow:
         jaxpr = make_scan_body_etp_jaxpr(3, 4)
         policy = braintrace.ControlFlowPolicy(etp_in_control_flow='exclude')
 
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            with diagnostic_context() as reporter:
-                top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
+        with diagnostic_context() as reporter:
+            top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
         assert top == [], 'ETP inside scan body must NOT bubble up'
         records = [
@@ -1026,10 +1012,8 @@ class TestCategoryN_ControlFlow:
         jaxpr = make_cond_branches_etp_jaxpr(3, 4)
         policy = braintrace.ControlFlowPolicy(etp_in_control_flow='exclude')
 
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            with diagnostic_context() as reporter:
-                top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
+        with diagnostic_context() as reporter:
+            top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
         assert top == []
         n_cf = sum(
@@ -1069,10 +1053,8 @@ class TestCategoryN_ControlFlow:
         jaxpr = make_while_body_etp_jaxpr(4, 4)
         policy = braintrace.ControlFlowPolicy(etp_in_control_flow='exclude')
 
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            with diagnostic_context() as reporter:
-                top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
+        with diagnostic_context() as reporter:
+            top = _scan_jaxpr_for_etp_eqns(jaxpr, policy=policy)
 
         assert top == []
         kinds = [r.kind for r in reporter.records()]

@@ -24,8 +24,6 @@ Ground truth verified by compiling each cell (cls(3, 4), unbatched input) on
 compiler_property_test.py, graph_test.py) and are not duplicated here.
 """
 
-import warnings
-
 import brainstate
 import pytest
 
@@ -51,11 +49,7 @@ def _compile_cell(name, n_in=3, n_out=4):
     cell = cls(n_in, n_out)
     brainstate.nn.init_all_states(cell)
     inp = brainstate.random.rand(n_in)
-    with warnings.catch_warnings():
-        # GRUCell legitimately warns when it excludes Wr (W->W->h); the guardrail
-        # checks the diagnostic records, not the warning.
-        warnings.simplefilter('ignore')
-        return braintrace.compile_etrace_graph(cell, inp, include_hidden_perturb=False)
+    return braintrace.compile_etrace_graph(cell, inp, include_hidden_perturb=False)
 
 
 @pytest.mark.parametrize('cell_name', list(_CELL_GUARDRAILS))

@@ -25,11 +25,10 @@ Coverage:
 
 
 
-import warnings
-
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import braintrace
 from braintrace._legacy import (
@@ -151,22 +150,14 @@ class TestDeprecationWarnings:
     # and not when importing from the private ``braintrace._legacy`` submodule.
 
     def test_matmul_op_access_warns(self):
-        with warnings.catch_warnings(record=True) as captured:
-            warnings.simplefilter('always')
+        with pytest.warns(DeprecationWarning, match='MatMulOp'):
             _ = braintrace.MatMulOp
-        assert any(
-            issubclass(w.category, DeprecationWarning)
-            and 'MatMulOp' in str(w.message)
-            for w in captured
-        )
 
-    def test_construction_does_not_warn(self):
+    def test_construction_does_not_warn(self, recwarn):
         # The shim classes themselves no longer warn; construction is silent.
-        with warnings.catch_warnings(record=True) as captured:
-            warnings.simplefilter('always')
-            MatMulOp()
+        MatMulOp()
         assert not any(
-            issubclass(w.category, DeprecationWarning) for w in captured
+            issubclass(w.category, DeprecationWarning) for w in recwarn
         )
 
 
