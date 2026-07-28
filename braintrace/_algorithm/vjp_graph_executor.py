@@ -145,7 +145,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     This class is used for executing the eligibility trace graph for the VJP-based online learning algorithms,
     including:
 
-    - :class:`pp_prop` (aliases :class:`ES_D_RTRL` / :class:`IODimVjpAlgorithm`) for the
+    - :class:`pp_prop` (aliases ``ES_D_RTRL`` /
+      :class:`IODimVjpAlgorithm`) for the
       algorithm with input-output dimensional complexity.
     - :class:`ParamDimVjpAlgorithm` (alias :class:`D_RTRL`) for the algorithm with
       parameter dimensional complexity.
@@ -174,7 +175,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     control_flow : ControlFlowPolicy, optional
         Policy governing control-flow canonicalization during graph
         compilation. ``None`` (default) uses
-        :data:`~braintrace.DEFAULT_CONTROL_FLOW_POLICY`.
+        ``ControlFlowPolicy()``.
     full_jacobian : bool, optional
         Return each group's **full** ``(*varshape, S, *varshape, S)``
         hidden-to-hidden Jacobian instead of its per-position block diagonal.

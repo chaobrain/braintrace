@@ -77,5 +77,14 @@ class Conv2d(brainstate.nn.Conv2d):
 
 class Conv3d(brainstate.nn.Conv3d):
     __module__ = 'braintrace.nn'
-    __doc__ = (brainstate.nn.Conv3d.__doc__ or '').replace('brainstate', 'braintrace')
+    __doc__ = (
+        (brainstate.nn.Conv3d.__doc__ or '')
+        .replace('brainstate', 'braintrace')
+        .replace(
+            '- A tuple of three integers: (stride_h, stride_w, stride_d)\n'
+            '        Default: 1.',
+            '- A tuple of three integers: (stride_h, stride_w, stride_d)\n\n'
+            '        Default: 1.',
+        )
+    )
     _conv_op = _etp_conv_op

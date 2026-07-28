@@ -38,7 +38,8 @@ class D_RTRL(ParamDimVjpAlgorithm):
     \end{aligned}
     $$
 
-    For more details, please see `the D-RTRL algorithm presented in our manuscript <https://www.biorxiv.org/content/10.1101/2024.09.24.614728v2>`_.
+    This formulation follows the D-RTRL estimator presented by Wang et al.
+    [1]_ and the original RTRL construction of Williams and Zipser [2]_.
 
     This subclass inherits all behavior from :py:class:`ParamDimVjpAlgorithm`
     without modification; it exists to provide the canonical ``D_RTRL`` name. See

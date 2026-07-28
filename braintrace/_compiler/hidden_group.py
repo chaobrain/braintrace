@@ -348,17 +348,17 @@ class HiddenGroup(NamedTuple):
         -----
         For diagonal recurrence (:attr:`is_diagonal_recurrence` is ``True``) the
         positions are independent, so the cheap column-sum produced by
-        :func:`jacrev_last_dim` already equals this block diagonal. For coupled
+        ``jacrev_last_dim`` already equals this block diagonal. For coupled
         recurrence the column sum would instead add in the off-diagonal
         cross-position terms -- inflating every entry and driving the eligibility
         trace to overflow -- so the true block diagonal is extracted directly via
-        :func:`block_diagonal_last_dim`.
+        ``block_diagonal_last_dim``.
 
         When the transition contains a ``while`` equation (an opaque forward
         node), reverse-mode differentiation is unavailable (JAX has no
         transpose rule for ``while``), so the Jacobian is extracted in
-        forward mode instead (:func:`jacfwd_last_dim`, or
-        :func:`block_diagonal_last_dim` with ``use_forward_mode=True``) --
+        forward mode instead (``jacfwd_last_dim``, or
+        ``block_diagonal_last_dim`` with ``use_forward_mode=True``) --
         same values, different derivative mode.
         """
         fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
@@ -2125,7 +2125,8 @@ def find_hidden_groups_from_minfo(
         The model information.
     include_recurrent_mixing : bool, default False
         Whether to trace recurrent ETP mixing primitives into the transition
-        jaxpr. See :func:`find_hidden_groups_from_jaxpr` for the full semantics.
+        jaxpr. See the internal ``find_hidden_groups_from_jaxpr`` helper for
+        the full semantics.
     sparse_n : int, optional
         SnAp order for ``recurrence_scope='sparse_n'``. When given, each group
         carries the derived n-step neighbourhood in its ``snap`` field. Default
@@ -2186,8 +2187,8 @@ def find_hidden_groups_from_module(
         The positional arguments of the model.
     include_recurrent_mixing : bool, default False
         Whether to trace recurrent ETP mixing primitives into the transition
-        jaxpr. Keyword-only. See :func:`find_hidden_groups_from_jaxpr` for the
-        full semantics.
+        jaxpr. Keyword-only. See the internal
+        ``find_hidden_groups_from_jaxpr`` helper for the full semantics.
     sparse_n : int, optional
         SnAp order for ``recurrence_scope='sparse_n'``. Keyword-only. Default
         ``None``.

@@ -382,7 +382,7 @@ def compile_etrace_graph(
     sparse_n : int, optional
         SnAp order for ``recurrence_scope='sparse_n'``. When given, every hidden
         group carries the ``n``-step position neighbourhood derived from its own
-        transition (:mod:`~braintrace._compiler.position_graph`) in
+        transition (implemented by the internal ``position_graph`` module) in
         ``HiddenGroup.snap``, and its trace's trailing state axis widens to
         ``K * num_state``. Requires ``include_recurrent_mixing=True`` -- the
         widened operator is gathered out of the coupled transition's Jacobian --
@@ -391,7 +391,7 @@ def compile_etrace_graph(
     snap_max_jacobian_elements : int, optional
         Ceiling on each group's widened block Jacobian, ``P * (K * S) ** 2``
         elements. Only consulted when *sparse_n* is given. Default
-        :data:`~braintrace._compiler.position_graph.DEFAULT_MAX_JACOBIAN_ELEMENTS`.
+        ``DEFAULT_MAX_JACOBIAN_ELEMENTS``.
     control_flow : ControlFlowPolicy or None, optional
         Policy governing control-flow canonicalization and downstream
         handling, forwarded to :func:`~braintrace.extract_module_info` and
@@ -411,7 +411,7 @@ def compile_etrace_graph(
           eligibility trace is folded over the substep axis at runtime —
           compile size stays independent of the scan length. Pass
           ``ControlFlowPolicy(scan_descent='off')`` to restore the
-          pre-Phase-4 error. See :mod:`braintrace._compiler.scan_descent`;
+          pre-Phase-4 error. See the internal ``scan_descent`` module;
         - keeps a **weight-free** ``while`` that reads/updates hidden state
           as an opaque forward node (``while_hidden='opaque-fwd'``):
           hidden-to-hidden Jacobians for groups whose transition crosses the

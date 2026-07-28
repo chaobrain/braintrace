@@ -54,7 +54,7 @@ __all__ = ['OSTLRecurrent', 'OSTLFeedforward']
 class OSTLRecurrent(ParamDimVjpAlgorithm):
     r"""OSTL 'with-H' regime — single-layer factorization, RTRL-exact only for block-diagonal hidden-to-hidden Jacobians.
 
-    OSTL derives an online rule by cleanly separating the gradient into a
+    OSTL [1]_ derives an online rule by cleanly separating the gradient into a
     *temporal* eligibility trace and a *spatial* learning signal. The 'with-H'
     regime retains the hidden-to-hidden Jacobian, so the trace carries the full
     temporal term:
@@ -153,10 +153,10 @@ class OSTLFeedforward(pp_prop):
         = \sum_t \frac{\partial \mathcal{L}^t}{\partial \mathbf{h}^t}
           \circ \boldsymbol{\epsilon}^t .
 
-    This is the appropriate (and exact) approximation for feed-forward SNNs. It
-    is realized by delegating to :class:`~braintrace.pp_prop` (the input-output
-    factorized trace) with a *negligible* decay, so the trace does not
-    accumulate across time.
+    This is the appropriate approximation for feed-forward SNNs in the OSTL
+    construction [1]_. It is realized by delegating to
+    :class:`~braintrace.pp_prop` (the input-output factorized trace) with a
+    *negligible* decay, so the trace does not accumulate across time.
 
     Parameters
     ----------

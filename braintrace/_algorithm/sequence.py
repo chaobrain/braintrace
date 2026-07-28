@@ -382,7 +382,10 @@ class SequenceDriverMixin:
             weights = self._seq_param_states
 
         windowed = chunk_size is not None
-        if windowed:
+        # Branch on ``chunk_size`` rather than ``windowed`` so the int is
+        # narrowed for the arithmetic below; ``windowed`` is only read as a
+        # flag from the closures, which no narrowing would reach anyway.
+        if chunk_size is not None:
             n_steps = length // chunk_size
             xs = (_to_windows(sequences, n_steps, chunk_size),
                   mask.reshape(n_steps, chunk_size))
@@ -513,7 +516,7 @@ class SequenceDriverMixin:
         self._seq_check_window(chunk_size, length, for_grad=False)
 
         windowed = chunk_size is not None
-        if windowed:
+        if chunk_size is not None:  # narrows the int; see ``etrace_grad``
             n_steps = length // chunk_size
             xs = _to_windows(sequences, n_steps, chunk_size)
         else:

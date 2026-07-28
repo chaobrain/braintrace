@@ -29,7 +29,8 @@ class pp_prop(IODimVjpAlgorithm):
     ``pp_prop`` is the canonical name for the input-output-dimension eligibility
     trace algorithm implemented by :class:`IODimVjpAlgorithm`. It computes the
     gradients of the weights with the diagonal approximation and the
-    input-output dimensional complexity.
+    input-output dimensional complexity introduced by Wang et al. [1]_, based
+    on the RTRL construction of Williams and Zipser [2]_.
 
     This subclass inherits all behavior from :class:`IODimVjpAlgorithm` without
     modification; it exists to provide the canonical ``pp_prop`` name. See

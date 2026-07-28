@@ -137,7 +137,7 @@ class FixedRandomFeedback:
     r"""Frozen random feedback matrix with a stop-gradient guard.
 
     The feedback matrix :math:`B \in \mathbb{R}^{n_{\mathrm{target}} \times n_{\mathrm{layer}}}`
-    is sampled once at construction and frozen via :func:`jax.lax.stop_gradient`. It backs
+    is sampled once at construction and frozen via ``jax.lax.stop_gradient``. It backs
     EProp's random-feedback mode, and is the intended home for any rule that replaces the
     symmetric learning signal with a fixed random projection.
 
