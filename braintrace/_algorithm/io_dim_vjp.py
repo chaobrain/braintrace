@@ -668,12 +668,15 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     model : brainstate.nn.Module
         The model function, which receives the input arguments and returns the
         model output.
-    decay_or_rank : float or int
+    decay_or_rank : float, int, or tuple of two floats or ints
         Parameterization of the exponential smoothing factor. A float in
         :math:`(0, 1)` is used directly as the decay. A positive integer
         :math:`r` is converted to :math:`\alpha=(r-1)/(r+1)`. The integer form
         does not allocate :math:`r` separate trace factors; both forms use the
-        same input/output-factorized trace structure.
+        same input/output-factorized trace structure. A two-item tuple
+        configures the input- and output-side factors separately.
+    name : str, optional
+        Name of the eligibility-trace algorithm.
     vjp_method : str, optional
         The method for computing the VJP. It should be either ``"single-step"``
         or ``"multi-step"``.
@@ -683,15 +686,20 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
           the data input.
+    fast_solve : bool, optional
+        Whether to use the closed-form per-primitive contractions when
+        available. The default is ``True``.
     control_flow : ControlFlowPolicy, optional
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
         ``ControlFlowPolicy()``.
-    name : str, optional
-        The name of the etrace algorithm.
-    mode : braintrace.mixin.Mode, optional
-        The computing mode, indicating the batching information.
+    config : ETraceConfig, optional
+        Learning-rule coordinates. ``None`` uses the input/output-factorized
+        preset derived from ``decay_or_rank``.
+    random_feedback_key : jax.Array, optional
+        Key used to initialize fixed random-feedback projections when the
+        selected config requests them.
 
     Notes
     -----

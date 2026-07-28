@@ -10,10 +10,10 @@ Learning tasks
 
 * `000-lif-snn-for-nmnist.py <https://github.com/chaobrain/braintrace/blob/main/examples/000-lif-snn-for-nmnist.py>`__
   trains a recurrent LIF-delta SNN on framed N-MNIST events. API:
-  :doc:`pp-prop </apis/generated/braintrace.pp_prop>`.
+  :doc:`pp-prop </apis/algorithm_details/braintrace.pp_prop>`.
 * `001-gif-snn-for-dms.py <https://github.com/chaobrain/braintrace/blob/main/examples/001-gif-snn-for-dms.py>`__
   trains a GIF recurrent SNN on delayed matching-to-sample. API:
-  :doc:`pp-prop </apis/generated/braintrace.pp_prop>`.
+  :doc:`pp-prop </apis/algorithm_details/braintrace.pp_prop>`.
 * `002-coba-ei-rsnn.py <https://github.com/chaobrain/braintrace/blob/main/examples/002-coba-ei-rsnn.py>`__
   trains an excitatory/inhibitory recurrent SNN on an evidence-accumulation
   task with configurable current- or conductance-based synapses. API:
@@ -30,13 +30,13 @@ per-sample ``vmap`` execution:
 
 * `003-snn-memory-and-speed-evaluation-all.py <https://github.com/chaobrain/braintrace/blob/main/examples/003-snn-memory-and-speed-evaluation-all.py>`__
   runs the complete comparison. API:
-  :doc:`D-RTRL </apis/generated/braintrace.D_RTRL>`.
+  :doc:`D-RTRL </apis/algorithm_details/braintrace.D_RTRL>`.
 * `003-snn-memory-and-speed-evaluation-batched.py <https://github.com/chaobrain/braintrace/blob/main/examples/003-snn-memory-and-speed-evaluation-batched.py>`__
   uses batched state. API:
-  :doc:`compile </apis/generated/braintrace.compile>`.
+  :doc:`compile </apis/algorithm_details/braintrace.compile>`.
 * `003-snn-memory-and-speed-evaluation-vmap.py <https://github.com/chaobrain/braintrace/blob/main/examples/003-snn-memory-and-speed-evaluation-vmap.py>`__
   uses per-sample ``vmap`` execution. API:
-  :doc:`compile </apis/generated/braintrace.compile>`.
+  :doc:`compile </apis/algorithm_details/braintrace.compile>`.
 
 Use these scripts for implementation benchmarking, not as evidence that two
 algorithms have equivalent gradient accuracy.
@@ -47,7 +47,7 @@ workflow before moving to dataset-scale scripts.
 Related API
 -----------
 
-* :doc:`pp-prop </apis/generated/braintrace.pp_prop>`
-* :doc:`EProp </apis/generated/braintrace.EProp>`
-* :doc:`OSTLRecurrent </apis/generated/braintrace.OSTLRecurrent>`
+* :doc:`pp-prop </apis/algorithm_details/braintrace.pp_prop>`
+* :doc:`EProp </apis/algorithm_details/braintrace.EProp>`
+* :doc:`OSTLRecurrent </apis/algorithm_details/braintrace.OSTLRecurrent>`
 * :doc:`Neural Network Layers </apis/nn>`

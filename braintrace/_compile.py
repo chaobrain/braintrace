@@ -142,12 +142,17 @@ def compile(
         need to be pre-initialized; ``compile`` always (re)initializes its states.
     algorithm : type, str or ETraceConfig
         An :class:`ETraceAlgorithm` subclass, a registered case-insensitive
-        name, e.g. ``'D_RTRL'``, ``'es_d_rtrl'``, ``'eprop'``,
-        ``'ostl_recurrent'``, ``'ostl_feedforward'``, or an
-        :class:`ETraceConfig` naming the learning-rule coordinate directly. A
-        config selects the engine through its ``trace_factorization`` and is
-        forwarded to the constructor, so any coordinate the compatibility
-        matrix admits can be compiled without a named preset.
+        name, or an :class:`ETraceConfig` naming the learning-rule coordinate
+        directly. Registered names are ``'d_rtrl'``, ``'pp_prop'``,
+        ``'es_d_rtrl'``, ``'esd_rtrl'``, ``'eprop'``, ``'e_prop'``,
+        ``'ostl_recurrent'``, ``'ostl_feedforward'``, ``'uoro'``,
+        ``'three_factor'``, and ``'dni'``. The aliases ``'es_d_rtrl'`` and
+        ``'esd_rtrl'`` select :class:`pp_prop`; ``'e_prop'`` selects
+        :class:`EProp`. :class:`SnAp` has no registered string name and must be
+        passed as a class. A config selects the engine through its
+        ``trace_factorization`` and is forwarded to the constructor, so any
+        coordinate admitted by the compatibility matrix can be compiled
+        without a named preset.
     *example_inputs
         Example call inputs (arrays / :class:`SingleStepData` /
         :class:`MultiStepData`) matching what ``learner.update(...)`` will
@@ -195,8 +200,10 @@ def compile(
         ``verbose`` is not in ``{0, 1, 2}``, or ``vmap=True`` without
         ``batch_size``.
     TypeError
-        If ``algorithm`` is neither an ``ETraceAlgorithm`` subclass nor a string,
-        or a required algorithm option (see below) is missing.
+        If ``algorithm`` is not an ``ETraceAlgorithm`` subclass, registered
+        string, or :class:`ETraceConfig`; if a required algorithm option is
+        missing; or if the same config is supplied both as ``algorithm`` and
+        through ``config=``.
     braintrace.CompilationError
         If no trainable weights are routed through ETP ops (nothing to learn
         online).
@@ -205,31 +212,24 @@ def compile(
     -----
     **Algorithm options.** ``**options`` are forwarded verbatim to the algorithm
     constructor. Required options have no default; omitting one raises
-    ``TypeError``. Authoritative descriptions live on each algorithm class.
+    ``TypeError``. The class pages are the authoritative source for accepted
+    options:
 
-    *Common (algorithm-dependent subset):*
+    - :class:`D_RTRL` for ``'d_rtrl'``.
+    - :class:`pp_prop` for ``'pp_prop'``, ``'es_d_rtrl'``, and ``'esd_rtrl'``.
+    - :class:`EProp` for ``'eprop'`` and ``'e_prop'``.
+    - :class:`OSTLRecurrent` for ``'ostl_recurrent'``.
+    - :class:`OSTLFeedforward` for ``'ostl_feedforward'``.
+    - :class:`UORO` for ``'uoro'``.
+    - :class:`ThreeFactor` for ``'three_factor'``.
+    - :class:`DNI` for ``'dni'``.
+    - :class:`SnAp` for class-only SnAp compilation.
 
-    - ``name`` (str) — module name.
-    - ``vjp_method`` (str, default ``'single-step'``) — loss→hidden VJP unrolling.
-    - ``fast_solve`` (bool, default ``True``) — fast linear solve for the
-      hidden→weight Jacobian.
-    - ``trace_dtype`` — eligibility-trace storage dtype.
-
-    *Per algorithm:*
-
-    - ``'D_RTRL'`` — ``vjp_method``, ``fast_solve``, ``trace_dtype``,
-      ``chunked_trace`` (bool, default ``True``: closed-form multi-step trace
-      roll via chunk factorization; see :class:`ParamDimVjpAlgorithm`),
-      ``name``.
-    - ``'es_d_rtrl'`` / ``'pp_prop'`` — ``decay_or_rank`` (**required**: float in
-      (0, 1) ⇒ decay, or int ≥ 1 ⇒ rank), ``vjp_method``, ``fast_solve``,
-      ``name``.
-    - ``'eprop'`` — ``feedback`` (default ``'symmetric'``), ``kappa_filter_decay``
-      (default ``0.0``), ``random_feedback_key`` (default ``None``),
-      ``vjp_method``, ``fast_solve``, ``name``.
-    - ``'ostl_recurrent'`` — ``vjp_method``, ``fast_solve``, ``trace_dtype``,
-      ``name``.
-    - ``'ostl_feedforward'`` — ``decay_or_rank`` (default ``1e-6``), ``name``.
+    Passing an algorithm class supports subclasses and avoids the string
+    registry. Passing :class:`ETraceConfig` selects
+    :class:`ParamDimVjpAlgorithm`, :class:`IODimVjpAlgorithm`, or
+    :class:`RandomProjectionVjpAlgorithm` from ``trace_factorization``. Do not
+    also pass ``config=`` in that case.
 
     Calling ``compile`` twice on the same model re-initializes its states.
 
@@ -263,9 +263,18 @@ def compile(
         >>>
         >>> model = RNN()
         >>> x0 = brainstate.random.randn(1, 3)   # (batch, features)
-        >>> # one call: initialise states, build the trace graph, return a learner
-        >>> learner = braintrace.compile(model, 'D_RTRL', x0, batch_size=1)
-        >>> y = learner.update(x0)               # forward pass + eligibility-trace update
+        >>> # Registered string: initialize states, build the graph, return a learner.
+        >>> by_name = braintrace.compile(model, 'd_rtrl', x0, batch_size=1)
+        >>> y = by_name.update(x0)
+        >>>
+        >>> # Algorithm classes, including SnAp, can be passed directly.
+        >>> by_class = braintrace.compile(
+        ...     model, braintrace.D_RTRL, x0, batch_size=1)
+        >>>
+        >>> # A config selects an engine from its trace factorization.
+        >>> config = braintrace.ETraceConfig()
+        >>> by_config = braintrace.compile(
+        ...     model, config, x0, batch_size=1)
     """
     cls = _resolve_algorithm(algorithm)
     if isinstance(algorithm, ETraceConfig):

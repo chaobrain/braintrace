@@ -22,6 +22,6 @@ workflow for the complete training sequence.
 Related API
 -----------
 
-* :doc:`D-RTRL </apis/generated/braintrace.D_RTRL>`
-* :doc:`SnAp </apis/generated/braintrace.SnAp>`
+* :doc:`D-RTRL </apis/algorithm_details/braintrace.D_RTRL>`
+* :doc:`SnAp </apis/algorithm_details/braintrace.SnAp>`
 * :doc:`Neural Network Layers </apis/nn>`

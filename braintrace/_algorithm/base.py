@@ -59,20 +59,25 @@ class EligibilityTrace(brainstate.ShortTermState):
 
 
 class ETraceAlgorithm(brainstate.nn.Module):
-    r"""
-    The base class for the eligibility trace algorithm.
+    r"""Provide the base interface for eligibility-trace algorithms.
 
     Parameters
     ----------
     model : brainstate.nn.Module
         The model function, which receives the input arguments and returns the model output.
+    graph_executor : ETraceGraphExecutor
+        The executor used to evaluate the compiled eligibility-trace graph.
     name : str, optional
         The name of the etrace algorithm.
 
     Attributes
     ----------
-    graph : ETraceGraphExecutor
-        The etrace graph.
+    graph : ETraceGraph
+        The compiled eligibility-trace graph.
+    executor : ETraceGraphExecutor
+        The executor associated with ``graph``.
+    report : CompilationReport
+        Structured diagnostics produced by graph compilation.
     param_states : Dict[Hashable, brainstate.ParamState]
         The weight states.
     hidden_states : Dict[Hashable, brainstate.HiddenState]
