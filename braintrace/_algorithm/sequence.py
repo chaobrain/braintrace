@@ -162,7 +162,7 @@ class SequenceDriverMixin:
         The learner's ``vjp_method``, or ``None`` if it has none.
 
     ``_seq_vjp_method`` is a hook rather than a ``getattr`` on the driver
-    because :class:`brainstate.nn.Vmap` defines no ``__getattr__`` and so does
+    because ``brainstate.nn.Vmap`` defines no ``__getattr__`` and so does
     not forward ``vjp_method`` from ``.module``. Reading the attribute off the
     driver object would silently yield ``None`` for every vmapped learner and
     bypass the window-mode validation entirely.
@@ -285,7 +285,7 @@ class SequenceDriverMixin:
         Returns
         -------
         grads or tuple
-            Mirrors :func:`brainstate.transform.grad`: ``grads``,
+            Mirrors ``brainstate.transform.grad``: ``grads``,
             ``(grads, losses)``, ``(grads, aux)`` or ``(grads, losses, aux)``.
 
         Raises
@@ -537,7 +537,7 @@ class SequenceDriverMixin:
 
 
 class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
-    """A :class:`brainstate.nn.Vmap` that carries the sequence drivers.
+    """Provide sequence drivers on a ``brainstate.nn.Vmap`` wrapper.
 
     Returned by ``braintrace.compile(..., vmap=True)`` so the call site is
     identical in batched and unbatched mode. Because it *is* a
@@ -555,7 +555,8 @@ class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
     would drive the **unbatched** learner and silently produce per-lane-wrong
     results.
 
-    Window mode is refused here -- see :meth:`SequenceDriverMixin._seq_check_window`.
+    Window mode is refused here -- see
+    :meth:`SequenceDriverMixin.etrace_grad`.
     """
     __module__ = 'braintrace'
 

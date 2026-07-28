@@ -27,9 +27,14 @@ graph object it returns.
 .. autosummary::
    :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    compile_etrace_graph
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
    ETraceGraph
 
 
@@ -57,9 +62,14 @@ Extracts the ``jaxpr`` and state information from a ``brainstate.nn.Module``.
 .. autosummary::
    :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    extract_module_info
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+   :template: classtemplate.rst
+
    ModuleInfo
 
 
@@ -76,6 +86,11 @@ directly from a module.
    :template: classtemplate.rst
 
    HiddenGroup
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+
    find_hidden_groups_from_minfo
    find_hidden_groups_from_module
 
@@ -95,6 +110,11 @@ ETP primitive is deliberately excluded.
    :template: classtemplate.rst
 
    HiddenParamOpRelation
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+
    find_hidden_param_op_relations_from_minfo
    find_hidden_param_op_relations_from_module
 
@@ -111,6 +131,11 @@ Perturbation structures used to compute hidden-to-hidden Jacobians
    :template: classtemplate.rst
 
    HiddenPerturbation
+
+.. autosummary::
+   :toctree: generated/
+   :nosignatures:
+
    add_hidden_perturbation_from_minfo
    add_hidden_perturbation_in_module
 

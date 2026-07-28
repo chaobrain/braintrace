@@ -7,3 +7,6 @@
 
 .. autoclass:: {{ name }}
     :members:
+    :exclude-members: __init__
+
+.. automethod:: {{ name }}.__init__
