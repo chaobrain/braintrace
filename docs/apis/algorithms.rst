@@ -229,7 +229,7 @@ sparse.
    SnAp
 
 
-UORO - Random-projection estimator
+UORO — Random-projection estimator
 ----------------------------------
 
 :class:`UORO` carries a rank-one random projection of the full recurrent
@@ -270,8 +270,10 @@ gradient to carry credit across finite online windows;
    train_synthetic_gradient
 
 
-E-prop
-------
+.. _e-prop:
+
+E-prop — Spiking eligibility-propagation estimator
+--------------------------------------------------
 
 :class:`EProp` implements eligibility propagation for recurrent spiking neural
 networks, with optional kappa filtering and fixed random-feedback learning
@@ -285,8 +287,10 @@ signals.
    EProp
 
 
-OSTL
-----
+.. _ostl:
+
+OSTL — Recurrent and feedforward estimators
+-------------------------------------------
 
 Online Spatio-Temporal Learning exposes recurrent (with-H) and feedforward
 (without-H) regimes as separate concrete classes.
