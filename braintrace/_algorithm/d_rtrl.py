@@ -23,28 +23,68 @@ __all__ = [
 
 
 class D_RTRL(ParamDimVjpAlgorithm):
-    r"""
-    The Diagonal RTRL (D-RTRL) online gradient computation algorithm.
+    r"""Compute online gradients with the Diagonal RTRL preset.
 
     ``D_RTRL`` is the canonical name for the parameter-dimension eligibility
-    trace algorithm implemented by :py:class:`ParamDimVjpAlgorithm`. It computes
+    trace algorithm implemented by :class:`ParamDimVjpAlgorithm`. It computes
     the gradients of the weights with the diagonal approximation and the
     parameter dimension complexity, following the learning rule:
 
-    $$
-    \begin{aligned}
-    &\boldsymbol{\epsilon}^t \approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}+\operatorname{diag}\left(\mathbf{D}_f^t\right) \otimes \mathbf{x}^t \\
-    & \nabla_{\boldsymbol{\theta}} \mathcal{L}=\sum_{t^{\prime} \in \mathcal{T}} \frac{\partial \mathcal{L}^{t^{\prime}}}{\partial \mathbf{h}^{t^{\prime}}} \circ \boldsymbol{\epsilon}^{t^{\prime}}
-    \end{aligned}
-    $$
+    .. math::
+
+        \begin{aligned}
+        \boldsymbol{\epsilon}^t
+        &\approx \mathbf{D}^t \boldsymbol{\epsilon}^{t-1}
+        + \operatorname{diag}(\mathbf{D}_f^t) \otimes \mathbf{x}^t, \\
+        \nabla_{\boldsymbol{\theta}} \mathcal{L}
+        &= \sum_{t^{\prime} \in \mathcal{T}}
+        \frac{\partial \mathcal{L}^{t^{\prime}}}
+        {\partial \mathbf{h}^{t^{\prime}}}
+        \circ \boldsymbol{\epsilon}^{t^{\prime}}.
+        \end{aligned}
 
     This formulation follows the D-RTRL estimator presented by Wang et al.
     [1]_ and the original RTRL construction of Williams and Zipser [2]_.
 
-    This subclass inherits all behavior from :py:class:`ParamDimVjpAlgorithm`
-    without modification; it exists to provide the canonical ``D_RTRL`` name. See
-    :py:class:`ParamDimVjpAlgorithm` for the full parameter list and a usage
-    example.
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        Recurrent model whose ETP-routed parameters are trained online.
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method : {'single-step', 'multi-step'}, optional
+        VJP window used to compute the learning signal.
+    fast_solve : bool, optional
+        Whether to use closed-form per-primitive contractions when available.
+    trace_dtype : dtype, optional
+        Storage dtype for supported fast-path eligibility traces.
+    chunked_trace : bool, optional
+        Whether multi-step inputs use the closed-form chunked trace roll.
+    control_flow : ControlFlowPolicy, optional
+        Control-flow canonicalization policy used during graph compilation.
+    config : ETraceConfig, optional
+        Learning-rule coordinates. ``None`` uses the D-RTRL preset.
+    random_feedback_key : jax.Array, optional
+        Key for fixed random-feedback projections requested by ``config``.
+    snap_max_jacobian_elements : int, optional
+        Maximum permitted size of each SnAp widened block Jacobian.
+
+    See Also
+    --------
+    ParamDimVjpAlgorithm
+        Parameter-dimensional engine implementing this preset.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import brainstate
+        >>> import braintrace
+        >>>
+        >>> model = braintrace.nn.ValinaRNNCell(2, 4, activation='tanh')
+        >>> x0 = brainstate.random.randn(2)
+        >>> learner = braintrace.compile(model, braintrace.D_RTRL, x0)
+        >>> y = learner.update(x0)
 
     References
     ----------

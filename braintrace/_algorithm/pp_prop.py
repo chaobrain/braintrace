@@ -33,12 +33,33 @@ class pp_prop(IODimVjpAlgorithm):
     on the RTRL construction of Williams and Zipser [2]_.
 
     This subclass inherits all behavior from :class:`IODimVjpAlgorithm` without
-    modification; it exists to provide the canonical ``pp_prop`` name. See
-    :class:`IODimVjpAlgorithm` for the full parameter list.
+    modification; it exists to provide the canonical ``pp_prop`` name.
+
+    Parameters
+    ----------
+    model : brainstate.nn.Module
+        Recurrent model whose ETP-routed parameters are trained online.
+    decay_or_rank : float, int, or tuple of two floats or ints
+        Exponential-smoothing decay, integer rank parameterization, or separate
+        input/output-side settings.
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method : {'single-step', 'multi-step'}, optional
+        VJP window used to compute the learning signal.
+    fast_solve : bool, optional
+        Whether to use closed-form per-primitive contractions when available.
+    control_flow : ControlFlowPolicy, optional
+        Control-flow canonicalization policy used during graph compilation.
+    config : ETraceConfig, optional
+        Learning-rule coordinates. ``None`` derives the pp-prop preset from
+        ``decay_or_rank``.
+    random_feedback_key : jax.Array, optional
+        Key for fixed random-feedback projections requested by ``config``.
 
     See Also
     --------
-    IODimVjpAlgorithm : The implementing class with the full parameter list.
+    IODimVjpAlgorithm
+        Input/output-factorized engine implementing this preset.
 
     Notes
     -----

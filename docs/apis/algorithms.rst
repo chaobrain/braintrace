@@ -7,6 +7,33 @@ Online-Learning Algorithms
    :local:
    :depth: 1
 
+.. toctree::
+   :hidden:
+
+   algorithm_details/braintrace.compile
+   algorithm_details/braintrace.ETraceConfig
+   algorithm_details/braintrace.ETraceAlgorithm
+   algorithm_details/braintrace.SequenceDriverMixin
+   algorithm_details/braintrace.ETraceVmap
+   algorithm_details/braintrace.ETraceVjpAlgorithm
+   algorithm_details/braintrace.EligibilityTrace
+   algorithm_details/braintrace.ParamDimVjpAlgorithm
+   algorithm_details/braintrace.D_RTRL
+   algorithm_details/braintrace.IODimVjpAlgorithm
+   algorithm_details/braintrace.pp_prop
+   algorithm_details/braintrace.SnAp
+   algorithm_details/braintrace.RandomProjectionVjpAlgorithm
+   algorithm_details/braintrace.UORO
+   algorithm_details/braintrace.ThreeFactor
+   algorithm_details/braintrace.DNI
+   algorithm_details/braintrace.SyntheticGradient
+   algorithm_details/braintrace.train_synthetic_gradient
+   algorithm_details/braintrace.EProp
+   algorithm_details/braintrace.OSTLRecurrent
+   algorithm_details/braintrace.OSTLFeedforward
+   algorithm_details/braintrace.FixedRandomFeedback
+   algorithm_details/braintrace.KappaFilter
+
 ``braintrace`` provides online-learning algorithms based on eligibility-trace
 propagation. They all share one interface: wrap a model, compile its graph,
 then call the learner as a drop-in replacement for the model's forward pass —
@@ -26,9 +53,7 @@ for a model and eagerly builds its eligibility-trace graph, returning a
 ready-to-``update`` learner in a single call.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    compile
 
@@ -65,9 +90,7 @@ step and requires ``vjp_method='multi-step'``; ``chunk_size=1`` is the plain
 single-step path, matching :func:`train_synthetic_gradient`'s encoding.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    SequenceDriverMixin
    ETraceVmap
@@ -116,9 +139,7 @@ Pass a config wherever :func:`compile` accepts an algorithm name:
     )
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    ETraceConfig
 
@@ -132,9 +153,7 @@ concrete D-RTRL / ES-D-RTRL / SNN algorithms build on. :class:`EligibilityTrace`
 is the state these algorithms carry across time.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    ETraceAlgorithm
    ETraceVjpAlgorithm
@@ -162,9 +181,7 @@ gradient-equivalent to BPTT outside the assumptions of that approximation.
    \circ \boldsymbol{\epsilon}^{t'}
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    ParamDimVjpAlgorithm
    D_RTRL
@@ -199,9 +216,7 @@ it does not allocate multiple rank factors.
    + (1 - \alpha) \operatorname{diag}(\mathbf{D}_f^t)
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    IODimVjpAlgorithm
    pp_prop
@@ -221,9 +236,7 @@ the method is most useful when the recurrent position graph is structurally
 sparse.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    SnAp
 
@@ -237,9 +250,7 @@ variance for linear carrier storage. :class:`RandomProjectionVjpAlgorithm` is
 the shared engine for algorithms that use this factorization.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    RandomProjectionVjpAlgorithm
    UORO
@@ -255,13 +266,15 @@ gradient to carry credit across finite online windows;
 :func:`train_synthetic_gradient` updates that predictor.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    ThreeFactor
    DNI
    SyntheticGradient
+
+.. autosummary::
+   :nosignatures:
+
    train_synthetic_gradient
 
 
@@ -273,9 +286,7 @@ Paper-faithful algorithms tailored to spiking neural networks, all
 regime makes them exact); know the regime before relying on their gradients.
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    EProp
    OSTLRecurrent
@@ -285,9 +296,7 @@ Trace helpers reused across the SNN algorithms — a frozen random-feedback
 projection and an output-side low-pass filter:
 
 .. autosummary::
-   :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    FixedRandomFeedback
    KappaFilter
