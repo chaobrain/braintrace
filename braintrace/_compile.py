@@ -154,7 +154,7 @@ def compile(
         ``trace_factorization`` and is forwarded to the constructor, so any
         coordinate admitted by the compatibility matrix can be compiled
         without a named preset.
-    *example_inputs
+    *example_inputs : Any
         Example call inputs (arrays / :class:`SingleStepData` /
         :class:`MultiStepData`) matching what ``learner.update(...)`` will
         receive. At least one is required.
@@ -184,7 +184,7 @@ def compile(
         ``result.module.report``). Requires a model whose hidden states are all
         (re)created in ``init_all_states``; models holding construction-time
         states may raise ``brainstate.transform.BatchAxisError``.
-    **options
+    **options : Any
         Forwarded to the algorithm constructor. See *Algorithm options* below.
 
     Returns

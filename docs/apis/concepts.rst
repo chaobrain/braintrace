@@ -33,7 +33,6 @@ input rank.
 .. autosummary::
    :toctree: generated/
    :nosignatures:
-   :template: classtemplate.rst
 
    matmul
    grouped_matmul

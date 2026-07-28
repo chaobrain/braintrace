@@ -37,9 +37,16 @@ __all__ = [
 
 
 class EligibilityTrace(brainstate.ShortTermState):
-    """
-    The state for storing the eligibility trace during the computation of
-    online learning algorithms.
+    """Store the eligibility trace carried by an online-learning algorithm.
+
+    Parameters
+    ----------
+    value : PyTree[ArrayLike]
+        The initial eligibility-trace value.
+    name : str, optional
+        The state name.
+    **metadata : Any
+        Additional metadata stored with the state.
 
     Examples
     --------

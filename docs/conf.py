@@ -74,6 +74,17 @@ extensions = [
     'brainx_sphinx_header',
 ]
 
+# Public API pages document re-exported ``braintrace`` symbols. Keep viewcode
+# for objects documented from their defining modules, but do not expose links
+# from the public API to private implementation modules.
+viewcode_follow_imported_members = False
+
+# ``brainstate.nn.Module`` uses a metaclass whose generic ``__call__`` would
+# otherwise replace concrete constructor signatures with ``(*args, **kwargs)``.
+# Render constructors as ``__init__`` methods so autodoc reads the real
+# signatures without modifying the runtime classes.
+autodoc_class_signature = 'separated'
+
 
 html_baseurl = 'https://brainx.chaobrain.com/braintrace/'
 # Keep relative documentation assets local when previewing a built index page.
