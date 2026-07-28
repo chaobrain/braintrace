@@ -705,47 +705,49 @@ class _WindowOracleSynthesizer(SyntheticGradient):
     """``M(h^{b_k})`` pinned to the true future gradient of :func:`_b4_step_loss`.
 
     Unlike :class:`_OracleSynthesizer`, whose table is fixed, this one is
-    recomputed against the *current* parameters at the top of every epoch: the
+    recomputed against the *current* parameters at the top of every window: the
     true future cotangent is a function of the model, and the model is moving.
     """
 
     def __init__(self, group_shapes):
         super().__init__(group_shapes)
-        self.table = None
-        self.window = 0
+        self.estimate = None
 
     def param_values(self):
-        return {'estimate': self.table[self.window]}
+        return {'estimate': self.estimate}
 
     def apply(self, param_values, group_hiddens):
         return {gid: jnp.asarray(param_values['estimate'][gid])
                 for gid in group_hiddens}
 
 
-def _b4_oracle_table(spec, seq, params, groups):
-    """The true ``d(sum_{t >= b} l_t)/dh^b`` for the parameters as they stand."""
-    table = []
-    for b in BOUNDS_B4:
-        model = spec.factory()
-        brainstate.nn.init_all_states(model, batch_size=1)
-        for key, st in model.states(brainstate.ParamState).items():
-            st.value = params[key].value
-        hidden = model.states(brainstate.HiddenState)
-        if b > 0:
-            brainstate.transform.for_loop(lambda x: model(x), seq[:b])
-        if b >= T_B4:
-            grads = {k: jax.tree.map(u.math.zeros_like, st.value)
-                     for k, st in hidden.items()}
-        else:
-            grads = brainstate.transform.grad(
-                lambda: brainstate.transform.for_loop(
-                    lambda x: _b4_step_loss(model(x)), seq[b:]).sum(), hidden)()
-        table.append({
-            g.index: np.asarray(u.get_mantissa(g.concat_hidden(
-                [u.get_mantissa(grads[p]) for p in g.hidden_paths])))
-            for g in groups
-        })
-    return table
+def _b4_oracle_estimate(spec, seq, params, groups, b):
+    """The true ``d(sum_{t >= b} l_t)/dh^b`` for the parameters as they stand.
+
+    One window bound, not the whole table. The caller has to refresh this every
+    window anyway -- the parameters move -- and only the current window's entry
+    is ever read, so building all of ``BOUNDS_B4`` cost six prefix rollouts and
+    six suffix VJPs per window to use one of each.
+    """
+    model = spec.factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    for key, st in model.states(brainstate.ParamState).items():
+        st.value = params[key].value
+    hidden = model.states(brainstate.HiddenState)
+    if b > 0:
+        brainstate.transform.for_loop(lambda x: model(x), seq[:b])
+    if b >= T_B4:
+        grads = {k: jax.tree.map(u.math.zeros_like, st.value)
+                 for k, st in hidden.items()}
+    else:
+        grads = brainstate.transform.grad(
+            lambda: brainstate.transform.for_loop(
+                lambda x: _b4_step_loss(model(x)), seq[b:]).sum(), hidden)()
+    return {
+        g.index: np.asarray(u.get_mantissa(g.concat_hidden(
+            [u.get_mantissa(grads[p]) for p in g.hidden_paths])))
+        for g in groups
+    }
 
 
 @pytest.mark.slow
@@ -837,8 +839,8 @@ class TestTheDelayedRewardTask:
                         # already left -- from the second window on it would hold
                         # cotangents of stale parameters, and the arm would stop
                         # being an oracle exactly where it starts mattering.
-                        synth.table = _b4_oracle_table(spec, seq, params, groups)
-                        synth.window = k
+                        synth.estimate = _b4_oracle_estimate(
+                            spec, seq, params, groups, BOUNDS_B4[k])
                     g = brainstate.transform.grad(
                         lambda s: _b4_step_loss(
                             algo(braintrace.MultiStepData(s))),

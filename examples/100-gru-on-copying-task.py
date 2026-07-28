@@ -117,8 +117,6 @@ class OnlineTrainer(Trainer):
 
     @brainstate.transform.jit(static_argnums=(0,))
     def batch_train(self, inputs, target):
-        weights = self.target.states(brainstate.ParamState)
-
         if self.batch_train_method == 'vmap':
             # 初始化在线学习模型
             # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的

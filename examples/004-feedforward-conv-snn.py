@@ -267,9 +267,6 @@ class OnlineVmapTrainer(Trainer):
         model.show_graph()
         model = brainstate.nn.Vmap(model, vmap_states='new')
 
-        # weights
-        weights = self.target.states().subset(brainstate.ParamState)
-
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):
                 # call the model
@@ -310,9 +307,6 @@ class OnlineBatchTrainer(Trainer):
         with brainstate.environ.context(fit=True):
             model.compile_graph(inputs[0])
             model.show_graph()
-
-        # weights
-        weights = self.target.states().subset(brainstate.ParamState)
 
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):

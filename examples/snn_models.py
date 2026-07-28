@@ -404,9 +404,6 @@ class OnlineTrainer(Trainer):
 
     @brainstate.transform.jit(static_argnums=0)
     def batch_train(self, inputs, targets):
-        # weights
-        weights = self.target.states().subset(brainstate.ParamState)
-
         # initialize the online learning model
         model = braintrace.compile(self.target, braintrace.pp_prop, inputs[0],
                                    batch_size=inputs.shape[1], vmap=True,

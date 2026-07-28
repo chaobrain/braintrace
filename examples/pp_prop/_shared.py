@@ -330,7 +330,6 @@ def online_train_epoch(
 ) -> jnp.ndarray:
     """Run one online-training epoch using pp_prop. Returns traced mean step loss (wrap in jit)."""
     import braintrace
-    weights = model.states(brainstate.ParamState)
     vmap_model = braintrace.compile(
         model, braintrace.pp_prop, inputs[0],
         batch_size=inputs.shape[1], vmap=True,
@@ -360,7 +359,6 @@ def online_train_epoch_fixed_target(
 ) -> jnp.ndarray:
     """Classification variant: fixed label per batch, softmax-xent loss applied each step."""
     import braintrace
-    weights = model.states(brainstate.ParamState)
     vmap_model = braintrace.compile(
         model, braintrace.pp_prop, inputs[0],
         batch_size=inputs.shape[1], vmap=True,

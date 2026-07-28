@@ -430,7 +430,6 @@ class Trainer:
     @brainstate.transform.jit(static_argnums=(0,))
     def etrace_train(self, inputs, targets):
         inputs = jnp.asarray(inputs, dtype=brainstate.environ.dftype())  # [T, B, N]
-        weights = self.target.states().subset(brainstate.ParamState)
 
         # initialize the online learning model
         if self.method == 'expsm_diag':

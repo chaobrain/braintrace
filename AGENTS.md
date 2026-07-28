@@ -2,14 +2,6 @@
 
 Online learning for recurrent networks via Eligibility Trace Propagation (ETP).
 
-> This file holds **durable, abstract rules**: architecture, invariants, design
-> principles, and process requirements. It deliberately avoids concrete file
-> paths, exact symbol names, signatures, and counts — those drift. For the
-> current concrete layout, read the source: `braintrace/__init__.__all__` is the
-> source of truth for the public API; the package directory tree is the source of
-> truth for module structure.
-
-
 ## Working agreement
 
 1. Before writing any code, describe approach, wait for approval.
@@ -53,74 +45,6 @@ compiler; the compiler depends on the operator registry; algorithms depend on
 the compiler and executor. Legacy back-compat shims are a side branch nothing
 else depends on.
 
-## Core design principles
-
-These are the load-bearing rules. Preserve them across refactors.
-
-### Primitives are thin markers, not reimplementations
-
-Each ETP primitive's implementation delegates to a standard JAX op. All standard
-JAX rules (JVP, transpose, batching, abstract eval, lowering) are auto-derived
-from that implementation. **Never hand-write derivative formulas for standard
-rules.** Only the small set of *ETP-specific* rules is hand-written per
-primitive (trace propagation, the input/hidden→weight-gradient rule, and the
-trace-state initializers). Adding a primitive means supplying those few rules;
-everything else is free.
-
-### Selection is primitive-based, not class-based
-
-A parameter participates in online learning **iff it is used through an ETP
-primitive**. The same parameter used through a regular JAX op is excluded. There
-is no special parameter class controlling this — the *operation* decides. To
-include a parameter, route it through an ETP op; to exclude it, use a plain JAX
-op. The compiler considers all ordinary parameter states and filters by how each
-is used.
-
-### Identify primitives by type, not by name
-
-The compiler recognizes ETP primitives by primitive-type identity, never by
-string-matching op or trace names. Keep it that way.
-
-### Batched vs unbatched is encoded in the primitive
-
-Operations that have both batched and unbatched forms expose two primitives; the
-user-facing op dispatches by input rank. Do not reintroduce runtime
-batching-mode flags — the primitive identity carries that information.
-
-### Invariant: no "weight → weight → hidden" pathway
-
-Each ETP primitive's hand-written rules assume the map from its output to the
-hidden state contains **no other trainable ETP weight**. If one trainable ETP
-op's output flows through *another* (non-gradient-enabled) ETP op before
-reaching the hidden state, the first op must **not** be recorded as a relation —
-otherwise its contribution is double-counted, and per-primitive rules cannot
-express the correct joint decomposition. The compiler enforces this by stopping
-forward reachability at such primitives and treating them as boundaries.
-
-A small set of identity-like, explicitly *gradient-enabled* primitives are
-exempt and may sit on the tail of such a path.
-
-**Practical consequence:** a cell can have more trainable linear maps than ETP
-relations, because some parameters reach the hidden state only *through another
-trainable map* and are correctly excluded (and flagged non-temporal). When
-adding or modifying an RNN cell, trace each parameter's path to the hidden
-state and count only those whose tail to the hidden state is non-parametric.
-Tests that assert relation counts encode this invariant — update them
-deliberately, not reflexively.
-
-### Quantity (unit) support
-
-ETP user-API ops accept physical-unit quantities: split mantissa/unit, compute,
-recombine. New ops must preserve this.
-
-### SNN learning-signal axis invariant
-
-SNN learning signals carry a trailing per-hidden-state axis. Every learning-
-signal hook, every per-algorithm weight-gradient solver, and every new SNN
-algorithm must thread this axis explicitly (einsum/broadcast/collapse-expand).
-Misuse produces shape errors or silently wrong gradients. Treat this axis layout
-as a contract.
-
 ## Algorithm taxonomy (for correctness reasoning)
 
 - **Exact algorithms** compute the same total gradient as backprop-through-time
@@ -134,16 +58,6 @@ as a contract.
 
 Know which class an algorithm belongs to before asserting anything about its
 gradients.
-
-## Dependencies (abstract)
-
-- A state-management + NN base-class library (provides parameter/hidden state
-  abstractions and cell base classes).
-- A physical-units library (mantissa/unit handling).
-- JAX as the core computation framework.
-- Additional brain-ecosystem utilities.
-
-Pin exact names/versions in `pyproject.toml` / requirements files,.
 
 ## Known limitations
 
@@ -165,19 +79,7 @@ the compiler or an ETP per-primitive rule may use the whole-sequence path.
 
 ## Docstring style (NumPy-doc)
 
-All public classes, methods, functions must use [NumPy-style docstrings](https://numpydoc.readthedocs.io/en/latest/format.html). Canonical section order:
-
-1. **Short summary** – one-line imperative description (no blank line before).
-2. **Extended summary** – optional, follow blank line after short summary.
-3. **Parameters** – each entry: `name : type` on own line, description indented below.
-4. **Returns** / **Yields** – same format as Parameters.
-5. **Raises** – exception type and when raised.
-6. **See Also** – related functions / classes.
-7. **Notes** – implementation details, math, references.
-8. **References** – numbered bibliography entries (`.. [1]`).
-9. **Examples** – runnable, doctestable code snippets.
-
-#### Rules for the Examples section
+All public classes, methods, functions must use [NumPy-style docstrings](https://numpydoc.readthedocs.io/en/latest/format.html). Rules for the Examples section: 
 
 - Wrap example code in `.. code-block:: python` directive so Sphinx render with syntax highlighting.
 - Prefix every input line with `>>>` (continuation lines with `...`) for `doctest` compatibility.
