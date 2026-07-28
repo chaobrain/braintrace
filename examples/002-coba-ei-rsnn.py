@@ -430,7 +430,6 @@ class Trainer:
     @brainstate.transform.jit(static_argnums=(0,))
     def etrace_train(self, inputs, targets):
         inputs = jnp.asarray(inputs, dtype=brainstate.environ.dftype())  # [T, B, N]
-        weights = self.target.states().subset(brainstate.ParamState)
 
         # initialize the online learning model
         if self.method == 'expsm_diag':
@@ -449,17 +448,12 @@ class Trainer:
             me = braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean()
             return me, out
 
-        def _etrace_step(prev_grads, x):
-            # no need to return weights and states, since they are generated then no longer needed
-            f_grad = brainstate.transform.grad(_etrace_grad, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, out = f_grad(x)
-            next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-            return next_grads, (out, local_loss)
-
         def _etrace_train(inputs_):
-            # forward propagation
-            grads = jax.tree.map(jnp.zeros_like, weights.to_dict_values())
-            grads, (outs, mse_ls) = brainstate.transform.scan(_etrace_step, grads, inputs_)
+            # reduction='sum' preserves the accumulated-gradient scale this
+            # example was tuned at; the reported loss stays the per-step mean.
+            grads, mse_ls, outs = model.etrace_grad(
+                inputs_, step_fn=_etrace_grad, reduction='sum',
+                has_aux=True, return_value=True)
             acc = self._acc(outs, targets)
 
             grads = brainstate.nn.clip_grad_norm(grads, 1.)
@@ -467,9 +461,10 @@ class Trainer:
             # accuracy
             return mse_ls.mean(), acc
 
-        # running indices
+        # running indices: free-run the prefix so hidden states and the
+        # eligibility trace advance without computing a loss.
         if self.n_sim > 0:
-            brainstate.transform.for_loop(model, inputs[:self.n_sim])
+            model.etrace_evolve(inputs[:self.n_sim])
             r = _etrace_train(inputs[self.n_sim:])
         else:
             r = _etrace_train(inputs)

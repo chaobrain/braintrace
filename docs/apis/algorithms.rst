@@ -13,6 +13,8 @@ Online-Learning Algorithms
    algorithm_details/braintrace.compile
    algorithm_details/braintrace.ETraceConfig
    algorithm_details/braintrace.ETraceAlgorithm
+   algorithm_details/braintrace.SequenceDriverMixin
+   algorithm_details/braintrace.ETraceVmap
    algorithm_details/braintrace.ETraceVjpAlgorithm
    algorithm_details/braintrace.EligibilityTrace
    algorithm_details/braintrace.ParamDimVjpAlgorithm
@@ -54,6 +56,44 @@ ready-to-``update`` learner in a single call.
    :nosignatures:
 
    compile
+
+
+Driving a Sequence
+------------------
+
+Every learner carries two sequence drivers, so the scan-accumulate block that
+online learning used to require is not something you write by hand:
+
+.. code-block:: python
+
+    def step_loss(inp, tar):
+        return braintools.metric.squared_error(learner(inp), tar).mean()
+
+    # optional warm-up: advance hidden states and eligibility traces, no gradient
+    learner.etrace_evolve(inputs[:n_warmup])
+
+    grads, step_losses = learner.etrace_grad(
+        inputs[n_warmup:], targets, step_fn=step_loss, return_value=True)
+    opt.update(grads)
+
+:meth:`~ETraceAlgorithm.etrace_grad` owns the loop, the accumulation, the loss
+mask and the reduction; ``step_fn`` owns the model call. That split is what lets
+a multi-head model, a hidden-state regularizer, or a windowed objective work
+without the driver knowing anything about them. Both methods are
+*continuations*: they leave the final state installed, so consecutive calls
+compose into one trajectory and no call implies a reset.
+
+A ``mask`` gates the **loss only** — the learner is still driven at every step,
+so a zero-weighted prefix is exactly equivalent to ``etrace_evolve`` over it.
+``chunk_size=k >= 2`` hands ``step_fn`` a ``(k, ...)`` window instead of one
+step and requires ``vjp_method='multi-step'``; ``chunk_size=1`` is the plain
+single-step path, matching :func:`train_synthetic_gradient`'s encoding.
+
+.. autosummary::
+   :nosignatures:
+
+   SequenceDriverMixin
+   ETraceVmap
 
 
 Axis Coordinates

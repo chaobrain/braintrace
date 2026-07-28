@@ -1,10 +1,8 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
 """Shared data generators and thin training helpers for examples/drtrl/*.py."""
 
-from typing import Callable, Tuple
+from typing import Tuple
 
-import brainstate
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -96,19 +94,6 @@ def make_char_batches(
     return ''.join(vocab), jnp.asarray(one_hot), jnp.asarray(y_ids)
 
 
-def accumulate_grads(
-    weights,
-    step_grad_fn: Callable,
-    inputs: jnp.ndarray,
-    targets: jnp.ndarray,
-) -> Tuple[dict, jnp.ndarray]:
-    """Scan ``step_grad_fn`` over (inputs, targets) accumulating gradients."""
-    init = jax.tree.map(lambda a: jnp.zeros_like(a), {k: v.value for k, v in weights.items()})
-
-    def body(prev_grads, pair):
-        inp, tar = pair
-        cur_grads, loss = step_grad_fn(inp, tar)
-        next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-        return next_grads, loss
-
-    return brainstate.transform.scan(body, init, (inputs, targets))
+# ``accumulate_grads`` lived here to wrap the scan-accumulate block that every
+# example repeated. That block is now ``learner.etrace_grad(...)``, so the
+# helper has no reason to exist.

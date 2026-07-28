@@ -267,9 +267,6 @@ class OnlineVmapTrainer(Trainer):
         model.show_graph()
         model = brainstate.nn.Vmap(model, vmap_states='new')
 
-        # weights
-        weights = self.target.states().subset(brainstate.ParamState)
-
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):
                 # call the model
@@ -278,22 +275,17 @@ class OnlineVmapTrainer(Trainer):
                 loss = braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean()
                 return loss, out
 
-        def _etrace_step(prev_grads, x):
-            # no need to return weights and states, since they are generated then no longer needed
-            f_grad = brainstate.transform.grad(_etrace_grad, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, out = f_grad(x)
-            next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-            return next_grads, (out, local_loss)
-
-        # forward propagation
-        grads = jax.tree.map(u.math.zeros_like, weights.to_dict_values())
-        grads, (outs, losses) = brainstate.transform.scan(_etrace_step, grads, inputs)
+        # forward propagation. reduction='sum' preserves the
+        # accumulated-gradient scale this example was tuned at; the reported
+        # loss stays the per-step mean.
+        grads, losses, outs = model.etrace_grad(
+            inputs, step_fn=_etrace_grad, reduction='sum',
+            has_aux=True, return_value=True)
 
         # gradient updates
         # grads = brainstate.nn.clip_grad_norm(grads, 1.)
         self.opt.update(grads)
-        loss, outs = losses.mean(), outs
-        return loss, self._acc(outs, targets)
+        return losses.mean(), self._acc(outs, targets)
 
 
 class OnlineBatchTrainer(Trainer):
@@ -316,9 +308,6 @@ class OnlineBatchTrainer(Trainer):
             model.compile_graph(inputs[0])
             model.show_graph()
 
-        # weights
-        weights = self.target.states().subset(brainstate.ParamState)
-
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):
                 # call the model
@@ -327,22 +316,17 @@ class OnlineBatchTrainer(Trainer):
                 loss = braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean()
                 return loss, out
 
-        def _etrace_step(prev_grads, x):
-            # no need to return weights and states, since they are generated then no longer needed
-            f_grad = brainstate.transform.grad(_etrace_grad, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, out = f_grad(x)
-            next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-            return next_grads, (out, local_loss)
-
-        # forward propagation
-        grads = jax.tree.map(u.math.zeros_like, weights.to_dict_values())
-        grads, (outs, losses) = brainstate.transform.scan(_etrace_step, grads, inputs)
+        # forward propagation. reduction='sum' preserves the
+        # accumulated-gradient scale this example was tuned at; the reported
+        # loss stays the per-step mean.
+        grads, losses, outs = model.etrace_grad(
+            inputs, step_fn=_etrace_grad, reduction='sum',
+            has_aux=True, return_value=True)
 
         # gradient updates
         # grads = brainstate.nn.clip_grad_norm(grads, 1.)
         self.opt.update(grads)
-        loss, outs = losses.mean(), outs
-        return loss, self._acc(outs, targets)
+        return losses.mean(), self._acc(outs, targets)
 
 
 class BPTTTrainer(Trainer):

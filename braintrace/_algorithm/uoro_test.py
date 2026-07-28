@@ -36,6 +36,7 @@ Every gradient assertion goes through the finite-window oracle
 parameter keys it compares.
 """
 
+import functools
 import itertools
 
 import brainstate
@@ -62,6 +63,7 @@ from braintrace._algorithm.oracle import (
 H = 2       # hidden units == the width of one Rademacher draw
 T = 3       # >= 3, or the boundary trace holds only instantaneous terms
 CHUNK = 1   # one-step windows: maximally sensitive to the trace
+N_U3 = 64   # U3's sample size; the floor is measured in ``_u3_samples``
 
 
 def _inputs(t=T, n=H, *, seed=0, scale=0.5):
@@ -116,12 +118,19 @@ def _exhaustive_mean_gradient(spec, inputs, *, n_draw_steps, draw_shape,
     group's own draw must be independent of its neighbour's. The enumeration is
     therefore over ``2^(n_draw_steps * n_groups * prod(draw_shape))`` patterns,
     which is why the multi-group case uses one unit per island.
+
+    Returns the mean, the number of patterns enumerated, and the individual
+    per-pattern gradients -- the last so that a caller wanting the spread rather
+    than the mean can reuse this enumeration instead of repeating it. Each
+    pattern bakes its draw table in as a traced constant and therefore compiles
+    its own scan, so a repeated enumeration is paid for in compilations, not
+    just in time.
     """
     algo_kwargs = algo_kwargs or {}
     width = n_groups * int(np.prod(draw_shape))
     patterns = _sign_patterns(width)
     total = None
-    count = 0
+    per_pattern = []
     for combo in itertools.product(patterns, repeat=n_draw_steps):
         # (n_steps, n_groups, *draw_shape)
         table = np.stack([c.reshape((n_groups,) + tuple(draw_shape))
@@ -133,10 +142,28 @@ def _exhaustive_mean_gradient(spec, inputs, *, n_draw_steps, draw_shape,
             chunk_size=chunk_size,
         )
         flat = {k: np.asarray(u.get_mantissa(v)) for k, v in g.items()}
+        per_pattern.append(flat)
         total = flat if total is None else {
             k: total[k] + flat[k] for k in flat}
-        count += 1
-    return {k: v / count for k, v in total.items()}, count
+    count = len(per_pattern)
+    return {k: v / count for k, v in total.items()}, count, per_pattern
+
+
+@functools.cache
+def _u1_enumeration():
+    """The one 16-run enumeration that U1, its BPTT companion and U1a share.
+
+    Three tests assert three different things -- agreement with the exact
+    recursion, agreement with BPTT, and that no single pattern *is* the mean --
+    about the identical enumeration over the identical fixture. Computing it
+    once and asserting against it three times keeps each assertion intact while
+    paying for 16 compiled scans instead of 64; the arrays are read-only.
+    """
+    spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
+    inputs = _inputs()
+    mean, count, per_pattern = _exhaustive_mean_gradient(
+        spec, inputs, n_draw_steps=2, draw_shape=(1, H, 1))
+    return spec, inputs, mean, count, per_pattern
 
 
 def _saturating_snap_reference(spec, inputs, *, chunk_size=CHUNK, n=4):
@@ -160,10 +187,7 @@ class TestExhaustiveExactness:
     """U1: the mean over all sign patterns *is* the exact recursion."""
 
     def test_the_enumeration_mean_matches_the_exact_within_group_recursion(self):
-        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
-        inputs = _inputs()
-        mean, count = _exhaustive_mean_gradient(
-            spec, inputs, n_draw_steps=2, draw_shape=(1, H, 1))
+        spec, inputs, mean, count, _ = _u1_enumeration()
         assert count == 4 ** 2, f'expected 16 runs, enumerated {count}'
 
         ref = _saturating_snap_reference(spec, inputs)
@@ -174,10 +198,7 @@ class TestExhaustiveExactness:
     def test_the_enumeration_mean_also_matches_bptt_on_this_fixture(self):
         # Single group, position-preserving elementwise tail: the within-group
         # recursion is itself exact here, so the BPTT comparison is meaningful.
-        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
-        inputs = _inputs()
-        mean, _ = _exhaustive_mean_gradient(
-            spec, inputs, n_draw_steps=2, draw_shape=(1, H, 1))
+        spec, inputs, mean, _, _ = _u1_enumeration()
         ref = bptt_param_gradients(spec.factory, inputs)
         dev = relative_deviation(
             {('w',): mean[('w',)]}, {('w',): ref[('w',)]})
@@ -207,21 +228,14 @@ class TestSingleRunsDeviateFromTheMean:
     """U1a: the enumeration must be doing work."""
 
     def test_individual_sign_patterns_are_not_the_mean(self):
-        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
-        inputs = _inputs()
-        mean, _ = _exhaustive_mean_gradient(
-            spec, inputs, n_draw_steps=2, draw_shape=(1, H, 1))
+        # The same 16 patterns U1 averages: the per-pattern gradients come back
+        # from the shared enumeration rather than being enumerated a second time.
+        _, _, mean, _, per_pattern = _u1_enumeration()
 
-        deviations = []
-        for combo in itertools.product(_sign_patterns(H), repeat=2):
-            table = np.stack([c.reshape(1, H, 1) for c in combo])[:, None]
-            g = chunked_online_param_gradients(
-                spec.factory, inputs,
-                algo_factory=lambda m, _t=table: _TabulatedUORO(
-                    m, _t, vjp_method='multi-step'),
-                chunk_size=CHUNK)
-            deviations.append(relative_deviation(
-                {('w',): np.asarray(g[('w',)])}, {('w',): mean[('w',)]}))
+        deviations = [
+            relative_deviation({('w',): g[('w',)]}, {('w',): mean[('w',)]})
+            for g in per_pattern
+        ]
         assert min(deviations) > 1e-4, (
             f'some single run equals the mean exactly (min dev {min(deviations)}); '
             f'the estimator is not stochastic')
@@ -378,7 +392,7 @@ class TestKeyingAndSharing:
     def test_a_tied_weight_keeps_one_hidden_factor_and_stays_unbiased(self):
         spec = om.tied_weight_rnn(n_rec=H)
         inputs = _inputs(T, H, scale=0.4)
-        mean, count = _exhaustive_mean_gradient(
+        mean, count, _ = _exhaustive_mean_gradient(
             spec, inputs, n_draw_steps=2, draw_shape=(1, H, 1))
         assert count == 16
         ref = _saturating_snap_reference(spec, inputs)
@@ -411,7 +425,7 @@ class TestKeyingAndSharing:
         # independent. One unit per island keeps the enumeration at 2^4.
         spec = om.two_island_rnn(n_in=1, n_rec=1)
         inputs = _inputs(T, 1, scale=0.6)
-        mean, count = _exhaustive_mean_gradient(
+        mean, count, _ = _exhaustive_mean_gradient(
             spec, inputs, n_draw_steps=2, draw_shape=(1, 1), n_groups=2)
         assert count == 16, f'expected 2^(2 steps * 2 groups), got {count}'
 
@@ -473,31 +487,48 @@ class TestTheDrawIndexAdvances:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.slow
+@functools.cache
+def _u3_samples():
+    """The 256-seed draw and its reference, shared by both U3 tests.
+
+    The two tests differ only in which reference they hold the interval
+    against -- the honest one, and one skewed by 1.15 -- while drawing the
+    identical seeded gradients beforehand. That draw is where effectively all
+    of U3's cost sits (each seed compiles its own run), so it is done once and
+    asserted against twice. Neither caller mutates what it gets back.
+
+    ``N_U3`` is set by the *rejection* half, not the acceptance half. Rejecting
+    a 1.15-skewed reference needs ``0.15 |<ref, d>| > z sd / sqrt(N)``, so the
+    interval has to be tight enough to exclude the bias; the non-vacuity half
+    is satisfied here from ``N = 16`` upwards and never binds. Measured over
+    the same 256-sample draw, re-checked at twelve direction seeds: at ``N =
+    16`` and ``24`` the skewed reference is *accepted* and the test asserts
+    nothing; at ``32`` one direction seed in twelve fails to reject; from
+    ``48`` up all twelve reject. 64 keeps a margin above that floor -- the
+    rejection gap grows as ``sqrt(N)`` -- while costing a quarter of the 256
+    the suite used to draw.
+    """
+    spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
+    inputs = _inputs()
+    samples = seed_gradient_samples(
+        spec.factory, inputs,
+        algo_factory=lambda m, seed: braintrace.UORO(
+            m, vjp_method='multi-step', projection_key=seed),
+        seeds=range(N_U3), chunk_size=CHUNK)
+    return samples, _saturating_snap_reference(spec, inputs)
+
+
 class TestSampledUnbiasedness:
     """U3: fixed directions, a two-sided interval, and a non-vacuity bound."""
 
     def test_the_sampled_mean_lands_inside_its_confidence_interval(self):
-        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
-        inputs = _inputs()
-        samples = seed_gradient_samples(
-            spec.factory, inputs,
-            algo_factory=lambda m, seed: braintrace.UORO(
-                m, vjp_method='multi-step', projection_key=seed),
-            seeds=range(256), chunk_size=CHUNK)
-        ref = _saturating_snap_reference(spec, inputs)
+        samples, ref = _u3_samples()
         assert_unbiased_estimator(samples, ref, keys=["w|"], seed=0)
 
     def test_a_biased_reference_is_rejected(self):
         # The interval must be able to fail. Scaling the reference by 1.15 is a
         # bias no honest estimator could match.
-        spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
-        inputs = _inputs()
-        samples = seed_gradient_samples(
-            spec.factory, inputs,
-            algo_factory=lambda m, seed: braintrace.UORO(
-                m, vjp_method='multi-step', projection_key=seed),
-            seeds=range(256), chunk_size=CHUNK)
-        ref = _saturating_snap_reference(spec, inputs)
+        samples, ref = _u3_samples()
         skewed = {k: v * 1.15 for k, v in ref.items()}
         with pytest.raises(AssertionError, match='confidence interval'):
             assert_unbiased_estimator(samples, skewed, keys=["w|"], seed=0)

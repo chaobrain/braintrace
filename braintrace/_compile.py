@@ -24,6 +24,7 @@ from ._misc import CompilationError
 from ._algorithm import (
     ETraceAlgorithm,
     ETraceConfig,
+    ETraceVmap,
     IODimVjpAlgorithm,
     ParamDimVjpAlgorithm,
     RandomProjectionVjpAlgorithm,
@@ -321,7 +322,12 @@ def compile(
                 _init()
         else:
             _init()
-        result: ETraceAlgorithm | brainstate.nn.Vmap = brainstate.nn.Vmap(learner, vmap_states='new')
+        # ETraceVmap, not brainstate.nn.Vmap: the wrapper must carry
+        # etrace_grad / etrace_evolve so the call site is identical in batched
+        # and unbatched mode. Reaching into `.module` instead would drive the
+        # *unbatched* learner and silently give per-lane-wrong results. It is
+        # still a brainstate.nn.Vmap, so existing users are unaffected.
+        result: ETraceAlgorithm | brainstate.nn.Vmap = ETraceVmap(learner, vmap_states='new')
     else:
         # --- state initialization (always) --- #
         if seed is not None:

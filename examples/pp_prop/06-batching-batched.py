@@ -45,18 +45,14 @@ def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 50, plot: bool
 
         def step_loss(inp, tar):
             out = online_model(inp)
-            return braintools.metric.squared_error(out, tar).mean(), out
-
-        def grad_step(prev_grads, pair):
-            inp, tar = pair
-            f_grad = brainstate.transform.grad(step_loss, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, _ = f_grad(inp, tar)
-            return jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads), local_loss
+            return braintools.metric.squared_error(out, tar).mean()
 
         @brainstate.transform.jit
         def train_step(inputs, targets):
-            init_grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
-            grads, step_losses = brainstate.transform.scan(grad_step, init_grads, (inputs, targets))
+            # reduction='sum' preserves the accumulated-gradient scale this
+            # example was tuned at; the reported loss stays the per-step mean.
+            grads, step_losses = online_model.etrace_grad(
+                inputs, targets, step_fn=step_loss, reduction='sum', return_value=True)
             grads = brainstate.nn.clip_grad_norm(grads, 1.0)
             opt.update(grads)
             return step_losses.mean()

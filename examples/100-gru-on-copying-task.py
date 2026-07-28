@@ -117,8 +117,6 @@ class OnlineTrainer(Trainer):
 
     @brainstate.transform.jit(static_argnums=(0,))
     def batch_train(self, inputs, target):
-        weights = self.target.states(brainstate.ParamState)
-
         if self.batch_train_method == 'vmap':
             # 初始化在线学习模型
             # 此处，我们需要使用 mode 来指定使用数据集是具有 batch 维度的
@@ -141,45 +139,35 @@ class OnlineTrainer(Trainer):
             out = model(inp)
 
             # calculate the loss
-            loss = braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean()
-            return loss, out
-
-        def _etrace_grad(prev_grads, x):
-            inp, tar = x
-            # 计算当前时刻的梯度
-            f_grad = brainstate.transform.grad(_etrace_loss, weights, has_aux=True, return_value=True)
-            cur_grads, local_loss, out = f_grad(inp, tar)
-            # 累计梯度
-            next_grads = jax.tree.map(lambda a, b: a + b, prev_grads, cur_grads)
-            # 返回累计后的梯度和损失函数值
-            return next_grads, (out, local_loss)
+            return braintools.metric.softmax_cross_entropy_with_integer_labels(out, tar).mean()
 
         def _etrace_train(inputs_):
-            # 初始化梯度
-            grads = jax.tree.map(lambda a: jax.numpy.zeros_like(a), {k: v.value for k, v in weights.items()})
-            # 沿着时间轴计算和累积梯度
-            grads, (outs, losses) = brainstate.transform.scan(_etrace_grad, grads, (inputs_, target))
-            # The scan *sums* the per-step gradients, but the optimised/reported
-            # objective is ``losses.mean()`` — so divide by the number of
-            # accumulated steps to make the update the gradient of that mean, i.e.
-            # the same scale BPTT differentiates. (This is only a learning-rate
-            # scale match; it is *not* what fixed the historical NaN. That was a
-            # grouping bug: the recurrent ETP matmul was traced *into* the
-            # hidden-to-hidden transition, making the per-position Jacobian
-            # coupled; the cheap diagonal (column-sum) extraction then exceeded 1
-            # on the coupled GRU, so the eligibility trace grew ~1.16x/step and
-            # overflowed float32. The default HiddenGroup mode now excludes
-            # recurrent ETP mixing from the transition (``include_recurrent_mixing
-            # =False``), so the transition is element-wise and the trace stays
-            # bounded — the standard D-RTRL diagonal approximation.)
-            grads = jax.tree.map(lambda g: g / losses.shape[0], grads)
+            # ``reduction='mean'`` *is* the correction this example used to write
+            # by hand: accumulating per-step gradients sums them, while the
+            # optimised/reported objective is the per-step mean, so the update
+            # has to be divided by the number of accumulated steps to sit at the
+            # scale BPTT differentiates.
+            #
+            # (That was only ever a learning-rate scale match; it is *not* what
+            # fixed the historical NaN. That was a grouping bug: the recurrent
+            # ETP matmul was traced *into* the hidden-to-hidden transition,
+            # making the per-position Jacobian coupled; the cheap diagonal
+            # (column-sum) extraction then exceeded 1 on the coupled GRU, so the
+            # eligibility trace grew ~1.16x/step and overflowed float32. The
+            # default HiddenGroup mode now excludes recurrent ETP mixing from the
+            # transition (``include_recurrent_mixing=False``), so the transition
+            # is element-wise and the trace stays bounded — the standard D-RTRL
+            # diagonal approximation.)
+            grads, losses = model.etrace_grad(
+                inputs_, target, step_fn=_etrace_loss,
+                reduction='mean', return_value=True)
             # 更新梯度
             self.opt.update(grads)
             return losses.mean()
 
         # 在T时刻之前，模型更新其状态和eligibility trace
         n_sim = self.n_seq + 10
-        brainstate.transform.for_loop(lambda inp: model(inp), inputs[:n_sim])
+        model.etrace_evolve(inputs[:n_sim])
 
         # 在T时刻之后，模型开始在线学习
         r = _etrace_train(inputs[n_sim:])

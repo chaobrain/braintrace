@@ -33,6 +33,7 @@ from .io_dim_vjp import IODimVjpAlgorithm
 from .param_dim_vjp import ParamDimVjpAlgorithm
 from .random_projection_vjp import RandomProjectionVjpAlgorithm
 from .pp_prop import ES_D_RTRL, pp_prop  # ES_D_RTRL: back-compat alias
+from .sequence import ETraceVmap, SequenceDriverMixin
 from .snap_n import SnAp
 from .dni import DNI, SyntheticGradient, train_synthetic_gradient
 from .three_factor import ThreeFactor
@@ -47,6 +48,9 @@ __all__ = [
     'ETraceAlgorithm',
     'EligibilityTrace',
     'ETraceGraphExecutor',
+    # sequence drivers
+    'ETraceVmap',
+    'SequenceDriverMixin',
     # VJP
     'ETraceVjpAlgorithm',
     'ETraceVjpGraphExecutor',
