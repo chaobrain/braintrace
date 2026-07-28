@@ -129,8 +129,15 @@ class EProp(ParamDimVjpAlgorithm):
         ``feedback='random'``; ignored otherwise.
     name : str, optional
         Name of the algorithm instance.
-    vjp_method, fast_solve
-        Forwarded verbatim to :class:`~braintrace.D_RTRL`.
+    vjp_method : {'single-step', 'multi-step'}, optional
+        VJP window used to compute the learning signal.
+    fast_solve : bool, optional
+        Whether to use closed-form per-primitive contractions when available.
+    **kwargs : Any
+        Additional options forwarded to
+        :class:`~braintrace.ParamDimVjpAlgorithm`, including ``trace_dtype``,
+        ``chunked_trace``, ``control_flow``, ``config``, and
+        ``snap_max_jacobian_elements``.
 
     Raises
     ------

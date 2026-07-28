@@ -109,8 +109,11 @@ class SnAp(ParamDimVjpAlgorithm):
         ``P * (K * S) ** 2`` elements. Raising it is how a deliberately large
         neighbourhood is admitted; the default rejects roughly half a gigabyte
         per operator. Forwarded to the compiler.
-    **kwargs
-        Forwarded verbatim to :class:`~braintrace.ParamDimVjpAlgorithm`.
+    **kwargs : Any
+        Additional options forwarded to
+        :class:`~braintrace.ParamDimVjpAlgorithm`, including ``trace_dtype``,
+        ``chunked_trace``, ``control_flow``, ``config``, and
+        ``random_feedback_key``.
 
     Attributes
     ----------

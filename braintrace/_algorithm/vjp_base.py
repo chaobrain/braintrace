@@ -188,9 +188,7 @@ def expand_modulator_to_group(
 
 
 class ETraceVjpAlgorithm(ETraceAlgorithm):
-    r"""
-    The base class for the eligibility trace algorithm supporting the VJP gradient
-    computation (reverse-mode differentiation).
+    r"""Provide VJP-based eligibility-trace gradient computation.
 
     The term ``VJP`` comes from two aspects. First, this module is designed to be
     compatible with JAX's VJP mechanism, so the gradient is computed according to the
@@ -223,6 +221,15 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
         ``ControlFlowPolicy()``.
+    config : ETraceConfig, optional
+        Learning-rule coordinates. ``None`` uses the subclass's preset
+        coordinate.
+    random_feedback_key : jax.Array, optional
+        Key used to initialize fixed random-feedback projections when
+        ``config.learning_signal='random_feedback'``.
+    snap_max_jacobian_elements : int, optional
+        Maximum number of elements permitted in each SnAp widened block
+        Jacobian. The default is ``16777216``.
 
     Notes
     -----

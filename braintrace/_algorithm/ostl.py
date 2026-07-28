@@ -93,8 +93,24 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     ----------
     model : brainstate.nn.Module
         The recurrent SNN whose weights are trained online.
-    name, vjp_method, fast_solve : optional
-        Forwarded verbatim to :class:`~braintrace.ParamDimVjpAlgorithm`.
+    name : str, optional
+        Name of the algorithm instance.
+    vjp_method : {'single-step', 'multi-step'}, optional
+        VJP window used to compute the learning signal.
+    fast_solve : bool, optional
+        Whether to use closed-form per-primitive contractions when available.
+    trace_dtype : dtype, optional
+        Storage dtype for supported fast-path eligibility traces.
+    chunked_trace : bool, optional
+        Whether multi-step inputs use the closed-form chunked trace roll.
+    control_flow : ControlFlowPolicy, optional
+        Control-flow canonicalization policy used during graph compilation.
+    config : ETraceConfig, optional
+        Learning-rule coordinates. ``None`` uses the OSTL recurrent preset.
+    random_feedback_key : jax.Array, optional
+        Key for fixed random-feedback projections requested by ``config``.
+    snap_max_jacobian_elements : int, optional
+        Maximum permitted size of each SnAp widened block Jacobian.
 
     Examples
     --------
@@ -166,8 +182,12 @@ class OSTLFeedforward(pp_prop):
         Exponential-smoothing factor of the IO-dim trace. The tiny default makes
         the temporal contribution negligible, matching the 'without-H' regime. A
         float must lie in ``[0, 1)``; an int is read as an approximation rank.
-    name, vjp_method, fast_solve : optional
-        Forwarded verbatim to :class:`~braintrace.pp_prop`.
+    name : str, optional
+        Name of the algorithm instance.
+    **kwargs : Any
+        Additional options forwarded to :class:`~braintrace.pp_prop`, including
+        ``vjp_method``, ``fast_solve``, ``control_flow``, ``config``, and
+        ``random_feedback_key``.
 
     Notes
     -----

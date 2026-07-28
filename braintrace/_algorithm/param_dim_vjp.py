@@ -963,6 +963,8 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
     model : brainstate.nn.Module
         The model function, which receives the input arguments and returns the
         model output.
+    name : str, optional
+        Name of the eligibility-trace algorithm.
     vjp_method : str, optional
         The method for computing the VJP. It should be either ``"single-step"``
         or ``"multi-step"``.
@@ -972,6 +974,12 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         - ``"multi-step"``: the VJP is computed at multiple time steps, i.e.,
           :math:`\partial L^t/\partial h^{t-k}`, where :math:`k` is determined by
           the data input.
+    fast_solve : bool, optional
+        Whether to use the closed-form per-primitive contractions when
+        available. The default is ``True``.
+    trace_dtype : dtype, optional
+        Storage dtype for supported fast-path eligibility traces. ``None``
+        preserves the native dtype.
     chunked_trace : bool, optional
         When ``True`` (default) and the input spans multiple time steps, the
         eligibility-trace roll over the window is computed in closed form —
@@ -994,10 +1002,15 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         scan unrolling, structured scan descent, ...) during graph
         compilation. ``None`` (default) uses
         ``ControlFlowPolicy()``.
-    name : str, optional
-        The name of the etrace algorithm.
-    mode : braintrace.mixin.Mode, optional
-        The computing mode, indicating the batching behavior.
+    config : ETraceConfig, optional
+        Learning-rule coordinates. ``None`` uses the parameter-dimensional
+        preset.
+    random_feedback_key : jax.Array, optional
+        Key used to initialize fixed random-feedback projections when the
+        selected config requests them.
+    snap_max_jacobian_elements : int, optional
+        Maximum number of elements permitted in each SnAp widened block
+        Jacobian. The default is ``16777216``.
 
     Notes
     -----
@@ -1071,7 +1084,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         >>>
         >>> model = RNN()
         >>> x0 = brainstate.random.randn(1)
-        >>> # ``braintrace.D_RTRL`` is an alias of ``ParamDimVjpAlgorithm``; one call
+        >>> # ``D_RTRL`` is the concrete parameter-dimensional preset; one call
         >>> # initialises states, builds the trace graph, and returns a learner.
         >>> learner = braintrace.compile(model, braintrace.D_RTRL, x0)
         >>> y = learner(x0)             # forward pass + eligibility-trace update
