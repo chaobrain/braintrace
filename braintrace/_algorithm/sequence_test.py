@@ -1168,8 +1168,15 @@ class TestAlgorithmInteractions:
                     lambda a, b: a + b, total, g)
             return total
 
-        # The driver is plumbing: it must land on the shipped behaviour exactly.
-        _assert_trees_equal(g_driver, manual(False),
+        # The driver is plumbing: it must land on the shipped behaviour. Unlike
+        # the plain-mode comparisons, which are scan-vs-scan and do agree bit
+        # for bit, this one is a scan over stacked windows against a Python loop
+        # of separate grad calls -- two different graphs, so XLA is free to fuse
+        # them differently and jax <= 0.10 does, by one float32 ulp (measured
+        # 9.3e-10 absolute, 7.5e-08 relative). The tolerance is still three
+        # decades below the 2.1e-03 F-30 effect the next arm has to see, so it
+        # buys the ulp without weakening the claim.
+        _assert_trees_equal(g_driver, manual(False), atol=1e-8, rtol=1e-6,
                             msg='windowed driver vs hand-written window loop')
 
         # ...and the shipped behaviour must be measurably the biased one, or
