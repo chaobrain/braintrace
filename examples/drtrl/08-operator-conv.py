@@ -66,7 +66,10 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
 
     @brainstate.transform.jit
     def f_train(inputs, targets):
-        brainstate.transform.for_loop(lambda inp: online(inp), inputs[:-1])
+        # Free-run the prefix: hidden states and the eligibility trace advance,
+        # no loss is computed. The loss here is at the final step only, so the
+        # gradient below stays a single-step grad rather than an etrace_grad.
+        online.etrace_evolve(inputs[:-1])
 
         def final_loss():
             out = online(inputs[-1])

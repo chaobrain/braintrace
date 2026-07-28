@@ -253,6 +253,7 @@ def compile(
 
         >>> import brainstate
         >>> import braintrace
+        >>> import jax.numpy as jnp
         >>>
         >>> class RNN(brainstate.nn.Module):
         ...     def __init__(self):
@@ -276,6 +277,16 @@ def compile(
         >>> config = braintrace.ETraceConfig()
         >>> by_config = braintrace.compile(
         ...     model, config, x0, batch_size=1)
+        >>>
+        >>> # Every learner compile returns carries the two sequence drivers.
+        >>> xs = brainstate.random.randn(10, 1, 3)   # (T, batch, features)
+        >>> ys = brainstate.random.randn(10, 1, 1)
+        >>> def step_loss(x, y):
+        ...     return jnp.mean((by_name(x) - y) ** 2)
+        >>> grads, losses = by_name.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
+        >>> # etrace_evolve is the same drive with no loss: it advances hidden
+        >>> # state and the eligibility trace, optionally stacking the outputs.
+        >>> outs = by_name.etrace_evolve(xs, return_outputs=True)
     """
     cls = _resolve_algorithm(algorithm)
     if isinstance(algorithm, ETraceConfig):

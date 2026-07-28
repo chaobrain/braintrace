@@ -458,8 +458,12 @@ class Trainer(object):
         return losses.mean(), acc
 
     def _compile_etrace_function(self, input_info):
-        # kept manual: data-dependent (DVSGesture) — no smoke coverage to verify a
-        # compile() migration; uses ShapeDtypeStruct example incompatible with compile's vmap axis-strip
+        # kept manual: this *is* compile(..., vmap=True)'s scheme --
+        # vmap_new_states(state_tag='new') + init_all_states + compile_graph on
+        # the unbatched sample + a Vmap wrapper -- but compile cannot take this
+        # example input. It strips the batch axis with `a[0]`, and `input_info`
+        # is an unbatched jax.ShapeDtypeStruct, which is not subscriptable.
+        # (A benchmark builds the graph from a shape, never from real data.)
         if self.args.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, )
         elif self.args.method == 'diag':
@@ -515,18 +519,18 @@ class Trainer(object):
         inputs = np.reshape(inputs, (inputs.shape[0], inputs.shape[1], -1))  # [n_steps, n_samples, n_in]
         self._etrace_reset_fun()
 
+        # Kept manual on purpose -- this is a memory/speed benchmark. A single
+        # ``learner.etrace_grad(...)`` would fuse the whole sequence into one
+        # scan, which is what an application should do but leaves nowhere to
+        # sample ``get_mem_usage()`` between steps. The Python loop over a
+        # jitted step is the measurement, not an un-migrated leftover.
+        #
         # initial gradients
         grads = jax.tree.map(lambda a: jnp.zeros_like(a), self.param_weights.to_dict_values())
 
         # training
         indices = np.arange(inputs.shape[0])
         n_sim = _format_sim_epoch(self.args.warmup_ratio, inputs.shape[0])
-        # brainstate.transform.for_loop(self._etrace_pred_fun, indices[:n_sim], inputs[:n_sim])
-        # grads, (outs, losses) = brainstate.transform.scan(
-        #     functools.partial(self._etrace_train_fun, targets=targets),
-        #     grads,
-        #     (indices[n_sim:], inputs[n_sim:])
-        # )
         outs, losses = [], []
         for i in indices:
             if i < n_sim:

@@ -118,6 +118,7 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
 
         >>> import brainstate
         >>> import braintrace
+        >>> import jax.numpy as jnp
         >>>
         >>> class Net(brainstate.nn.Module):
         ...     def __init__(self):
@@ -132,6 +133,13 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
         >>> # one call: initialise states, build the trace graph, return a learner
         >>> learner = braintrace.compile(model, braintrace.OSTLRecurrent, x0)
         >>> y = learner(x0)
+        >>>
+        >>> # etrace_grad drives the sequence and accumulates the online gradients
+        >>> xs = brainstate.random.randn(10, 1)   # (T, ...)
+        >>> ys = brainstate.random.randn(10, 1)
+        >>> def step_loss(x, y):
+        ...     return jnp.mean((learner(x) - y) ** 2)
+        >>> grads, losses = learner.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
 
     References
     ----------
@@ -204,6 +212,7 @@ class OSTLFeedforward(pp_prop):
 
         >>> import brainstate
         >>> import braintrace
+        >>> import jax.numpy as jnp
         >>>
         >>> class Net(brainstate.nn.Module):
         ...     def __init__(self):
@@ -218,6 +227,13 @@ class OSTLFeedforward(pp_prop):
         >>> # one call: initialise states, build the trace graph, return a learner
         >>> learner = braintrace.compile(model, braintrace.OSTLFeedforward, x0)
         >>> y = learner(x0)
+        >>>
+        >>> # etrace_grad drives the sequence and accumulates the online gradients
+        >>> xs = brainstate.random.randn(10, 1)   # (T, ...)
+        >>> ys = brainstate.random.randn(10, 1)
+        >>> def step_loss(x, y):
+        ...     return jnp.mean((learner(x) - y) ** 2)
+        >>> grads, losses = learner.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
 
     References
     ----------
