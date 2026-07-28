@@ -753,6 +753,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
         >>> import brainstate
         >>> import braintrace
+        >>> import jax.numpy as jnp
         >>>
         >>> class RNN(brainstate.nn.Module):
         ...     def __init__(self):
@@ -767,6 +768,13 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         >>> # one call: initialise states, build the trace graph, return a learner
         >>> learner = braintrace.compile(model, braintrace.pp_prop, x0, decay_or_rank=0.9)  # or rank: decay_or_rank=19
         >>> y = learner(x0)             # forward pass + eligibility-trace update
+        >>>
+        >>> # etrace_grad drives the sequence and accumulates the online gradients
+        >>> xs = brainstate.random.randn(10, 1)   # (T, ...)
+        >>> ys = brainstate.random.randn(10, 1)
+        >>> def step_loss(x, y):
+        ...     return jnp.mean((learner(x) - y) ** 2)
+        >>> grads, losses = learner.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
 
     References
     ----------

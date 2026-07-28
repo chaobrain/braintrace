@@ -125,11 +125,10 @@ class OnlineTrainer(Trainer):
                                        vjp_method=self.vjp_method)
 
         elif self.batch_train_method == 'batch':
-            # kept manual: re-initializes states inside @jit every batch; braintrace.compile must live outside jit
-            model = braintrace.ParamDimVjpAlgorithm(
-                self.target, vjp_method=self.vjp_method)
-            brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])
-            model.compile_graph(inputs[0])
+            # 同一个调用，只是没有 vmap：模型自己看到 batch 维度
+            model = braintrace.compile(self.target, braintrace.ParamDimVjpAlgorithm, inputs[0],
+                                       batch_size=inputs.shape[1],
+                                       vjp_method=self.vjp_method)
 
         else:
             raise ValueError

@@ -246,26 +246,25 @@ class OnlineVmapTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
-        # kept manual: uses vmap_states='new' — cannot replace with braintrace.compile
-        # model = braintrace.ES_D_RTRL(self.target, self.decay_or_rank)
-        model = braintrace.D_RTRL(self.target)
+        # One call replaces init_all_states + compile_graph + Vmap. Pass the
+        # batched single step inputs[0]; compile strips axis 0 to recover the
+        # per-sample example, so this is the same graph the manual expansion in
+        # examples/drtrl/02-batching-vmap.py builds by hand.
+        # model = braintrace.compile(self.target, braintrace.ES_D_RTRL, inputs[0],
+        #                            batch_size=inputs.shape[1], vmap=True,
+        #                            decay_or_rank=self.decay_or_rank)
+        with brainstate.environ.context(fit=True):
+            model = braintrace.compile(
+                self.target, braintrace.D_RTRL, inputs[0],
+                batch_size=inputs.shape[1], vmap=True,
+            )
 
-        @brainstate.transform.vmap_new_states(
-            state_tag='new',
-            axis_size=inputs.shape[1],
-        )
-        def init():
-            brainstate.nn.init_all_states(self.target)
-            # initialize the online learning model
-            with brainstate.environ.context(fit=True):
-                model.compile_graph(inputs[0, 0])
-
-        init()
-        # show_graph() is a post-compile diagnostic: call it once *after* init().
-        # The vmap_new_states discovery probe runs init() with compilation deferred
-        # to the real mapped pass, so the graph is only available after init().
-        model.show_graph()
-        model = brainstate.nn.Vmap(model, vmap_states='new')
+        # show_graph() is a post-compile diagnostic and lives on the learner, not
+        # on the vmap wrapper -- ETraceVmap forwards the drivers, not the
+        # introspection surface. Reading through .module is fine here; only
+        # *driving* through it would be wrong (it would drive the unbatched
+        # learner and give per-lane-wrong results).
+        model.module.show_graph()
 
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):
@@ -298,15 +297,18 @@ class OnlineBatchTrainer(Trainer):
         # inputs: [n_step, n_batch, ...]
         # targets: [n_batch, n_out]
 
-        # kept manual: re-initializes states inside @jit every batch; braintrace.compile must live outside jit
-        # model = braintrace.ES_D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
-        model = braintrace.D_RTRL(self.target, self.decay_or_rank, model=brainstate.mixin.Batching())
-
-        # initialize the online learning model
-        brainstate.nn.init_all_states(self.target, batch_size=inputs.shape[1])
+        # Same call as OnlineVmapTrainer above, minus vmap=True: the model sees
+        # the batch axis itself, so compile only has to init the states with
+        # batch_size and build the graph on the batched example inputs[0].
+        # model = braintrace.compile(self.target, braintrace.ES_D_RTRL, inputs[0],
+        #                            batch_size=inputs.shape[1],
+        #                            decay_or_rank=self.decay_or_rank)
         with brainstate.environ.context(fit=True):
-            model.compile_graph(inputs[0])
-            model.show_graph()
+            model = braintrace.compile(
+                self.target, braintrace.D_RTRL, inputs[0],
+                batch_size=inputs.shape[1],
+            )
+        model.show_graph()
 
         def _etrace_grad(inp):
             with brainstate.environ.context(fit=True):

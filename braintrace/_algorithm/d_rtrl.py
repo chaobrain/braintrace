@@ -80,11 +80,19 @@ class D_RTRL(ParamDimVjpAlgorithm):
 
         >>> import brainstate
         >>> import braintrace
+        >>> import jax.numpy as jnp
         >>>
         >>> model = braintrace.nn.ValinaRNNCell(2, 4, activation='tanh')
         >>> x0 = brainstate.random.randn(2)
         >>> learner = braintrace.compile(model, braintrace.D_RTRL, x0)
         >>> y = learner.update(x0)
+        >>>
+        >>> # etrace_grad drives the sequence and accumulates the online gradients
+        >>> xs = brainstate.random.randn(10, 2)   # (T, ...)
+        >>> ys = brainstate.random.randn(10, 4)
+        >>> def step_loss(x, y):
+        ...     return jnp.mean((learner(x) - y) ** 2)
+        >>> grads, losses = learner.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
 
     References
     ----------

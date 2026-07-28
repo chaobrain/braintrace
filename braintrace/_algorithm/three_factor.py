@@ -130,6 +130,21 @@ class ThreeFactor(ParamDimVjpAlgorithm):
 
     The keyword takes precedence for the call it appears on.
 
+    Over a sequence, the per-step reward is simply a second sequence:
+    ``etrace_grad`` slices every sequence in lockstep and hands the slices to
+    ``step_fn`` positionally, and ``step_fn`` -- not the driver -- owns the
+    model call, so there is nowhere the modulator has to be threaded through.
+
+    .. code-block:: python
+
+        >>> xs = jnp.zeros((10, 1, 4))
+        >>> rewards = jnp.linspace(-1.0, 1.0, 10)
+        >>> ys = jnp.zeros((10, 1, 4))
+        >>> def step_loss(x, reward, y):
+        ...     return jnp.mean((learner.update(x, modulator=reward) - y) ** 2)
+        >>> grads, losses = learner.etrace_grad(
+        ...     xs, rewards, ys, step_fn=step_loss, return_value=True)
+
     Notes
     -----
     Under single-step, every **plain** (non-ETP) parameter's gradient is exactly

@@ -352,8 +352,16 @@ class Trainer(object):
         return losses.mean(), acc
 
     def _compile_etrace_function(self, input_info):
-        # kept manual: uses vmap_init_all_states with state_tag='new' and Batching() mode;
-        # braintrace.compile uses init_all_states which is incompatible with this vmap state scheme
+        # kept manual: braintrace.compile has no path for this state scheme.
+        # It offers two: init_all_states(batch_size=B) (vmap=False), or
+        # vmap_new_states(state_tag='new') + compile_graph on an *unbatched*
+        # sample + an ETraceVmap wrapper (vmap=True). This benchmark uses a
+        # third -- vmap_init_all_states(state_tag='new') for the per-sample
+        # states, compile_graph on the *batched* example, no wrapper, and an
+        # explicit brainstate.transform.vmap(in_states=...) only for the reset.
+        # compile's vmap branch would also reject `input_info`: it strips the
+        # batch axis with `a[0]`, and a jax.ShapeDtypeStruct is not
+        # subscriptable.
         if self.args.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay)
         elif self.args.method == 'diag':
@@ -416,6 +424,12 @@ class Trainer(object):
         inputs = np.reshape(inputs, (inputs.shape[0], inputs.shape[1], -1))  # [n_steps, n_samples, n_in]
         self._etrace_reset_fun()
 
+        # Kept manual on purpose -- this is a memory/speed benchmark. A single
+        # ``learner.etrace_grad(...)`` would fuse the whole sequence into one
+        # scan, which is what an application should do but leaves nowhere to
+        # sample ``get_mem_usage()`` between steps. The Python loop over a
+        # jitted step is the measurement, not an un-migrated leftover.
+        #
         # initial gradients -- a pytree of zeros matching the grad_states pytree
         # used in ``_etrace_step`` (``opt.param_states.to_pytree()``), so the
         # per-step ``jax.tree.map(a + b, ...)`` accumulation aligns.

@@ -160,6 +160,7 @@ class SnAp(ParamDimVjpAlgorithm):
 
         >>> import brainstate
         >>> import braintrace
+        >>> import jax.numpy as jnp
         >>>
         >>> class Net(brainstate.nn.Module):
         ...     def __init__(self):
@@ -173,6 +174,13 @@ class SnAp(ParamDimVjpAlgorithm):
         >>> x0 = brainstate.random.randn(1)
         >>> learner = braintrace.compile(model, braintrace.SnAp, x0, n=2)
         >>> y = learner(x0)
+        >>>
+        >>> # etrace_grad drives the sequence and accumulates the online gradients
+        >>> xs = brainstate.random.randn(10, 1)   # (T, ...)
+        >>> ys = brainstate.random.randn(10, 1)
+        >>> def step_loss(x, y):
+        ...     return jnp.mean((learner(x) - y) ** 2)
+        >>> grads, losses = learner.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
     """
 
     __module__ = 'braintrace'

@@ -41,7 +41,10 @@ downward:
    hidden->weight / hidden->hidden Jacobian computations.
 4. **Algorithms** — online-learning orchestrators: the exact algorithms
    :class:`D_RTRL` / :func:`pp_prop` / :class:`ES_D_RTRL`, and the SNN family
-   :class:`EProp`, :class:`OSTLRecurrent`, :class:`OSTLFeedforward`.
+   :class:`EProp`, :class:`OSTLRecurrent`, :class:`OSTLFeedforward`. Every one
+   of them carries the two sequence drivers of
+   :class:`SequenceDriverMixin` — ``etrace_grad`` and ``etrace_evolve`` — so a
+   caller never writes the per-step gradient-accumulation loop by hand.
 
 The :mod:`braintrace.nn` subpackage provides ready-made ETP-wired layers
 (linear maps, convolutions, recurrent cells, read-outs).
@@ -49,7 +52,13 @@ The :mod:`braintrace.nn` subpackage provides ready-made ETP-wired layers
 Notes
 -----
 The convenience entry point :func:`compile` wraps a model together with an
-algorithm into a single trainable object and is the recommended starting point.
+algorithm into a single trainable object and is the recommended starting point:
+one call replaces ``init_all_states`` + algorithm construction +
+``compile_graph`` (+ the vmap wrapper, with ``vmap=True``). The object it
+returns drives a sequence with :meth:`~SequenceDriverMixin.etrace_grad`
+(accumulate online gradients under a loss) or
+:meth:`~SequenceDriverMixin.etrace_evolve` (advance hidden state and the
+eligibility trace with no loss).
 The ``braintrace.MatMulOp`` / ``ETraceParam`` style names from the v0.1.x API
 are deprecated shims served lazily with a :class:`DeprecationWarning`; new code
 should mark parameters by routing them through ETP ops instead.

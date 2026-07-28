@@ -1,11 +1,21 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-# kept manual: vmap_states='new' path not yet covered by compile()
+# kept manual: this file *is* the worked expansion of compile(..., vmap=True)
 """02 · Batching via ``vmap_new_states``.
 
 Shows the per-sample-init pattern explicitly:
     1. wrap model in D_RTRL
     2. inside a vmapped new-states scope: init_all_states + compile_graph
-    3. outside, wrap the online model in brainstate.nn.Vmap
+    3. outside, wrap the online model in braintrace.ETraceVmap
+
+``braintrace.compile(model, braintrace.D_RTRL, inputs[0], batch_size=B,
+vmap=True)`` does exactly these three steps in one call, and that is what an
+application should write. The steps are spelled out here so the wiring is
+visible — which state gets the per-sample axis, and on which *unbatched*
+sample the eligibility-trace graph is built.
+
+Step 3 uses ``braintrace.ETraceVmap`` rather than ``brainstate.nn.Vmap``: it
+*is* a ``brainstate.nn.Vmap`` (same call, same isinstance checks) and adds the
+sequence drivers, which a bare ``Vmap`` does not carry.
 
 Pick this pattern when every sample needs its own eligibility trace state
 (the usual case).
@@ -53,7 +63,8 @@ def main(*, n_epochs: int = 30, batch_size: int = 64, plot: bool = True) -> dict
             online_model.compile_graph(inputs[0, 0])
 
         init()
-        vmap_model = brainstate.nn.Vmap(online_model, vmap_states='new')
+        # ETraceVmap, not brainstate.nn.Vmap: same wrapper, plus the drivers.
+        vmap_model = braintrace.ETraceVmap(online_model, vmap_states='new')
 
         def step_loss(inp, tar):
             out = vmap_model(inp)

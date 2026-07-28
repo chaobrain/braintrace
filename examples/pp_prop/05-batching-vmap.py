@@ -1,11 +1,16 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-# kept manual: vmap_states='new' path not yet covered by compile()
-"""05 · Batching via brainstate.nn.Vmap(vmap_states='new').
+"""05 · Batching via ``braintrace.compile(..., vmap=True)``.
 
-The network and the pp_prop algorithm are defined unbatched, then replicated
-across the batch dimension via vmap_new_states. pp_prop's per-rule init is
-aware of batching and allocates batched eligibility traces automatically.
-This is the default batching path used by examples 01-04.
+The network and the pp_prop algorithm are defined unbatched; ``compile`` with
+``vmap=True`` replicates them across the batch dimension (it initializes the
+states inside a ``vmap_new_states`` scope, builds the eligibility-trace graph
+on one unbatched sample, and returns an ``ETraceVmap``). pp_prop's per-rule
+init is aware of batching and allocates batched eligibility traces
+automatically. This is the default batching path used by examples 01-04, and
+it lives in ``_shared.online_train_epoch``, which this file calls.
+
+For the same three steps written out by hand, see
+``examples/drtrl/02-batching-vmap.py``.
 """
 
 import pathlib

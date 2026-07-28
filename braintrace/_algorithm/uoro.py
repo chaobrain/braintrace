@@ -118,6 +118,21 @@ class UORO(RandomProjectionVjpAlgorithm):
         >>> learner.compile_graph(braintrace.MultiStepData(jnp.zeros((1, 1, 4))))
         >>> learner.init_etrace_state()
 
+    UORO is multi-step by construction, so ``etrace_grad`` drives it in **window
+    mode**: pass ``chunk_size=k`` with ``k >= 2``, and ``step_fn`` receives a
+    ``(k, ...)`` slice, wraps its model input in :class:`MultiStepData`, and
+    returns a ``(k,)`` vector of per-step losses rather than a scalar.
+
+    .. code-block:: python
+
+        >>> xs = jnp.zeros((10, 1, 4))
+        >>> ys = jnp.zeros((10, 1, 4))
+        >>> def window_loss(x, y):          # x, y are (k, 1, 4)
+        ...     out = learner(braintrace.MultiStepData(x))
+        ...     return jnp.mean((out - y) ** 2, axis=(1, 2))    # (k,)
+        >>> grads, losses = learner.etrace_grad(
+        ...     xs, ys, step_fn=window_loss, chunk_size=5, return_value=True)
+
     Notes
     -----
     **Variance grows with the number of window boundaries.** The estimate is
