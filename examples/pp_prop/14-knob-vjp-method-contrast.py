@@ -35,11 +35,14 @@ def _accuracy(outputs_seq, labels):
 
 
 def _eval(model, inputs, labels):
-    mapped_model = brainstate.nn.Map(
-        model, init_map_size=inputs.shape[1]
-    )
-    mapped_model.init_all_states()
-    outs = brainstate.transform.for_loop(lambda x: mapped_model(x), inputs)
+    # kept manual: eval re-init, no online construction
+    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
+    def init():
+        brainstate.nn.init_all_states(model)
+
+    init()
+    vmap_model = brainstate.nn.Vmap(model, vmap_states="new")
+    outs = brainstate.transform.for_loop(lambda x: vmap_model(x), inputs)
     return _accuracy(outs, labels)
 
 

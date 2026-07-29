@@ -58,8 +58,6 @@ __all__ = [
     'register_primitive',
 ]
 
-_ETP_BATCHING_RULES: dict[Primitive, Callable[..., Any]] = {}
-
 
 class ETPPrimitive(Primitive):
     """A JAX ``Primitive`` with ETP rule registration helpers.
@@ -338,7 +336,6 @@ def register_primitive(
         )
         return jax.vmap(partial(impl_fn, **params), in_axes=dims)(*args), 0
 
-    _ETP_BATCHING_RULES[p] = _batching
     batching.primitive_batchers[p] = _batching
 
     return p

@@ -121,9 +121,8 @@ from typing import Any, Optional, Sequence
 import jax
 import jax.numpy as jnp
 import brainunit as u
-from jax.interpreters import batching
 
-from ._primitive import _ETP_BATCHING_RULES, register_primitive
+from ._primitive import register_primitive
 from ._registries import ETP_RULES_INSTANT_DRTRL, ETP_RULES_SOLVE_DRTRL
 from braintrace._typing import ArrayLike, WeightFn
 
@@ -759,51 +758,6 @@ etp_conv_p = register_primitive(
     trainable_invars_fn=_conv_trainable_invars,
     x_invar_index=0,
 )
-
-_default_conv_batcher = _ETP_BATCHING_RULES[etp_conv_p]
-
-
-def _conv_lhs_batch_axis(params: dict[str, Any]) -> int:
-    """Return the input batch-axis position encoded by dimension numbers."""
-    dn = params.get('dimension_numbers')
-    if dn is None:
-        return 0
-    if isinstance(dn, tuple) and len(dn) == 3 and isinstance(dn[0], str):
-        return dn[0].index('N')
-    return dn.lhs_spec[0]
-
-
-def _conv_batcher(args: Any, dims: Any, **params: Any) -> Any:
-    """Preserve ``etp_conv_p`` when mapping only the convolution input."""
-    x_idx = 0
-    if (
-        dims[x_idx] is None
-        or any(d is not None for i, d in enumerate(dims) if i != x_idx)
-    ):
-        return _default_conv_batcher(args, dims, **params)
-
-    x = jnp.moveaxis(args[x_idx], dims[x_idx], 0)
-    lhs_batch_axis = _conv_lhs_batch_axis(params)
-    x = jnp.moveaxis(x, lhs_batch_axis + 1, 1)
-    map_size, inner_batch_size = x.shape[:2]
-    merged_x = x.reshape(map_size * inner_batch_size, *x.shape[2:])
-    merged_x = jnp.moveaxis(merged_x, 0, lhs_batch_axis)
-
-    merged_args = tuple(
-        merged_x if i == x_idx else arg for i, arg in enumerate(args)
-    )
-    y = etp_conv_p.bind(*merged_args, **params)
-
-    _, _, output_batch_axis, _ = _conv_layout(params)
-    y = jnp.moveaxis(y, output_batch_axis, 0)
-    y = y.reshape(map_size, inner_batch_size, *y.shape[1:])
-    y = jnp.moveaxis(y, 1, output_batch_axis + 1)
-    return y, 0
-
-
-batching.primitive_batchers[etp_conv_p] = _conv_batcher
-
-
 def _conv_snap_anchor(eqn_params: dict) -> bool:
     """Declare the SnAp-n trace anchor for ``etp_conv``.
 

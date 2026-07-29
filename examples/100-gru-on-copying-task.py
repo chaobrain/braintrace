@@ -179,11 +179,14 @@ class BPTTTrainer(Trainer):
         # 需要求解梯度的参数
         weights = self.target.states(brainstate.ParamState)
 
-        # kept manual: BPTT baseline, with mapped per-sample states
-        model = brainstate.nn.Map(
-            self.target, init_map_size=inputs.shape[1]
-        )
-        model.init_all_states()
+        # kept manual: BPTT baseline — no online algorithm to migrate
+        # initialize the states
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
+        def init():
+            brainstate.nn.init_all_states(self.target)
+
+        init()
+        model = brainstate.nn.Vmap(self.target, vmap_states='new')
 
         def _run_step_train(inp, tar):
             out = model(inp)

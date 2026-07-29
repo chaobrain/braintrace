@@ -13,17 +13,17 @@
 # limitations under the License.
 # ==============================================================================
 
-"""Conv and mixed ETP correctness under ``brainstate.nn.Map``.
+"""Conv / mixed ETP under ``brainstate.nn.Vmap(vmap_states='new')`` correctness.
 
 Regression coverage for the eligibility-trace path through the *batched* online
-executor backed by ``brainstate.nn.Map`` (the mapped batching flow used
+executor wrapped by ``brainstate.nn.Vmap`` (the ``OnlineVmapTrainer`` flow used
 by ``examples/004``). This path was previously uncovered — conv was exercised
 only at the rule level (``_op/conv_test.py``) and the "conv" model in
 ``transform_correctness_test`` is actually a matmul — which let two regressions
 through:
 
 1. *Pure conv.* A conv forward forces a leading batch axis on its input, but
-   under mapped state initialization the hidden-state traces are per-lane and carry no
+   under ``vmap_states='new'`` the hidden-state traces are per-lane and carry no
    batch axis, so the instantaneous, recurrent and solve terms saw a singleton
    batch on the input but none on the cotangent.
 
@@ -36,13 +36,13 @@ through:
 3. *Norm in the transition.* ``conv -> LayerNorm -> IF`` makes ``dh/dy``
    non-diagonal; the all-ones jvp returns its row sums, exactly zero for the
    shift-invariant norm. A ``use_fast_variance=True`` norm leaves a float32
-   residual instead, which under mapped execution the recurrent trace and
+   residual instead, which under ``vmap_states='new'`` the recurrent trace and
    ``rsqrt(var+eps)`` amplify into an overflow that diverges from the eager
    reference — the ``examples/004`` ``loss=ln(10)`` stall.
 
-**Oracle (exact, transform-invariance).** ``brainstate.nn.Map`` is a transform;
+**Oracle (exact, transform-invariance).** ``brainstate.nn.Vmap`` is a transform;
 for parameters shared across lanes its grad sums the per-lane gradients. So the
-gradient from the mapped path on a batch of ``B`` samples
+gradient from the ``vmap_new_states`` + ``Vmap`` path on a batch of ``B`` samples
 must equal the sum over ``b`` of the *eager, batch=1* gradient on sample ``b``.
 The eager batch=1 path is independently healthy for conv (states are initialised
 *with* a size-1 batch, so input and trace batch axes agree), which makes it a
@@ -58,6 +58,17 @@ import brainstate
 import braintrace
 import braintools
 import brainpy.state
+
+# `etp_conv` has no registered batched counterpart, so every model here that
+# routes a sample through `braintrace.nn.Conv2d` under `brainstate.nn.Vmap`
+# hits the identity-preserving batching rule's decomposition fallback in
+# `braintrace/_op/_primitive.py`, which emits a `UserWarning`. That warning is
+# expected-but-not-under-test in this module (the module tests gradient
+# correctness, not the vmap-decomposition warning itself — that is covered by
+# `braintrace/_op/_primitive_test.py`), so it is filtered narrowly by message.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:ETP primitive 'etp_conv' was decomposed:UserWarning"
+)
 
 H = W = 6
 C_IN = 2
@@ -143,19 +154,24 @@ def _eager_grad_one(sample_seq, target, make_net):
     return grads
 
 
-def _map_grad(data, targets, make_net):
-    """Initialize mapped states explicitly and accumulate mapped gradients."""
+def _vmap_grad(data, targets, make_net):
+    """The ``OnlineVmapTrainer`` flow: vmap_new_states init + Vmap(vmap_states='new')."""
     net = make_net()
-    mapped_net = brainstate.nn.Map(net, init_map_size=data.shape[1])
-    mapped_net.init_all_states()
-    model = braintrace.D_RTRL(mapped_net)
-    with brainstate.environ.context(fit=True):
-        model.compile_graph(data[0])
+    model = braintrace.D_RTRL(net)
+
+    @brainstate.transform.vmap_new_states(state_tag='new', axis_size=data.shape[1])
+    def init():
+        brainstate.nn.init_all_states(net)
+        with brainstate.environ.context(fit=True):
+            model.compile_graph(data[0, 0])
+
+    init()
+    vmodel = brainstate.nn.Vmap(model, vmap_states='new')
     weights = net.states().subset(brainstate.ParamState)
 
     def _grad(inp):
         with brainstate.environ.context(fit=True):
-            return _loss(model(inp), targets)
+            return _loss(vmodel(inp), targets)
 
     def _step(prev, x):
         g = brainstate.transform.grad(_grad, weights)(x)
@@ -173,7 +189,7 @@ N_HID = 7  # mixed-net Linear out features (!= flattened conv size, so a wrong
 def _make_mixed_net():
     """conv -> IF -> flatten -> Linear -> IF: a *mixed* batched/unbatched model.
 
-    Under ``brainstate.nn.Map`` the graph is compiled across mapped lanes, so the conv stays
+    Under ``vmap_states='new'`` the graph is compiled per-lane, so the conv stays
     a *batched* primitive (its parent layer forces a leading batch axis) while the
     flattened ``Linear`` input is 1-D and dispatches to the *unbatched* ``etp_mv``.
     The solve's trailing batch-sum must collapse only the conv gradient's batch
@@ -216,7 +232,7 @@ def _make_conv_ln_net(use_fast_variance):
     upstream conv gets no eligibility gradient through the norm — a documented
     approximation, matching the eager path). That exactness is numerical: with
     ``use_fast_variance=True`` the ``E[x^2]-E[x]^2`` variance leaves a float32
-    residual instead of zero, and under mapped execution the recurrent
+    residual instead of zero, and under ``Vmap(vmap_states='new')`` the recurrent
     trace and the large ``rsqrt(var+eps)`` factor amplify it into an overflow that
     diverges from the eager reference (the ``examples/004`` ``loss=ln(10)`` stall).
     """
@@ -256,8 +272,8 @@ def _assert_grads_match(ref, got):
 
 
 @pytest.mark.parametrize('neuron', ['IF', 'ALIF'], ids=['num_state1_IF', 'num_state2_ALIF'])
-def test_conv_map_grad_equals_sum_of_eager_single_sample(neuron):
-    """Mapped conv D-RTRL gradient equals the sum of eager sample gradients."""
+def test_conv_vmap_grad_equals_sum_of_eager_single_sample(neuron):
+    """vmap_new_states+Vmap conv D_RTRL grad == sum over samples of eager batch=1 grad."""
     rng = np.random.RandomState(42)
     data = jnp.asarray(rng.rand(N_STEP, B, H, W, C_IN).astype('float32'))
     targets = jnp.asarray(rng.rand(B, H, W, C_OUT).astype('float32'))
@@ -268,11 +284,11 @@ def test_conv_map_grad_equals_sum_of_eager_single_sample(neuron):
         g = _eager_grad_one(data[:, b], targets[b], make_net)
         ref = g if ref is None else jax.tree.map(lambda a, c: a + c, ref, g)
 
-    got = _map_grad(data, targets, make_net)
+    got = _vmap_grad(data, targets, make_net)
     _assert_grads_match(ref, got)
 
 
-def test_mixed_conv_dense_map_grad_equals_sum_of_eager_single_sample():
+def test_mixed_conv_dense_vmap_grad_equals_sum_of_eager_single_sample():
     """Mixed batched(conv)+unbatched(dense-mv) model: vmap grad == sum of eager batch=1.
 
     Regression for the ``examples/004`` layer4 failure — the unbatched ``etp_mv``
@@ -288,11 +304,11 @@ def test_mixed_conv_dense_map_grad_equals_sum_of_eager_single_sample():
         g = _eager_grad_one(data[:, b], targets[b], _make_mixed_net)
         ref = g if ref is None else jax.tree.map(lambda a, c: a + c, ref, g)
 
-    got = _map_grad(data, targets, _make_mixed_net)
+    got = _vmap_grad(data, targets, _make_mixed_net)
     _assert_grads_match(ref, got)
 
 
-def test_conv_layernorm_map_grad_matches_eager_and_stays_finite():
+def test_conv_layernorm_vmap_grad_matches_eager_and_stays_finite():
     """conv -> LayerNorm -> IF: vmap grad == sum of eager batch=1, and stays finite.
 
     Regression for the ``examples/004`` ``loss=ln(10)`` stall. A mean-subtracting
@@ -300,7 +316,7 @@ def test_conv_layernorm_map_grad_matches_eager_and_stays_finite():
     its row sums, which for shift-invariance are exactly zero, so the conv weight
     gets no eligibility gradient through the norm (both paths agree on ~0). With a
     numerically stable variance (``use_fast_variance=False``) that exact zero holds
-    under mapped execution; the transform-invariance oracle then makes
+    under ``Vmap(vmap_states='new')``; the transform-invariance oracle then makes
     vmap == sum-of-eager, and neither explodes.
     """
     rng = np.random.RandomState(42)
@@ -313,7 +329,7 @@ def test_conv_layernorm_map_grad_matches_eager_and_stays_finite():
         g = _eager_grad_one(data[:, b], targets[b], make_net)
         ref = g if ref is None else jax.tree.map(lambda a, c: a + c, ref, g)
 
-    got = _map_grad(data, targets, make_net)
+    got = _vmap_grad(data, targets, make_net)
     # No overflow/NaN in either path (the bug produced ~1e14 -> NaN under vmap).
     for leaf in jax.tree.leaves(got):
         assert np.all(np.isfinite(np.asarray(leaf))), 'vmap grad is non-finite'

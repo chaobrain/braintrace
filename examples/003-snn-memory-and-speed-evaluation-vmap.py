@@ -458,34 +458,32 @@ class Trainer(object):
         return losses.mean(), acc
 
     def _compile_etrace_function(self, input_info):
-        # Kept explicit because this benchmark compiles from an unbatched
-        # ShapeDtypeStruct rather than a concrete batched example input.
-        mapped_target = brainstate.nn.Map(
-            self.target, init_map_size=self.args.batch_size
-        )
-        mapped_target.init_all_states()
-
+        # kept manual: this *is* compile(..., vmap=True)'s scheme --
+        # vmap_new_states(state_tag='new') + init_all_states + compile_graph on
+        # the unbatched sample + a Vmap wrapper -- but compile cannot take this
+        # example input. It strips the batch axis with `a[0]`, and `input_info`
+        # is an unbatched jax.ShapeDtypeStruct, which is not subscriptable.
+        # (A benchmark builds the graph from a shape, never from real data.)
         if self.args.method == 'expsm_diag':
-            model = braintrace.ES_D_RTRL(
-                mapped_target, self.args.etrace_decay,
-            )
+            model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay, )
         elif self.args.method == 'diag':
-            model = braintrace.D_RTRL(mapped_target)
+            model = braintrace.D_RTRL(self.target, )
         else:
             raise ValueError(f'Unknown online learning methods: {self.args.method}.')
 
-        batched_input_info = jax.ShapeDtypeStruct(
-            (self.args.batch_size, *input_info.shape), input_info.dtype
-        )
-        model.compile_graph(batched_input_info)
-        run_model = model
+        # initialize the states
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=self.args.batch_size)
+        def init():
+            brainstate.nn.init_all_states(self.target)
+            model.compile_graph(input_info)
+
+        init()
+        run_model = brainstate.nn.Vmap(model, vmap_states='new')
 
         @brainstate.transform.jit
+        @brainstate.transform.vmap(in_states=run_model.states('new'))
         def reset_state():
-            brainstate.nn.reset_all_states(
-                self.target, batch_size=self.args.batch_size
-            )
-            run_model.reset_state(batch_size=self.args.batch_size)
+            brainstate.nn.reset_all_states(run_model)
 
         @brainstate.transform.jit
         def _etrace_single_run(i, batch_inp):

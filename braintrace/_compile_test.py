@@ -259,10 +259,7 @@ def test_compile_vmap_builds_forwards_and_grads():
     B = 4
     xb = jnp.ones((B, 3), dtype='float32')
     learner = braintrace.compile(model, 'D_RTRL', xb, batch_size=B, vmap=True)
-    assert isinstance(learner, braintrace.D_RTRL)
-    assert isinstance(learner.graph_executor.model, brainstate.nn.Map)
-    assert learner.graph_executor.model.init_map_size == B
-    assert learner.graph_executor.model._init
+    assert isinstance(learner, brainstate.nn.Vmap)
 
     out = learner(xb)
     assert out.shape[0] == B
@@ -282,20 +279,20 @@ def test_compile_vmap_requires_batch_size():
     assert 'batch_size' in str(exc.value)
 
 
-def test_compile_vmap_returns_algorithm_exposing_report():
+def test_compile_vmap_returns_wrapper_exposing_report():
     model = _VmapRNN()
     B = 4
     xb = jnp.ones((B, 3), dtype='float32')
     learner = braintrace.compile(model, 'D_RTRL', xb, batch_size=B, vmap=True)
-    assert isinstance(learner, braintrace.D_RTRL)
-    assert learner.report is not None
-    assert learner.is_compiled
+    assert isinstance(learner.module, braintrace.D_RTRL)
+    assert learner.module.report is not None
+    assert learner.module.is_compiled
 
 
 # --- both-modes coverage across RNN architectures + algorithms ---------------
 # Each architecture/algorithm must build, forward, and back-prop a finite,
 # non-zero gradient under BOTH compile(vmap=False) (internal batch primitive)
-# and compile(vmap=True) (Map-owned per-sample states). A multi-step scan exercises
+# and compile(vmap=True) (per-sample vmap lanes). A multi-step scan exercises
 # the eligibility trace (single-step would never engage it).
 
 _NI, _NR = 3, 4
@@ -405,14 +402,24 @@ _BOTH_MODE_CASES = [
 @pytest.mark.parametrize('name,builder,algo,kw,feat', _BOTH_MODE_CASES,
                          ids=[c[0] for c in _BOTH_MODE_CASES])
 @pytest.mark.parametrize('vmap', [False, True], ids=['no_vmap', 'vmap'])
+# `conv1d_minigru_d_rtrl` (etp_conv) has no registered batched counterpart,
+# so under `vmap=True` compilation it hits the identity-preserving batching
+# rule's decomposition fallback and warns (see `braintrace/_op/_primitive.py`).
+# This test asserts gradient finiteness/non-zero-ness, not the
+# vmap-decomposition warning (covered by
+# `braintrace/_op/_primitive_test.py`), so the expected warning is filtered
+# narrowly by message rather than left uncaptured. `lora_d_rtrl` (etp_lora_mv)
+# now has a registered batched counterpart (`etp_lora_mm`) and is promoted
+# instead of decomposed, so no filter is needed for it.
+@pytest.mark.filterwarnings(
+    "ignore:ETP primitive 'etp_conv' was decomposed:UserWarning")
 def test_compile_both_modes_finite_nonzero_grad(name, builder, algo, kw, feat, vmap):
     B, T = 4, 5
     xs = brainstate.random.randn(T, B, *feat)
     model = builder()
     learner = braintrace.compile(model, algo, xs[0], batch_size=B, vmap=vmap, **kw)
     if vmap:
-        assert isinstance(learner, braintrace.ETraceAlgorithm)
-        assert isinstance(learner.graph_executor.model, brainstate.nn.Map)
+        assert isinstance(learner, brainstate.nn.Vmap)
     weights = model.states(brainstate.ParamState)
 
     def total_loss(xs):

@@ -1,10 +1,16 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-# ``online_train_epoch`` uses braintrace.compile(..., vmap=True).
-"""05 - Batching via ``braintrace.compile(..., vmap=True)``.
+"""05 · Batching via ``braintrace.compile(..., vmap=True)``.
 
-The model keeps single-sample update logic. ``braintrace.compile`` wraps it in
-``brainstate.nn.Map``, initializes per-sample states, and compiles pp_prop from
-one batched time step.
+The network and the pp_prop algorithm are defined unbatched; ``compile`` with
+``vmap=True`` replicates them across the batch dimension (it initializes the
+states inside a ``vmap_new_states`` scope, builds the eligibility-trace graph
+on one unbatched sample, and returns an ``ETraceVmap``). pp_prop's per-rule
+init is aware of batching and allocates batched eligibility traces
+automatically. This is the default batching path used by examples 01-04, and
+it lives in ``_shared.online_train_epoch``, which this file calls.
+
+For the same three steps written out by hand, see
+``examples/drtrl/02-batching-vmap.py``.
 """
 
 import pathlib

@@ -389,14 +389,16 @@ def bptt_train_epoch_fixed_target(
     """BPTT baseline with per-step softmax-cross-entropy over a fixed label."""
     weights = model.states(brainstate.ParamState)
 
-    # kept manual: BPTT baseline, with mapped per-sample states
-    mapped_model = brainstate.nn.Map(
-        model, init_map_size=inputs.shape[1]
-    )
-    mapped_model.init_all_states()
+    # kept manual: BPTT re-init — no algorithm construction, no compile_graph
+    @brainstate.transform.vmap_new_states(state_tag="new", axis_size=inputs.shape[1])
+    def init():
+        brainstate.nn.init_all_states(model)
+
+    init()
+    vmap_model = brainstate.nn.Vmap(model, vmap_states="new")
 
     def run_step(inp):
-        out = mapped_model(inp)
+        out = vmap_model(inp)
         loss = braintools.metric.softmax_cross_entropy_with_integer_labels(
             out, target_labels
         ).mean()

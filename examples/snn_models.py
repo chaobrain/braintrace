@@ -143,8 +143,12 @@ class GifNet(brainstate.nn.Module):
         xs = np.transpose(input_spikes, (1, 0, 2))  # [n_steps, n_samples, n_in]
 
         # 运行仿真模型
-        model = brainstate.nn.Map(self, init_map_size=xs.shape[1])
-        model.init_all_states()
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=xs.shape[1])
+        def init():
+            brainstate.nn.init_all_states(self)
+
+        init()
+        model = brainstate.nn.Vmap(self, vmap_states='new')
 
         outs, sps, vs = brainstate.transform.for_loop(
             lambda x: (model(x), self.r.get_spike(), self.r.V.value),
@@ -404,7 +408,7 @@ class OnlineTrainer(Trainer):
         model = braintrace.compile(self.target, braintrace.pp_prop, inputs[0],
                                    batch_size=inputs.shape[1], vmap=True,
                                    decay_or_rank=self.decay_or_rank)
-        model.show_graph()
+        model.module.show_graph()
 
         def _etrace_grad(inp):
             # call the model
@@ -444,11 +448,14 @@ class BPTTTrainer(Trainer):
     def batch_train(self, inputs, targets):
         weights = self.target.states().subset(brainstate.ParamState)
 
-        # kept manual: BPTT baseline, with mapped per-sample states
-        model = brainstate.nn.Map(
-            self.target, init_map_size=inputs.shape[1]
-        )
-        model.init_all_states()
+        # kept manual: BPTT baseline — no online algorithm to migrate
+        # initialize the states
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=inputs.shape[1])
+        def init():
+            brainstate.nn.init_all_states(self.target)
+
+        init()
+        model = brainstate.nn.Vmap(self.target, vmap_states='new')
 
         # the model for a single step
         def _run_step_train(inp):
@@ -514,8 +521,12 @@ class LIF_Delta_Net(brainstate.nn.Module):
 
     @brainstate.transform.jit(static_argnums=0)
     def eval(self, xs):
-        model = brainstate.nn.Map(self, init_map_size=xs.shape[1])
-        model.init_all_states()
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=xs.shape[1])
+        def init():
+            brainstate.nn.init_all_states(self)
+
+        init()
+        model = brainstate.nn.Vmap(self, vmap_states='new')
 
         outs, sps, vs = brainstate.transform.for_loop(
             lambda x: (model(x), self.neu.get_spike(), self.neu.V.value), xs

@@ -1,7 +1,7 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
 """Verify the example SNN cells compile and run under BOTH
 ``braintrace.compile(vmap=False)`` (batched, internal batch primitive) and
-``braintrace.compile(vmap=True)`` (``brainstate.nn.Map`` state ownership).
+``braintrace.compile(vmap=True)`` (per-sample vmap lanes).
 
 The custom ``GIF`` neuron in ``snn_models.py`` originally defined
 ``init_state(self)`` without ``batch_size``, so the non-vmap path
@@ -88,19 +88,3 @@ def test_gif_neuron_init_state_accepts_batch_size():
         brainstate.nn.init_all_states(neu, batch_size=B)
         assert neu.V.value.shape == (B, N_REC)
         assert neu.I2.value.shape == (B, N_REC)
-
-
-def test_mapped_compile_exposes_show_graph_directly():
-    """Mapped compile results expose reports without a wrapper ``.module``."""
-    xs = jnp.zeros((B, N_IN))
-    learner = braintrace.compile(
-        braintrace.nn.GRUCell(N_IN, N_REC), braintrace.D_RTRL, xs,
-        batch_size=B, vmap=True,
-    )
-
-    report = learner.show_graph(verbose=False, return_msg=True)
-
-    assert isinstance(report, str)
-    assert "model.module.show_graph()" not in (
-        EXAMPLES_DIR / "snn_models.py"
-    ).read_text(encoding="utf-8")

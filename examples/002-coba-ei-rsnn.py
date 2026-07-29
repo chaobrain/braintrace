@@ -297,8 +297,12 @@ class _SNNEINet(brainstate.nn.Module):
         n_seq = inputs.shape[0]
         batch_size = inputs.shape[1]
 
-        model = brainstate.nn.Map(self, init_map_size=batch_size)
-        model.init_all_states()
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)
+        def init():
+            brainstate.nn.init_all_states(self)
+
+        init()
+        model = brainstate.nn.Vmap(self, vmap_states='new')
 
         def step(inp):
             out = model(inp)

@@ -64,27 +64,6 @@ class TestControlFlowPolicyThreading:
 
 
 class Test_extract_model_info:
-    def test_map_hidden_state_aliases_are_deduplicated(self):
-        batch_size = 3
-        rnn = braintrace.nn.GRUCell(2, 4)
-        mapped = brainstate.nn.Map(rnn, init_map_size=batch_size)
-        mapped.init_all_states()
-
-        expected_states = brainstate.graph.states(rnn)
-        expected_params = rnn.states(brainstate.ParamState)
-
-        minfo = braintrace.extract_module_info(
-            mapped, brainstate.random.rand(batch_size, 2)
-        )
-        states = minfo.retrieved_model_states
-
-        assert set(states) == set(expected_states)
-        assert set(minfo.weight_path_to_invars) == set(expected_params)
-        assert all(states[path] is state for path, state in expected_states.items())
-        assert len({id(state) for state in states.values()}) == len(states)
-        assert all('module' not in path for path in states)
-        assert all('dict_vmap_states' not in path for path in states)
-
     @pytest.mark.parametrize(
         "cls",
         [

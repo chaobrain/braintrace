@@ -17,12 +17,14 @@ from __future__ import annotations
 
 from typing import Any, Type, Union
 
+import jax
 import brainstate
 
 from ._misc import CompilationError
 from ._algorithm import (
     ETraceAlgorithm,
     ETraceConfig,
+    ETraceVmap,
     IODimVjpAlgorithm,
     ParamDimVjpAlgorithm,
     RandomProjectionVjpAlgorithm,
@@ -126,7 +128,7 @@ def compile(
     verbose: int = 0,
     vmap: bool = False,
     **options: Any,
-) -> ETraceAlgorithm:
+) -> ETraceAlgorithm | brainstate.nn.Vmap:
     """Define an eligibility-trace online-learning model in one call.
 
     This is the unified entry point. It initializes the model's states, builds
@@ -172,22 +174,29 @@ def compile(
     vmap : bool, optional
         When ``False`` (default) states are initialized with
         ``init_all_states(model, batch_size=batch_size)``. When ``True``, states
-        initialized by wrapping the model in
-        ``brainstate.nn.Map(model, init_map_size=batch_size)`` and calling the
-        mapped model's ``init_all_states()`` method. In vmap mode,
-        ``example_inputs`` carry the batch axis (axis 0), ``batch_size`` is
-        **required** and sets the map size, and the returned learner exposes
-        ``report``, ``etrace_grad``, and ``etrace_evolve`` directly.
+        are created under
+        ``brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)``
+        and the learner is wrapped in :class:`ETraceVmap`. In vmap mode:
+        ``example_inputs`` carry the batch axis (axis 0); ``batch_size`` is
+        **required** and used as the vmap ``axis_size``; the return value is a
+        :class:`ETraceVmap` whose ``.module`` is the unbatched learner (use
+        ``result.module.report`` for its report). Drive sequences through the
+        returned wrapper, never through ``result.module``. Requires a model
+        whose hidden states are all (re)created in ``init_all_states``; models
+        holding construction-time states may raise
+        ``brainstate.transform.BatchAxisError``.
     **options : Any
         Forwarded to the algorithm constructor. See *Algorithm options* below.
 
     Returns
     -------
-    ETraceAlgorithm
-        The compiled learner, carrying a :attr:`~ETraceAlgorithm.report`. Call
-        ``.update(*inputs)`` for one step, or use ``etrace_grad`` and
-        ``etrace_evolve`` for sequences. This return contract is identical in
-        mapped and directly batched modes.
+    ETraceAlgorithm or ETraceVmap
+        When ``vmap=False``, the compiled learner carries a
+        :attr:`~ETraceAlgorithm.report`; call ``.update(*inputs)`` to train.
+        When ``vmap=True``, returns an :class:`ETraceVmap` wrapper (also a
+        ``brainstate.nn.Vmap``); access the underlying learner's report as
+        ``.module.report``. Call ``etrace_grad`` and ``etrace_evolve`` on the
+        wrapper itself, not on ``.module``.
 
     Raises
     ------
@@ -306,22 +315,34 @@ def compile(
         raise ValueError(f'verbose must be 0, 1, or 2, got {verbose!r}.')
     if vmap and batch_size is None:
         raise ValueError(
-            'compile(..., vmap=True) requires batch_size, used as the '
-            'brainstate.nn.Map size. Pass batch_size=<n_batch> matching axis 0 '
-            'of example_inputs.'
+            'compile(..., vmap=True) requires batch_size, used as the per-sample '
+            'vmap axis size. Pass batch_size=<n_batch> matching the batch axis '
+            '(axis 0) of example_inputs.'
         )
 
     if vmap:
-        # Per-sample map scheme: example_inputs carry the batch axis (axis 0).
-        model = brainstate.nn.Map(model, init_map_size=batch_size)
+        # Per-sample vmap scheme: example_inputs carry the batch axis (axis 0);
+        # the eligibility-trace graph is built per-lane on an unbatched sample,
+        # while hidden + trace states are created with the new per-sample axis.
+        learner = cls(model, **options)
+        unbatched = jax.tree.map(lambda a: a[0], example_inputs)
+
+        @brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)
+        def _init() -> None:
+            brainstate.nn.init_all_states(model)
+            learner.compile_graph(*unbatched)
+
         if seed is not None:
             with brainstate.random.seed_context(seed):
-                model.init_all_states()
+                _init()
         else:
-            model.init_all_states()
-        learner = cls(model, **options)
-        learner.compile_graph(*example_inputs)
-        result = learner
+            _init()
+        # ETraceVmap, not brainstate.nn.Vmap: the wrapper must carry
+        # etrace_grad / etrace_evolve so the call site is identical in batched
+        # and unbatched mode. Reaching into `.module` instead would drive the
+        # *unbatched* learner and silently give per-lane-wrong results. It is
+        # still a brainstate.nn.Vmap, so existing users are unaffected.
+        result: ETraceAlgorithm | brainstate.nn.Vmap = ETraceVmap(learner, vmap_states='new')
     else:
         # --- state initialization (always) --- #
         if seed is not None:

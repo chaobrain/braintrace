@@ -477,10 +477,15 @@ class Trainer(object):
 
     def _compile_etrace_function(self, input_info):
         # kept manual: braintrace.compile has no path for this state scheme.
-        # It owns explicitly tagged per-sample states and resets those states
-        # through ``transform.vmap``. ``compile(vmap=True)`` instead wraps the
-        # target in ``brainstate.nn.Map``, which would change this benchmark's
-        # state ownership and reset contract.
+        # It offers two: init_all_states(batch_size=B) (vmap=False), or
+        # vmap_new_states(state_tag='new') + compile_graph on an *unbatched*
+        # sample + an ETraceVmap wrapper (vmap=True). This benchmark uses a
+        # third -- vmap_init_all_states(state_tag='new') for the per-sample
+        # states, compile_graph on the *batched* example, no wrapper, and an
+        # explicit brainstate.transform.vmap(in_states=...) only for the reset.
+        # compile's vmap branch would also reject `input_info`: it strips the
+        # batch axis with `a[0]`, and a jax.ShapeDtypeStruct is not
+        # subscriptable.
         if self.args.method == 'expsm_diag':
             model = braintrace.ES_D_RTRL(self.target, self.args.etrace_decay)
         elif self.args.method == 'diag':

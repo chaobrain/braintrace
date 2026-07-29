@@ -42,6 +42,7 @@ Properties under test
 
 
 import importlib.util
+import warnings
 
 import pytest
 
@@ -72,8 +73,10 @@ _HYPOTHESIS_SETTINGS = settings(
 )
 
 
-def _compile(model, *args):
-    return compile_etrace_graph(model, *args, include_hidden_perturb=False)
+def _silent_compile(model, *args):
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', UserWarning)
+        return compile_etrace_graph(model, *args, include_hidden_perturb=False)
 
 
 def _summary(graph):
@@ -119,8 +122,8 @@ class TestIdempotence:
         m2 = UnbatchedMvRNN(n_in, n_out)
         brainstate.nn.init_all_states(m2)
 
-        s1 = _summary(_compile(m1, inp))
-        s2 = _summary(_compile(m2, inp))
+        s1 = _summary(_silent_compile(m1, inp))
+        s2 = _summary(_silent_compile(m2, inp))
         assert s1 == s2
 
     @given(
@@ -135,8 +138,8 @@ class TestIdempotence:
         m2 = PartialPathRNN(n, n)
         brainstate.nn.init_all_states(m2)
 
-        s1 = _summary(_compile(m1, inp))
-        s2 = _summary(_compile(m2, inp))
+        s1 = _summary(_silent_compile(m1, inp))
+        s2 = _summary(_silent_compile(m2, inp))
         assert s1 == s2
 
 
@@ -160,7 +163,7 @@ class TestStackedScoping:
         brainstate.nn.init_all_states(model)
         inp = jnp.zeros(n_in)
 
-        graph = _compile(model, inp)
+        graph = _silent_compile(model, inp)
         rels = graph.hidden_param_op_relations
 
         assert len(rels) == depth
@@ -187,7 +190,7 @@ class TestTiedWeightMultiplicity:
         brainstate.nn.init_all_states(model)
         inp = jnp.zeros(n)
 
-        graph = _compile(model, inp)
+        graph = _silent_compile(model, inp)
         rels = graph.hidden_param_op_relations
 
         assert len(rels) == 2
@@ -255,7 +258,7 @@ class TestChainExclusion:
         brainstate.nn.init_all_states(model)
         inp = jnp.zeros(n)
 
-        graph = _compile(model, inp)
+        graph = _silent_compile(model, inp)
         rels = graph.hidden_param_op_relations
         included_paths = {r.path for r in rels}
         last = (f'w{chain_len - 1}',)
@@ -291,7 +294,7 @@ class TestPartialPathStability:
         brainstate.nn.init_all_states(model)
         inp = jnp.zeros(n_in)
 
-        graph = _compile(model, inp)
+        graph = _silent_compile(model, inp)
         by_path = {r.path: r for r in graph.hidden_param_op_relations}
 
         assert by_path[('w1',)].path_classification == {

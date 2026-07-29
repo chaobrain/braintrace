@@ -49,6 +49,8 @@ oracle. That anchors the primary assertion above to ground truth.
   WARNING-level ``CONTROL_FLOW_OPAQUE_FWD`` diagnostic for each detach.
 """
 
+import warnings
+
 import brainstate
 import jax
 import jax.numpy as jnp
@@ -237,11 +239,13 @@ def test_upstream_layer_gradient_is_zero_behind_while_DOCUMENTED_LIMITATION():
     inputs = _inputs(6, 3)
 
     def grads(while_layer):
-        return online_param_gradients_singlestep_naive(
-            lambda: _StackedWhileNet(while_layer=while_layer),
-            inputs,
-            algo_factory=braintrace.D_RTRL,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            return online_param_gradients_singlestep_naive(
+                lambda: _StackedWhileNet(while_layer=while_layer),
+                inputs,
+                algo_factory=braintrace.D_RTRL,
+            )
 
     g_while = grads(True)
     g_twin = grads(False)
