@@ -233,6 +233,9 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
     @property
     def _seq_param_states(self) -> brainstate.util.FlattedDict:
         """Sequence-driver hook: the default set of weights to differentiate."""
+        model = self.graph_executor.model
+        if isinstance(model, brainstate.nn.Map):
+            return model.module.states(brainstate.ParamState)
         return self.param_states
 
     @property

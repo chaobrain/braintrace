@@ -168,9 +168,10 @@ class SequenceDriverMixin:
     bypass the window-mode validation entirely.
     """
 
-    #: Set by :class:`ETraceVmap`. Window mode is refused when true, because
-    #: ``compile(vmap=True)`` maps ``in_axes=0`` and a ``(k, B, ...)`` window
-    #: slice would map *time* as the batch axis.
+    #: Set by :class:`ETraceVmap`. Window mode is refused for that compatibility
+    #: wrapper because its ``in_axes=0`` would map a window's time axis.
+    #: ``compile(vmap=True)`` now uses ``brainstate.nn.Map``, keeps the
+    #: batch axis inside the graph, and therefore leaves this false.
     _seq_is_vmapped: bool = False
 
     @property
@@ -196,12 +197,12 @@ class SequenceDriverMixin:
         if self._seq_is_vmapped:
             raise ValueError(
                 f'chunk_size={chunk_size} (window mode) is not supported under '
-                f'a vmapped learner. compile(vmap=True) maps in_axes=0, so a '
-                f'(chunk_size, batch, ...) window slice would map the *time* '
-                f'axis as the batch axis -- which is silently wrong whenever '
-                f'chunk_size equals the batch size. Use the batched (non-vmap) '
-                f'mode, which carries the batch axis inside the compiled graph, '
-                f'or drive with chunk_size=None.'
+                f'an ETraceVmap learner. Its in_axes=0 mapping would treat the '
+                f'*time* axis of a (chunk_size, batch, ...) window slice as the '
+                f'batch axis -- which is silently wrong whenever '
+                f'chunk_size equals the batch size. Use compile(vmap=True), '
+                f'which carries the batch axis inside a brainstate.nn.Map, or '
+                f'drive this compatibility wrapper with chunk_size=None.'
             )
 
         if for_grad and self._seq_vjp_method != 'multi-step':
@@ -266,7 +267,7 @@ class SequenceDriverMixin:
             ``step_fn`` must return a ``(k,)`` vector of per-step losses and
             wrap its model inputs in :class:`MultiStepData`. Window mode
             requires ``vjp_method='multi-step'`` and ``T % k == 0``, and is not
-            available under a vmapped learner.
+            available under an :class:`ETraceVmap` compatibility wrapper.
         weights : dict, optional
             The :class:`brainstate.ParamState` to differentiate. Defaults to
             the learner's own ``param_states``.
@@ -302,8 +303,9 @@ class SequenceDriverMixin:
             ``T == 0`` -- there is nothing to slice. If *chunk_size* is below
             ``1``; if ``k >= 2`` but the learner's ``vjp_method`` is not
             ``'multi-step'`` (the executor would raise three frames down), the
-            learner is vmapped (``in_axes=0`` would map time as the batch
-            axis), or ``T % k != 0``. If *mask* is not shape ``(T,)``. If
+            learner is an :class:`ETraceVmap` (``in_axes=0`` would map time as
+            the batch axis), or ``T % k != 0``. If *mask* is not shape
+            ``(T,)``. If
             *reduction* or *loss_output* is not one of its legal values. If
             ``step_fn`` returns a non-scalar in plain mode, or anything but
             shape ``(k,)`` in window mode. If the learner has not been
@@ -498,7 +500,8 @@ class SequenceDriverMixin:
             As in :meth:`etrace_grad`, **except** that a window is *not*
             refused for being on a single-step learner -- no loss VJP is taken
             here, so the restriction does not apply. Windows are still refused
-            under a vmapped learner, and ``T % chunk_size == 0`` still holds.
+            under an :class:`ETraceVmap` compatibility wrapper, and
+            ``T % chunk_size == 0`` still holds.
 
         Examples
         --------
@@ -537,11 +540,12 @@ class SequenceDriverMixin:
 
 
 class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
-    """Provide sequence drivers on a ``brainstate.nn.Vmap`` wrapper.
+    """Provide sequence drivers for explicitly constructed legacy Vmap models.
 
-    Returned by ``braintrace.compile(..., vmap=True)`` so the call site is
-    identical in batched and unbatched mode. Because it *is* a
-    ``brainstate.nn.Vmap``, calling it, its attributes and every
+    ``braintrace.compile(..., vmap=True)`` uses ``brainstate.nn.Map`` and
+    returns the algorithm directly. This public compatibility type remains for
+    callers that explicitly construct a ``brainstate.nn.Vmap`` learner.
+    Because it *is* a ``brainstate.nn.Vmap``, calling it and every
     ``isinstance(x, brainstate.nn.Vmap)`` check keep working; only the added
     methods are new.
 
@@ -555,7 +559,7 @@ class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
     would drive the **unbatched** learner and silently produce per-lane-wrong
     results.
 
-    Window mode is refused here -- see
+    Window mode is refused here; see
     :meth:`SequenceDriverMixin.etrace_grad`.
     """
     __module__ = 'braintrace'

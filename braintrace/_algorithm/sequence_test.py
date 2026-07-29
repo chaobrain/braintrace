@@ -34,6 +34,7 @@ Two claims get the sharpest treatment, because getting them wrong is silent:
 import inspect
 
 import brainstate
+import braintools
 import brainunit as u
 import jax
 import jax.numpy as jnp
@@ -609,20 +610,18 @@ class TestMasking:
 
 
 # ---------------------------------------------------------------------------
-# 18--20. vmap
+# 18--20. Map
 # ---------------------------------------------------------------------------
 
 class _VmapNet(brainstate.nn.Module):
     """A model whose hidden state is created in ``init_state``, not ``__init__``.
 
-    ``om.tanh_rnn`` allocates its ``HiddenState`` in ``__init__``, so
-    ``vmap_new_states`` has nothing to batch and ``compile(vmap=True)`` raises
-    ``BatchAxisError`` on the first call -- the whole vmap section was
-    previously written against a fixture that could not run. ``ValinaRNNCell``
-    defers its state to ``init_state``, which is the property that matters.
+    ``ValinaRNNCell`` defers its state to ``init_state``, allowing
+    ``brainstate.nn.Map.init_all_states`` to create one independent state per
+    mapped lane.
 
     ``wout`` is a plain (non-ETP) parameter, so it is exactly zero under
-    ``vjp_method='single-step'`` (F-33); the vmap fixture therefore runs
+    ``vjp_method='single-step'`` (F-33); the Map fixture therefore runs
     ``'multi-step'``, which keeps every key live and the comparisons honest.
     """
 
@@ -637,7 +636,7 @@ class _VmapNet(brainstate.nn.Module):
         return self.cell(x) @ self.wout.value
 
 
-def _vmap_learner(batch, vjp_method='multi-step', **opts):
+def _map_learner(batch, vjp_method='multi-step', **opts):
     return braintrace.compile(_VmapNet(), 'D_RTRL', jnp.zeros((batch, N_IN)),
                               batch_size=batch, vmap=True,
                               vjp_method=vjp_method, **opts)
@@ -662,20 +661,46 @@ def _lane_data(batch, *, seed=7):
     return xs, ys
 
 
-class TestVmap:
-    def test_the_vmapped_learner_carries_the_driver_methods(self):
+class TestMap:
+    def test_the_mapped_learner_carries_the_driver_methods(self):
         """Spec test 18.
 
-        ``compile(vmap=True)`` must return something that *has* ``etrace_grad``;
-        before this change it returned a bare ``brainstate.nn.Vmap``, which does
-        not. Reaching into ``.module`` instead would drive the unbatched learner
-        and silently give per-lane-wrong results.
+        ``compile(vmap=True)`` returns the algorithm itself with a mapped model,
+        so sequence drivers and compilation reports remain directly available.
         """
-        learner = _vmap_learner(3)
+        learner = _map_learner(3)
+        assert isinstance(learner, braintrace.ETraceAlgorithm)
+        assert isinstance(learner.graph_executor.model, brainstate.nn.Map)
         assert hasattr(learner, 'etrace_grad')
         assert hasattr(learner, 'etrace_evolve')
 
-    def test_the_vmapped_gradient_is_the_sum_over_independent_lanes(self):
+    def test_default_gradients_keep_the_original_model_parameter_paths(self):
+        """Map internals must not leak into the public optimizer contract."""
+        batch = 3
+        xs, ys = _lane_data(batch)
+        model = _VmapNet()
+        weights = model.states(brainstate.ParamState)
+        optimizer = braintools.optim.Adam(lr=1e-3)
+        optimizer.register_trainable_weights(weights)
+        learner = braintrace.compile(
+            model,
+            'D_RTRL',
+            jnp.zeros((batch, N_IN)),
+            batch_size=batch,
+            vmap=True,
+            vjp_method='multi-step',
+        )
+
+        grads = learner.etrace_grad(
+            xs,
+            ys,
+            step_fn=lambda inp, tar: jnp.sum((learner(inp) - tar) ** 2),
+        )
+
+        assert set(grads) == set(weights)
+        optimizer.update(grads)
+
+    def test_the_mapped_gradient_is_the_sum_over_independent_lanes(self):
         """Spec test 18, the part that has content.
 
         The parameters are shared across lanes, so the batched gradient must be
@@ -688,7 +713,7 @@ class TestVmap:
         batch = 3
         xs, ys = _lane_data(batch)
 
-        batched = _vmap_learner(batch)
+        batched = _map_learner(batch)
 
         def step_fn(inp, tar):
             return jnp.sum((batched(inp) - tar) ** 2)
@@ -708,13 +733,16 @@ class TestVmap:
                 lambda a, b: a + b, lane_total, g_lane)
 
         flat = _arrays(g_batched)
-        assert set(flat) == set(_arrays(lane_total)), 'gradient keys diverged'
+        lane_flat = _arrays(lane_total)
+        assert set(flat) == set(lane_flat), 'gradient keys diverged'
         for k, v in flat.items():
             assert np.max(np.abs(v)) > 0.0, f'{k} is identically zero -- vacuous'
-        _assert_trees_equal(g_batched, lane_total, rtol=2e-6, atol=1e-6,
-                            msg='batched vs sum over independent lanes')
+            np.testing.assert_allclose(
+                v, lane_flat[k], rtol=2e-6, atol=1e-6,
+                err_msg=f'mapped vs sum over independent lanes: at {k}',
+            )
 
-    def test_permuting_the_lanes_changes_the_vmapped_gradient(self):
+    def test_permuting_the_lanes_changes_the_mapped_gradient(self):
         """Spec test 18, the negative control.
 
         Without this, the sum-over-lanes identity could hold for a driver that
@@ -725,11 +753,11 @@ class TestVmap:
         xs, ys = _lane_data(batch)
         perm = jnp.asarray([1, 0, 2])
 
-        straight = _vmap_learner(batch)
+        straight = _map_learner(batch)
         g_straight = straight.etrace_grad(
             xs, ys, step_fn=lambda i, t: jnp.sum((straight(i) - t) ** 2))
 
-        swapped = _vmap_learner(batch)
+        swapped = _map_learner(batch)
         g_swapped = swapped.etrace_grad(
             xs, ys[:, perm], step_fn=lambda i, t: jnp.sum((swapped(i) - t) ** 2))
 
@@ -737,50 +765,110 @@ class TestVmap:
         oracle.assert_gradients_differ(_arrays(g_straight), _arrays(g_swapped),
                                        min_rel=1e-3)
 
-    @pytest.mark.parametrize('batch', [3, K])  # B != k, and the silent B == k case
-    def test_window_mode_is_refused_under_vmap(self, batch):
+    @pytest.mark.parametrize('batch', [3, K])
+    def test_window_mode_matches_independent_lane_windows_under_map(self, batch):
         """Spec test 19.
 
-        ``compile(vmap=True)`` maps ``in_axes=0``, so a ``(k, B, ...)`` window
-        slice would map *time* as the batch axis. At ``B != k`` that is a loud
-        shape error; at ``B == k`` the shapes line up and it would train on
-        transposed data. The ``B == k`` parametrization is the one that matters.
-        """
-        learner = _vmap_learner(batch)
-        xs = jnp.zeros((T, batch, N_IN))
-
-        with pytest.raises(ValueError, match='vmap'):
-            learner.etrace_grad(xs, step_fn=lambda x: jnp.zeros(K),
-                                chunk_size=K)
-        with pytest.raises(ValueError, match='vmap'):
-            learner.etrace_evolve(xs, chunk_size=K)
-
-    @pytest.mark.parametrize('batch', [3, K])
-    def test_chunk_size_one_is_admitted_under_vmap(self, batch):
-        """Spec test 19, the other half -- the refusal must not overreach.
-
-        ``chunk_size=1`` is the plain path, so it carries none of the axis
-        collision that makes ``k >= 2`` unsafe. A guard written as
-        ``if chunk_size is not None`` would refuse it, which is why both
-        methods are exercised rather than just ``etrace_evolve``.
+        Map keeps the batch axis inside the compiled graph, so a
+        ``(K, batch, ...)`` window must equal the sum of independently driven
+        ``(K, 1, ...)`` lanes. Comparing with the plain path is not a valid
+        oracle: a multi-step update and K single-step updates are different
+        approximation regimes for this recurrent fixture.
         """
         xs, ys = _lane_data(batch)
-        learner = _vmap_learner(batch)
+        mapped = _map_learner(batch)
+
+        def mapped_window_loss(inp, tar):
+            out = mapped(braintrace.MultiStepData(inp))
+            return jnp.sum((out - tar) ** 2, axis=(1, 2))
+
+        g_mapped = mapped.etrace_grad(
+            xs,
+            ys,
+            step_fn=mapped_window_loss,
+            chunk_size=K,
+            reduction='sum',
+        )
+
+        lane_total = None
+        for lane_index in range(batch):
+            lane = _lane_learner()
+
+            def lane_window_loss(inp, tar, learner=lane):
+                out = learner(braintrace.MultiStepData(inp))
+                return jnp.sum((out - tar) ** 2, axis=(1, 2))
+
+            g_lane = lane.etrace_grad(
+                xs[:, lane_index:lane_index + 1],
+                ys[:, lane_index:lane_index + 1],
+                step_fn=lane_window_loss,
+                chunk_size=K,
+                reduction='sum',
+            )
+            lane_total = g_lane if lane_total is None else jax.tree.map(
+                lambda a, b: a + b, lane_total, g_lane)
+
+        mapped_arrays = _arrays(g_mapped)
+        lane_arrays = _arrays(lane_total)
+        assert set(mapped_arrays) == set(lane_arrays), 'gradient keys diverged'
+        for key, mapped_value in mapped_arrays.items():
+            np.testing.assert_allclose(
+                mapped_value,
+                lane_arrays[key],
+                rtol=2e-6,
+                atol=1e-6,
+                err_msg=f'Map window vs independent lane windows: at {key}',
+            )
+
+    @pytest.mark.parametrize('batch', [3, K])
+    def test_window_evolve_matches_independent_lanes_under_map(self, batch):
+        """Window evolution preserves separate time and mapped-lane axes."""
+        xs, _ = _lane_data(batch)
+        mapped = _map_learner(batch)
+        mapped_outputs = mapped.etrace_evolve(
+            xs, chunk_size=K, return_outputs=True)
+
+        lane_outputs = []
+        for lane_index in range(batch):
+            lane = _lane_learner()
+            lane_outputs.append(
+                lane.etrace_evolve(
+                    xs[:, lane_index:lane_index + 1],
+                    chunk_size=K,
+                    return_outputs=True,
+                )
+            )
+        expected = jnp.concatenate(lane_outputs, axis=2)
+        np.testing.assert_allclose(
+            np.asarray(mapped_outputs),
+            np.asarray(expected),
+            rtol=2e-6,
+            atol=1e-6,
+        )
+
+    @pytest.mark.parametrize('batch', [3, K])
+    def test_chunk_size_one_is_admitted_under_map(self, batch):
+        """Spec test 19, the plain path remains available under Map.
+
+        ``chunk_size=1`` is normalized to the ordinary step-by-step path.
+        """
+        xs, ys = _lane_data(batch)
+        learner = _map_learner(batch)
         learner.etrace_evolve(xs, chunk_size=1)
 
-        grad_learner = _vmap_learner(batch)
+        grad_learner = _map_learner(batch)
         grads = grad_learner.etrace_grad(
             xs, ys, chunk_size=1,
             step_fn=lambda i, t: jnp.sum((grad_learner(i) - t) ** 2))
         for k, v in _arrays(grads).items():
             assert np.all(np.isfinite(v)), f'{k} is not finite'
 
-    def test_the_vmap_return_value_is_still_a_brainstate_vmap(self):
-        """Spec test 20 -- existing ``vmap=True`` users must be unaffected."""
-        learner = _vmap_learner(3)
-        assert isinstance(learner, brainstate.nn.Vmap)
-        assert isinstance(learner, braintrace.ETraceVmap)
-        assert isinstance(learner.module, braintrace.ETraceAlgorithm)
+    def test_vmap_option_returns_an_algorithm_with_a_mapped_model(self):
+        """Spec test 20 -- the option selects Map-based state initialization."""
+        learner = _map_learner(3)
+        assert isinstance(learner, braintrace.ETraceAlgorithm)
+        assert not isinstance(learner, brainstate.nn.Vmap)
+        assert isinstance(learner.graph_executor.model, brainstate.nn.Map)
 
 
 # ---------------------------------------------------------------------------
