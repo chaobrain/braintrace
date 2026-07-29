@@ -679,9 +679,6 @@ class TestMap:
         batch = 3
         xs, ys = _lane_data(batch)
         model = _VmapNet()
-        weights = model.states(brainstate.ParamState)
-        optimizer = braintools.optim.Adam(lr=1e-3)
-        optimizer.register_trainable_weights(weights)
         learner = braintrace.compile(
             model,
             'D_RTRL',
@@ -690,6 +687,8 @@ class TestMap:
             vmap=True,
             vjp_method='multi-step',
         )
+        optimizer = braintools.optim.Adam(lr=1e-3)
+        optimizer.register_trainable_weights(learner.param_states)
 
         grads = learner.etrace_grad(
             xs,
@@ -697,7 +696,8 @@ class TestMap:
             step_fn=lambda inp, tar: jnp.sum((learner(inp) - tar) ** 2),
         )
 
-        assert set(grads) == set(weights)
+        assert set(learner.param_states) == set(model.states(brainstate.ParamState))
+        assert set(grads) == set(learner.param_states)
         optimizer.update(grads)
 
     def test_the_mapped_gradient_is_the_sum_over_independent_lanes(self):

@@ -194,10 +194,13 @@ def abstractify_model(
         "The model should be an instance of brainstate.nn.Module. "
         "Since it allows the explicit definition of the model structure."
     )
-    model_retrieved_states = brainstate.graph.states(model)
     if isinstance(model, brainstate.nn.Map):
-        for path, state in brainstate.graph.states(model.module).items():
-            model_retrieved_states[('module', *path)] = state
+        # ``Map`` exposes the same states through implementation paths such as
+        # ``module`` and ``dict_vmap_states``.  Compiler paths are public model
+        # paths, so retrieve them from the wrapped module directly.
+        model_retrieved_states = brainstate.graph.states(model.module)
+    else:
+        model_retrieved_states = brainstate.graph.states(model)
 
     # --- stateful model, for extracting states, weights, and variables --- #
     #

@@ -404,7 +404,7 @@ class OnlineTrainer(Trainer):
         model = braintrace.compile(self.target, braintrace.pp_prop, inputs[0],
                                    batch_size=inputs.shape[1], vmap=True,
                                    decay_or_rank=self.decay_or_rank)
-        model.module.show_graph()
+        model.show_graph()
 
         def _etrace_grad(inp):
             # call the model

@@ -295,7 +295,7 @@ def test_compile_vmap_returns_algorithm_exposing_report():
 # --- both-modes coverage across RNN architectures + algorithms ---------------
 # Each architecture/algorithm must build, forward, and back-prop a finite,
 # non-zero gradient under BOTH compile(vmap=False) (internal batch primitive)
-# and compile(vmap=True) (per-sample vmap lanes). A multi-step scan exercises
+# and compile(vmap=True) (Map-owned per-sample states). A multi-step scan exercises
 # the eligibility trace (single-step would never engage it).
 
 _NI, _NR = 3, 4
