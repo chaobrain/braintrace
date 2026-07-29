@@ -8,9 +8,10 @@ Online-Learning Algorithms
    :depth: 1
 
 ``braintrace`` provides online-learning algorithms based on eligibility-trace
-propagation. They all share one interface: wrap a model, compile its graph,
-then call the learner as a drop-in replacement for the model's forward pass —
-gradients are accumulated forward in time instead of by BPTT.
+propagation. They all share one interface: compile a model with
+:func:`compile`, then call the returned learner as a drop-in replacement for
+the model's forward pass — gradients are accumulated forward in time instead
+of by BPTT.
 
 Two correctness classes appear below. **Exact** algorithms compute the same
 total gradient as BPTT (just forward); they match a BPTT oracle element-wise.
@@ -40,6 +41,8 @@ online learning used to require is not something you write by hand:
 
 .. code-block:: python
 
+    learner = braintrace.compile(model, 'd_rtrl', inputs[0], batch_size=1)
+
     def step_loss(inp, tar):
         return braintools.metric.squared_error(learner(inp), tar).mean()
 
@@ -47,15 +50,21 @@ online learning used to require is not something you write by hand:
     learner.etrace_evolve(inputs[:n_warmup])
 
     grads, step_losses = learner.etrace_grad(
-        inputs[n_warmup:], targets, step_fn=step_loss, return_value=True)
+        inputs[n_warmup:], targets[n_warmup:],
+        step_fn=step_loss, return_value=True)
     opt.update(grads)
 
 :meth:`~SequenceDriverMixin.etrace_grad` owns the loop, the accumulation, the loss
-mask and the reduction; ``step_fn`` owns the model call. That split is what lets
-a multi-head model, a hidden-state regularizer, or a windowed objective work
-without the driver knowing anything about them. Both methods are
+mask and the reduction; ``step_fn`` owns the model call and must call
+``learner`` exactly once per invocation. That split is what lets a multi-head
+model, a hidden-state regularizer, or a windowed objective work without the
+driver knowing anything about them. Both methods are
 *continuations*: they leave the final state installed, so consecutive calls
 compose into one trajectory and no call implies a reset.
+
+With ``compile(..., vmap=True)``, call ``etrace_grad`` and ``etrace_evolve``
+on the returned wrapper. Never call ``learner.module.etrace_grad(...)`` or
+``learner.module.etrace_evolve(...)``: doing so bypasses the mapped lanes.
 
 A ``mask`` gates the **loss only** — the learner is still driven at every step,
 so a zero-weighted prefix is exactly equivalent to ``etrace_evolve`` over it.

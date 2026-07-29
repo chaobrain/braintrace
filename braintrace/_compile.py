@@ -133,7 +133,7 @@ def compile(
 
     This is the unified entry point. It initializes the model's states, builds
     the eligibility-trace graph, checks that the model is trainable online, and
-    (optionally) prints a compilation report — returning a ready-to-``update``
+    optionally prints a compilation report before returning a ready-to-``update``
     learner.
 
     Parameters
@@ -176,23 +176,27 @@ def compile(
         ``init_all_states(model, batch_size=batch_size)``. When ``True``, states
         are created under
         ``brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)``
-        and the learner is wrapped in
-        ``brainstate.nn.Vmap(vmap_states='new')``. In vmap mode:
+        and the learner is wrapped in :class:`ETraceVmap`. In vmap mode:
         ``example_inputs`` carry the batch axis (axis 0); ``batch_size`` is
         **required** and used as the vmap ``axis_size``; the return value is a
-        ``brainstate.nn.Vmap`` whose ``.module`` is the learner (use
-        ``result.module.report``). Requires a model whose hidden states are all
-        (re)created in ``init_all_states``; models holding construction-time
-        states may raise ``brainstate.transform.BatchAxisError``.
+        :class:`ETraceVmap` whose ``.module`` is the unbatched learner (use
+        ``result.module.report`` for its report). Drive sequences through the
+        returned wrapper, never through ``result.module``. Requires a model
+        whose hidden states are all (re)created in ``init_all_states``; models
+        holding construction-time states may raise
+        ``brainstate.transform.BatchAxisError``.
     **options : Any
         Forwarded to the algorithm constructor. See *Algorithm options* below.
 
     Returns
     -------
-    ETraceAlgorithm or brainstate.nn.Vmap
-        The compiled learner, carrying a :attr:`~ETraceAlgorithm.report`. Call
-        ``.update(*inputs)`` to train. When ``vmap=True``, returns a
-        ``brainstate.nn.Vmap`` wrapper; access the learner via ``.module``.
+    ETraceAlgorithm or ETraceVmap
+        When ``vmap=False``, the compiled learner carries a
+        :attr:`~ETraceAlgorithm.report`; call ``.update(*inputs)`` to train.
+        When ``vmap=True``, returns an :class:`ETraceVmap` wrapper (also a
+        ``brainstate.nn.Vmap``); access the underlying learner's report as
+        ``.module.report``. Call ``etrace_grad`` and ``etrace_evolve`` on the
+        wrapper itself, not on ``.module``.
 
     Raises
     ------
@@ -278,7 +282,7 @@ def compile(
         >>> by_config = braintrace.compile(
         ...     model, config, x0, batch_size=1)
         >>>
-        >>> # Every learner compile returns carries the two sequence drivers.
+        >>> # Every learner returned by compile carries the two sequence drivers.
         >>> xs = brainstate.random.randn(10, 1, 3)   # (T, batch, features)
         >>> ys = brainstate.random.randn(10, 1, 1)
         >>> def step_loss(x, y):

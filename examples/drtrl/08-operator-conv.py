@@ -57,7 +57,7 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
     n_classes, n_hidden = 4, 32
     model = ConvRNN(n_hidden, n_classes)
     # example input: one timestep of shape (B, 28, 1) matching Conv1d in_size=(28,1)
-    online = braintrace.compile(
+    learner = braintrace.compile(
         model, 'D_RTRL', jnp.zeros((batch_size, 28, 1)), batch_size=batch_size,
     )
     weights = model.states(brainstate.ParamState)
@@ -67,15 +67,17 @@ def main(*, n_epochs: int = 30, batch_size: int = 16, plot: bool = True) -> dict
     @brainstate.transform.jit
     def f_train(inputs, targets):
         # Free-run the prefix: hidden states and the eligibility trace advance,
-        # no loss is computed. The loss here is at the final step only, so the
-        # gradient below stays a single-step grad rather than an etrace_grad.
-        online.etrace_evolve(inputs[:-1])
+        # while the objective remains defined at the final step only.
+        learner.etrace_evolve(inputs[:-1])
 
-        def final_loss():
-            out = online(inputs[-1])
+        def final_step_loss(inp):
+            out = learner(inp)
             return braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean(), out
 
-        grads, loss, _ = brainstate.transform.grad(final_loss, weights, has_aux=True, return_value=True)()
+        grads, loss, _ = learner.etrace_grad(
+            inputs[-1:], step_fn=final_step_loss, weights=weights, has_aux=True,
+            loss_output='scalar', return_value=True,
+        )
         opt.update(grads)
         return loss
 
