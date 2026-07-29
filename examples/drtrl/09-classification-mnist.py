@@ -68,20 +68,23 @@ def main(*, n_epochs: int = 1, batch_size: int = 64, max_batches: int | None = 1
     train_loader, _ = _load_mnist(batch_size)
 
     # compile outside jit: init_all_states + compile_graph run once eagerly
-    om = braintrace.compile(model_online, 'D_RTRL', jnp.zeros((batch_size, 28)), batch_size=batch_size)
+    learner = braintrace.compile(
+        model_online, 'D_RTRL', jnp.zeros((batch_size, 28)), batch_size=batch_size)
 
     @brainstate.transform.jit
     def online_step(inputs, targets):
         # Free-run the prefix: hidden states and the eligibility trace advance,
-        # no loss is computed. The loss here is at the final step only, so the
-        # gradient below stays a single-step grad rather than an etrace_grad.
-        om.etrace_evolve(inputs[:-1])
+        # while the objective remains defined at the final step only.
+        learner.etrace_evolve(inputs[:-1])
 
-        def final_loss():
-            out = om(inputs[-1])
+        def final_step_loss(inp):
+            out = learner(inp)
             return braintools.metric.softmax_cross_entropy_with_integer_labels(out, targets).mean(), out
 
-        grads, loss, _ = brainstate.transform.grad(final_loss, w_online, has_aux=True, return_value=True)()
+        grads, loss, _ = learner.etrace_grad(
+            inputs[-1:], step_fn=final_step_loss, weights=w_online, has_aux=True,
+            loss_output='scalar', return_value=True,
+        )
         opt_online.update(grads)
         return loss
 
