@@ -1,9 +1,11 @@
-Foundations
-===========
+Building Neural Networks for Online Learning
+============================================
 
-Build the conceptual path from an ETP-marked operation to the hidden state it
-influences. These chapters explain the contracts that determine whether a
-parameter participates in online learning.
+Build an online-learning-ready recurrent model in three connected steps. First,
+ETP operators mark the parameterized computations that participate in online
+learning. Next, ``braintrace.nn`` layers compose those operators into reusable
+network blocks. Finally, hidden states provide the temporal destinations that
+the compiler connects to the marked parameter paths.
 
 Choose a foundation
 -------------------
@@ -11,26 +13,26 @@ Choose a foundation
 .. grid:: 1 1 3 3
    :gutter: 2
 
-   .. grid-item-card:: ETP Operator Fundamentals
+   .. grid-item-card:: Operators for Online Learning
       :link: five_primitive_functions
       :link-type: doc
 
-      Use the five public ETP operators with batching, physical units, JIT,
-      gradients, and ``vmap``.
+      Mark trainable computation paths with the five public ETP operators and
+      verify their batching, unit, and JAX-transform contracts.
 
-   .. grid-item-card:: braintrace.nn Layers
+   .. grid-item-card:: Neural Network Layers for Online Learning
       :link: neural_network_layers
       :link-type: doc
 
-      Compose ETP-aware layers and understand operation-based parameter
-      selection and relation boundaries.
+      Compose the marked operators through ``braintrace.nn`` layers while
+      preserving operation-based parameter selection and relation boundaries.
 
-   .. grid-item-card:: Hidden State Management
+   .. grid-item-card:: Hidden States for Online Learning
       :link: hidden_states
       :link-type: doc
 
-      Define, initialize, reset, and inspect the hidden-state groups discovered
-      by the compiler.
+      Define and initialize the recurrent state that makes a model temporal,
+      then inspect the hidden groups discovered by the compiler.
 
 Recommended sequence
 --------------------
@@ -43,16 +45,17 @@ Recommended sequence
      - Chapter
      - Use it to
    * - 1
-     - :doc:`ETP Operator Fundamentals <five_primitive_functions>`
-     - Select trainable operations and verify unit and JAX-transform behavior.
+     - :doc:`Operators for Online Learning <five_primitive_functions>`
+     - Mark parameter operations for online learning and verify their unit and
+       JAX-transform behavior.
    * - 2
-     - :doc:`braintrace.nn Layers <neural_network_layers>`
-     - Assemble recurrent models without violating parameter-to-hidden relation
-       boundaries.
+     - :doc:`Neural Network Layers for Online Learning <neural_network_layers>`
+     - Assemble marked operations into recurrent models without violating
+       parameter-to-hidden relation boundaries.
    * - 3
-     - :doc:`Hidden State Management <hidden_states>`
-     - Control state structure and understand how the compiler forms hidden
-       groups.
+     - :doc:`Hidden States for Online Learning <hidden_states>`
+     - Make the model temporal and understand how the compiler forms hidden
+       groups from recurrent state.
 
 Where to look first
 -------------------
@@ -63,6 +66,13 @@ Where to look first
   discussion in :doc:`neural_network_layers`.
 - State shapes, grouping, initialization, or reset behavior are unclear: use
   :doc:`hidden_states`.
+
+Related API reference
+---------------------
+
+- Operator signatures and core ETP types: :doc:`../apis/concepts`.
+- ETP-aware layer classes: :doc:`../apis/nn`.
+- Hidden-group discovery, compilation, and diagnostics: :doc:`../apis/compiler`.
 
 .. toctree::
    :hidden:
