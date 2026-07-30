@@ -147,7 +147,7 @@ and the two algorithm tutorials.
       :doc:`pp-prop <tutorials/pp_prop>`
 
    Internals and application
-      **8** :doc:`ETP Operator Fundamentals <tutorials/five_primitive_functions>` · **9**
+      **8** :doc:`Operators for Online Learning <tutorials/five_primitive_functions>` · **9**
       :doc:`Graph Compilation <tutorials/graph_compilation>` · **10**
       :doc:`Examples and Advanced Topics <examples/snn_examples>`
 
