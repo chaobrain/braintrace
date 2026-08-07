@@ -824,3 +824,258 @@ class TestTheExitCotangentTemplate:
             algo._exit_cotangent_grads(
                 self._template(algo), {('h',): jnp.zeros((1, 9))})
         assert '(1, 9)' in str(exc.value) and '(1, 4)' in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# E-01: the hidden <-> gradient correspondence is checked, not asserted
+#
+# The backward pass hands back a collection of hidden-state cotangents that is
+# then re-ordered onto the hidden groups by path and concatenated. Nothing
+# downstream re-derives which hidden state a cotangent came from, so a
+# mis-ordered or mis-shaped collection produces a *wrong gradient rather than an
+# error*. The guards used to be three `assert` statements checking cardinalities
+# and (in the multi-step branch) a key set -- never a correspondence -- and
+# `python -O` stripped all three.
+# ---------------------------------------------------------------------------
+
+import os
+import pathlib
+import subprocess
+import sys
+import textwrap
+
+from braintrace._algorithm.vjp_base import _check_hidden_gradient_correspondence
+
+
+def _e01_groups(n_rec=4):
+    """Real compiler output: the hidden groups of a one-layer GRU."""
+    gru = braintrace.nn.GRUCell(3, n_rec)
+    brainstate.nn.init_all_states(gru)
+    groups, _ = braintrace.find_hidden_groups_from_module(
+        gru, brainstate.random.randn(3))
+    return list(groups)
+
+
+def _e01_well_formed(groups):
+    """One correctly shaped, correctly typed cotangent per hidden state."""
+    return {
+        path: jnp.zeros(
+            tuple(state.varshape),
+            dtype=u.get_mantissa(state.value).dtype,
+        )
+        for group in groups
+        for path, state in zip(group.hidden_paths, group.hidden_states)
+    }
+
+
+class TestHiddenGradientCorrespondence:
+    """The helper accepts what the compiler produces, and nothing else."""
+
+    def test_a_well_formed_mapping_is_accepted(self):
+        groups = _e01_groups()
+        # returns None, raises nothing
+        assert _check_hidden_gradient_correspondence(
+            groups, _e01_well_formed(groups), source='unit test') is None
+
+    def test_a_missing_path_is_refused_and_named(self):
+        groups = _e01_groups()
+        mapping = _e01_well_formed(groups)
+        dropped = next(iter(mapping))
+        del mapping[dropped]
+
+        with pytest.raises(ValueError) as exc:
+            _check_hidden_gradient_correspondence(
+                groups, mapping, source='unit test')
+        message = str(exc.value)
+        assert str(dropped) in message
+        assert 'unit test' in message
+
+    def test_an_extra_path_is_refused_and_named(self):
+        groups = _e01_groups()
+        mapping = _e01_well_formed(groups)
+        mapping[('a', 'stray', 'path')] = jnp.zeros((4,))
+
+        with pytest.raises(ValueError) as exc:
+            _check_hidden_gradient_correspondence(
+                groups, mapping, source='unit test')
+        message = str(exc.value)
+        assert str(('a', 'stray', 'path')) in message
+        assert 'no hidden group claims' in message
+
+    def test_a_shape_mismatch_is_refused_naming_both_shapes(self):
+        groups = _e01_groups(n_rec=4)
+        mapping = _e01_well_formed(groups)
+        path = groups[0].hidden_paths[0]
+        mapping[path] = jnp.zeros((9,))
+
+        with pytest.raises(ValueError) as exc:
+            _check_hidden_gradient_correspondence(
+                groups, mapping, source='unit test')
+        message = str(exc.value)
+        assert str(path) in message
+        assert '(9,)' in message       # what arrived
+        assert '(4,)' in message       # what the hidden state wants
+
+    def test_a_dtype_mismatch_is_refused_naming_both_dtypes(self):
+        groups = _e01_groups()
+        mapping = _e01_well_formed(groups)
+        path = groups[0].hidden_paths[0]
+        state = groups[0].hidden_states[0]
+        assert u.get_mantissa(state.value).dtype == jnp.float32
+        mapping[path] = jnp.zeros(tuple(state.varshape), dtype=jnp.int32)
+
+        with pytest.raises(ValueError) as exc:
+            _check_hidden_gradient_correspondence(
+                groups, mapping, source='unit test')
+        message = str(exc.value)
+        assert str(path) in message
+        assert 'int32' in message
+        assert 'float32' in message
+
+    def test_the_message_names_the_group_the_position_and_the_source(self):
+        groups = _e01_groups()
+        mapping = _e01_well_formed(groups)
+        path = groups[0].hidden_paths[0]
+        mapping[path] = jnp.zeros((9,))
+
+        with pytest.raises(ValueError) as exc:
+            _check_hidden_gradient_correspondence(
+                groups, mapping, source='multi-step last-hidden gradients')
+        message = str(exc.value)
+        assert f'hidden group {groups[0].index}' in message
+        assert 'position 0' in message
+        assert 'multi-step last-hidden gradients' in message
+
+
+# The script the `-O` subprocess runs. It has to be self-contained: the point is
+# that a *fresh optimised interpreter* still refuses a mis-shaped cotangent.
+_E01_DASH_O_SCRIPT = textwrap.dedent(
+    """
+    import sys
+
+    # Prove the interpreter really is optimised before proving anything else:
+    # under -O, `__debug__` is False and `assert` compiles to nothing.
+    if __debug__:
+        print('NOT-OPTIMISED')
+        sys.exit(2)
+    assert False, 'this assert must have been stripped'
+
+    import brainstate
+    import brainunit as u
+    import jax.numpy as jnp
+    import braintrace
+    from braintrace._algorithm.vjp_base import _check_hidden_gradient_correspondence
+
+    gru = braintrace.nn.GRUCell(3, 4)
+    brainstate.nn.init_all_states(gru)
+    groups, _ = braintrace.find_hidden_groups_from_module(
+        gru, brainstate.random.randn(3))
+    groups = list(groups)
+
+    mapping = {
+        path: jnp.zeros(tuple(state.varshape),
+                        dtype=u.get_mantissa(state.value).dtype)
+        for group in groups
+        for path, state in zip(group.hidden_paths, group.hidden_states)
+    }
+
+    # 1. the well-formed mapping is still accepted
+    _check_hidden_gradient_correspondence(groups, mapping, source='dash-O probe')
+
+    # 2. a mis-shaped cotangent is still refused
+    mapping[groups[0].hidden_paths[0]] = jnp.zeros((9,))
+    try:
+        _check_hidden_gradient_correspondence(
+            groups, mapping, source='dash-O probe')
+    except ValueError as e:
+        if 'not in correspondence' not in str(e):
+            print('WRONG-MESSAGE:' + str(e))
+            sys.exit(3)
+    else:
+        print('NOT-RAISED')
+        sys.exit(4)
+
+    # 3. and so is a short value list to concat_hidden -- the zip truncation
+    try:
+        groups[0].concat_hidden([])
+    except ValueError:
+        pass
+    else:
+        print('CONCAT-NOT-RAISED')
+        sys.exit(5)
+
+    print('GUARDS-SURVIVED-DASH-O')
+    """
+)
+
+
+class TestTheGuardsSurviveDashO:
+    """E-01's core complaint: `python -O` strips `assert`, so these must not be.
+
+    Without this test the fix could silently regress to `assert` statements and
+    every other test in this file would still pass, because pytest runs with
+    assertions enabled.
+    """
+
+    def test_a_mis_shaped_cotangent_is_still_refused_under_dash_O(self):
+        # Import the package this test imported, not whatever is installed:
+        # `braintrace/__init__.py` lives one level below the path we want on
+        # `sys.path`.
+        package_root = str(pathlib.Path(braintrace.__file__).resolve().parent.parent)
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join(
+            [package_root] + ([env['PYTHONPATH']] if env.get('PYTHONPATH') else [])
+        )
+        env.pop('PYTHONOPTIMIZE', None)
+
+        proc = subprocess.run(
+            [sys.executable, '-O', '-c', _E01_DASH_O_SCRIPT],
+            capture_output=True, text=True, env=env, cwd=package_root, timeout=900,
+        )
+
+        assert proc.returncode == 0, (
+            f'-O subprocess failed (returncode={proc.returncode})\n'
+            f'--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}'
+        )
+        assert 'GUARDS-SURVIVED-DASH-O' in proc.stdout, proc.stdout
+
+
+class TestGradientsAreUnchangedByTheGuards:
+    """Positive control: the guards accept real compiler output, and the
+    gradients they now stand in front of are the ones they always were."""
+
+    def test_multistep_gradients_still_match_bptt(self):
+        from braintrace._testing import oracle
+        from braintrace._testing import oracle_models as om
+
+        spec = om.tanh_rnn(n_in=3, n_rec=4)
+        inputs = brainstate.random.randn(8, 3)
+        bptt = oracle.bptt_param_gradients(spec.factory, inputs)
+        got = oracle.online_param_gradients(
+            spec.factory, inputs,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'),
+        )
+        oracle.assert_param_gradients_close(
+            got, bptt, atol=1e-5, rtol=1e-5, keys=spec.etp_param_keys)
+
+    @pytest.mark.parametrize('cls', [braintrace.nn.GRUCell, braintrace.nn.LSTMCell])
+    def test_the_single_step_branch_accepts_the_compiled_graph(self, cls):
+        """The single-step branch is the one that reads the perturbation vars.
+
+        ``LSTMCell`` matters here: two hidden states, so the per-position
+        correspondence has something to get wrong.
+        """
+        model = cls(3, 4)
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.D_RTRL(model, vjp_method='single-step')
+        x = jnp.ones((1, 3))
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        params = model.states(brainstate.ParamState)
+        grads = brainstate.transform.grad(
+            lambda inp: (algo(inp) ** 2).sum(), params)(x)
+
+        leaves = jax.tree.leaves(grads)
+        assert leaves
+        assert all(bool(jnp.all(jnp.isfinite(u.get_mantissa(v)))) for v in leaves)

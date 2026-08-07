@@ -173,29 +173,51 @@ class HiddenPerturbation(NamedTuple):
 
         Raises
         ------
-        AssertionError
+        ValueError
             If ``perturb_data`` does not have the same length as
-            ``perturb_vars``.
+            ``perturb_vars``, or if a hidden group needs a path that was not
+            perturbed.
+
+        Notes
+        -----
+        Both guards are ``if ... raise`` rather than ``assert`` so that
+        ``python -O`` cannot strip them. The mapping from paths to perturbation
+        data is positional (``zip(perturb_hidden_paths, perturb_data)``), so a
+        length disagreement silently re-attributes every cotangent past the
+        mismatch; and a group asking for an unperturbed path used to surface as
+        a bare ``KeyError`` naming a path tuple and nothing else. Both checks
+        read only Python-level lengths and dict keys, never array data.
         """
-        assert len(perturb_data) == len(self.perturb_vars), (
-            f'The length of the perturb data is not correct. '
-            f'Expected: {len(self.perturb_vars)}, '
-            f'Got: {len(perturb_data)}'
-        )
+        perturb_data = list(perturb_data)
+        if len(perturb_data) != len(self.perturb_vars):
+            raise ValueError(
+                f'The length of the perturb data is not correct. '
+                f'Expected: {len(self.perturb_vars)} '
+                f'(one per perturbed hidden state '
+                f'{list(self.perturb_hidden_paths)}), '
+                f'Got: {len(perturb_data)}'
+            )
         path_to_perturb_data = {
             path: data
             for path, data in zip(self.perturb_hidden_paths, perturb_data)
         }
-        return [
-            group.concat_hidden(
-                [
-                    # dimensionless processing
-                    u.get_mantissa(path_to_perturb_data[path])
-                    for path in group.hidden_paths
-                ]
-            )
-            for group in hidden_groups
-        ]
+
+        group_data = []
+        for group in hidden_groups:
+            vals = []
+            for path in group.hidden_paths:
+                if path not in path_to_perturb_data:
+                    raise ValueError(
+                        f'Hidden group {group.index} needs the hidden state '
+                        f'{path}, but that path was not perturbed. The perturbed '
+                        f'paths are {list(self.perturb_hidden_paths)}. The graph '
+                        f'and its hidden perturbation disagree; recompile the '
+                        f'graph.'
+                    )
+                # dimensionless processing
+                vals.append(u.get_mantissa(path_to_perturb_data[path]))
+            group_data.append(group.concat_hidden(vals))
+        return group_data
 
     def dict(self) -> Dict[str, Any]:
         """Return this perturbation's named fields as a plain dictionary.

@@ -1,6 +1,6 @@
 # E-01 — check the hidden↔gradient correspondence for real
 
-Status: proposed
+Status: implemented (see "Deviations from this plan" at the end)
 Scope: `braintrace/_algorithm/vjp_base.py`, `braintrace/_compiler/hidden_group.py`,
 `braintrace/_compiler/hidden_pertubation.py`
 Backlog entry: E-01 in `2026-08-07-deferred-engineering-backlog.md`
@@ -152,3 +152,38 @@ compiler's output, which no public API allows. The tests therefore drive the
 checkers directly. That is the right level: the checkers are the contract, and
 an end-to-end test would only re-verify that the compiler currently satisfies
 it — which the existing oracle suite already does.
+
+## Deviations from this plan
+
+Four places where the implementation had to depart from the text above.
+
+1. **`split_hidden` cannot use a length check or `strict=True`.** The plan says
+   to "add the same check to `split_hidden`'s inverse assumption". It cannot be
+   the same check: `u.math.split` at this group's cumulative boundaries returns
+   `len(hidden_states) + 1` parts — one per state plus a trailing remainder —
+   and the existing `zip` drops that remainder *by design*. A length check or
+   `strict=True` would therefore reject every correct call. The equivalent guard
+   is on the input's **trailing-axis width** (`shape[-1] == num_state`), which is
+   what was implemented. Every caller passes a `concat_hidden`-produced slab of
+   exactly that width, including the SnAp-n path (`widened_block_jacobian`
+   linearizes a shape-preserving map on `(*varshape, num_state)`).
+
+2. **`concat_hidden` uses an explicit length check, not `strict=True`.** Same
+   effect, but the message can name the group, both counts and the paths, which
+   `zip`'s built-in `ValueError` cannot — and its wording is interpreter-version
+   dependent, which CI on a different Python would notice. The argument is
+   materialized with `list()` first so a generator still works.
+
+3. **The dtype comparison exempts `float0`.** `jax.dtypes.float0` is JAX's
+   cotangent dtype for a non-differentiable leaf, so it is a *correct* cotangent
+   for an integer or boolean hidden state and must not read as a mismatch. The
+   dtype is also read straight off the array rather than through
+   `jnp.result_type`, which does not round-trip `float0`.
+
+4. **The multi-step branch's `len(dg_last_hiddens) == len(self.hidden_states)`
+   guard is dropped rather than converted.** Both operands are dicts, so the
+   key-set equality that follows it already implies it.
+
+The plan's cost argument holds unchanged: every check reads Python-level
+metadata (lengths, dict keys, static shapes, dtypes), never array data, so
+nothing is traced into the compiled program.

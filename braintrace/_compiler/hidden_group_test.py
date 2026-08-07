@@ -1867,3 +1867,111 @@ class TestHiddenGroupSnapWidening:
             np.asarray(widened.diagonal_jacobian(hidden_vals, input_vals)),
             np.asarray(group.diagonal_jacobian(hidden_vals, input_vals)),
         )
+
+
+# ---------------------------------------------------------------------------
+# E-01: concat_hidden / split_hidden must not silently truncate
+#
+# `concat_hidden` used to zip the value list against `self.hidden_states`, and
+# `zip` truncates to the shorter argument. A *short* value list therefore did
+# not raise: it produced a concatenated array with a too-narrow trailing axis,
+# which surfaced later as a shape mismatch somewhere in unrelated trace math --
+# or not at all, when the widths happened to coincide. `split_hidden` had the
+# mirror-image hole on its trailing-axis width.
+# ---------------------------------------------------------------------------
+
+class _E01FakeState:
+    """A stand-in hidden state with just the attributes the group reads."""
+
+    def __init__(self, varshape=(2, 3), num_state=1):
+        self.varshape = varshape
+        self.num_state = num_state
+
+
+def _e01_group(num_states=(1, 1), varshape=(2, 3)):
+    """A `HiddenGroup` carrying `len(num_states)` fake plain hidden states."""
+    return braintrace.HiddenGroup(
+        index=7,
+        hidden_paths=[('h', i) for i in range(len(num_states))],
+        hidden_states=[_E01FakeState(varshape, n) for n in num_states],
+        hidden_invars=[],
+        hidden_outvars=[],
+        transition_jaxpr=None,
+        transition_jaxpr_constvars=[],
+    )
+
+
+class TestConcatHiddenLengthGuard:
+
+    def test_short_value_list_raises_instead_of_truncating(self):
+        group = _e01_group(num_states=(1, 1, 1))
+        vals = [jnp.zeros((2, 3)), jnp.zeros((2, 3))]  # one short
+
+        with pytest.raises(ValueError) as exc:
+            group.concat_hidden(vals)
+
+        message = str(exc.value)
+        assert '7' in message                  # names the group
+        assert '3' in message and '2' in message   # names both counts
+
+    def test_short_value_list_used_to_produce_a_narrow_array(self):
+        """Pin the pre-fix behaviour so the regression stays legible.
+
+        Zipping a 2-element value list against 3 hidden states produced a
+        ``(2, 3, 2)`` slab where the group's contract says ``(2, 3, 3)``. That
+        is the silent corruption E-01 is about; it is reproduced here through a
+        local ``zip`` rather than through the method, which now refuses it.
+        """
+        group = _e01_group(num_states=(1, 1, 1))
+        vals = [jnp.zeros((2, 3)), jnp.zeros((2, 3))]
+        truncated = jnp.concatenate(
+            [jnp.expand_dims(v, -1) for v, _ in zip(vals, group.hidden_states)],
+            axis=-1,
+        )
+        assert truncated.shape == (2, 3, 2)          # what used to come back
+        assert truncated.shape[-1] != group.num_state  # ... and it was wrong
+
+    def test_long_value_list_raises(self):
+        group = _e01_group(num_states=(1, 1))
+        vals = [jnp.zeros((2, 3))] * 3
+
+        with pytest.raises(ValueError) as exc:
+            group.concat_hidden(vals)
+        assert '3' in str(exc.value)
+
+    def test_exact_length_still_succeeds(self):
+        group = _e01_group(num_states=(1, 1))
+        out = group.concat_hidden([jnp.ones((2, 3)), jnp.full((2, 3), 2.0)])
+        assert out.shape == (2, 3, 2)
+        np.testing.assert_array_equal(np.asarray(out)[..., 0], np.ones((2, 3)))
+        np.testing.assert_array_equal(np.asarray(out)[..., 1], np.full((2, 3), 2.0))
+
+    def test_a_generator_is_accepted(self):
+        """The length guard must not break a lazily-produced value sequence."""
+        group = _e01_group(num_states=(1, 1))
+        out = group.concat_hidden(jnp.zeros((2, 3)) for _ in range(2))
+        assert out.shape == (2, 3, 2)
+
+
+class TestSplitHiddenWidthGuard:
+
+    def test_narrow_slab_raises(self):
+        group = _e01_group(num_states=(1, 1, 1))
+        with pytest.raises(ValueError) as exc:
+            group.split_hidden(jnp.zeros((2, 3, 2)))
+        message = str(exc.value)
+        assert '7' in message
+        assert '(2, 3, 2)' in message
+
+    def test_wide_slab_raises(self):
+        group = _e01_group(num_states=(1, 1))
+        with pytest.raises(ValueError):
+            group.split_hidden(jnp.zeros((2, 3, 5)))
+
+    def test_exact_width_still_round_trips(self):
+        group = _e01_group(num_states=(1, 1))
+        slab = group.concat_hidden([jnp.ones((2, 3)), jnp.full((2, 3), 2.0)])
+        parts = group.split_hidden(slab)
+        assert len(parts) == 2
+        np.testing.assert_array_equal(np.asarray(parts[0]), np.ones((2, 3)))
+        np.testing.assert_array_equal(np.asarray(parts[1]), np.full((2, 3), 2.0))

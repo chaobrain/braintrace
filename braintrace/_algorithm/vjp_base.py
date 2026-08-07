@@ -104,6 +104,162 @@ def _add_future_for_plain_paths(base: Any, future: Any, etp_paths: Any) -> Any:
     return out
 
 
+def _static_dtype(x: Any) -> Any:
+    """The dtype of ``x`` without materializing or converting it.
+
+    Read straight off the array/tracer when it has one, so that JAX's
+    ``float0`` cotangent dtype -- which does not survive ``jnp.result_type`` --
+    comes through intact, and so that nothing is moved to a device.
+
+    Parameters
+    ----------
+    x : Any
+        An array, tracer, ``Quantity`` mantissa or Python scalar.
+
+    Returns
+    -------
+    numpy.dtype
+        The dtype of ``x``.
+    """
+    dtype = getattr(x, 'dtype', None)
+    if dtype is not None:
+        return dtype
+    return jnp.result_type(x)
+
+
+def _expected_hidden_shape(state: brainstate.HiddenState) -> Tuple[int, ...]:
+    """The shape a cotangent for ``state`` must have.
+
+    A plain :class:`brainstate.HiddenState` carries one state per position, so
+    its cotangent is ``varshape``-shaped; a
+    :class:`brainstate.HiddenGroupState` stacks ``num_state`` of them on a
+    trailing axis, which is exactly the axis
+    :meth:`~braintrace.HiddenGroup.concat_hidden` concatenates along.
+
+    Parameters
+    ----------
+    state : brainstate.HiddenState
+        The hidden state whose cotangent shape is wanted.
+
+    Returns
+    -------
+    tuple of int
+        The required cotangent shape.
+    """
+    varshape = tuple(state.varshape)
+    if isinstance(state, brainstate.HiddenGroupState):
+        return varshape + (int(state.num_state),)
+    return varshape
+
+
+def _check_hidden_gradient_correspondence(
+    hidden_groups: Sequence[Any],
+    path_to_cotangent: Dict[Path, Any],
+    *,
+    source: str,
+) -> None:
+    """Check that cotangent *i* really belongs to hidden state *i*.
+
+    The backward pass hands back a collection of hidden-state cotangents which
+    is then re-ordered onto the hidden groups by path and concatenated. Nothing
+    downstream re-derives which hidden state a given cotangent came from, so a
+    mis-ordered or mis-shaped collection produces a **wrong gradient rather than
+    an error**. This function is the contract that makes that impossible.
+
+    Three things are checked, for every hidden group and every position in it:
+
+    1. **Totality** -- every path a group needs is present in
+       ``path_to_cotangent``.
+    2. **No strays** -- ``path_to_cotangent`` carries no path that no group
+       claims, which would mean the cotangent collection and the compiled graph
+       describe different models.
+    3. **Correspondence** -- the cotangent at each path has the shape and dtype
+       of the hidden state at that path (see :func:`_expected_hidden_shape`),
+       compared after :func:`brainunit.get_mantissa`, exactly as the consumers
+       strip units before concatenating.
+
+    Parameters
+    ----------
+    hidden_groups : sequence of HiddenGroup
+        The compiled hidden groups the cotangents will be routed onto.
+    path_to_cotangent : dict
+        Mapping from hidden-state path to that state's cotangent.
+    source : str
+        Human-readable name of the branch that produced ``path_to_cotangent``,
+        used in the error messages so the reader is not left guessing which of
+        the two VJP modes failed.
+
+    Raises
+    ------
+    ValueError
+        If any of the three conditions above does not hold. The message names
+        the hidden group, the position within it, the path, and the expected
+        versus actual shape/dtype.
+
+    Notes
+    -----
+    Deliberately ``if ... raise`` and not ``assert``: ``python -O`` /
+    ``PYTHONOPTIMIZE=1`` strips ``assert`` statements, and this guard has to
+    hold on an optimised interpreter too.
+
+    Every comparison is on Python-level metadata -- dict keys, static shapes,
+    dtypes -- and never on array *data*. Nothing here is traced into the
+    compiled program, so it adds no XLA operation and forces no device sync,
+    even though it runs once per backward pass.
+    """
+    needed: Dict[Path, Tuple[int, int, Any]] = {}
+    for group in hidden_groups:
+        for position, (path, state) in enumerate(zip(group.hidden_paths, group.hidden_states)):
+            needed.setdefault(path, (group.index, position, state))
+
+    missing = [path for path in needed if path not in path_to_cotangent]
+    if missing:
+        group_index, position, _ = needed[missing[0]]
+        raise ValueError(
+            f'The {source} did not provide a gradient for every hidden state. '
+            f'Hidden group {group_index} needs {missing[0]} at position '
+            f'{position}, and {len(missing)} needed path(s) are absent: '
+            f'{sorted(map(str, missing))}. The gradients provided are for '
+            f'{sorted(map(str, path_to_cotangent))}.'
+        )
+
+    strays = [path for path in path_to_cotangent if path not in needed]
+    if strays:
+        raise ValueError(
+            f'The {source} provided gradients for {len(strays)} hidden state '
+            f'path(s) that no hidden group claims: {sorted(map(str, strays))}. '
+            f'The hidden groups cover {sorted(map(str, needed))}. The compiled '
+            f'graph and the backward pass disagree about the model\'s hidden '
+            f'states; recompile the graph.'
+        )
+
+    for path, (group_index, position, state) in needed.items():
+        cotangent = u.get_mantissa(path_to_cotangent[path])
+        want_shape = _expected_hidden_shape(state)
+        got_shape = tuple(u.math.shape(cotangent))
+        if got_shape != want_shape:
+            raise ValueError(
+                f'The {source} produced a gradient of shape {got_shape} for the '
+                f'hidden state {path}, which is at position {position} of hidden '
+                f'group {group_index} and has shape {want_shape}. A gradient '
+                f'cannot belong to a hidden state of a different shape, so the '
+                f'gradients and the hidden states are not in correspondence.'
+            )
+        want_dtype = _static_dtype(u.get_mantissa(state.value))
+        got_dtype = _static_dtype(cotangent)
+        # `float0` is JAX's cotangent dtype for a non-differentiable leaf; it is
+        # a correct cotangent for an integer or boolean hidden state and must not
+        # be read as a mismatch.
+        if got_dtype != want_dtype and got_dtype != jax.dtypes.float0:
+            raise ValueError(
+                f'The {source} produced a gradient of dtype {got_dtype} for the '
+                f'hidden state {path}, which is at position {position} of hidden '
+                f'group {group_index} and has dtype {want_dtype}. A gradient '
+                f'cannot belong to a hidden state of a different dtype, so the '
+                f'gradients and the hidden states are not in correspondence.'
+            )
+
+
 def expand_modulator_to_group(
     modulator: Any,
     group_shape: Tuple[int, ...],
@@ -1043,24 +1199,65 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         #
         # get the gradients of the hidden states at the last time step
         #
+        #
+        # Every guard below is `if ... raise`, never `assert`: `python -O` strips
+        # `assert` statements, and a mis-routed cotangent here produces a *wrong
+        # gradient rather than an error*, so the check has to survive an
+        # optimised interpreter. All of them read Python-level metadata only
+        # (lengths, dict keys, static shapes, dtypes), so none of it reaches the
+        # compiled program.
+        #
         if self.graph_executor.is_single_step_vjp:
-            # TODO: the correspondence between the hidden states and the gradients
-            #       should be checked.
-            #
-            assert len(dg_etrace_params) == 0  # gradients all etrace weights are updated by the RTRL algorithm
-            assert self.graph.hidden_perturb is not None
-            assert len(self.graph.hidden_perturb.perturb_vars) == len(dg_hid_perturb_or_dl2h)
-            dl2h_at_t_or_t_minus_1 = self.graph.hidden_perturb.perturb_data_to_hidden_group_data(
+            if len(dg_etrace_params) != 0:
+                # Under `vjp_method='single-step'` the ETP weights are updated by
+                # the RTRL recursion, so the transposed jaxpr must not also hand
+                # back gradients for them.
+                raise ValueError(
+                    f'Under vjp_method=\'single-step\' the ETP weight gradients '
+                    f'come from the eligibility-trace recursion, so the backward '
+                    f'pass must not return any. It returned '
+                    f'{len(dg_etrace_params)} for '
+                    f'{sorted(map(str, dg_etrace_params))}. The compiled graph '
+                    f'and the graph executor disagree; recompile the graph.'
+                )
+            hidden_perturb = self.graph.hidden_perturb
+            if hidden_perturb is None:
+                raise ValueError(
+                    'vjp_method=\'single-step\' reads the hidden-state gradients '
+                    'off the hidden perturbation variables, but the compiled '
+                    'graph carries no hidden perturbation. Call `compile_graph()` '
+                    'on this algorithm before running the backward pass.'
+                )
+            if len(hidden_perturb.perturb_vars) != len(dg_hid_perturb_or_dl2h):
+                raise ValueError(
+                    f'The backward pass returned {len(dg_hid_perturb_or_dl2h)} '
+                    f'hidden-perturbation gradient(s) for '
+                    f'{len(hidden_perturb.perturb_vars)} perturbation variable(s) '
+                    f'{list(hidden_perturb.perturb_hidden_paths)}. The two are '
+                    f'matched by position, so a length disagreement re-attributes '
+                    f'every gradient past the mismatch.'
+                )
+            _check_hidden_gradient_correspondence(
+                self.graph.hidden_groups,
+                dict(zip(hidden_perturb.perturb_hidden_paths, dg_hid_perturb_or_dl2h)),
+                source='single-step hidden perturbation',
+            )
+            dl2h_at_t_or_t_minus_1 = hidden_perturb.perturb_data_to_hidden_group_data(
                 dg_hid_perturb_or_dl2h, self.graph.hidden_groups,
             )
 
         else:
-            assert len(dg_last_hiddens) == len(self.hidden_states)
-            assert set(dg_last_hiddens.keys()) == set(self.hidden_states.keys()), (
-                f'The hidden states should be the same. Bug got \n'
-                f'{set(dg_last_hiddens.keys())}\n'
-                f'!=\n'
-                f'{set(self.hidden_states.keys())}'
+            if set(dg_last_hiddens.keys()) != set(self.hidden_states.keys()):
+                raise ValueError(
+                    f'The hidden states should be the same. Bug got \n'
+                    f'{set(dg_last_hiddens.keys())}\n'
+                    f'!=\n'
+                    f'{set(self.hidden_states.keys())}'
+                )
+            _check_hidden_gradient_correspondence(
+                self.graph.hidden_groups,
+                dg_last_hiddens,
+                source='multi-step last-hidden gradients',
             )
             dl2h_at_t_or_t_minus_1 = [
                 group.concat_hidden(
