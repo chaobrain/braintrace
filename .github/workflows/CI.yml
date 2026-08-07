@@ -89,6 +89,40 @@ jobs:
           fail_ci_if_error: false
 
 
+  examples:
+    # The example suites (``examples/tests/`` and ``examples/pp_prop/tests/``)
+    # existed and passed locally but were never run here: the ``test`` job above
+    # runs ``pytest braintrace/`` only. That gap is how two AttributeError /
+    # TypeError bugs in the example scripts reached main and had to be fixed
+    # after the fact (#153).
+    #
+    # Kept as its own job rather than folded into the matrix above: it takes
+    # ~13 min, and multiplying that across four JAX versions buys nothing --
+    # these are integration smoke tests for the *scripts*, and one JAX version
+    # exercises them fully.
+    name: Examples
+    runs-on: ubuntu-latest
+    steps:
+      - name: Cancel Previous Runs
+        uses: styfle/cancel-workflow-action@0.13.1
+        with:
+          access_token: ${{ github.token }}
+      - uses: actions/checkout@v6
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install -r requirements-dev.txt
+          python -m pip install jax || exit 1
+          python -m pip install . || exit 1
+      - name: Test examples with pytest
+        run: |
+          pytest examples/ -n auto --durations=15
+
+
   typecheck_and_build:
     runs-on: ubuntu-latest
     strategy:

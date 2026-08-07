@@ -284,7 +284,7 @@ class TestPublicExports:
             assert name in op.__all__
 
 
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_direction_aligned,
     assert_param_gradients_close,
     bptt_param_gradients,

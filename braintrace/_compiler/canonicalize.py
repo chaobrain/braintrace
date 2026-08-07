@@ -45,7 +45,7 @@ a ``cond`` inside a ``scan`` body (and vice versa) canonicalizes fully.
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Set
 
 import jax
 
@@ -55,7 +55,6 @@ from braintrace._compatible_imports import (
     JaxprEqn,
     Var,
     is_cond_primitive,
-    is_jit_primitive,
     is_scan_primitive,
     is_while_primitive,
     new_jaxpr_eqn,

@@ -3,7 +3,7 @@
 Status: implemented
 Parent: [`2026-07-25-algorithm-axes-roadmap.md`](2026-07-25-algorithm-axes-roadmap.md) § P1
 Baseline: commit `bc153da`
-Target release: 0.3.0
+Target release: 0.2.5
 
 ## Premise shift
 

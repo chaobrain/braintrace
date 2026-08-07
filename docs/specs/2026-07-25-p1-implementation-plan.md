@@ -1283,9 +1283,9 @@ scope boundary pins it today.
 | ID | Claim | Status | Pinned by |
 |---|---|---|---|
 | F-01 / F-04 | multi-state (`num_state >= 2`) HiddenGroups mishandled | resolved | `snn_model_correctness_test.py::test_multi_state_hidden_groups_are_discovered` and `::test_d_rtrl_matches_bptt_on_snn_models` (num_state 1-5) |
-| F-07 / F-08 / F-09 | OTTT / OTPE approximation bias | dead | removed with those algorithms in 0.3.0 |
+| F-07 / F-08 / F-09 | OTTT / OTPE approximation bias | dead | removed with those algorithms in 0.2.5 |
 | F-17 | implementation facts drifted from the instruction file | resolved | `braintrace/__init___test.py` Task 7 |
-| F-19 / F-20 | OTTT / OSTTP exactness gaps | dead | removed with those algorithms in 0.3.0 |
+| F-19 / F-20 | OTTT / OSTTP exactness gaps | dead | removed with those algorithms in 0.2.5 |
 | F-21 | rank / decay / random-feedback configs are exact on rate models | misattributed — the cause is the oracle path (F-23), not the model | `approx_correctness_test.py::test_rank_decay_random_approximations_are_exact_on_rate_model_F21`, docstring corrected |
 | F-22 | exposing approximation bias needs an SNN multi-population zoo | **retired** — premise false; a multi-population SNN model is bitwise-exact on the same path | replaced by `approx_correctness_test.py::test_approximations_are_measurable_through_a_finite_window` |
 | F-23 | the full-window multi-step oracle path is blind to every learning-rule axis | active, **by design** — documented, not a defect | `axis_discrimination_test.py`, both directions; warned in `online_param_gradients`' docstring |

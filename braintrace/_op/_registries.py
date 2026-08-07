@@ -136,12 +136,12 @@ r"""Position of the output ``y`` in ``eqn.outvars`` (0 for all current
 primitives, which have a single output)."""
 
 
-def is_etp_primitive(primitive) -> bool:
+def is_etp_primitive(primitive: Primitive) -> bool:
     """Return True iff *primitive* was created via :func:`register_primitive`."""
     return primitive in ETP_PRIMITIVES
 
 
-def is_etp_enable_gradient_primitive(primitive) -> bool:
+def is_etp_enable_gradient_primitive(primitive: Primitive) -> bool:
     """Return True iff the compiler must *evaluate* this primitive instead of
     skipping it when walking through a ``pjit`` equation.
 
@@ -152,12 +152,12 @@ def is_etp_enable_gradient_primitive(primitive) -> bool:
     return primitive in GRADIENT_ENABLED_PRIMITIVES
 
 
-def is_batched_primitive(primitive) -> bool:
+def is_batched_primitive(primitive: Primitive) -> bool:
     """Return True iff *primitive* was registered with ``batched=True``."""
     return primitive in BATCHED_PRIMITIVES
 
 
-def register_batched_counterpart(unbatched_p, batched_p) -> None:
+def register_batched_counterpart(unbatched_p: Primitive, batched_p: Primitive) -> None:
     """Declare *batched_p* as the batched form of *unbatched_p* under vmap.
 
     Parameters
@@ -192,7 +192,7 @@ def register_batched_counterpart(unbatched_p, batched_p) -> None:
     BATCHED_COUNTERPARTS[unbatched_p] = batched_p
 
 
-def get_batched_counterpart(primitive):
+def get_batched_counterpart(primitive: Primitive) -> Optional[Primitive]:
     """Return the batched counterpart of *primitive*, or ``None``.
 
     Parameters
@@ -209,7 +209,7 @@ def get_batched_counterpart(primitive):
     return BATCHED_COUNTERPARTS.get(primitive)
 
 
-def get_trainable_invars(primitive, eqn_params: dict) -> Dict[str, int]:
+def get_trainable_invars(primitive: Primitive, eqn_params: dict) -> Dict[str, int]:
     """Return ``{key: invar_index}`` for *primitive* on an equation.
 
     Falls back to the single-weight ``{'weight': 1}`` layout for primitives
@@ -221,12 +221,12 @@ def get_trainable_invars(primitive, eqn_params: dict) -> Dict[str, int]:
     return fn(eqn_params)
 
 
-def get_x_invar_index(primitive) -> Optional[int]:
+def get_x_invar_index(primitive: Primitive) -> Optional[int]:
     """Return the index of ``x`` in ``eqn.invars`` (``None`` if no input)."""
     return ETP_X_INVAR_INDICES.get(primitive, 0)
 
 
-def get_y_outvar_index(primitive) -> int:
+def get_y_outvar_index(primitive: Primitive) -> int:
     """Return the index of ``y`` in ``eqn.outvars``."""
     return ETP_Y_OUTVAR_INDICES.get(primitive, 0)
 
@@ -287,7 +287,7 @@ path). Queried through :func:`get_fast_path_rules`.
 """
 
 
-def get_fast_path_rules(primitive) -> Optional[FastPathRules]:
+def get_fast_path_rules(primitive: Primitive) -> Optional[FastPathRules]:
     """Return the :class:`FastPathRules` bundle for *primitive*, or ``None``.
 
     Parameters
@@ -333,7 +333,7 @@ legacy ``dt_to_t`` scaffolding). Unregistered primitives fall back to
 """
 
 
-def get_instant_drtrl_rule(primitive) -> Optional[Callable]:
+def get_instant_drtrl_rule(primitive: Primitive) -> Optional[Callable]:
     """Return the param-dim D-RTRL instantaneous-term rule, or ``None``.
 
     Parameters
@@ -351,7 +351,7 @@ def get_instant_drtrl_rule(primitive) -> Optional[Callable]:
     return ETP_RULES_INSTANT_DRTRL.get(primitive)
 
 
-def get_solve_drtrl_rule(primitive) -> Optional[Callable]:
+def get_solve_drtrl_rule(primitive: Primitive) -> Optional[Callable]:
     """Return the param-dim D-RTRL solve-time gradient rule, or ``None``.
 
     Parameters
@@ -389,7 +389,7 @@ unchanged. The filtered representation is what
 """
 
 
-def get_pp_x_repr(primitive) -> Optional[Callable]:
+def get_pp_x_repr(primitive: Primitive) -> Optional[Callable]:
     """Return the IO-dim x-trace representation rule, or ``None``.
 
     Parameters
@@ -431,7 +431,7 @@ Queried through :func:`is_snap_anchored`.
 """
 
 
-def is_snap_anchored(primitive, params: Optional[Dict] = None) -> bool:
+def is_snap_anchored(primitive: Primitive, params: Optional[Dict] = None) -> bool:
     """Return True iff *primitive* declares a SnAp-n trace anchor.
 
     Parameters
@@ -478,7 +478,7 @@ channels). Queried through :func:`get_snap_adjacency_rule`.
 """
 
 
-def get_snap_adjacency_rule(primitive) -> Optional[Callable]:
+def get_snap_adjacency_rule(primitive: Primitive) -> Optional[Callable]:
     """Return the SnAp-n position-adjacency rule for *primitive*, or ``None``.
 
     Parameters

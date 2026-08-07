@@ -1,7 +1,20 @@
 # Release Notes
 
 
-## UNRELEASED
+## Version 0.2.5
+
+> **This patch release removes public API.** Despite the patch version number,
+> `OTTT`, `OSTTP`, `OTPE` and `PresynapticTrace` are gone and
+> `IODimVjpAlgorithm.decay` is now read-only. A pin of `braintrace>=0.2,<0.3`
+> will pick these changes up, so read the *Breaking changes* section below
+> before upgrading.
+
+It is also the largest feature release since 0.2.0: ten new public symbols,
+headlined by the **sequence-driver API** (`etrace_grad` / `etrace_evolve`),
+which removes the hand-written scan-and-accumulate loop from every call site,
+and by five new learning rules (`SnAp`, `UORO`, `ThreeFactor`, `DNI`,
+`RandomProjectionVjpAlgorithm`) expressed as coordinates in the new
+`ETraceConfig` axis space rather than as bespoke implementations.
 
 ### Breaking changes
 
@@ -46,6 +59,78 @@
   `temporal_recursion='none'`; it was previously rejected as invalid input.
 
 ### New features
+
+- **Sequence drivers: `etrace_grad` and `etrace_evolve`.** Every algorithm now
+  carries two methods (via the new `braintrace.SequenceDriverMixin`) that drive
+  a whole sequence, so the scan-and-accumulate loop that every call site used to
+  hand-write is gone. `etrace_grad` accumulates online gradients over a
+  sequence; `etrace_evolve` advances hidden states and eligibility traces
+  without computing any gradient.
+
+  ```python
+  # before -- hand-written, repeated in 19 example files
+  grads = jax.tree.map(jnp.zeros_like, {k: v.value for k, v in weights.items()})
+  def body(carry, xs_t):
+      x, y = xs_t
+      g, loss = brainstate.transform.grad(step, weights, return_value=True)(x, y)
+      return jax.tree.map(jnp.add, carry, g), loss
+  grads, losses = brainstate.transform.scan(body, grads, (xs, ys))
+
+  # after
+  grads, losses = learner.etrace_grad(xs, ys, step_fn=step, return_value=True)
+  ```
+
+  `step_fn` is keyword-only, so any number of sequences can be passed
+  positionally and are sliced in lockstep. Supporting options: `mask` (weights
+  the loss per step while still evolving the trace on masked steps),
+  `chunk_size` (windowed drive), `weights`, `reduction` (`'mean'` over unmasked
+  steps by default, or `'sum'`), `loss_output` (`'per_step'` / `'masked'` /
+  `'scalar'`), `has_aux` and `return_value`. `chunk_size` and `vjp_method` are
+  independent axes: chunking sets how many steps each window covers, the VJP
+  method sets how the window is differentiated.
+
+  `braintrace.compile(..., vmap=True)` now returns a `braintrace.ETraceVmap` —
+  a `brainstate.nn.Vmap` subclass carrying the same two methods — so batched and
+  unbatched call sites are identical. It remains a `brainstate.nn.Vmap` for
+  `isinstance` purposes; only `type(x) is brainstate.nn.Vmap` changes. Note that
+  reaching through `.module` is *not* equivalent:
+  `learner.module.etrace_grad(...)` drives the unbatched learner and silently
+  produces per-lane-wrong results.
+
+  See `docs/specs/2026-07-27-sequence-driver-api.md`. All examples, tutorials
+  and docstrings were migrated onto `compile` / `etrace_grad` / `etrace_evolve`;
+  the remaining manual loops in `examples/` are BPTT baselines and benchmark
+  instrumentation, each carrying an in-file `# kept manual:` rationale.
+
+- **`SnAp` — sparse *n*-step approximation.** `recurrence_scope` generalises
+  from the two-valued `'diagonal'` / `'coupled'` to an *n*-step neighbourhood:
+  `SnAp(model, n=k)` keeps hidden→hidden influence out to `k` steps in the
+  position graph and drops the rest, so `n=1` is the diagonal rule and larger
+  `n` interpolates toward the fully coupled one. Reachable by name as
+  `'snap'`, and the neighbourhood is computed from the compiled graph, so it
+  works for every ETP primitive rather than dense matmul only.
+  See `docs/specs/2026-07-25-p3-snap-n.md`.
+
+- **`UORO` — unbiased online recurrent optimization.** A rank-1 random
+  projection of the influence matrix, giving an *unbiased* (but higher-variance)
+  gradient estimate at O(P) memory instead of D-RTRL's O(P·H). Built on the new
+  `RandomProjectionVjpAlgorithm` engine, which is also public. Reachable as
+  `'uoro'`.
+
+- **`ThreeFactor` — modulated learning.** `learning_signal='modulatory'`
+  replaces the backpropagated error with an externally supplied scalar (or
+  per-group) modulator, the neuromodulation-style third factor. Requires
+  `vjp_method='single-step'`, which is enforced at construction rather than
+  discovered at run time. Reachable as `'three_factor'`.
+
+- **`DNI` — decoupled neural interfaces / synthetic gradients.** `DNI` learns a
+  synthesiser `M(h)` that predicts the future loss gradient `dL_{>=t}/dh_t`,
+  removing the dependence on a full backward pass. Ships with
+  `SyntheticGradient` (the synthesiser module, sized from the compiled graph via
+  `algo.group_signal_shapes()`) and `train_synthetic_gradient` (a training
+  helper driven by the learner's own returned hidden cotangent, so the
+  regression target is exact rather than bootstrapped). Reachable as `'dni'`.
+  See `docs/specs/2026-07-25-p4-uoro-modulatory-dni.md`.
 
 - **`ETraceConfig` — learning rules as explicit axis coordinates.** The new
   `braintrace.ETraceConfig` describes a learning rule as a point in a six-axis
@@ -92,12 +177,94 @@
   rather than silently computing the symmetric rule.
 
 - **`recurrence_scope` is a public axis.** What was the private
-  `_include_recurrent_mixing` class attribute is now `recurrence_scope`
-  (`'diagonal'` / `'coupled'`), and asking for `'coupled'` on a model whose
-  compilation descends into a `scan` raises instead of silently degrading to
-  `'diagonal'`.
+  `_include_recurrent_mixing` class attribute is now `recurrence_scope`, and
+  asking for a scope wider than the model supports — e.g. `'coupled'` on a model
+  whose compilation descends into a `scan` — raises instead of silently
+  degrading to `'diagonal'`. Beyond the original two values it accepts an
+  integer *n*-step neighbourhood; see `SnAp` above.
+
+- **New algorithm names in `braintrace.compile`.** `'snap'`, `'uoro'`,
+  `'three_factor'` and `'dni'` now resolve, alongside the existing `'d_rtrl'`,
+  `'pp_prop'`, `'e_prop'` and the OSTL names. (`'ottt'`, `'osttp'` and `'otpe'`
+  no longer do — see *Breaking changes*.)
+
+- **`braintrace.nn.CFNCell` is exported.** The Chaos-Free Network cell
+  (`arXiv:1612.06212`) was implemented but never added to `braintrace.nn`'s
+  `__all__`, so the call its own docstring advertised raised `AttributeError`.
+  Exporting it surfaced a second defect, fixed here: the constructor sized the
+  input projection `out_size -> out_size`, but `update()` feeds it the input, so
+  every forward pass with `in_size != out_size` raised a `dot_general` shape
+  error. It is now sized `in_size -> out_size`, matching the paper's
+  `h_t = theta_t * phi(h_{t-1}) + eta_t * phi(W x_t)`.
+
+- **`braintrace.nn.__dir__`** now advertises the ~50 names that
+  `__getattr__` forwards to `brainstate.nn` / `brainpy.state`. They always
+  resolved, but were invisible to `dir()` and tab-completion, unlike the
+  top-level `braintrace` namespace which already had this.
 
 ### Improvements
+
+- **JAX 0.11 compatibility.** Ported the scan handling onto JAX's flattree
+  representation. CI now runs the suite against JAX 0.8, 0.9, 0.10 and latest.
+- **Conv bias IO-dim fix**, plus an axis-aware verification harness and an
+  in-tree limitation list (`docs/specs/2026-07-25-known-limitations.md`), which
+  is now the tracked backlog of known approximation edges.
+- **`train_synthetic_gradient`'s window loop is compiled** rather than traced
+  once per window, via `brainstate.transform.for_loop`.
+- **The wheel no longer ships the test suite.** This project co-locates tests
+  (`foo.py` / `foo_test.py`), and `setuptools`' `packages.find` `exclude`
+  matches package names, not loose modules — so all 76 `*_test.py` files, the
+  `_algorithm/tests/` and `_compiler/tests/` subpackages, and the fixture
+  modules were being copied into every install: 1.63 MB of a 2.90 MB wheel,
+  56%. The fixture cluster (reference models, the BPTT oracle, the compiler
+  scenario catalog) moved to a new `braintrace._testing` package, excluded by
+  name, and a `build_py` subclass in `setup.py` drops `*_test.py`. The wheel is
+  now **1.24 MB across 68 files**, down from 2.90 MB across 148.
+
+  This also removed a layering violation: `_algorithm/oracle_models.py` (shipped
+  code) imported layer classes from `braintrace/_etrace_model_test.py` (a
+  pytest-collected module that contained no tests). Both now live in
+  `braintrace._testing`, on the same side of the ship/no-ship line, and the
+  mypy `ignore_errors` special case that existed only to paper over that import
+  is gone.
+
+  **The sdist keeps the full test payload**, because that is what downstream
+  packagers build and run the suite from. Splitting the two artifacts is why
+  the pruning lives in `setup.py` rather than in `packages.find`: exclusion at
+  discovery time happens before either artifact exists and so hits both. The
+  wheel filter is applied in `build_py.find_package_modules` and switched off
+  for `get_source_files`, the list `sdist` builds its manifest from. This only
+  holds with `include-package-data = false` (now set): left on, setuptools
+  re-adds every file in the sdist manifest to the wheel as *package data*,
+  which put the whole payload back. Verified end-to-end — the extracted sdist
+  runs its own suite in a clean virtualenv, `braintrace._testing` included.
+- **The "every public API is typed" mypy gate now actually covers them.** Twelve
+  modules owning names in `braintrace.__all__` were missing from the
+  `disallow_untyped_defs` list — including `_algorithm/sequence.py`, which owns
+  `etrace_grad` / `etrace_evolve`. They are now listed and annotated. Three dead
+  entries naming the removed `otpe` / `ottt` / `osttp` modules were deleted;
+  mypy ignores unmatched module patterns silently, so they never errored.
+- **`braintrace._op` honours its facade claim.** The module docstring promised
+  that every name exported from the underlying registries is available on the
+  package, but seven were not — which is why `_algorithm/param_dim_vjp.py` had
+  to reach past the facade into `braintrace._op._registries`. All seven
+  (`BATCHED_COUNTERPARTS`, `register_batched_counterpart`,
+  `get_batched_counterpart`, `ETP_RULES_INSTANT_DRTRL`, `ETP_RULES_SOLVE_DRTRL`,
+  `get_instant_drtrl_rule`, `get_solve_drtrl_rule`) are now re-exported.
+- **`braintrace._compiler` declares an `__all__`**, the last package facade in
+  the tree without one.
+- **Public surfaces no longer recommend `jax.random`.** The
+  `random_feedback_key` error message, the `FixedRandomFeedback` doctest and
+  `EProp`'s parameter documentation all told users to build keys with
+  `jax.random.PRNGKey`, against the project's own rule to use
+  `brainstate.random`. They now point at `brainstate.random.split_key()`.
+- **A bad algorithm name gives a clean error.** `braintrace.compile(model,
+  'nosuch')` raised its actionable `ValueError` chained onto the internal
+  `KeyError`, burying the message under "During handling of the above
+  exception". The chain is now suppressed.
+- **`compile(..., vmap=True)` validates `example_inputs`.** A scalar or
+  wrong-batch leaf previously produced a raw `TypeError` from `a[0]` naming
+  neither `compile` nor the offending leaf.
 
 - **`sparse_matmul` migrates off brainevent's deprecated trace protocol.**
   `braintrace._op.sparse` now calls `brainevent.DataRepresentation.dt2t` /
@@ -113,8 +280,8 @@
   `braintrace._compatible_imports.wrap_init`), matching the pattern already
   used elsewhere in the `brainstate`/`saiunit` stack. No behavior change.
 - **Fixed stale API references in the documentation notebooks.** Three
-  notebooks (`docs/tutorials/etp_primitives.ipynb`,
-  `docs/tutorials/customizing_primitive_transforms.ipynb`,
+  notebooks (`docs/advanced/etp_primitives.ipynb`,
+  `docs/advanced/customizing_primitive_transforms.ipynb`,
   `docs/advanced/limitations.ipynb`) still referenced braintrace's own
   pre-#130 `yw_to_w` / `ETP_RULES_YW_TO_W` rule naming instead of the current
   `dt_to_t` / `ETP_RULES_DT_TO_T`; two executable cells in
@@ -123,6 +290,34 @@
   also still called `element_wise(weight, fn=...)`, predating that
   parameter's rename to `weight_fn`. All affected notebooks were re-executed
   end-to-end to confirm they now run cleanly.
+
+### Documentation
+
+- **Tutorials reorganised into learning paths.** The flat tutorial list became
+  four hubs — *Online training*, *Algorithm tutorials*, *Foundations*,
+  *Compiler & runtime* — with the deeper material moved from
+  `docs/tutorials/` to a new `docs/advanced/` section. The hierarchy is native
+  RST rather than synthesised.
+- **The Algorithms API reference is complete**, covering every public algorithm
+  including the five added in this release.
+- **Every docstring is NumPy-style.** The remaining Google-style docstrings were
+  converted, so the whole public surface renders consistently.
+- **`ScaledWSLinear` is documented.** It was exported from `braintrace.nn` but
+  appeared on no API page, which `nitpicky = True` would eventually flag.
+- **`README.md` now opens with a runnable quickstart** — `compile` plus
+  `etrace_grad` — where it previously carried no code at all.
+- **The docs build is warning-free again.** The convolution layers now close the
+  bullet lists they inherit from the upstream `brainstate` docstrings
+  structurally, rather than by matching one exact sentence of upstream wording
+  that had since changed; `docs/conf.py` gained the `brainstate.random.split_key`
+  nitpick exemption the ecosystem convention already used for `brainstate`
+  classes.
+- **The audit's deferred findings are written down.** Ten engineering-hygiene
+  items that this release deliberately did not fix — from the unchecked
+  hidden↔gradient correspondence to the unbounded cond fixpoint — are recorded
+  in `docs/specs/2026-08-07-deferred-engineering-backlog.md`, kept separate from
+  the learning-rule correctness backlog in
+  `docs/specs/2026-07-25-known-limitations.md`.
 
 
 ## Version 0.2.4

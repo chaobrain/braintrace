@@ -311,7 +311,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 "learning_signal='random_feedback' needs a "
                 '`random_feedback_key` to draw the fixed projection matrices '
                 'from, so the run is reproducible. Pass one, e.g. '
-                'random_feedback_key=jax.random.PRNGKey(0).'
+                'random_feedback_key=brainstate.random.split_key().'
             )
         if (config.learning_signal == 'modulatory'
                 and vjp_method != 'single-step'):

@@ -2,7 +2,7 @@
 
 Status: spec, revised after external review
 Baseline: commit `8b7cdc7`
-Target release: 0.3.0
+Target release: 0.2.5
 
 ## Goal
 
@@ -873,7 +873,7 @@ def f_train(inputs, targets):
   `ETraceVmap`.
 - `docs/specs/2026-07-25-known-limitations.md` F-30 and F-35 each gain a sentence
   noting the driver as a new route to the condition.
-- `examples/tests/test_smoke.py`, `test_compile_modes.py` and the per-family
+- `examples/tests/smoke_test.py`, `compile_modes_test.py` and the per-family
   smoke suites must keep passing. The migration is behaviour-preserving except
   for the gradient *scale*, which is the one thing to watch: a site that
   previously summed keeps its tuned learning rate by passing `reduction='sum'`,

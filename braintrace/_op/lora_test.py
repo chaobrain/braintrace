@@ -546,7 +546,7 @@ class TestLoRAOnlineLearningExact:
 
     def _assert_exact(self, **factory_kwargs):
         import brainstate
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients,
             online_param_gradients_singlestep_naive,
         )

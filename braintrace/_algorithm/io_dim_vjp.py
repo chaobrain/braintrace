@@ -40,7 +40,6 @@ from braintrace._op import (
     ETP_RULES_XY_TO_DW,
     ETP_RULES_INIT_PP,
     get_pp_x_repr,
-    is_batched_primitive,
 )
 from braintrace._misc import (
     check_dict_keys,
@@ -279,7 +278,6 @@ def _init_IO_dim_state(
             etrace_xs[x_key] = EligibilityTrace(u.math.zeros(shape, dtype))
 
     y_shape = relation.y_var.aval.shape
-    y_dtype = relation.y_var.aval.dtype
     group: HiddenGroup
     for group in relation.hidden_groups:
         # Exact match required, or (elemwise only) allow trailing-dim match
@@ -595,7 +593,6 @@ def _solve_IO_dim_weight_gradients(
 
         xy_to_dw_rule = ETP_RULES_XY_TO_DW[relation.primitive]
         eqn_params = relation.eqn_params
-        batched = is_batched_primitive(relation.primitive)
 
         def _call(df_: Any, w_: Any, _rule: Any = xy_to_dw_rule, _params: Any = eqn_params, _x: Any = x) -> Any:
             return _rule(_x, df_, w_, **_params)

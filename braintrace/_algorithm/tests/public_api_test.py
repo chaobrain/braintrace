@@ -32,7 +32,7 @@ class TestPublicAPI(unittest.TestCase):
             assert name in braintrace.__all__
 
     def test_removed_algorithms_are_gone(self):
-        """OTTT / OSTTP / OTPE were removed in 0.3.0 (see docs/specs roadmap).
+        """OTTT / OSTTP / OTPE were removed in 0.2.5 (see docs/specs roadmap).
 
         They whitelisted dense-matmul primitives and were not model-agnostic, so
         they no longer belong in a general framework. Their coordinates remain

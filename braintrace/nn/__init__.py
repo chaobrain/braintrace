@@ -33,7 +33,7 @@ The exported building blocks fall into four groups:
 - **Recurrent cells** — :class:`ValinaRNNCell`, :class:`GRUCell`,
   :class:`MGUCell`, :class:`LSTMCell`, :class:`URLSTMCell`,
   :class:`MinimalRNNCell`, :class:`MiniGRU`, :class:`MiniLSTM`,
-  :class:`LRUCell`.
+  :class:`LRUCell`, :class:`CFNCell`.
 
 Activation, normalisation and pooling layers are intentionally not
 re-implemented here; accessing them through ``braintrace.nn`` emits a
@@ -49,7 +49,10 @@ from ._conv import Conv1d, Conv2d, Conv3d
 from ._embedding import Embedding
 from ._linear import Linear, GroupedLinear, SignedWLinear, ScaledWSLinear, SparseLinear, LoRA
 from ._readout import LeakyRateReadout
-from ._rnn import ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell, MiniGRU, MiniLSTM, LRUCell
+from ._rnn import (
+    ValinaRNNCell, GRUCell, MGUCell, LSTMCell, URLSTMCell, MinimalRNNCell,
+    MiniGRU, MiniLSTM, LRUCell, CFNCell,
+)
 
 __all__ = [
     # conv
@@ -62,13 +65,40 @@ __all__ = [
     'LeakyRateReadout',
     # rnn
     'ValinaRNNCell', 'GRUCell', 'MGUCell', 'LSTMCell', 'URLSTMCell',
-    'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell',
+    'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell', 'CFNCell',
 ]
+
+# Names that ``__getattr__`` forwards, with a DeprecationWarning, to the
+# package that now owns them. Kept as module-level constants (rather than
+# literals inside ``__getattr__``) so ``__dir__`` can advertise them: without
+# that, none of these ~50 names is tab-completable even though every one of
+# them still resolves. Mirrors ``braintrace/__init__.py``.
+_DEPRECATED_TO_BRAINPY_STATE = (
+    'IF', 'LIF', 'ALIF', 'Expon', 'Alpha', 'DualExpon', 'STP', 'STD',
+)
+
+_DEPRECATED_TO_BRAINSTATE_NN = (
+    'ReLU', 'RReLU', 'Hardtanh', 'ReLU6', 'Sigmoid', 'Hardsigmoid',
+    'Tanh', 'SiLU', 'Mish', 'Hardswish', 'ELU', 'CELU', 'SELU', 'GLU', 'GELU',
+    'Hardshrink', 'LeakyReLU', 'LogSigmoid', 'Softplus', 'Softshrink', 'PReLU',
+    'Softsign', 'Tanhshrink', 'Softmin', 'Softmax', 'Softmax2d', 'LogSoftmax',
+    'Dropout', 'Dropout1d', 'Dropout2d', 'Dropout3d',
+    'Identity', 'SpikeBitwise',
+
+    'Flatten', 'Unflatten',
+    'AvgPool1d', 'AvgPool2d', 'AvgPool3d',
+    'MaxPool1d', 'MaxPool2d', 'MaxPool3d',
+    'AdaptiveAvgPool1d', 'AdaptiveAvgPool2d', 'AdaptiveAvgPool3d',
+    'AdaptiveMaxPool1d', 'AdaptiveMaxPool2d', 'AdaptiveMaxPool3d',
+
+    'BatchNorm0d', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
+    'LayerNorm', 'RMSNorm', 'GroupNorm',
+)
 
 
 def __getattr__(name: str) -> Any:
     import warnings
-    if name in ['IF', 'LIF', 'ALIF', 'Expon', 'Alpha', 'DualExpon', 'STP', 'STD']:
+    if name in _DEPRECATED_TO_BRAINPY_STATE:
         warnings.warn(
             f'braintrace.nn.{name} is deprecated. Use brainpy.state.{name} instead.',
             DeprecationWarning,
@@ -77,23 +107,7 @@ def __getattr__(name: str) -> Any:
         import brainpy.state
         return getattr(brainpy.state, name)
 
-    if name in [
-        'ReLU', 'RReLU', 'Hardtanh', 'ReLU6', 'Sigmoid', 'Hardsigmoid',
-        'Tanh', 'SiLU', 'Mish', 'Hardswish', 'ELU', 'CELU', 'SELU', 'GLU', 'GELU',
-        'Hardshrink', 'LeakyReLU', 'LogSigmoid', 'Softplus', 'Softshrink', 'PReLU',
-        'Softsign', 'Tanhshrink', 'Softmin', 'Softmax', 'Softmax2d', 'LogSoftmax',
-        'Dropout', 'Dropout1d', 'Dropout2d', 'Dropout3d',
-        'Identity', 'SpikeBitwise',
-
-        'Flatten', 'Unflatten',
-        'AvgPool1d', 'AvgPool2d', 'AvgPool3d',
-        'MaxPool1d', 'MaxPool2d', 'MaxPool3d',
-        'AdaptiveAvgPool1d', 'AdaptiveAvgPool2d', 'AdaptiveAvgPool3d',
-        'AdaptiveMaxPool1d', 'AdaptiveMaxPool2d', 'AdaptiveMaxPool3d',
-
-        'BatchNorm0d', 'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d',
-        'LayerNorm', 'RMSNorm', 'GroupNorm',
-    ]:
+    if name in _DEPRECATED_TO_BRAINSTATE_NN:
         warnings.warn(
             f'braintrace.nn.{name} is deprecated. Use brainstate.nn.{name} instead.',
             DeprecationWarning,
@@ -103,3 +117,11 @@ def __getattr__(name: str) -> Any:
         return getattr(brainstate.nn, name)
 
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(
+        list(__all__)
+        + list(_DEPRECATED_TO_BRAINPY_STATE)
+        + list(_DEPRECATED_TO_BRAINSTATE_NN)
+    )

@@ -129,7 +129,7 @@ def _sequence_length(sequences: tuple) -> int:
     return length
 
 
-def _check_mask(mask: Any, length: int):
+def _check_mask(mask: Any, length: int) -> jax.Array:
     """Validate ``mask`` and return it as a ``(T,)`` array of weights."""
     if mask is None:
         return jnp.ones((length,), dtype=jnp.float32)
@@ -142,7 +142,7 @@ def _check_mask(mask: Any, length: int):
     return mask
 
 
-def _to_windows(tree, n_windows: int, chunk_size: int):
+def _to_windows(tree: Any, n_windows: int, chunk_size: int) -> Any:
     """Reshape every leaf ``(T, ...) -> (n_windows, chunk_size, ...)``."""
     return jax.tree.map(
         lambda a: a.reshape((n_windows, chunk_size) + jnp.shape(a)[1:]), tree
@@ -178,7 +178,7 @@ class SequenceDriverMixin:
         return self  # type: ignore[return-value]
 
     @property
-    def _seq_param_states(self):
+    def _seq_param_states(self) -> Any:
         raise NotImplementedError
 
     @property
@@ -238,7 +238,7 @@ class SequenceDriverMixin:
         loss_output: str = 'per_step',
         has_aux: bool = False,
         return_value: bool = False,
-    ):
+    ) -> Any:
         r"""Accumulate online gradients over a sequence.
 
         Parameters
@@ -392,7 +392,7 @@ class SequenceDriverMixin:
         else:
             xs = (sequences, mask)
 
-        def objective(slices, weight):
+        def objective(slices: Any, weight: Any) -> Any:
             result = step_fn(*slices)
             if has_aux:
                 loss, aux = result
@@ -417,7 +417,7 @@ class SequenceDriverMixin:
 
         grad_fn = brainstate.transform.grad(objective, weights, has_aux=True)
 
-        def body(carry, xs_t):
+        def body(carry: Any, xs_t: Any) -> Any:
             slices, weight = xs_t
             grads, (loss, aux) = grad_fn(slices, weight)
             return jax.tree.map(jnp.add, carry, grads), (loss, aux)
@@ -459,7 +459,7 @@ class SequenceDriverMixin:
         step_fn: Optional[Callable] = None,
         chunk_size: Optional[int] = None,
         return_outputs: bool = False,
-    ):
+    ) -> Any:
         r"""Drive the model and the eligibility trace forward, computing no gradient.
 
         Hidden states and eligibility traces advance exactly as they do inside
@@ -524,7 +524,7 @@ class SequenceDriverMixin:
 
         call = self._seq_call
 
-        def body(*slices):
+        def body(*slices: Any) -> Any:
             if step_fn is None:
                 if windowed:
                     slices = tuple(MultiStepData(s) for s in slices)
@@ -563,8 +563,12 @@ class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
     _seq_is_vmapped = True
 
     @property
-    def _seq_param_states(self):
-        return self.module.param_states
+    def _seq_param_states(self) -> Any:
+        # ``Vmap.module`` is declared as ``brainstate.nn.Module``, but the
+        # module an ETraceVmap wraps is always an ETraceAlgorithm, which is
+        # what carries ``param_states``. ``compile(..., vmap=True)`` is the only
+        # constructor, and it always passes a learner.
+        return self.module.param_states  # type: ignore[attr-defined]
 
     @property
     def _seq_vjp_method(self) -> Optional[str]:

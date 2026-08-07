@@ -36,8 +36,9 @@ import pytest
 import brainunit as u
 
 import braintrace
-from braintrace._algorithm import EligibilityTrace, oracle
-from braintrace._algorithm import oracle_models as om
+from braintrace._algorithm import EligibilityTrace
+from braintrace._testing import oracle
+from braintrace._testing import oracle_models as om
 from braintrace._algorithm.d_rtrl import D_RTRL
 from braintrace._algorithm.param_dim_vjp import (
     ParamDimVjpAlgorithm,

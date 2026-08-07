@@ -43,13 +43,13 @@ resolution, never that a test stopped being run.
 | ID | Claim | Status | Pinned by |
 |---|---|---|---|
 | F-01 / F-04 | multi-state (`num_state >= 2`) HiddenGroups mishandled | resolved | `tests/snn_model_correctness_test.py::test_multi_state_hidden_groups_are_discovered` and `::test_d_rtrl_matches_bptt_on_snn_models` (num_state 1–5) |
-| F-07 / F-08 / F-09 | OTTT / OTPE approximation bias | dead | removed with those algorithms in 0.3.0 |
+| F-07 / F-08 / F-09 | OTTT / OTPE approximation bias | dead | removed with those algorithms in 0.2.5 |
 | F-17 | implementation facts drifted from the instruction file | resolved | `braintrace/__init___test.py` |
-| F-19 / F-20 | OTTT / OSTTP exactness gaps | dead | removed with those algorithms in 0.3.0 |
+| F-19 / F-20 | OTTT / OSTTP exactness gaps | dead | removed with those algorithms in 0.2.5 |
 | F-21 | rank / decay / random-feedback configs are exact on rate models | misattributed — the cause is the oracle path (F-23), not the model | `tests/approx_correctness_test.py::test_rank_decay_random_approximations_are_exact_on_rate_model_F21`, docstring corrected |
 | F-22 | exposing approximation bias needs an SNN multi-population zoo | **retired** — premise false; a multi-population SNN model (num_state 5, 3 relations) is bitwise-exact on the same path | replaced by `tests/approx_correctness_test.py::test_approximations_are_measurable_through_a_finite_window` and `tests/snn_model_correctness_test.py::test_approximation_is_measurable_on_snn_models` |
 | F-23 | the full-window multi-step oracle path is blind to every learning-rule axis | active, **by design** — documented, not a defect | `tests/axis_discrimination_test.py`, both directions; warned in `online_param_gradients`' docstring |
-| F-24 | `_etrace_model_test.py` factories are non-deterministic (unseeded global RNG) | active in the layer classes; neutralised for oracle use | `oracle_models_test.py::test_snn_spec_construction_is_deterministic` |
+| F-24 | `braintrace/_testing/models.py` factories are non-deterministic (unseeded global RNG) | active in the layer classes; neutralised for oracle use | `oracle_models_test.py::test_snn_spec_construction_is_deterministic` |
 | F-25 | SNN models are silent at unit input scale, so comparisons are vacuous | active as a property; guarded | `oracle_models_test.py::test_snn_spec_is_live`, `::test_underdriven_input_scale_is_dead`, `::test_overdriven_input_scale_is_also_dead_while_still_spiking`, and `assert_model_is_live` |
 | F-26 | `pp_prop` / IODim raised on conv + trainable bias | resolved | `oracle_test.py::test_pp_prop_conv_bias_matches_bptt`; `conv_nwc_bias` restored to both pp_prop family parametrizations |
 | F-27 | *(never instantiated)* — reserved during planning for "an SNN spec that cannot be made live". No such spec exists: every one of the nine is live at a recorded input scale. The phenomenon that prompted the reservation is the bounded-above liveness window, recorded under F-25. | n/a | — |
@@ -268,4 +268,4 @@ Stated so the list is not read as exhaustive:
   `EProp(feedback='random')`. It is documented, not lifted, and no test
   exercises a separate readout layer of a different width.
 - **F-24 in the layer classes.** The oracle specs re-seed at construction; the
-  `_etrace_model_test.py` constructors still draw from the global RNG.
+  `braintrace/_testing/models.py` constructors still draw from the global RNG.

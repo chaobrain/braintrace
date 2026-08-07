@@ -8,7 +8,7 @@ import pytest
 
 import braintrace
 from braintrace._compiler import CompilationReport
-from braintrace._algorithm.oracle_models import tanh_rnn
+from braintrace._testing.oracle_models import tanh_rnn
 
 
 def _gru_graph():

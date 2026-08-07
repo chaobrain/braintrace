@@ -148,7 +148,8 @@ class FixedRandomFeedback:
     n_layer : int
         Number of layer dimensions (the column count of ``B``).
     key : jax.Array
-        A JAX PRNG key used to sample the feedback matrix.
+        A PRNG key used to sample the feedback matrix. Obtain one from
+        :func:`brainstate.random.split_key`.
     init_scale : float, optional
         Standard-deviation scaling applied to the sampled normal entries. Default is ``0.1``.
 
@@ -166,8 +167,11 @@ class FixedRandomFeedback:
     .. code-block:: python
 
         >>> import jax
+        >>> import brainstate
         >>> import braintrace
-        >>> fb = braintrace.FixedRandomFeedback(2, 3, jax.random.PRNGKey(0))
+        >>>
+        >>> brainstate.random.seed(0)
+        >>> fb = braintrace.FixedRandomFeedback(2, 3, brainstate.random.split_key())
         >>> print(fb.B.shape)
         (2, 3)
         >>> y = jax.numpy.ones(2)

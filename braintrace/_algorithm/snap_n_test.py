@@ -21,7 +21,7 @@ axis-decomposition roadmap:
 * **Finite window only.** The full-window multi-step VJP path returns BPTT for
   every algorithm at every coordinate (finding F-23), so a criterion phrased
   there is vacuous. Everything below goes through
-  :func:`~braintrace._algorithm.oracle.chunked_online_param_gradients` with
+  :func:`~braintrace._testing.oracle.chunked_online_param_gradients` with
   ``chunk_size < T``.
 * **Structural pins.** A gradient criterion is read against the compiled
   neighbourhood width ``K``, the widened state axis ``M = K * S``, the
@@ -40,9 +40,9 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm import oracle_models as om
+from braintrace._testing import oracle_models as om
 from braintrace._algorithm.axes import ETraceConfig
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_gradients_differ,
     assert_model_is_live,
     assert_param_gradients_close,

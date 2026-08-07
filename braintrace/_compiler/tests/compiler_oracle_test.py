@@ -47,7 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from braintrace import compile_etrace_graph
-from braintrace._compiler.scenario_catalog import (
+from braintrace._testing.scenario_catalog import (
     ElemwiseOnlyRNN,
     PartialPathRNN,
     UnbatchedMvRNN,

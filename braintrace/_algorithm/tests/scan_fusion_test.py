@@ -37,11 +37,11 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_param_gradients_close,
     bptt_param_gradients,
 )
-from braintrace._algorithm.oracle_models import tanh_rnn
+from braintrace._testing.oracle_models import tanh_rnn
 
 
 def _inputs(T, n_in, seed=42):

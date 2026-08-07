@@ -24,11 +24,11 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_param_gradients_close,
     bptt_param_gradients,
 )
-from braintrace._algorithm.oracle_models import (
+from braintrace._testing.oracle_models import (
     batched_tanh_rnn,
     tanh_rnn,
 )
@@ -171,7 +171,7 @@ def x64_enabled():
 
 
 def _f64_spec():
-    from braintrace._algorithm.oracle_models import ModelSpec
+    from braintrace._testing.oracle_models import ModelSpec
 
     def factory():
         class Net(brainstate.nn.Module):

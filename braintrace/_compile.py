@@ -112,7 +112,7 @@ def _resolve_algorithm(
             raise ValueError(
                 f'Unknown algorithm name {algorithm!r}. Valid names: {valid}. '
                 f'Or pass an ETraceAlgorithm subclass directly.'
-            )
+            ) from None
     raise TypeError(
         f'algorithm must be an ETraceAlgorithm subclass, a registered string '
         f'name, or an ETraceConfig, got {type(algorithm)}.'
@@ -325,7 +325,29 @@ def compile(
         # the eligibility-trace graph is built per-lane on an unbatched sample,
         # while hidden + trace states are created with the new per-sample axis.
         learner = cls(model, **options)
-        unbatched = jax.tree.map(lambda a: a[0], example_inputs)
+
+        # Every leaf must carry the batch axis so ``a[0]`` yields one sample.
+        # A scalar (or any 0-d / non-indexable) leaf is not subscriptable, and
+        # the raw ``TypeError`` from ``a[0]`` names neither ``compile`` nor the
+        # offending leaf -- so check first and say which leaf is wrong.
+        def _one_sample(a: Any) -> Any:
+            aval = jax.numpy.shape(a)
+            if len(aval) == 0:
+                raise ValueError(
+                    f'compile(..., vmap=True) expects every leaf of example_inputs '
+                    f'to carry the batch axis at axis 0, but found a scalar leaf '
+                    f'of type {type(a).__name__}. Give it a leading batch axis of '
+                    f'size batch_size={batch_size}, or pass vmap=False.'
+                )
+            if aval[0] != batch_size:
+                raise ValueError(
+                    f'compile(..., vmap=True) expects every leaf of example_inputs '
+                    f'to have batch_size={batch_size} at axis 0, but found a leaf '
+                    f'with shape {tuple(aval)}.'
+                )
+            return a[0]
+
+        unbatched = jax.tree.map(_one_sample, example_inputs)
 
         @brainstate.transform.vmap_new_states(state_tag='new', axis_size=batch_size)
         def _init() -> None:

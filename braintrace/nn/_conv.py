@@ -27,6 +27,44 @@ from braintrace._typing import ArrayLike
 __all__ = ['Conv1d', 'Conv2d', 'Conv3d']
 
 
+def _adapt_doc(doc: str | None) -> str:
+    """Retarget an upstream ``brainstate`` docstring at ``braintrace``.
+
+    Besides the name substitution, this closes bullet lists that the upstream
+    text leaves open. Several ``brainstate.nn`` convolution docstrings follow a
+    bullet item directly with a same- or lesser-indented paragraph (``Default:
+    1.``) or with the next NumPy-doc parameter, which docutils reports as
+    ``Bullet list ends without a blank line; unexpected unindent`` under the
+    ``nitpicky`` docs build. A blank line is inserted after the final item of
+    each such list. Doing it structurally rather than by matching the exact
+    upstream wording keeps the fix working when that wording changes.
+
+    Parameters
+    ----------
+    doc : str or None
+        The upstream docstring, or ``None`` when the class carries none.
+
+    Returns
+    -------
+    str
+        The adapted docstring; the empty string when ``doc`` is ``None``.
+    """
+    lines = (doc or '').replace('brainstate', 'braintrace').split('\n')
+    out: list[str] = []
+    for line in lines:
+        prev = out[-1] if out else ''
+        prev_is_item = prev.lstrip().startswith('- ')
+        if prev_is_item and line.strip():
+            prev_indent = len(prev) - len(prev.lstrip())
+            indent = len(line) - len(line.lstrip())
+            # A deeper indent continues the item; another ``- `` continues the
+            # list. Anything else closes it and needs a separating blank line.
+            if indent <= prev_indent and not line.lstrip().startswith('- '):
+                out.append('')
+        out.append(line)
+    return '\n'.join(out)
+
+
 def _etp_conv_op(self: Any, x: ArrayLike, params: dict[str, Any]) -> ArrayLike:
     """Route a convolution through the ETP ``conv`` primitive.
 
@@ -65,26 +103,17 @@ def _etp_conv_op(self: Any, x: ArrayLike, params: dict[str, Any]) -> ArrayLike:
 
 class Conv1d(brainstate.nn.Conv1d):
     __module__ = 'braintrace.nn'
-    __doc__ = (brainstate.nn.Conv1d.__doc__ or '').replace('brainstate', 'braintrace')
+    __doc__ = _adapt_doc(brainstate.nn.Conv1d.__doc__)
     _conv_op = _etp_conv_op
 
 
 class Conv2d(brainstate.nn.Conv2d):
     __module__ = 'braintrace.nn'
-    __doc__ = (brainstate.nn.Conv2d.__doc__ or '').replace('brainstate', 'braintrace')
+    __doc__ = _adapt_doc(brainstate.nn.Conv2d.__doc__)
     _conv_op = _etp_conv_op
 
 
 class Conv3d(brainstate.nn.Conv3d):
     __module__ = 'braintrace.nn'
-    __doc__ = (
-        (brainstate.nn.Conv3d.__doc__ or '')
-        .replace('brainstate', 'braintrace')
-        .replace(
-            '- A tuple of three integers: (stride_h, stride_w, stride_d)\n'
-            '        Default: 1.',
-            '- A tuple of three integers: (stride_h, stride_w, stride_d)\n\n'
-            '        Default: 1.',
-        )
-    )
+    __doc__ = _adapt_doc(brainstate.nn.Conv3d.__doc__)
     _conv_op = _etp_conv_op

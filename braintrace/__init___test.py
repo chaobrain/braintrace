@@ -33,7 +33,7 @@ import pytest
 
 import braintrace
 import braintrace._legacy as legacy
-from braintrace._algorithm.oracle_models import tanh_rnn
+from braintrace._testing.oracle_models import tanh_rnn
 
 
 # ===========================================================================
@@ -235,8 +235,20 @@ def test_iodim_lives_in_io_dim_vjp_module():
 def test_expected_rnn_cells_exist():
     import braintrace.nn as nn
     for cell in ('ValinaRNNCell', 'GRUCell', 'MGUCell', 'LSTMCell', 'URLSTMCell',
-                 'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell'):
+                 'MinimalRNNCell', 'MiniGRU', 'MiniLSTM', 'LRUCell', 'CFNCell'):
         assert hasattr(nn, cell), f"missing cell: {cell}"
+        assert cell in nn.__all__, f"cell not in __all__: {cell}"
+
+
+def test_nn_dir_advertises_deprecated_forwards():
+    # ``braintrace.nn.__getattr__`` forwards ~50 names to brainstate.nn /
+    # brainpy.state. Without ``__dir__`` none of them is discoverable, so the
+    # forwarding is invisible to tab-completion and to ``dir()``-based tooling.
+    import braintrace.nn as nn
+    names = dir(nn)
+    assert 'ReLU' in names  # forwarded to brainstate.nn
+    assert 'LIF' in names  # forwarded to brainpy.state
+    assert set(nn.__all__).issubset(names)
 
 
 # ===========================================================================

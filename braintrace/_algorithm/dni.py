@@ -31,7 +31,7 @@ and :func:`train_synthetic_gradient` for the recipe that fits ``M``.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional
 
 import brainstate
 import brainunit as u
@@ -405,11 +405,11 @@ class DNI(ParamDimVjpAlgorithm):
 
 def train_synthetic_gradient(
     learner: DNI,
-    inputs,
+    inputs: Any,
     *,
     chunk_size: int = 1,
     loss_fn: Optional[Callable] = None,
-    optimizer=None,
+    optimizer: Any = None,
     lr: float = 1e-2,
     epochs: int = 1,
     reset: bool = True,
@@ -545,7 +545,7 @@ def train_synthetic_gradient(
         )
     n_windows = n_steps // chunk_size
 
-    def _fit_one(group_hiddens: dict, group_target: dict):
+    def _fit_one(group_hiddens: dict, group_target: dict) -> Any:
         """One regression step on a single (state, target) pair.
 
         Returns the *traced* pre-update error, not a Python float: this runs
@@ -553,7 +553,7 @@ def train_synthetic_gradient(
         raise. The caller converts once, after the loop.
         """
 
-        def regression(values):
+        def regression(values: Any) -> Any:
             pred = synthesizer.apply(values, group_hiddens)
             return sum(jnp.mean((pred[gi] - group_target[gi]) ** 2)
                        for gi in group_hiddens)
@@ -573,7 +573,7 @@ def train_synthetic_gradient(
         return {g.index: g.concat_hidden(
             [u.get_mantissa(tree[p]) for p in g.hidden_paths]) for g in groups}
 
-    def _one_window(window):
+    def _one_window(window: Any) -> Any:
         """Drive one window, then fit the synthesiser at its entry state."""
         # The entry hiddens are what the synthesiser sees; snapshot before
         # the window advances them.
@@ -630,7 +630,7 @@ def train_synthetic_gradient(
     return history
 
 
-def _infer_batch_size(hidden_states: dict, groups) -> int:
+def _infer_batch_size(hidden_states: dict, groups: Any) -> int:
     """The learner's batch size, from a hidden state rather than assumed.
 
     Re-initialising at a hard-coded ``batch_size=1`` either raises a shape error
@@ -660,7 +660,7 @@ def _infer_batch_size(hidden_states: dict, groups) -> int:
     return 1
 
 
-def _as_window(seq, chunk_size: int):
+def _as_window(seq: Any, chunk_size: int) -> Any:
     """Wrap a window for the learner, matching how it will be driven."""
     import braintrace
     if chunk_size == 1:

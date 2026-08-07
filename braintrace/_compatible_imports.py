@@ -34,7 +34,7 @@ __all__ = [
     'wrap_init',
 ]
 
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal, wrap_init
 
@@ -62,7 +62,7 @@ except ImportError:  # future JAX relocation: recover the primitive by tracing
     stop_gradient_p = _probe_eqns[0].primitive
 
 
-def new_var(suffix, aval):
+def new_var(suffix: Any, aval: Any) -> Var:
     if jax.__version_info__ < (0, 6, 2):
         return Var(suffix, aval)
     else:

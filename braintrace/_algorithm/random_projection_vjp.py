@@ -21,7 +21,7 @@ description; this module documents the representation and the update.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import brainstate
 import brainunit as u
@@ -565,7 +565,7 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
     # the step
     # ------------------------------------------------------------------ #
 
-    def _make_scan_fn(self, weight_vals: Dict[Path, PyTree]):
+    def _make_scan_fn(self, weight_vals: Dict[Path, PyTree]) -> Callable:
         """Build the per-step rank-1 update (the scan body)."""
 
         def scan_fn(carry: Dict[str, Any], jacobians: Any) -> Tuple[Dict[str, Any], None]:
@@ -631,7 +631,7 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
 
         return scan_fn
 
-    def _make_etrace_stepper(self, weight_vals: Dict[Path, PyTree]):
+    def _make_etrace_stepper(self, weight_vals: Dict[Path, PyTree]) -> Callable:
         """Always the fused per-step stepper.
 
         Never ``None``: the stack-then-scan path would hold the full

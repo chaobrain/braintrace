@@ -111,7 +111,7 @@ class TestFullJacobianFlag(unittest.TestCase):
     """
 
     def _executor(self, **kwargs):
-        from braintrace._algorithm import oracle_models as om
+        from braintrace._testing import oracle_models as om
         from braintrace._algorithm.vjp_graph_executor import ETraceVjpGraphExecutor
         spec = om.stacked_tanh_rnn(n_in=4, n_rec=4)
         model = spec.factory()
@@ -144,7 +144,7 @@ class TestFullJacobianFlag(unittest.TestCase):
 
     def test_the_random_projection_engine_turns_the_flag_on(self):
         # The wiring that matters: the coordinate, not the caller, selects it.
-        from braintrace._algorithm import oracle_models as om
+        from braintrace._testing import oracle_models as om
         spec = om.tanh_rnn(n_in=3, n_rec=4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)

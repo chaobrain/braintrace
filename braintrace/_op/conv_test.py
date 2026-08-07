@@ -785,7 +785,7 @@ class TestConvOnlineLearningExact:
         return float(jnp.abs(a - b).max() / denom)
 
     def _assert_exact(self, factory, xs):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients,
             online_param_gradients_singlestep_naive,
         )

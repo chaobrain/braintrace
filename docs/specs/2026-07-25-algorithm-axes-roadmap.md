@@ -2,7 +2,7 @@
 
 Status: design, awaiting review
 Baseline: commit `928219b` (OTTT / OSTTP / OTPE removed)
-Target release: 0.3.0 — every phase below lands in it
+Target release: 0.2.5 — every phase below lands in it
 
 ## Why
 
@@ -247,7 +247,7 @@ argument was wrong, and the class stays.
 
 ## Phases
 
-All land in 0.3.0. Ordering reflects dependencies, not separate releases.
+All land in 0.2.5. Ordering reflects dependencies, not separate releases.
 
 ### P0 — Removal — **done** (`928219b`)
 
@@ -558,7 +558,7 @@ statistical class.
 5. **`modulatory` recreates OSTTP's plumbing mistake** (P4). Mitigation: the
    injection path must not bind to HiddenGroup count or readout shape; the
    mismatched-dimension test above is the guard.
-6. **0.3.0 carries the whole roadmap.** All breaking changes and all new
+6. **0.2.5 carries the whole roadmap.** All breaking changes and all new
    algorithm families ship together. Mitigation: phases merge independently
    behind the axis interfaces, and P5 runs on every merge so regressions surface
    per phase rather than at release.

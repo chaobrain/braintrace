@@ -46,12 +46,12 @@ from hypothesis import HealthCheck, given, settings, strategies as st
 
 import brainstate
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_param_gradients_close,
     bptt_param_gradients,
     online_param_gradients,
 )
-from braintrace._algorithm.oracle_models import (
+from braintrace._testing.oracle_models import (
     batched_tanh_rnn,
     stacked_tanh_rnn,
     tanh_rnn,

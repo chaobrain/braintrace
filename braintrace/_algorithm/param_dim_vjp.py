@@ -39,15 +39,12 @@ from braintrace._op import (
     ETP_RULES_INIT_DRTRL,
     is_batched_primitive,
     get_fast_path_rules,
-)
-from braintrace._op._registries import (
     get_instant_drtrl_rule,
     get_solve_drtrl_rule,
 )
 from braintrace._misc import etrace_df_key, etrace_x_key, suffix_products
 from braintrace._typing import (
     PyTree,
-    WeightID,
     Path,
     DTypeLike,
     ETraceX_Key,

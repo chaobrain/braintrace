@@ -4,7 +4,7 @@ A tutorial-linear walk through `braintrace.pp_prop` (aliases `ES_D_RTRL` /
 `IODimVjpAlgorithm`) — an online eligibility-trace gradient estimator with
 input-output dimensional complexity for spiking neural networks. Each file
 is self-contained. Read them in order (01 → 14) to follow the companion
-tutorial at `docs/tutorials/pp_prop.md`.
+tutorial at `docs/tutorials/pp_prop.ipynb`.
 
 ## How to run
 
@@ -50,7 +50,7 @@ required for pp_prop), see `examples/drtrl/11-knob-fast-solve.py`.
 
 ## Tutorial
 
-See `docs/tutorials/pp_prop.md` for the long-form narrative.
+See `docs/tutorials/pp_prop.ipynb` for the long-form narrative.
 
 ## Tests
 

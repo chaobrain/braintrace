@@ -25,10 +25,10 @@ import pytest
 import brainunit as u
 
 import braintrace
-from braintrace._compiler import model4test as group_etrace_model
+from braintrace._testing import compiler_models as group_etrace_model
 from braintrace._compiler.hidden_group import find_hidden_groups_from_module
 from braintrace._compiler.hidden_group import group_merging
-from braintrace._etrace_model_test import (
+from braintrace._testing.models import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,
     ALIF_ExpCo_Dense_Layer,

@@ -133,6 +133,7 @@ nitpick_ignore_regex = [
     ),
     ("py:class", r"brainunit\.(?:Quantity|sparse\.SparseMatrix)"),
     ("py:class", r"jax\.Array"),
+    ("py:func", r"brainstate\.random\.split_key"),
     # Private implementation annotations expose these aliases, but BrainTrace
     # does not own public API pages for them.
     (

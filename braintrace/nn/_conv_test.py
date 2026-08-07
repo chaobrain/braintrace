@@ -821,3 +821,70 @@ class TestConvParameterLayout:
             b_init=None,
         )
         assert 'bias' not in conv.weight.value
+
+
+class TestAdaptDoc:
+    """Tests for the docstring adapter that retargets brainstate docs at braintrace."""
+
+    def test_none_doc_becomes_empty_string(self):
+        """A class with no upstream docstring yields '' rather than None."""
+        from braintrace.nn._conv import _adapt_doc
+        assert _adapt_doc(None) == ''
+
+    def test_package_name_is_retargeted(self):
+        """Occurrences of 'brainstate' are rewritten to 'braintrace'."""
+        from braintrace.nn._conv import _adapt_doc
+        assert _adapt_doc('See brainstate.nn.Conv3d.') == 'See braintrace.nn.Conv3d.'
+
+    def test_blank_line_inserted_on_unindent_after_bullet(self):
+        """A bullet list followed by a lesser-indented line gets a separating blank line."""
+        from braintrace.nn._conv import _adapt_doc
+        doc = (
+            'kernel_size : int\n'
+            '    Can be:\n'
+            '\n'
+            '    - An integer\n'
+            '    - A tuple of three integers\n'
+            'stride : int\n'
+        )
+        assert _adapt_doc(doc).endswith(
+            '    - A tuple of three integers\n'
+            '\n'
+            'stride : int\n'
+        )
+
+    def test_blank_line_inserted_before_same_indent_paragraph(self):
+        """A same-indent non-bullet paragraph after a bullet also closes the list."""
+        from braintrace.nn._conv import _adapt_doc
+        doc = (
+            '    - A tuple of three integers: (stride_h, stride_w, stride_d)\n'
+            '    Default: 1.\n'
+        )
+        assert _adapt_doc(doc) == (
+            '    - A tuple of three integers: (stride_h, stride_w, stride_d)\n'
+            '\n'
+            '    Default: 1.\n'
+        )
+
+    def test_list_continuation_lines_are_untouched(self):
+        """Deeper-indented continuations and following bullets do not gain blank lines."""
+        from braintrace.nn._conv import _adapt_doc
+        doc = (
+            '    - An integer\n'
+            '      wrapped onto a second line\n'
+            '    - Another item\n'
+        )
+        assert _adapt_doc(doc) == doc
+
+    def test_conv3d_doc_has_no_open_bullet_list(self):
+        """The shipped Conv3d docstring closes every bullet list it opens."""
+        from braintrace.nn._conv import _adapt_doc  # noqa: F401
+        lines = braintrace.nn.Conv3d.__doc__.split('\n')
+        for prev, cur in zip(lines, lines[1:]):
+            if not prev.lstrip().startswith('- ') or not cur.strip():
+                continue
+            prev_indent = len(prev) - len(prev.lstrip())
+            indent = len(cur) - len(cur.lstrip())
+            assert indent > prev_indent or cur.lstrip().startswith('- '), (
+                f'open bullet list before: {cur!r}'
+            )

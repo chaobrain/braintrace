@@ -26,7 +26,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_direction_aligned,
     assert_param_gradients_close,
     bptt_param_gradients,
@@ -34,7 +34,7 @@ from braintrace._algorithm.oracle import (
     online_param_gradients,
     online_param_gradients_singlestep_naive,
 )
-from braintrace._algorithm.oracle_models import ModelSpec, tanh_rnn
+from braintrace._testing.oracle_models import ModelSpec, tanh_rnn
 
 
 def _inputs(T, n_in, seed=42):
@@ -513,7 +513,7 @@ def test_flat_gradient_leaves_handles_nested_and_units():
     """Gradient trees are nested dicts and may carry units; the flattener must
     yield plain arrays keyed by a stable label."""
     import brainunit as u
-    from braintrace._algorithm.oracle import flat_gradient_leaves
+    from braintrace._testing.oracle import flat_gradient_leaves
     tree = {
         ('syn', 'comm', 'weight'): {'weight': jnp.ones((2, 3)) * u.mS,
                                     'bias': jnp.zeros((3,)) * u.mS},
@@ -528,7 +528,7 @@ def test_flat_gradient_leaves_handles_nested_and_units():
 
 
 def test_gradient_norm_and_relative_deviation():
-    from braintrace._algorithm.oracle import gradient_norm, relative_deviation
+    from braintrace._testing.oracle import gradient_norm, relative_deviation
     a = {('w',): jnp.array([3.0, 4.0])}
     b = {('w',): jnp.array([3.0, 4.0])}
     assert gradient_norm(a) == pytest.approx(5.0, abs=1e-6)
@@ -544,7 +544,7 @@ def test_gradient_norm_and_relative_deviation():
 
 
 def test_assert_model_is_live_passes_on_live_model():
-    from braintrace._algorithm.oracle import assert_model_is_live
+    from braintrace._testing.oracle import assert_model_is_live
     spec = tanh_rnn(n_in=3, n_rec=4, seed=0)
     xs = _inputs(4, 3)
     norm = assert_model_is_live(spec.factory, xs)
@@ -560,7 +560,7 @@ def test_assert_model_is_live_rejects_a_dead_model():
     ``stop_gradient`` severs the derivative, which is exactly the silent-SNN
     situation F-25 describes: a live forward pass with a zero gradient.
     """
-    from braintrace._algorithm.oracle import assert_model_is_live
+    from braintrace._testing.oracle import assert_model_is_live
 
     def factory():
         class Dead(brainstate.nn.Module):
@@ -581,7 +581,7 @@ def test_assert_model_is_live_rejects_a_dead_model():
 
 
 def test_assert_gradients_differ_flags_a_dead_knob():
-    from braintrace._algorithm.oracle import assert_gradients_differ
+    from braintrace._testing.oracle import assert_gradients_differ
     a = {('w',): jnp.array([1.0, 2.0])}
     assert_gradients_differ(a, {('w',): jnp.array([1.0, 5.0])})
     with pytest.raises(AssertionError, match='indistinguishable'):
@@ -608,7 +608,7 @@ def test_assert_param_gradients_close_supports_nested_unit_trees():
 # fixed 10% bias satisfies that at every N a test can afford. So the helpers are
 # tested here against estimators whose bias is known by construction.
 
-from braintrace._algorithm.oracle import (  # noqa: E402
+from braintrace._testing.oracle import (  # noqa: E402
     assert_unbiased_estimator,
     fixed_gradient_directions,
     project_gradient,
@@ -623,7 +623,7 @@ _B_KEYS = ['b|']
 
 
 def _flat_labels(tree):
-    from braintrace._algorithm.oracle import flat_gradient_leaves
+    from braintrace._testing.oracle import flat_gradient_leaves
     return set(flat_gradient_leaves(tree))
 
 
@@ -675,7 +675,7 @@ class TestFixedGradientDirections:
 
 
 def _flat_labels(tree):
-    from braintrace._algorithm.oracle import flat_gradient_leaves
+    from braintrace._testing.oracle import flat_gradient_leaves
     return set(flat_gradient_leaves(tree))
 
 
@@ -740,7 +740,7 @@ class TestFutureHiddenGradients:
     """The DNI target oracle: ``d(sum_{t >= b} L_t) / d h^b``."""
 
     def test_matches_a_hand_rolled_suffix_gradient(self):
-        from braintrace._algorithm.oracle import future_hidden_gradients
+        from braintrace._testing.oracle import future_hidden_gradients
         spec = tanh_rnn(n_in=3, n_rec=4)
         inputs = _inputs(5, 3)
         got = future_hidden_gradients(spec.factory, inputs, [1, 3])
@@ -775,7 +775,7 @@ class TestFutureHiddenGradients:
                 np.asarray(got[idx][('h',)]), np.asarray(want), atol=1e-5)
 
     def test_the_last_boundary_has_no_future_loss(self):
-        from braintrace._algorithm.oracle import future_hidden_gradients
+        from braintrace._testing.oracle import future_hidden_gradients
         spec = tanh_rnn(n_in=3, n_rec=4)
         inputs = _inputs(4, 3)
         got = future_hidden_gradients(spec.factory, inputs, [4])
@@ -786,7 +786,7 @@ class TestFutureHiddenGradients:
         # must be excluded here. If it were included, boundary b and boundary
         # b - 1 would both count L_{b-1} and every DNI target would be wrong by
         # one loss.
-        from braintrace._algorithm.oracle import future_hidden_gradients
+        from braintrace._testing.oracle import future_hidden_gradients
         spec = tanh_rnn(n_in=3, n_rec=4)
         inputs = _inputs(4, 3)
         g3, g4 = future_hidden_gradients(spec.factory, inputs, [3, 4])
@@ -796,7 +796,7 @@ class TestFutureHiddenGradients:
     def test_it_leaves_a_live_model_untouched(self):
         # It rolls the model forward internally; leaking that into the states
         # under test would corrupt every later assertion.
-        from braintrace._algorithm.oracle import future_hidden_gradients
+        from braintrace._testing.oracle import future_hidden_gradients
         spec = tanh_rnn(n_in=3, n_rec=4)
         inputs = _inputs(4, 3)
         model = spec.factory()

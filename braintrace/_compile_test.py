@@ -21,7 +21,7 @@ import pytest
 
 import braintrace
 from braintrace._compile import _resolve_algorithm
-from braintrace._algorithm.oracle_models import tanh_rnn
+from braintrace._testing.oracle_models import tanh_rnn
 
 
 # --- Task 1: algorithm resolution -------------------------------------------

@@ -24,7 +24,7 @@ def assign_dict_state_values(
     states: Mapping[Path, brainstate.State],
     state_values: Mapping[Path, PyTree],
     write: bool = True
-):
+) -> None:
     """
     Assign or restore values to a dictionary of states.
 
@@ -59,7 +59,7 @@ def assign_state_values_v2(
     states: Mapping[Any, brainstate.State],
     state_values: Mapping[Any, PyTree],
     write: bool = True
-):
+) -> None:
     """
     Assign or restore values to a dictionary of states.
 

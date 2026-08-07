@@ -310,7 +310,12 @@ class CFNCell(brainstate.nn.RNNCell):
         params: dict[str, Any] = dict(w_init=w_init, b_init=b_init)
         self.Wf = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
         self.Wi = Linear(_as_size_tuple(self.in_size)[-1] + _as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
-        self.Wh = Linear(_as_size_tuple(self.out_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
+        # ``Wh`` consumes the *input* ``x``, not the hidden state: the CFN update
+        # is ``h_t = theta_t * phi(h_{t-1}) + eta_t * phi(W x_t)`` (arXiv
+        # 1612.06212), so W maps in_size -> out_size. Sizing it out_size ->
+        # out_size made ``update()`` raise a dot_general shape error on every
+        # call where in_size != out_size.
+        self.Wh = Linear(_as_size_tuple(self.in_size)[-1], _as_size_tuple(self.out_size)[-1], **params)
 
     def init_state(self, batch_size: int | None = None, **kwargs: Any) -> None:
         self.h = brainstate.HiddenState(braintools.init.param(self._state_initializer, self.out_size, batch_size))

@@ -3,7 +3,7 @@
 Status: spec, implementation in progress
 Roadmap: [`2026-07-25-algorithm-axes-roadmap.md`](2026-07-25-algorithm-axes-roadmap.md) § P2
 Baseline: commit `156d058` (P1 landed)
-Target release: 0.3.0
+Target release: 0.2.5
 
 ## Goal
 
@@ -75,7 +75,7 @@ alone cannot express.
 | `sparse_n` | int ≥ 1 | coefficient of `recurrence_scope='sparse_n'` |
 | `window_size` | int ≥ 1 | coefficient of `update_schedule='window'` |
 
-† rejected in 0.3.0-P2; see *Scope / Out*.
+† rejected in 0.2.5-P2; see *Scope / Out*.
 
 ### `temporal_recursion` is a structural operator, `decay` is a coefficient
 

@@ -1088,7 +1088,7 @@ def two_island_rnn(n_in: int = 3, n_rec: int = 3, seed: int = 0) -> ModelSpec:
 # ---------------------------------------------------------------------------
 # SNN specs: the realistic-model end of the zoo.
 #
-# These wrap the layer classes in ``braintrace/_etrace_model_test.py`` for
+# These wrap the layer classes in ``braintrace/_testing/models.py`` for
 # oracle use. Two things have to be fixed at this boundary:
 #
 # * F-24 -- those constructors call unseeded ``braintools.init.*``, which draws
@@ -1140,7 +1140,7 @@ def _snn_spec(cls, n_in, n_rec, seed, scale=_SNN_SCALE, **kwargs) -> ModelSpec:
 
 def snn_if_delta(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
     """IF neuron, delta synapse. Single hidden state (``num_state == 1``)."""
-    from braintrace._etrace_model_test import IF_Delta_Dense_Layer
+    from braintrace._testing.models import IF_Delta_Dense_Layer
     return _snn_spec(IF_Delta_Dense_Layer, n_in, n_rec, seed)
 
 
@@ -1152,32 +1152,32 @@ def snn_alif_delta(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> Mode
     gradient to exactly zero while the network still spikes. See the F-25 note
     above this block.
     """
-    from braintrace._etrace_model_test import ALIF_Delta_Dense_Layer
+    from braintrace._testing.models import ALIF_Delta_Dense_Layer
     return _snn_spec(ALIF_Delta_Dense_Layer, n_in, n_rec, seed,
                      scale=_SNN_SCALE_DELTA)
 
 
 def snn_lif_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
     """LIF neuron, exponential current synapse. Two timescales: tau_mem, tau_syn."""
-    from braintrace._etrace_model_test import LIF_ExpCu_Dense_Layer
+    from braintrace._testing.models import LIF_ExpCu_Dense_Layer
     return _snn_spec(LIF_ExpCu_Dense_Layer, n_in, n_rec, seed)
 
 
 def snn_alif_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
     """ALIF + exponential current synapse. Three timescales, ``num_state == 3``."""
-    from braintrace._etrace_model_test import ALIF_ExpCu_Dense_Layer
+    from braintrace._testing.models import ALIF_ExpCu_Dense_Layer
     return _snn_spec(ALIF_ExpCu_Dense_Layer, n_in, n_rec, seed)
 
 
 def snn_lif_std_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
     """LIF + short-term depression. Adds tau_std as a further timescale."""
-    from braintrace._etrace_model_test import LIF_STDExpCu_Dense_Layer
+    from braintrace._testing.models import LIF_STDExpCu_Dense_Layer
     return _snn_spec(LIF_STDExpCu_Dense_Layer, n_in, n_rec, seed)
 
 
 def snn_lif_stp_expcu(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> ModelSpec:
     """LIF + short-term plasticity. Adds tau_f and tau_d."""
-    from braintrace._etrace_model_test import LIF_STPExpCu_Dense_Layer
+    from braintrace._testing.models import LIF_STPExpCu_Dense_Layer
     return _snn_spec(LIF_STPExpCu_Dense_Layer, n_in, n_rec, seed)
 
 
@@ -1185,7 +1185,7 @@ def snn_alif_expco_ei(n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED) -> M
     """ALIF with an excitatory/inhibitory population split and conductance
     synapses. The heterogeneous-population case: separate E and I projections
     produce several ETP relations feeding one hidden group."""
-    from braintrace._etrace_model_test import ALIF_ExpCo_Dense_Layer
+    from braintrace._testing.models import ALIF_ExpCo_Dense_Layer
     return _snn_spec(ALIF_ExpCo_Dense_Layer, n_in, n_rec, seed)
 
 
@@ -1197,7 +1197,7 @@ def snn_lif_expcu_heterogeneous(
     The heterogeneous-leak case: ``tau_mem`` is a length-``n_rec`` vector, so no
     single global leak exists for the transition to factor out.
     """
-    from braintrace._etrace_model_test import LIF_ExpCu_Dense_Layer
+    from braintrace._testing.models import LIF_ExpCu_Dense_Layer
     tau_mem = jnp.linspace(3.0, 12.0, n_rec) * u.ms
     return _snn_spec(LIF_ExpCu_Dense_Layer, n_in, n_rec, seed, tau_mem=tau_mem)
 
@@ -1206,7 +1206,7 @@ def snn_alif_expcu_heterogeneous(
     n_in: int = 4, n_rec: int = 5, seed: int = _SNN_SEED
 ) -> ModelSpec:
     """ALIF with per-neuron membrane *and* adaptation time constants."""
-    from braintrace._etrace_model_test import ALIF_ExpCu_Dense_Layer
+    from braintrace._testing.models import ALIF_ExpCu_Dense_Layer
     return _snn_spec(
         ALIF_ExpCu_Dense_Layer, n_in, n_rec, seed,
         tau_mem=jnp.linspace(3.0, 12.0, n_rec) * u.ms,
