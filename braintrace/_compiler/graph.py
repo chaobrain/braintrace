@@ -425,7 +425,13 @@ def compile_etrace_graph(
           canonicalizer could not flatten
           (``etp_in_control_flow='error'``); pass
           ``ControlFlowPolicy(etp_in_control_flow='exclude')`` to restore
-          the warn-and-exclude behavior.
+          the warn-and-exclude behavior;
+        - caps every canonicalization fixpoint at
+          ``fixpoint_iteration_limit`` sweeps (default 64) so control flow
+          that never converges raises
+          :class:`~braintrace.CompilationError` naming the offending
+          equations instead of hanging the compiler. Raise it for models
+          that genuinely nest control flow deeper than that.
 
     Returns
     -------

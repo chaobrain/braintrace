@@ -88,6 +88,19 @@ class TestControlFlowPolicy:
         with pytest.raises(ValueError, match='scan_descent'):
             ControlFlowPolicy(scan_descent='yes-please')
 
+    def test_fixpoint_iteration_limit_default(self):
+        assert DEFAULT_CONTROL_FLOW_POLICY.fixpoint_iteration_limit == 64
+
+    @pytest.mark.parametrize('bad', [0, -1, 1.0, '8', None])
+    def test_fixpoint_iteration_limit_rejects_non_positive_int(self, bad):
+        with pytest.raises(ValueError, match='fixpoint_iteration_limit'):
+            ControlFlowPolicy(fixpoint_iteration_limit=bad)
+
+    def test_fixpoint_iteration_limit_rejects_bool(self):
+        # ``bool`` is an ``int`` subclass; ``True`` must not mean 1.
+        with pytest.raises(ValueError, match='fixpoint_iteration_limit'):
+            ControlFlowPolicy(fixpoint_iteration_limit=True)
+
 
 class TestIfConvertConds:
     """Unit tests of the cond -> inlined branches + select_n rewrite."""
@@ -1095,6 +1108,206 @@ class TestCanonicalizeControlFlow:
             )
         names = _primitive_names(conv)
         assert 'cond' in names
+
+
+class TestFixpointIterationLimit:
+    """Every canonicalization fixpoint is capped (issue #157).
+
+    Each sweep rewrites the visible control flow, so a jaxpr needs one sweep
+    per nesting level plus a final no-op sweep that proves convergence. The
+    tests pin both ends: the exact limit a jaxpr needs must succeed, one
+    fewer must raise a :class:`braintrace.CompilationError` naming the
+    offending equation.
+    """
+
+    def _cond_jaxpr(self):
+        def f(x, w):
+            return jax.lax.cond(
+                jnp.sum(x) > 0.,
+                lambda: braintrace.matmul(x, w),
+                lambda: x * 2.,
+            )
+
+        x = jnp.arange(3, dtype=jnp.float32) - 0.5
+        w = jnp.eye(3) * 0.5
+        return f, jax.make_jaxpr(f)(x, w), x, w
+
+    def _scan_in_scan_jaxpr(self):
+        def f(w, h0, xs):
+            def outer(h, x):
+                def inner(h2, _):
+                    return jnp.tanh(braintrace.matmul(h2, w)), None
+
+                h, _ = jax.lax.scan(inner, h + x, None, length=2)
+                return h, h
+
+            return jax.lax.scan(outer, h0, xs)
+
+        w = jnp.eye(3) * 0.5
+        h0 = jnp.zeros(3)
+        xs = jnp.stack([jnp.ones(3), -jnp.ones(3)]) * 0.1
+        return f, jax.make_jaxpr(f)(w, h0, xs), w, h0, xs
+
+    def _cond_in_scan_jaxpr(self):
+        def f(w, h0, xs):
+            def body(h, x):
+                drive = jax.lax.cond(
+                    jnp.sum(x) > 0.,
+                    lambda: braintrace.matmul(x, w),
+                    lambda: x * 2.,
+                )
+                return jnp.tanh(drive + h), h
+
+            return jax.lax.scan(body, h0, xs)
+
+        w = jnp.eye(3) * 0.5
+        h0 = jnp.zeros(3)
+        xs = jnp.stack([jnp.ones(3), -jnp.ones(3)])
+        return f, jax.make_jaxpr(f)(w, h0, xs), w, h0, xs
+
+    # -- cond fixpoint ----------------------------------------------------
+
+    def test_cond_fixpoint_raises_when_limit_exhausted(self):
+        f, closed, x, w = self._cond_jaxpr()
+        with pytest.raises(braintrace.CompilationError) as exc:
+            _convert(
+                closed,
+                weights=[closed.jaxpr.invars[1]],
+                policy=ControlFlowPolicy(fixpoint_iteration_limit=1),
+            )
+        msg = str(exc.value)
+        assert 'fixpoint_iteration_limit=1' in msg
+        # The offending equation is named, not just counted.
+        assert 'cond' in msg
+        assert 'branches=2' in msg
+        assert "cond='opaque'" in msg
+
+    def test_cond_fixpoint_succeeds_at_exactly_the_needed_limit(self):
+        # One sweep converts, a second observes nothing left to do.
+        f, closed, x, w = self._cond_jaxpr()
+        conv = _convert(
+            closed,
+            weights=[closed.jaxpr.invars[1]],
+            policy=ControlFlowPolicy(fixpoint_iteration_limit=2),
+        )
+        assert 'cond' not in _primitive_names(conv)
+        assert jnp.allclose(_eval(conv, x, w)[0], f(x, w))
+
+    def test_cond_free_jaxpr_never_hits_the_limit(self):
+        # Nothing to rewrite: the first sweep already converges.
+        closed = jax.make_jaxpr(lambda x: x * 2.)(jnp.ones(3))
+        conv = _convert(
+            closed, policy=ControlFlowPolicy(fixpoint_iteration_limit=1)
+        )
+        assert conv is closed
+
+    def test_opaque_cond_policy_never_hits_the_limit(self):
+        f, closed, x, w = self._cond_jaxpr()
+        conv = _convert(
+            closed,
+            weights=[closed.jaxpr.invars[1]],
+            policy=ControlFlowPolicy(cond='opaque', fixpoint_iteration_limit=1),
+        )
+        assert conv is closed
+
+    # -- scan fixpoint ----------------------------------------------------
+
+    def test_scan_fixpoint_raises_when_limit_exhausted(self):
+        f, closed, w, h0, xs = self._scan_in_scan_jaxpr()
+        with pytest.raises(braintrace.CompilationError) as exc:
+            _unroll(
+                closed,
+                weights=[closed.jaxpr.invars[0]],
+                policy=ControlFlowPolicy(fixpoint_iteration_limit=1),
+            )
+        msg = str(exc.value)
+        assert 'fixpoint_iteration_limit=1' in msg
+        assert 'scan' in msg
+        assert 'length=' in msg
+        assert 'scan_unroll_limit=0' in msg
+
+    def test_scan_fixpoint_succeeds_at_exactly_the_needed_limit(self):
+        # Sweep 1 unrolls the outer scan, sweep 2 the inner copies it
+        # surfaced, sweep 3 confirms the fixpoint.
+        f, closed, w, h0, xs = self._scan_in_scan_jaxpr()
+        conv = _unroll(
+            closed,
+            weights=[closed.jaxpr.invars[0]],
+            policy=ControlFlowPolicy(fixpoint_iteration_limit=3),
+        )
+        assert 'scan' not in _primitive_names(conv)
+        ref = jax.tree.leaves(f(w, h0, xs))
+        got = _eval(conv, w, h0, xs)
+        for r, g in zip(ref, got):
+            assert jnp.allclose(g, r, atol=1e-6)
+
+    def test_scan_disabled_never_hits_the_limit(self):
+        f, closed, w, h0, xs = self._scan_in_scan_jaxpr()
+        conv = _unroll(
+            closed,
+            weights=[closed.jaxpr.invars[0]],
+            policy=ControlFlowPolicy(
+                scan_unroll_limit=0, fixpoint_iteration_limit=1
+            ),
+        )
+        assert conv is closed
+
+    # -- joint fixpoint ---------------------------------------------------
+
+    def _canonicalize(self, closed, weight, limit):
+        return canonicalize_control_flow(
+            closed,
+            weight_invars={weight},
+            hidden_invars=set(),
+            hidden_outvars=set(),
+            policy=ControlFlowPolicy(fixpoint_iteration_limit=limit),
+        )
+
+    def test_joint_fixpoint_raises_when_limit_exhausted(self):
+        f, closed, w, h0, xs = self._cond_in_scan_jaxpr()
+        with pytest.raises(braintrace.CompilationError) as exc:
+            self._canonicalize(closed, closed.jaxpr.invars[0], 1)
+        msg = str(exc.value)
+        assert 'canonicalize_control_flow' in msg
+        assert 'fixpoint_iteration_limit=1' in msg
+        assert 'scan' in msg
+
+    def test_joint_fixpoint_succeeds_at_exactly_the_needed_limit(self):
+        f, closed, w, h0, xs = self._cond_in_scan_jaxpr()
+        conv = self._canonicalize(closed, closed.jaxpr.invars[0], 3)
+        names = _primitive_names(conv)
+        assert 'scan' not in names and 'cond' not in names
+        ref = jax.tree.leaves(f(w, h0, xs))
+        got = _eval(conv, w, h0, xs)
+        for r, g in zip(ref, got):
+            assert jnp.allclose(g, r, atol=1e-6)
+
+    def test_default_limit_is_generous_enough_for_nested_control_flow(self):
+        # The shipped default must not turn working models into errors.
+        f, closed, w, h0, xs = self._cond_in_scan_jaxpr()
+        conv = canonicalize_control_flow(
+            closed,
+            weight_invars={closed.jaxpr.invars[0]},
+            hidden_invars=set(),
+            hidden_outvars=set(),
+            policy=DEFAULT_CONTROL_FLOW_POLICY,
+        )
+        assert 'cond' not in _primitive_names(conv)
+
+    def test_all_canonicalization_disabled_never_hits_the_limit(self):
+        f, closed, w, h0, xs = self._cond_in_scan_jaxpr()
+        conv = canonicalize_control_flow(
+            closed,
+            weight_invars={closed.jaxpr.invars[0]},
+            hidden_invars=set(),
+            hidden_outvars=set(),
+            policy=ControlFlowPolicy(
+                cond='opaque',
+                scan_unroll_limit=0,
+                fixpoint_iteration_limit=1,
+            ),
+        )
+        assert conv is closed
 
 
 class _InnerLoopCell(brainstate.nn.Module):
