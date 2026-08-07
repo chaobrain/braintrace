@@ -24,7 +24,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 from braintrace._input_data import has_multistep_data
-from braintrace._state_managment import assign_state_values_v2
+from braintrace._state_management import assign_state_values_v2
 from braintrace._typing import (
     Path,
     PyTree,

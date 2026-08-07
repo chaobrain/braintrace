@@ -67,7 +67,7 @@ from braintrace._misc import (
     etrace_df_key,
     etrace_x_key,
 )
-from braintrace._state_managment import (
+from braintrace._state_management import (
     assign_dict_state_values,
     split_dict_states_v2
 )

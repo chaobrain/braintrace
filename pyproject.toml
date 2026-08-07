@@ -246,7 +246,7 @@ module = [
     "braintrace._op.embedding",
     "braintrace._op.grouped",
     "braintrace.nn._embedding",
-    "braintrace._state_managment",
+    "braintrace._state_management",
     "braintrace._compatible_imports",
 ]
 disallow_untyped_defs = true

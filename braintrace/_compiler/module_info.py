@@ -30,7 +30,7 @@ from braintrace._misc import (
     unknown_state_path,
     _remove_quantity,
 )
-from braintrace._state_managment import sequence_split_state_values
+from braintrace._state_management import sequence_split_state_values
 from braintrace._typing import (
     Path,
     PyTree,

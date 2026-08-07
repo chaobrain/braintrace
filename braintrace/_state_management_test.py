@@ -17,7 +17,7 @@ import brainstate
 import jax.numpy as jnp
 import pytest
 
-from braintrace._state_managment import (
+from braintrace._state_management import (
     assign_dict_state_values,
     assign_state_values_v2,
     sequence_split_state_values,

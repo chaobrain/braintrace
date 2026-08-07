@@ -113,6 +113,11 @@ Two shipped modules have no `_test.py` sibling, against `AGENTS.md` rule 9:
 ## E-07 — `_state_managment.py` is misspelled
 
 Tracked as [#162](https://github.com/chaobrain/braintrace/issues/162).
+**Resolved** — renamed to `braintrace/_state_management.py` with no shim. The
+decision and the full list of updated reference sites are recorded in
+[`2026-08-07-e07-state-management-rename.md`](2026-08-07-e07-state-management-rename.md).
+The paragraph below is left in its original wording as the record of the state
+this audit found.
 
 `braintrace/_state_managment.py` should be `_state_management.py`. It is a
 private module, but renaming it is still a breaking import path for anyone who
