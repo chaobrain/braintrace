@@ -248,6 +248,28 @@ module = [
     "braintrace.nn._embedding",
     "braintrace._state_management",
     "braintrace._compatible_imports",
+    # Added for 0.2.6 (issue #164). Neither package owns a name in
+    # `braintrace.__all__`, which is why they were skipped in 0.2.5, but leaving
+    # whole packages outside the gate meant an untyped def could reappear
+    # anywhere in the compiler -- the layer every algorithm depends on. Both are
+    # now fully annotated; the sweep is recorded in
+    # `docs/specs/2026-08-07-e09-type-gate-compiler-legacy.md`.
+    "braintrace._compiler",
+    "braintrace._compiler.base",
+    "braintrace._compiler.canonicalize",
+    "braintrace._compiler.diagnostics",
+    "braintrace._compiler.graph",
+    "braintrace._compiler.hid_param_op",
+    "braintrace._compiler.hidden_group",
+    "braintrace._compiler.hidden_pertubation",
+    "braintrace._compiler.jaxpr_graph",
+    "braintrace._compiler.module_info",
+    "braintrace._compiler.position_graph",
+    "braintrace._compiler.report",
+    "braintrace._compiler.scan_descent",
+    "braintrace._legacy",
+    "braintrace._legacy._ops",
+    "braintrace._legacy._params",
 ]
 disallow_untyped_defs = true
 

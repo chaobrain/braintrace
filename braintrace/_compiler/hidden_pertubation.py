@@ -485,7 +485,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         )
         return eqn.replace(invars=new_invars)
 
-    def _eval_eqn(self, eqn: JaxprEqn):
+    def _eval_eqn(self, eqn: JaxprEqn) -> None:
         # ------------------------------------------------
         #
         # For every hidden outvar the equation produces (any number, at any
@@ -528,7 +528,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
                 )
             )
 
-    def _new_var_like(self, v):
+    def _new_var_like(self, v: Var) -> Var:
         return new_var('', jax.core.ShapedArray(v.aval.shape, v.aval.dtype))
 
 
@@ -625,8 +625,8 @@ def add_hidden_perturbation_from_minfo(
 
 def add_hidden_perturbation_in_module(
     model: brainstate.nn.Module,
-    *model_args,
-    **model_kwargs,
+    *model_args: Any,
+    **model_kwargs: Any,
 ) -> HiddenPerturbation:
     """Add hidden-state perturbations from a model.
 

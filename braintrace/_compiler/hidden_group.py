@@ -46,7 +46,7 @@
 
 from itertools import combinations
 from typing import TYPE_CHECKING
-from typing import List, Dict, FrozenSet, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
+from typing import List, Dict, FrozenSet, Iterable, Sequence, Tuple, Set, Optional, Callable, NamedTuple, Any, cast
 
 import brainstate
 import brainunit as u
@@ -273,7 +273,7 @@ class HiddenGroup(NamedTuple):
             return self.num_state
         return int(self.snap.num_neighbour) * self.num_state
 
-    def check_consistent_varshape(self):
+    def check_consistent_varshape(self) -> None:
         """Check whether the shapes of the hidden states are consistent.
 
         Raises
@@ -320,7 +320,7 @@ class HiddenGroup(NamedTuple):
         self,
         hidden_vals: Sequence[jax.Array],
         input_vals: PyTree,
-    ):
+    ) -> jax.Array:
         """Compute the diagonal Jacobian matrix along the last dimension.
 
         Parameters
@@ -378,7 +378,7 @@ class HiddenGroup(NamedTuple):
         self,
         hidden_vals: Sequence[jax.Array],
         input_vals: PyTree,
-    ):
+    ) -> jax.Array:
         """Compute the complete within-group hidden-to-hidden Jacobian.
 
         The sibling of :meth:`diagonal_jacobian` that keeps the cross-position
@@ -419,7 +419,7 @@ class HiddenGroup(NamedTuple):
         needs_fwd = _transition_contains_while(self.transition_jaxpr)
         return full_position_jacobian(fn, concat_hid, use_forward_mode=needs_fwd)
 
-    def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]):
+    def concat_hidden(self, splitted_hid_vals: Sequence[jax.Array]) -> jax.Array:
         """Concatenate split hidden-state values into a single array.
 
         Concatenates a sequence of split hidden-state values along the last
@@ -473,7 +473,7 @@ class HiddenGroup(NamedTuple):
         ]
         return u.math.concatenate(splitted_hid_vals, axis=-1)
 
-    def split_hidden(self, concat_hid_vals: jax.Array):
+    def split_hidden(self, concat_hid_vals: jax.Array) -> List[jax.Array]:
         """Split a concatenated hidden-state array into individual arrays.
 
         Splits a concatenated array of hidden-state values into separate arrays,
@@ -624,7 +624,7 @@ def jacfwd_last_dim(
     varshape = hid_vals.shape[:-1]
     basis = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
 
-    def _push(tangent):
+    def _push(tangent: jax.Array) -> jax.Array:
         out, tang = jax.jvp(fn, (hid_vals,), (tangent,))
         assert out.shape[-1] == num_state, 'Error: the number of input/output states should be the same.'
         return tang
@@ -1186,7 +1186,7 @@ def _simplify_hid2hid_tracer(
     hidden_invar_to_path: Dict[HiddenInVar, Path],
     hidden_outvar_to_path: Dict[HiddenOutVar, Path],
     path_to_state: Dict[Path, brainstate.HiddenState],
-    debug_info=None,
+    debug_info: Any = None,
 ) -> Optional[Hidden2GroupTransition]:
     """
     Simplifying the hidden-to-hidden state tracer.
@@ -1866,7 +1866,7 @@ def write_jaxpr_of_hidden_group_transition(
     hidden_invar_to_transition: Dict[HiddenInVar, Hidden2GroupTransition],
     hidden_invars: List[HiddenInVar],
     hidden_outvars: List[HiddenOutVar],
-    debug_info=None,
+    debug_info: Any = None,
 ) -> Jaxpr:
     assert len(hidden_invars) >= 1
 
@@ -1981,7 +1981,10 @@ def _merge_groups_ordered(groups: Sequence[Sequence[HiddenOutVar]]) -> List[List
     return [list(m) for m in merged]
 
 
-def group_merging(groups, version: int = 1) -> List[frozenset[HiddenOutVar]]:
+def group_merging(
+    groups: Iterable[Iterable[HiddenOutVar]],
+    version: int = 1,
+) -> List[frozenset[HiddenOutVar]]:
     """
     Merging the hidden groups using the intersection of the hidden states.
 
@@ -2170,7 +2173,7 @@ def find_hidden_groups_from_minfo(
     snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     descended_hidden_paths: FrozenSet[Path] = frozenset(),
-):
+) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """Find the hidden groups from the model information.
 
     Parameters
@@ -2225,11 +2228,11 @@ def find_hidden_groups_from_minfo(
 
 def find_hidden_groups_from_module(
     model: brainstate.nn.Module,
-    *model_args,
+    *model_args: Any,
     include_recurrent_mixing: bool = False,
     sparse_n: Optional[int] = None,
     snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
-    **model_kwargs,
+    **model_kwargs: Any,
 ) -> Tuple[Sequence[HiddenGroup], brainstate.util.PrettyDict]:
     """Find hidden groups from a model.
 

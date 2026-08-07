@@ -16,7 +16,7 @@
 
 import threading
 from contextlib import contextmanager
-from typing import Dict, Sequence, Tuple, Optional, NamedTuple
+from typing import Dict, Iterator, List, Sequence, Tuple, Optional, NamedTuple
 
 import brainstate
 import jax
@@ -24,8 +24,12 @@ import numpy as np
 
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
+    ETraceVals,
     Inputs,
+    Outputs,
     Path,
+    StateVals,
+    TempData,
 )
 from .canonicalize import ControlFlowPolicy
 from .diagnostics import (
@@ -60,7 +64,7 @@ __all__ = [
 
 def order_hidden_group_index(
     hidden_groups: Sequence[HiddenGroup],
-):
+) -> None:
     """
     Verifies that hidden group indices match their positions in the sequence.
 
@@ -178,7 +182,7 @@ class ETraceGraph(NamedTuple):
         args: Inputs,
         perturb_data: Sequence[jax.Array],
         old_state_vals: Optional[Sequence[jax.Array]] = None,
-    ):
+    ) -> Tuple[Outputs, ETraceVals, StateVals, TempData]:
         r"""Run the forward pass with additive perturbations injected at the hidden states.
 
         Evaluates the perturbed-forward jaxpr built during compilation, which is
@@ -200,9 +204,10 @@ class ETraceGraph(NamedTuple):
 
         Returns
         -------
-        object
-            The processed model outputs, in the same structure produced by a
-            normal forward call.
+        tuple
+            ``(outputs, etrace_state_vals, other_state_vals, temp_data)`` --
+            the same four-element structure produced by a normal forward call
+            through :meth:`ModuleInfo.jaxpr_call`.
         """
         # state checking
         if old_state_vals is None:
@@ -243,10 +248,10 @@ class CONTEXT(threading.local):
     for the eligibility trace.
     """
 
-    def __init__(self):
-        self.compilers = []
+    def __init__(self) -> None:
+        self.compilers: List[str] = []
 
-    def add_compiler(self, name: str):
+    def add_compiler(self, name: str) -> None:
         self.compilers.append(name)
 
 
@@ -254,7 +259,7 @@ context = CONTEXT()
 
 
 @contextmanager
-def compiler_context(name: str):
+def compiler_context(name: str) -> Iterator[None]:
     """
     Provides a context manager for managing the eligibility trace compiler context.
 

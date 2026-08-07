@@ -17,6 +17,7 @@ from typing import Container, Dict, Sequence, Set, List
 
 from braintrace._compatible_imports import (
     Var,
+    Jaxpr,
     JaxprEqn,
     is_jit_primitive,
     is_scan_primitive,
@@ -89,10 +90,10 @@ def find_element_exist_in_the_set(
 
 
 def check_unsupported_op(
-    self,
+    self: 'JaxprEvaluation',
     eqn: JaxprEqn,
     op_name: str
-):
+) -> None:
     """
     Checks for unsupported operations involving weight or hidden state variables in the given equation.
 
@@ -275,7 +276,7 @@ class JaxprEvaluation(object):
         outvar_to_hidden_path: Dict[Var, Path],
         *,
         control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
-    ):
+    ) -> None:
         self.weight_invars = weight_invars
         self.hidden_invars = hidden_invars
         self.hidden_outvars = hidden_outvars
@@ -283,7 +284,7 @@ class JaxprEvaluation(object):
         self.outvar_to_hidden_path = outvar_to_hidden_path
         self.control_flow = control_flow
 
-    def _eval_jaxpr(self, jaxpr) -> None:
+    def _eval_jaxpr(self, jaxpr: Jaxpr) -> None:
         """
         Evaluating the jaxpr for extracting the etrace relationships.
 
@@ -369,7 +370,7 @@ class JaxprEvaluation(object):
         check_unsupported_op(self, eqn, 'cond')
         self._eval_eqn(eqn)
 
-    def _eval_eqn(self, eqn):
+    def _eval_eqn(self, eqn: JaxprEqn) -> None:
         """
         Evaluate a single JAX equation.
 

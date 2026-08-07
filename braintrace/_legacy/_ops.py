@@ -26,7 +26,7 @@ the weight *out* of the ETP graph.
 
 import contextlib
 import threading
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, Optional, Sequence
 
 import jax
 import numpy as np
@@ -56,7 +56,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 class _OpContext(threading.local):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.stop = [False]
 
@@ -65,7 +65,7 @@ _ctx = _OpContext()
 
 
 @contextlib.contextmanager
-def stop_param_gradients(stop_or_not: bool = True):
+def stop_param_gradients(stop_or_not: bool = True) -> Iterator[None]:
     """Context manager — legacy compat shim. Pushes a flag onto a stack;
     has no effect in the new ETP primitive path (gradients flow through
     JAX autodiff on the primitive directly).
@@ -77,7 +77,7 @@ def stop_param_gradients(stop_or_not: bool = True):
         _ctx.stop.pop()
 
 
-def general_y2w(xw2y: Callable, x, y, w):
+def general_y2w(xw2y: Callable, x: Any, y: Any, w: Any) -> Any:
     """Legacy helper: VJP-based y→w pullback."""
     x = u.math.ones_like(x)
     primals, f_vjp = jax.vjp(lambda w_: u.get_mantissa(xw2y(x, w_)), w)
@@ -120,17 +120,17 @@ class ETraceOp:
         self,
         is_diagonal: Optional[bool] = False,
         name: Optional[str] = None,
-    ):
+    ) -> None:
         self.is_diagonal = is_diagonal
         self.name = name
 
-    def __call__(self, inputs, weights):
+    def __call__(self, inputs: Any, weights: Any) -> Any:
         return self.xw_to_y(inputs, weights)
 
-    def xw_to_y(self, inputs, weights):
+    def xw_to_y(self, inputs: Any, weights: Any) -> Any:
         raise NotImplementedError
 
-    def raw_xw_to_y(self, inputs, weights):
+    def raw_xw_to_y(self, inputs: Any, weights: Any) -> Any:
         """Compute the forward map without emitting an ETP primitive.
 
         Plain-JAX variant of :meth:`xw_to_y`, used by
@@ -153,10 +153,10 @@ class ETraceOp:
         """
         return self.xw_to_y(inputs, weights)
 
-    def dt_to_t(self, hidden_dim_arr, weight_dim_tree):
+    def dt_to_t(self, hidden_dim_arr: Any, weight_dim_tree: Any) -> Any:
         raise NotImplementedError
 
-    def xy_to_dw(self, input_dim_arr, hidden_dim_arr, weights):
+    def xy_to_dw(self, input_dim_arr: Any, hidden_dim_arr: Any, weights: Any) -> Any:
         primals, f_vjp = jax.vjp(
             lambda w: u.get_mantissa(self.xw_to_y(input_dim_arr, w)),
             weights,
@@ -203,7 +203,7 @@ class MatMulOp(ETraceOp):
         weight_mask: Optional[Any] = None,
         weight_fn: Callable = lambda w: w,
         apply_weight_fn_before_mask: bool = False,
-    ):
+    ) -> None:
         super().__init__(is_diagonal=False)
         if weight_mask is None:
             pass
@@ -219,13 +219,13 @@ class MatMulOp(ETraceOp):
         assert isinstance(apply_weight_fn_before_mask, bool)
         self.apply_weight_fn_before_mask = apply_weight_fn_before_mask
 
-    def _check(self, w):
+    def _check(self, w: Dict[str, Any]) -> None:
         if not isinstance(w, dict):
             raise TypeError(f'MatMulOp weight must be dict, got {type(w)}')
         if 'weight' not in w:
             raise ValueError("MatMulOp weight dict must contain 'weight'")
 
-    def _process_weight(self, w):
+    def _process_weight(self, w: Dict[str, Any]) -> Any:
         if self.apply_weight_fn_before_mask:
             W = self.weight_fn(w['weight'])
             if self.weight_mask is not None:
@@ -237,11 +237,11 @@ class MatMulOp(ETraceOp):
             W = self.weight_fn(W)
         return W
 
-    def xw_to_y(self, x, w):
+    def xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         return _new_matmul(x, self._process_weight(w), bias=w.get('bias'))
 
-    def raw_xw_to_y(self, x, w):
+    def raw_xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         y = u.math.matmul(x, self._process_weight(w))
         if 'bias' in w:
@@ -274,17 +274,17 @@ class ElemWiseOp(ETraceOp):
     """
     __module__ = 'braintrace'
 
-    def __init__(self, fn: Callable = lambda w: w):
+    def __init__(self, fn: Callable = lambda w: w) -> None:
         super().__init__(is_diagonal=True)
         self._raw_fn = fn
 
-    def __call__(self, weights):
+    def __call__(self, weights: Any) -> Any:  # type: ignore[override]
         return self.xw_to_y(None, weights)
 
-    def xw_to_y(self, inputs, weights):
+    def xw_to_y(self, inputs: Any, weights: Any) -> Any:
         return _new_element_wise(weights, weight_fn=self._raw_fn)
 
-    def raw_xw_to_y(self, inputs, weights):
+    def raw_xw_to_y(self, inputs: Any, weights: Any) -> Any:
         return self._raw_fn(weights)
 
 
@@ -336,7 +336,7 @@ class ConvOp(ETraceOp):
         self,
         xinfo: jax.ShapeDtypeStruct,
         window_strides: Sequence[int],
-        padding,
+        padding: Any,
         lhs_dilation: Optional[Sequence[int]] = None,
         rhs_dilation: Optional[Sequence[int]] = None,
         feature_group_count: int = 1,
@@ -344,7 +344,7 @@ class ConvOp(ETraceOp):
         dimension_numbers: Any = None,
         weight_mask: Optional[Any] = None,
         weight_fn: Callable = lambda w: w,
-    ):
+    ) -> None:
         super().__init__(is_diagonal=False)
         self.xinfo = xinfo
         self.window_strides = window_strides
@@ -366,19 +366,19 @@ class ConvOp(ETraceOp):
         assert callable(weight_fn)
         self.weight_fn = weight_fn
 
-    def _check(self, w):
+    def _check(self, w: Dict[str, Any]) -> None:
         if not isinstance(w, dict):
             raise TypeError(f'ConvOp weight must be dict, got {type(w)}')
         if 'weight' not in w:
             raise ValueError("ConvOp weight dict must contain 'weight'")
 
-    def _process_weight(self, w):
+    def _process_weight(self, w: Dict[str, Any]) -> Any:
         W = w['weight']
         if self.weight_mask is not None:
             W = W * self.weight_mask
         return self.weight_fn(W)
 
-    def _conv_kwargs(self):
+    def _conv_kwargs(self) -> Dict[str, Any]:
         return dict(
             strides=self.window_strides,
             padding=self.padding,
@@ -389,13 +389,13 @@ class ConvOp(ETraceOp):
             dimension_numbers=self.dimension_numbers,
         )
 
-    def xw_to_y(self, x, w):
+    def xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         return _new_conv(
             x, self._process_weight(w), bias=w.get('bias'), **self._conv_kwargs()
         )
 
-    def raw_xw_to_y(self, x, w):
+    def raw_xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         W = self._process_weight(w)
         y = jax.lax.conv_general_dilated(
@@ -445,9 +445,9 @@ class SpMatMulOp(ETraceOp):
 
     def __init__(
         self,
-        sparse_mat,
+        sparse_mat: Any,
         weight_fn: Callable = lambda w: w,
-    ):
+    ) -> None:
         super().__init__(is_diagonal=False)
         if not isinstance(sparse_mat, u.sparse.SparseMatrix):
             raise TypeError(
@@ -457,20 +457,20 @@ class SpMatMulOp(ETraceOp):
         assert callable(weight_fn)
         self.weight_fn = weight_fn
 
-    def _check(self, w):
+    def _check(self, w: Dict[str, Any]) -> None:
         if not isinstance(w, dict):
             raise TypeError(f'SpMatMulOp weight must be dict, got {type(w)}')
         if 'weight' not in w:
             raise ValueError("SpMatMulOp weight dict must contain 'weight'")
 
-    def xw_to_y(self, x, w):
+    def xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         data = self.weight_fn(w['weight'])
         return _new_sparse_matmul(
             x, data, sparse_mat=self.sparse_mat, bias=w.get('bias')
         )
 
-    def raw_xw_to_y(self, x, w):
+    def raw_xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         data = self.weight_fn(w['weight'])
         mat = self.sparse_mat.with_data(data)
@@ -506,24 +506,24 @@ class LoraOp(ETraceOp):
     """
     __module__ = 'braintrace'
 
-    def __init__(self, alpha: Optional[Any] = None):
+    def __init__(self, alpha: Optional[Any] = None) -> None:
         super().__init__(is_diagonal=False)
         if alpha is not None:
             alpha = u.math.asarray(alpha)
         self.alpha = alpha
 
-    def _check(self, w):
+    def _check(self, w: Dict[str, Any]) -> None:
         if not isinstance(w, dict):
             raise TypeError(f'LoraOp weight must be dict, got {type(w)}')
         if 'B' not in w or 'A' not in w:
             raise ValueError("LoraOp weight dict must contain 'B' and 'A'")
 
-    def xw_to_y(self, x, w):
+    def xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         alpha = 1.0 if self.alpha is None else self.alpha
         return _new_lora_matmul(x, w['B'], w['A'], alpha=alpha, bias=w.get('bias'))
 
-    def raw_xw_to_y(self, x, w):
+    def raw_xw_to_y(self, x: Any, w: Dict[str, Any]) -> Any:
         self._check(w)
         if self.alpha is not None:
             x = self.alpha * x
