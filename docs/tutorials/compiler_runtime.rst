@@ -1,5 +1,5 @@
-Compiler & Runtime
-==================
+Online Learning Compilers
+=========================
 
 Inspect what BrainTrace compiled before interpreting an online-learning result.
 These chapters connect model structure to hidden groups, ETP relations, and
