@@ -1,70 +1,6 @@
 # Release Notes
 
 
-## Unreleased
-
-### Fixed
-
-- **Control-flow canonicalization can no longer hang the compiler**
-  ([#157](https://github.com/chaobrain/braintrace/issues/157)). The three
-  fixpoint loops in `braintrace/_compiler/canonicalize.py` — cond
-  if-conversion, inner-scan unrolling, and the joint driver — were
-  `while True:` loops whose termination rested on an unenforced assumption
-  that control-flow nesting is finite. A jaxpr that regenerated convertible
-  `cond`/`scan` equations as fast as the sweeps consumed them spun forever,
-  with no output and no way to distinguish it from a slow compile.
-
-  All three are now bounded by the new
-  `ControlFlowPolicy.fixpoint_iteration_limit` (default 64, must be a
-  positive integer — there is no "unbounded" setting). Exhausting it raises
-  `braintrace.CompilationError` naming the equations the last sweep was
-  still rewriting (primitive, branch count or scan length, and source
-  location) and pointing at the remedies: raise the limit if the nesting is
-  genuine, or turn the offending pass off with
-  `ControlFlowPolicy(cond='opaque')` / `ControlFlowPolicy(scan_unroll_limit=0)`.
-
-  The limit bounds loop *iterations*, not the size of any single rewrite —
-  that remains `scan_unroll_limit`. Compiles that converged before converge
-  identically now.
-### Breaking changes
-
-- **Renamed the private module `braintrace._state_managment` to
-  `braintrace._state_management`** (the old name was missing an `e`). No
-  deprecation shim and no `DeprecationWarning` were left behind: the module is
-  private, none of its helpers (`assign_dict_state_values`,
-  `assign_state_values_v2`, `sequence_split_state_values`,
-  `split_dict_states_v2`) is re-exported from `braintrace`, and a shim would
-  keep the misspelling importable — and therefore greppable and
-  copy-pasteable — indefinitely. Public API is unaffected; only code that
-  imported the private path directly needs to change:
-
-  ```python
-  # before
-  from braintrace._state_managment import assign_state_values_v2
-  # after
-  from braintrace._state_management import assign_state_values_v2
-  ```
-
-  Resolves [#162](https://github.com/chaobrain/braintrace/issues/162); see
-  `docs/specs/2026-08-07-e07-state-management-rename.md`.
-
-### Internal
-
-- **`braintrace._compiler` and `braintrace._legacy` are now inside the typing
-  gate.** The `disallow_untyped_defs` module list in `pyproject.toml` is what
-  makes "every shipped def is annotated" a property `mypy` enforces rather than a
-  convention. Two packages were still outside it — the whole jaxpr-analysis layer
-  that every algorithm depends on, and the frozen v0.1.x back-compat shim. Both
-  are now listed and fully annotated: 93 `no-untyped-def` errors cleared (54 in
-  `_compiler`, 39 in `_legacy`). No runtime behaviour changed; the only
-  non-annotation edit is a corrected `Returns` docstring on
-  `ETraceGraph.call_hidden_perturb`, which claimed to return the model outputs
-  when it returns the same four-element tuple as a normal forward call.
-
-  Resolves [#164](https://github.com/chaobrain/braintrace/issues/164); see
-  `docs/specs/2026-08-07-e09-type-gate-compiler-legacy.md`.
-
-
 ## Version 0.2.5
 
 > **This patch release removes public API.** Despite the patch version number,
@@ -79,6 +15,15 @@ which removes the hand-written scan-and-accumulate loop from every call site,
 and by five new learning rules (`SnAp`, `UORO`, `ThreeFactor`, `DNI`,
 `RandomProjectionVjpAlgorithm`) expressed as coordinates in the new
 `ETraceConfig` axis space rather than as bespoke implementations.
+
+Closing the release, a nine-item hardening pass (E-01 … E-09) worked through
+the backlog opened by the pre-release package audit. Its theme is that a
+failure should be visible: four paths that could hang the compiler, mis-attribute
+a gradient, or refuse a constructor argument several transforms too late now
+raise where the mistake is, `jax` is a declared dependency instead of a borrowed
+one, and the `mypy` typing gate covers the last two packages that were outside
+it. Those items appear under *Correctness and robustness*, *Improvements*,
+*Documentation* and *Internal* below.
 
 ### Breaking changes
 
@@ -121,6 +66,26 @@ and by five new learning rules (`SnAp`, `UORO`, `ThreeFactor`, `DNI`,
   relaxed from `0 < decay < 1` to `0 <= decay < 1`). Zero is the coordinate for
   "no temporal accumulation on this side" and canonicalises to
   `temporal_recursion='none'`; it was previously rejected as invalid input.
+
+- **Renamed the private module `braintrace._state_managment` to
+  `braintrace._state_management`** (the old name was missing an `e`). No
+  deprecation shim and no `DeprecationWarning` were left behind: the module is
+  private, none of its helpers (`assign_dict_state_values`,
+  `assign_state_values_v2`, `sequence_split_state_values`,
+  `split_dict_states_v2`) is re-exported from `braintrace`, and a shim would
+  keep the misspelling importable — and therefore greppable and
+  copy-pasteable — indefinitely. Public API is unaffected; only code that
+  imported the private path directly needs to change:
+
+  ```python
+  # before
+  from braintrace._state_managment import assign_state_values_v2
+  # after
+  from braintrace._state_management import assign_state_values_v2
+  ```
+
+  Resolves [#162](https://github.com/chaobrain/braintrace/issues/162); see
+  `docs/specs/2026-08-07-e07-state-management-rename.md`.
 
 ### New features
 
@@ -266,10 +231,102 @@ and by five new learning rules (`SnAp`, `UORO`, `ThreeFactor`, `DNI`,
   resolved, but were invisible to `dir()` and tab-completion, unlike the
   top-level `braintrace` namespace which already had this.
 
+### Correctness and robustness
+
+- **The hidden↔gradient correspondence is checked, not asserted**
+  ([#165](https://github.com/chaobrain/braintrace/issues/165)). Three
+  `assert` statements in `_algorithm/vjp_base.py` were meant to guarantee that
+  the backward pass's cotangents line up with the compiled hidden states. They
+  failed at that twice over: `python -O` strips an `assert`, so on an optimised
+  interpreter nothing checked anything; and even enabled, they compared
+  cardinalities and one key set, never that cotangent *i* belongs to hidden
+  state *i*. A misattributed cotangent yields a wrong gradient, not an error.
+
+  Every guard is now an explicit `raise`.
+  `vjp_base._check_hidden_gradient_correspondence` verifies totality, absence
+  of strays, and per-index shape/dtype agreement, and is called from both
+  branches. `HiddenGroup.concat_hidden` — whose `zip` against
+  `self.hidden_states` silently truncated a short value list into a
+  too-narrow slab that surfaced later in unrelated trace math, or never —
+  raises unless it receives exactly one value per hidden state;
+  `split_hidden` gets the mirror guard on its trailing-axis width.
+  `HiddenPerturbation.perturb_data_to_hidden_group_data` raises on a length
+  disagreement and names the group and the missing path instead of a bare
+  `KeyError`. All comparisons are on Python-level metadata, so nothing is
+  added to the traced graph. See
+  `docs/specs/2026-08-07-e01-hidden-gradient-correspondence.md`.
+
+- **Control-flow canonicalization can no longer hang the compiler**
+  ([#157](https://github.com/chaobrain/braintrace/issues/157)). The three
+  fixpoint loops in `braintrace/_compiler/canonicalize.py` — cond
+  if-conversion, inner-scan unrolling, and the joint driver — were
+  `while True:` loops whose termination rested on an unenforced assumption
+  that control-flow nesting is finite. A jaxpr that regenerated convertible
+  `cond`/`scan` equations as fast as the sweeps consumed them spun forever,
+  with no output and no way to distinguish it from a slow compile.
+
+  All three are now bounded by the new
+  `ControlFlowPolicy.fixpoint_iteration_limit` (default 64, must be a
+  positive integer — there is no "unbounded" setting). Exhausting it raises
+  `braintrace.CompilationError` naming the equations the last sweep was
+  still rewriting (primitive, branch count or scan length, and source
+  location) and pointing at the remedies: raise the limit if the nesting is
+  genuine, or turn the offending pass off with
+  `ControlFlowPolicy(cond='opaque')` / `ControlFlowPolicy(scan_unroll_limit=0)`.
+
+  The limit bounds loop *iterations*, not the size of any single rewrite —
+  that remains `scan_unroll_limit`. Compiles that converged before converge
+  identically now.
+
+- **`braintrace.nn.Embedding` rejects its unsupported options at construction**
+  ([#159](https://github.com/chaobrain/braintrace/issues/159)). `max_norm`,
+  `freeze`, `scale_grad_by_freq` and `padding_idx` were accepted by the
+  inherited `__init__` and refused only by `update()` — which, under `jit`, is
+  a trace arbitrarily far from the line that passed the option, so the
+  traceback pointed at the transform rather than at the mistake. `__init__`
+  now forwards every argument to the parent unchanged and then validates, so
+  the error is raised from the constructor call; running validation *after*
+  `super().__init__` keeps the parent's more specific diagnoses (an
+  out-of-range `padding_idx` is still its `ValueError`). The `update()` check
+  is kept rather than deleted, because the four options are plain public
+  attributes that can be set after construction, and the message now names
+  only the options actually passed. The class docstring no longer inherits
+  the parent's text, which documented two of the four as working and
+  demonstrated them in examples that raise.
+
+- **Canonicalization warning dedup no longer rests on an undocumented
+  invariant** ([#158](https://github.com/chaobrain/braintrace/issues/158)).
+  Skip diagnostics were suppressed with `skip_warned` sets keyed on
+  `id(eqn)`, sound only because the enclosing jaxpr happened to keep every
+  equation object alive across sweeps. Keying on the equation's index is no
+  better (each sweep rebuilds the list, so one rewrite shifts every later
+  index), and content keys over-suppress. The key is gone instead: each sweep
+  buffers its diagnostics and returns them, and the fixpoint driver emits only
+  the buffer from the settling sweep — which rewrote nothing, so it visited
+  each surviving equation exactly once and holds exactly one entry per skip.
+
 ### Improvements
 
 - **JAX 0.11 compatibility.** Ported the scan handling onto JAX's flattree
   representation. CI now runs the suite against JAX 0.8, 0.9, 0.10 and latest.
+- **`jax>=0.8.0` is now a declared dependency**
+  ([#160](https://github.com/chaobrain/braintrace/issues/160)). Every module
+  imports `jax` directly, but `[project].dependencies` never said so. The floor
+  a resolver saw was not absent, it was *borrowed*: `brainstate` declares `jax`
+  only under extras, so the constraint that made installs work came from
+  `brainevent`'s metadata, and would have moved without a braintrace commit.
+  The floor is `0.8.0` because that is the lowest entry in the CI matrix, and
+  it is deliberately uncapped — a cap published today would constrain JAX
+  releases that do not exist yet, for every artifact already on PyPI, while the
+  daily scheduled run against unpinned `jax` surfaces a breaking release within
+  24 hours. No install that works today gains a constraint; ownership of the
+  floor simply moves to the matrix that tests it. The accelerator extras are
+  unaffected (`braintrace[cuda12]` still resolves one `jax` satisfying
+  `>=0.8.0` *with* the cuda12 extra, verified against the built wheel with
+  `pip install --dry-run --report`), and they stay unversioned so the floor
+  lives in exactly one place. The previously untested `braintrace/_version.py`
+  gained a co-located test pinning the declared floor to `min(CI matrix)`, the
+  no-cap rule, and the `requirements.txt` sync.
 - **Conv bias IO-dim fix**, plus an axis-aware verification harness and an
   in-tree limitation list (`docs/specs/2026-07-25-known-limitations.md`), which
   is now the tracked backlog of known approximation edges.
@@ -389,11 +446,51 @@ and by five new learning rules (`SnAp`, `UORO`, `ThreeFactor`, `DNI`,
   nitpick exemption the ecosystem convention already used for `brainstate`
   classes.
 - **The audit's deferred findings are written down.** Ten engineering-hygiene
-  items that this release deliberately did not fix — from the unchecked
-  hidden↔gradient correspondence to the unbounded cond fixpoint — are recorded
-  in `docs/specs/2026-08-07-deferred-engineering-backlog.md`, kept separate from
+  items surfaced by the pre-release audit are recorded in
+  `docs/specs/2026-08-07-deferred-engineering-backlog.md`, kept separate from
   the learning-rule correctness backlog in
-  `docs/specs/2026-07-25-known-limitations.md`.
+  `docs/specs/2026-07-25-known-limitations.md`. Nine of the ten (E-01 … E-09)
+  were resolved before this release shipped; each carries an implementation
+  spec of its own under `docs/specs/`.
+- **`docs/_static` lost 599 KiB of unreferenced assets**
+  ([#163](https://github.com/chaobrain/braintrace/issues/163)). Seven files
+  that no docs page, README, docstring, example or workflow referenced were
+  deleted from every clone's checkout. Two files the issue implied were dead
+  are kept, both load-bearing: `braintrace-learning-map.svg` is used by
+  `docs/index.rst`, and `braintrace.png` is hotlinked by the READMEs frozen on
+  the PyPI pages for 0.1.1 and 0.1.2 — deleting it would permanently break
+  their header image. Three stale per-file `.gitignore` rules naming files
+  that are already absent were replaced with one documented glob for the
+  editable figure masters. Verified with a real `sphinx-build -W --keep-going`
+  over all 114 pages.
+
+### Internal
+
+- **`braintrace._compiler` and `braintrace._legacy` are now inside the typing
+  gate** ([#164](https://github.com/chaobrain/braintrace/issues/164)). The
+  `disallow_untyped_defs` module list in `pyproject.toml` is what makes "every
+  shipped def is annotated" a property `mypy` enforces rather than a
+  convention. Two packages were still outside it — the whole jaxpr-analysis
+  layer that every algorithm depends on, and the frozen v0.1.x back-compat
+  shim. Both are now listed and fully annotated: 93 `no-untyped-def` errors
+  cleared (54 in `_compiler`, 39 in `_legacy`). No runtime behaviour changed;
+  the only non-annotation edit is a corrected `Returns` docstring on
+  `ETraceGraph.call_hidden_perturb`, which claimed to return the model outputs
+  when it returns the same four-element tuple as a normal forward call. See
+  `docs/specs/2026-08-07-e09-type-gate-compiler-legacy.md`.
+- **The last two modules without co-located tests have them**
+  ([#161](https://github.com/chaobrain/braintrace/issues/161)).
+  `braintrace/_typing_test.py` pins `as_size_tuple`'s normalisation contract
+  across every arm of the `Size` union, its idempotence, the round-trip
+  through a `brainstate` size setter that motivates the helper, and each
+  rejection by exception type — including two sharp edges recorded as facts
+  rather than changed (a float inside a sequence truncates toward zero; a
+  numeric string iterates character by character, so `'12'` becomes `(1, 2)`).
+  `braintrace/nn/__init___test.py` pins the deprecation dispatcher: all 48
+  forwarded names, `stacklevel=2` attribution, non-memoisation, dispatch-table
+  disjointness, a sorted `__dir__`, and the `AttributeError` fallthrough that
+  stops an unknown name from silently evaluating to `None`. Test-only; no
+  runtime behaviour is altered.
 
 
 ## Version 0.2.4
