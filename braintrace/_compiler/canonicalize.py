@@ -42,6 +42,10 @@ Unrolling is semantically identical — values and all derivatives are exact.
 
 :func:`canonicalize_control_flow` runs both passes to a joint fixpoint, so
 a ``cond`` inside a ``scan`` body (and vice versa) canonicalizes fully.
+Every fixpoint loop here is capped at ``policy.fixpoint_iteration_limit``
+sweeps: control flow that keeps regenerating faster than the sweeps consume
+it raises a :class:`~braintrace.CompilationError` naming the offending
+equations rather than spinning forever.
 """
 
 from dataclasses import dataclass
@@ -61,6 +65,7 @@ from braintrace._compatible_imports import (
     new_var,
     scan_num_consts_carry,
 )
+from braintrace._misc import CompilationError
 from braintrace._op import is_etp_primitive
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .jaxpr_graph import build_producer_map, inline_jit_calls
@@ -121,6 +126,22 @@ class ControlFlowPolicy:
         ``braintrace._compiler.scan_descent``). ``'off'`` preserves the
         pre-Phase-4 behavior: the scan stays opaque and compilation fails
         on the existing control-flow restrictions.
+    fixpoint_iteration_limit : int, optional
+        Maximum number of sweeps a canonicalization fixpoint may run before
+        giving up with a :class:`~braintrace.CompilationError` naming the
+        equations the last sweep was still rewriting. Default ``64``.
+
+        This bounds *loop iterations*, not the size of any single rewrite —
+        the per-rewrite bound is ``scan_unroll_limit``. Each sweep rewrites
+        the currently visible ``cond``/``scan`` equations and re-inlines the
+        ``jit`` bodies they surface, so the number of sweeps a jaxpr needs
+        is set by how deeply its ETP-relevant control flow nests, plus one
+        final sweep that rewrites nothing and so proves the fixpoint was
+        reached. Real models nest a handful of levels deep; raise the limit
+        if yours genuinely nests deeper. There is deliberately no
+        "unbounded" setting: without a cap, a jaxpr that regenerates
+        convertible control flow as fast as the sweeps consume it hangs the
+        compiler with no diagnostic at all. Must be a positive integer.
 
     Notes
     -----
@@ -163,6 +184,7 @@ class ControlFlowPolicy:
     while_hidden: str = 'opaque-fwd'
     etp_in_control_flow: str = 'error'
     scan_descent: str = 'auto'
+    fixpoint_iteration_limit: int = 64
 
     def __post_init__(self):
         if self.scan_descent not in ('auto', 'off'):
@@ -170,11 +192,87 @@ class ControlFlowPolicy:
                 f"ControlFlowPolicy.scan_descent must be 'auto' or 'off', "
                 f"got {self.scan_descent!r}."
             )
+        limit = self.fixpoint_iteration_limit
+        # ``bool`` is an ``int`` subclass; ``True`` must not silently mean 1.
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(
+                f"ControlFlowPolicy.fixpoint_iteration_limit must be a "
+                f"positive integer, got {limit!r}. There is no 'unbounded' "
+                f"setting: the cap exists so a non-converging jaxpr fails "
+                f"with a diagnostic instead of hanging the compiler."
+            )
 
 
 DEFAULT_CONTROL_FLOW_POLICY = ControlFlowPolicy()
 
 ControlFlowPolicy.__module__ = 'braintrace'
+
+
+def _eqn_location(eqn: JaxprEqn) -> str:
+    """Best-effort user source location of *eqn*, or ``''`` if unavailable.
+
+    Formatting a ``source_info`` is a JAX internal detail; a failure here
+    must never mask the compiler error the location is being collected for.
+    """
+    try:
+        from jax._src import source_info_util
+        return source_info_util.summarize(eqn.source_info) or ''
+    except Exception:  # pragma: no cover - depends on JAX internals
+        return ''
+
+
+def _describe_eqn(eqn: JaxprEqn) -> str:
+    """One-line description of *eqn* for a compiler error message.
+
+    Names the primitive, the parameter that distinguishes this equation from
+    its siblings (branch count for ``cond``, length for ``scan``), and the
+    user source location when JAX exposes one.
+    """
+    detail = ''
+    if is_cond_primitive(eqn):
+        branches = eqn.params.get('branches')
+        if branches is not None:
+            detail = f' (branches={len(branches)})'
+    elif is_scan_primitive(eqn):
+        length = eqn.params.get('length')
+        if length is not None:
+            detail = f' (length={length})'
+    location = _eqn_location(eqn)
+    where = f' at {location}' if location else ''
+    return f'{eqn.primitive.name}{detail}{where}'
+
+
+def _fixpoint_not_reached(
+    driver: str,
+    limit: int,
+    last_sweep: List[JaxprEqn],
+    remedies: str,
+) -> CompilationError:
+    """Build the error raised when a canonicalization fixpoint runs out of sweeps.
+
+    *last_sweep* holds the equations the final iteration rewrote — the ones
+    still churning — so the message can name them.
+    """
+    if last_sweep:
+        offenders = '\n'.join(f'  - {_describe_eqn(e)}' for e in last_sweep)
+        still = (
+            f'The last sweep was still rewriting {len(last_sweep)} '
+            f'equation(s):\n{offenders}'
+        )
+    else:  # pragma: no cover - defensive; a non-converged sweep rewrote >0
+        still = 'The last sweep still reported rewrites.'
+    return CompilationError(
+        f'{driver} did not reach a fixpoint within '
+        f'{limit} sweep{"" if limit == 1 else "s"} '
+        f'(ControlFlowPolicy.fixpoint_iteration_limit={limit}).\n'
+        f'{still}\n'
+        f'Each sweep rewrites the visible control flow and re-inlines the '
+        f'jit bodies it surfaces, so deeply nested control flow needs more '
+        f'sweeps. Either raise '
+        f'ControlFlowPolicy.fixpoint_iteration_limit if the nesting is '
+        f'genuine, or stop canonicalizing the offending construct '
+        f'({remedies}).'
+    )
 
 
 def _subjaxprs(eqn: JaxprEqn) -> Iterable[Jaxpr]:
@@ -289,6 +387,10 @@ def if_convert_conds(
     ------
     ValueError
         If ``policy.cond`` is neither ``'convert'`` nor ``'opaque'``.
+    braintrace.CompilationError
+        If the conversion fixpoint has not converged after
+        ``policy.fixpoint_iteration_limit`` sweeps. The message names the
+        ``cond`` equations the last sweep was still rewriting.
 
     Notes
     -----
@@ -317,24 +419,35 @@ def if_convert_conds(
     # Fixpoint loop: converting a cond can surface user ``jit`` equations
     # from its branches, and their inlined bodies can expose further conds.
     # Each iteration converts what is visible, then flattens surfaced jits;
-    # nesting depth is finite, so this terminates. Each sweep buffers (rather
-    # than emits) its skip diagnostics; only the settling sweep's buffer is
-    # emitted, so a relevant-but-unsafe cond warns once, not once per
-    # iteration. See ``_emit_pending``.
+    # nesting depth is finite, so this terminates — but the loop is capped
+    # anyway (``policy.fixpoint_iteration_limit``) so a jaxpr that violates
+    # that assumption raises a diagnosable error instead of hanging.
+    # Each sweep buffers (rather than emits) its skip diagnostics; only the
+    # settling sweep's buffer is emitted, so a relevant-but-unsafe cond warns
+    # once, not once per iteration. See ``_emit_pending``.
     result = closed_jaxpr
     pending: List[_PendingDiagnostic] = []
-    while True:
+    last_sweep: List[JaxprEqn] = []
+    for _ in range(policy.fixpoint_iteration_limit):
+        last_sweep = []
         converted, n_converted, pending = _convert_conds_once(
             result,
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
             hidden_outvars=hidden_outvars,
             policy=policy,
+            converted_log=last_sweep,
         )
         if n_converted == 0:
             _emit_pending(pending)
             return result
         result = inline_jit_calls(converted)
+    raise _fixpoint_not_reached(
+        'cond if-conversion (if_convert_conds)',
+        policy.fixpoint_iteration_limit,
+        last_sweep,
+        "ControlFlowPolicy(cond='opaque')",
+    )
 
 
 def _convert_conds_once(
@@ -344,12 +457,16 @@ def _convert_conds_once(
     hidden_invars: Container[Var],
     hidden_outvars: Container[Var],
     policy: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
+    converted_log: Optional[List[JaxprEqn]] = None,
 ):
     """One conversion sweep over the top-level equations.
 
     Returns ``(closed_jaxpr, n_converted, pending)``; the input object itself
     when nothing is converted. ``pending`` holds the skip diagnostics observed
     by this sweep, buffered for the caller to emit once the fixpoint settles.
+    When *converted_log* is given, every converted ``cond`` equation is
+    appended to it, so a caller that runs sweeps to a fixpoint can name the
+    equations still being rewritten when it gives up.
     """
     jaxpr = closed_jaxpr.jaxpr
     if not any(is_cond_primitive(eqn) for eqn in jaxpr.eqns):
@@ -467,6 +584,8 @@ def _convert_conds_once(
                             eqn.source_info.replace(),
                         ))
                     n_converted += 1
+                    if converted_log is not None:
+                        converted_log.append(eqn)
                     emit(
                         kind=DiagnosticKind.COND_IF_CONVERTED,
                         level=DiagnosticLevel.INFO,
@@ -610,6 +729,13 @@ def unroll_inner_scans(
         The canonicalized closed jaxpr. When nothing is unrolled, the input
         object itself is returned unchanged.
 
+    Raises
+    ------
+    braintrace.CompilationError
+        If the unrolling fixpoint has not converged after
+        ``policy.fixpoint_iteration_limit`` sweeps. The message names the
+        ``scan`` equations the last sweep was still rewriting.
+
     Notes
     -----
     A ``scan`` equation is unrolled only when it is *relevant* — its body
@@ -635,24 +761,35 @@ def unroll_inner_scans(
     # Fixpoint: unrolling a scan can surface user ``jit`` equations and
     # nested scans from its body. Each sweep unrolls the visible top-level
     # scans, then flattens surfaced jits; nesting depth is finite, so this
-    # terminates. Each sweep buffers (rather than emits) its skip
-    # diagnostics; only the settling sweep's buffer is emitted, so a
-    # relevant-but-ineligible scan warns once, not once per sweep. See
-    # ``_emit_pending``.
+    # terminates — but the loop is capped anyway
+    # (``policy.fixpoint_iteration_limit``) so a jaxpr that violates that
+    # assumption raises a diagnosable error instead of hanging.
+    # Each sweep buffers (rather than emits) its skip diagnostics; only the
+    # settling sweep's buffer is emitted, so a relevant-but-ineligible scan
+    # warns once, not once per sweep. See ``_emit_pending``.
     result = closed_jaxpr
     pending: List[_PendingDiagnostic] = []
-    while True:
+    last_sweep: List[JaxprEqn] = []
+    for _ in range(policy.fixpoint_iteration_limit):
+        last_sweep = []
         converted, n_unrolled, pending = _unroll_scans_once(
             result,
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
             hidden_outvars=hidden_outvars,
             policy=policy,
+            converted_log=last_sweep,
         )
         if n_unrolled == 0:
             _emit_pending(pending)
             return result
         result = inline_jit_calls(converted)
+    raise _fixpoint_not_reached(
+        'inner-scan unrolling (unroll_inner_scans)',
+        policy.fixpoint_iteration_limit,
+        last_sweep,
+        'ControlFlowPolicy(scan_unroll_limit=0)',
+    )
 
 
 def _unroll_scans_once(
@@ -662,12 +799,16 @@ def _unroll_scans_once(
     hidden_invars: Container[Var],
     hidden_outvars: Container[Var],
     policy: ControlFlowPolicy,
+    converted_log: Optional[List[JaxprEqn]] = None,
 ):
     """One unrolling sweep over the top-level equations.
 
     Returns ``(closed_jaxpr, n_unrolled, pending)``; the input object itself
     when nothing is unrolled. ``pending`` holds the skip diagnostics observed
     by this sweep, buffered for the caller to emit once the fixpoint settles.
+    When *converted_log* is given, every unrolled ``scan`` equation is
+    appended to it, so a caller that runs sweeps to a fixpoint can name the
+    equations still being rewritten when it gives up.
     """
     jaxpr = closed_jaxpr.jaxpr
     if not any(is_scan_primitive(eqn) for eqn in jaxpr.eqns):
@@ -975,6 +1116,8 @@ def _unroll_scans_once(
 
         unroll_scan(eqn)
         n_unrolled += 1
+        if converted_log is not None:
+            converted_log.append(eqn)
         emit(
             kind=DiagnosticKind.SCAN_UNROLLED,
             level=DiagnosticLevel.INFO,
@@ -1056,6 +1199,10 @@ def canonicalize_control_flow(
     ------
     ValueError
         If ``policy.cond`` is neither ``'convert'`` nor ``'opaque'``.
+    braintrace.CompilationError
+        If the joint fixpoint has not converged after
+        ``policy.fixpoint_iteration_limit`` alternations. The message names
+        the equations the last alternation was still rewriting.
     """
     if policy.cond not in ('convert', 'opaque'):
         raise ValueError(
@@ -1070,8 +1217,10 @@ def canonicalize_control_flow(
     result = closed_jaxpr
     cond_pending: List[_PendingDiagnostic] = []
     scan_pending: List[_PendingDiagnostic] = []
-    while True:
+    last_sweep: List[JaxprEqn] = []
+    for _ in range(policy.fixpoint_iteration_limit):
         n_total = 0
+        last_sweep = []
         if policy.cond == 'convert':
             converted, n, cond_pending = _convert_conds_once(
                 result,
@@ -1079,6 +1228,7 @@ def canonicalize_control_flow(
                 hidden_invars=hidden_invars,
                 hidden_outvars=hidden_outvars,
                 policy=policy,
+                converted_log=last_sweep,
             )
             if n:
                 result = inline_jit_calls(converted)
@@ -1090,6 +1240,7 @@ def canonicalize_control_flow(
                 hidden_invars=hidden_invars,
                 hidden_outvars=hidden_outvars,
                 policy=policy,
+                converted_log=last_sweep,
             )
             if n:
                 result = inline_jit_calls(converted)
@@ -1098,3 +1249,10 @@ def canonicalize_control_flow(
             _emit_pending(cond_pending)
             _emit_pending(scan_pending)
             return result
+    raise _fixpoint_not_reached(
+        'control-flow canonicalization (canonicalize_control_flow)',
+        policy.fixpoint_iteration_limit,
+        last_sweep,
+        "ControlFlowPolicy(cond='opaque') and/or "
+        'ControlFlowPolicy(scan_unroll_limit=0)',
+    )

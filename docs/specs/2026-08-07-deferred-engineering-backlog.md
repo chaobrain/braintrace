@@ -20,7 +20,8 @@ additionally has a written implementation plan at
 [`2026-08-07-e01-hidden-gradient-correspondence.md`](2026-08-07-e01-hidden-gradient-correspondence.md);
 that plan is **proposed, not implemented** in 0.2.5. E-10 (the sdist lost its
 tests alongside the wheel) *was* fixed in 0.2.5 and has been removed from this
-list.
+list. E-02 was fixed after 0.2.5 and is kept below, marked resolved, so the
+audit trail stays readable.
 
 ## E-01 — the hidden↔gradient correspondence is asserted, not checked
 
@@ -37,17 +38,23 @@ cotangents between hidden groups, which produces wrong gradients rather than an
 error. The fix is a real check — a raised exception, not an assert — plus a test
 that constructs a mismatch and asserts the exception.
 
-## E-02 — the cond-conversion fixpoint is unbounded
+## E-02 — the cond-conversion fixpoint is unbounded — **RESOLVED**
 
-Tracked as [#157](https://github.com/chaobrain/braintrace/issues/157).
+Tracked as [#157](https://github.com/chaobrain/braintrace/issues/157). Fixed
+after 0.2.5; plan in
+[`2026-08-07-e02-canonicalization-fixpoint-cap.md`](2026-08-07-e02-canonicalization-fixpoint-cap.md).
 
-`braintrace/_compiler/canonicalize.py:298,615,1041` are `while True:` fixpoint
+`braintrace/_compiler/canonicalize.py:298,615,1041` were `while True:` fixpoint
 loops. Scan unrolling is bounded by `policy.scan_unroll_limit`; the **cond**
-conversion fixpoint has no equivalent cap. A pathological jaxpr therefore hangs
+conversion fixpoint had no equivalent cap. A pathological jaxpr therefore hung
 the compiler instead of erroring with a diagnosable message.
 
-Give the cond fixpoint an iteration cap analogous to `scan_unroll_limit`, and
-raise a message that names the offending equation when it is hit.
+All three loops are now bounded by the new
+`ControlFlowPolicy.fixpoint_iteration_limit` (default 64, must be a positive
+integer). Exhausting it raises `braintrace.CompilationError` naming the
+equations the last sweep was still rewriting — primitive, distinguishing param,
+and source location — and pointing at the two remedies (raise the limit, or
+turn the offending pass off).
 
 ## E-03 — `id(eqn)`-keyed dedup relies on an undocumented liveness invariant
 

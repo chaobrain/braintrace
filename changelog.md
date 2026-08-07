@@ -1,6 +1,33 @@
 # Release Notes
 
 
+## Unreleased
+
+### Fixed
+
+- **Control-flow canonicalization can no longer hang the compiler**
+  ([#157](https://github.com/chaobrain/braintrace/issues/157)). The three
+  fixpoint loops in `braintrace/_compiler/canonicalize.py` — cond
+  if-conversion, inner-scan unrolling, and the joint driver — were
+  `while True:` loops whose termination rested on an unenforced assumption
+  that control-flow nesting is finite. A jaxpr that regenerated convertible
+  `cond`/`scan` equations as fast as the sweeps consumed them spun forever,
+  with no output and no way to distinguish it from a slow compile.
+
+  All three are now bounded by the new
+  `ControlFlowPolicy.fixpoint_iteration_limit` (default 64, must be a
+  positive integer — there is no "unbounded" setting). Exhausting it raises
+  `braintrace.CompilationError` naming the equations the last sweep was
+  still rewriting (primitive, branch count or scan length, and source
+  location) and pointing at the remedies: raise the limit if the nesting is
+  genuine, or turn the offending pass off with
+  `ControlFlowPolicy(cond='opaque')` / `ControlFlowPolicy(scan_unroll_limit=0)`.
+
+  The limit bounds loop *iterations*, not the size of any single rewrite —
+  that remains `scan_unroll_limit`. Compiles that converged before converge
+  identically now.
+
+
 ## Version 0.2.5
 
 > **This patch release removes public API.** Despite the patch version number,
