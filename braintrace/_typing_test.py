@@ -26,6 +26,8 @@ pinning.
 Spec: ``docs/specs/2026-08-07-e06-colocated-tests.md``.
 """
 
+import typing
+
 import brainstate
 import numpy as np
 import pytest
@@ -277,8 +279,17 @@ def test_brainstate_aliases_are_reexported_not_redeclared(name):
 def test_size_union_is_what_as_size_tuple_documents():
     """Guard the premise of ``test_every_arm_of_the_declared_size_union_is_accepted``:
     if ``brainstate`` widens ``Size``, the union-coverage test above silently
-    stops covering the whole union."""
-    assert str(_typing.Size) == (
-        'typing.Union[int, typing.Sequence[int], numpy.integer, '
-        'typing.Sequence[numpy.integer]]'
-    )
+    stops covering the whole union.
+
+    Compared structurally, via :func:`typing.get_args`, rather than against the
+    union's rendering: ``str()`` of a union is not stable across the supported
+    Python range (3.11 renders ``typing.Union[A, B]``, 3.14 renders ``A | B``)
+    even though the union itself is unchanged. Member order is likewise a
+    property of how the alias was spelled upstream, so compare as a set.
+    """
+    assert frozenset(typing.get_args(_typing.Size)) == frozenset({
+        int,
+        typing.Sequence[int],
+        np.integer,
+        typing.Sequence[np.integer],
+    })
