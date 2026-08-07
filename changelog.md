@@ -26,6 +26,27 @@
   The limit bounds loop *iterations*, not the size of any single rewrite —
   that remains `scan_unroll_limit`. Compiles that converged before converge
   identically now.
+### Breaking changes
+
+- **Renamed the private module `braintrace._state_managment` to
+  `braintrace._state_management`** (the old name was missing an `e`). No
+  deprecation shim and no `DeprecationWarning` were left behind: the module is
+  private, none of its helpers (`assign_dict_state_values`,
+  `assign_state_values_v2`, `sequence_split_state_values`,
+  `split_dict_states_v2`) is re-exported from `braintrace`, and a shim would
+  keep the misspelling importable — and therefore greppable and
+  copy-pasteable — indefinitely. Public API is unaffected; only code that
+  imported the private path directly needs to change:
+
+  ```python
+  # before
+  from braintrace._state_managment import assign_state_values_v2
+  # after
+  from braintrace._state_management import assign_state_values_v2
+  ```
+
+  Resolves [#162](https://github.com/chaobrain/braintrace/issues/162); see
+  `docs/specs/2026-08-07-e07-state-management-rename.md`.
 
 
 ## Version 0.2.5
