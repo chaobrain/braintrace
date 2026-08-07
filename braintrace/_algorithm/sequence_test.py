@@ -41,8 +41,8 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm import oracle_models as om
-from braintrace._algorithm import oracle
+from braintrace._testing import oracle_models as om
+from braintrace._testing import oracle
 from braintrace._algorithm.dni import _as_window, train_synthetic_gradient
 from braintrace._compile import _ALGORITHM_REGISTRY
 

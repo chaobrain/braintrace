@@ -263,7 +263,7 @@ class TestPublicExports:
             braintrace.matmul(jnp.ones((5, 2, 3)), jnp.ones((3, 4)))
 
 
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_direction_aligned,
     assert_param_gradients_close,
     bptt_param_gradients,

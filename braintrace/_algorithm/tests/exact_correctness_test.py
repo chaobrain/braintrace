@@ -18,7 +18,7 @@ element-wise, cross-algorithm reduction identities hold, and the vjp_method
 boundary is pinned.
 
 The single-step-only OTTT/OTPE/OSTTP equivalence and deferral tests
-(F-19/F-20) were removed in 0.3.0 along with those algorithms; see docs/specs
+(F-19/F-20) were removed in 0.2.5 along with those algorithms; see docs/specs
 for the roadmap."""
 
 import brainstate
@@ -28,12 +28,12 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_param_gradients_close,
     bptt_param_gradients,
     online_param_gradients,
 )
-from braintrace._algorithm.oracle_models import (
+from braintrace._testing.oracle_models import (
     cond_gate_rnn,
     leaky_linear,
     scan_body_rnn,

@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_model_is_live,
     bptt_param_gradients,
     chunked_online_param_gradients,
@@ -32,7 +32,7 @@ from braintrace._algorithm.oracle import (
     gradient_norm,
     online_param_gradients_singlestep_naive,
 )
-from braintrace._algorithm.oracle_models import SNN_SPECS
+from braintrace._testing.oracle_models import SNN_SPECS
 
 
 @pytest.mark.parametrize('name', sorted(SNN_SPECS))
@@ -116,7 +116,7 @@ class TestNonzeroInitRnn:
     block diagonal."""
 
     def test_the_initial_hidden_state_is_nonzero_after_init(self):
-        from braintrace._algorithm.oracle_models import nonzero_init_rnn
+        from braintrace._testing.oracle_models import nonzero_init_rnn
         spec = nonzero_init_rnn(n_rec=2, h0=0.4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -128,7 +128,7 @@ class TestNonzeroInitRnn:
         # The other fixtures in this module set their hidden value in __init__
         # only, so init_all_states leaves a *used* model where the last step left
         # it. A UORO reproducibility pin needs the value back.
-        from braintrace._algorithm.oracle_models import nonzero_init_rnn
+        from braintrace._testing.oracle_models import nonzero_init_rnn
         spec = nonzero_init_rnn(n_rec=2, h0=0.4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -150,7 +150,7 @@ class TestNonzeroInitRnn:
         # compiled group: whether the recurrent mixing reaches a *group
         # transition* depends on the algorithm's recurrence_scope, which is a
         # property of the rule, not of this fixture.
-        from braintrace._algorithm.oracle_models import nonzero_init_rnn
+        from braintrace._testing.oracle_models import nonzero_init_rnn
         spec = nonzero_init_rnn(n_rec=2, h0=0.4)
         x = jnp.zeros((1, 2))
         eps = 1e-3
@@ -172,7 +172,7 @@ class TestNonzeroInitRnn:
         # Why h0 != 0 is load-bearing: with h0 == 0 the recurrent weight's first
         # instantaneous term vanishes, so the transition acts on a zero influence
         # and no choice of transition can be distinguished.
-        from braintrace._algorithm.oracle_models import nonzero_init_rnn
+        from braintrace._testing.oracle_models import nonzero_init_rnn
         x = jnp.ones((1, 2))
         for h0, want_nonzero in [(0.4, True), (0.0, False)]:
             spec = nonzero_init_rnn(n_rec=2, h0=h0)
@@ -191,7 +191,7 @@ class TestNonzeroInitRnn:
                 assert max(mags) == 0.0, f'h0={h0}: trace is {mags}'
 
     def test_it_has_no_plain_parameters(self):
-        from braintrace._algorithm.oracle_models import nonzero_init_rnn
+        from braintrace._testing.oracle_models import nonzero_init_rnn
         spec = nonzero_init_rnn()
         assert spec.etp_param_keys == (('w',),)
         assert spec.plain_param_keys == ()
@@ -201,7 +201,7 @@ class TestUnitWeightRnn:
     """``unit_weight_rnn`` -- two states, two *different* units, one group."""
 
     def test_one_group_holds_both_states_with_different_units(self):
-        from braintrace._algorithm.oracle_models import unit_weight_rnn
+        from braintrace._testing.oracle_models import unit_weight_rnn
         spec = unit_weight_rnn(n_in=3, n_rec=4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -217,7 +217,7 @@ class TestUnitWeightRnn:
         assert len(units) == 2, f'the units must differ, got {units}'
 
     def test_a_step_and_a_gradient_both_survive(self):
-        from braintrace._algorithm.oracle_models import unit_weight_rnn
+        from braintrace._testing.oracle_models import unit_weight_rnn
         spec = unit_weight_rnn(n_in=3, n_rec=4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -237,7 +237,7 @@ class TestUnitWeightRnn:
     def test_concatenating_the_group_strips_both_units(self):
         # The claim a normaliser depends on: the concatenated hidden vector is a
         # plain mantissa array, so a scalar computed from it is unitless.
-        from braintrace._algorithm.oracle_models import unit_weight_rnn
+        from braintrace._testing.oracle_models import unit_weight_rnn
         spec = unit_weight_rnn(n_in=3, n_rec=4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -257,7 +257,7 @@ class TestPlainAndEtpRnn:
     """``plain_and_etp_rnn`` -- truncated plain credit, with a control."""
 
     def test_the_windowed_gradient_truncates_win_but_not_wout(self):
-        from braintrace._algorithm.oracle_models import plain_and_etp_rnn
+        from braintrace._testing.oracle_models import plain_and_etp_rnn
         spec = plain_and_etp_rnn(n_in=3, n_rec=4, n_out=2)
         inputs = _inputs(4, 3)
         ref = bptt_param_gradients(spec.factory, inputs)
@@ -278,7 +278,7 @@ class TestPlainAndEtpRnn:
         assert gap > 1e-3, f'win must be truncated by the window, gap={gap}'
 
     def test_it_declares_both_plain_kinds(self):
-        from braintrace._algorithm.oracle_models import plain_and_etp_rnn
+        from braintrace._testing.oracle_models import plain_and_etp_rnn
         spec = plain_and_etp_rnn()
         assert spec.etp_param_keys == (('w',),)
         assert spec.plain_param_keys == (('win',), ('wout',))
@@ -287,7 +287,7 @@ class TestPlainAndEtpRnn:
         # F-33. Not a truncation -- an absence. Pinned on the fixture that makes
         # it visible, so a single-step rule's silence about plain parameters is a
         # recorded property rather than a surprise.
-        from braintrace._algorithm.oracle_models import plain_and_etp_rnn
+        from braintrace._testing.oracle_models import plain_and_etp_rnn
         spec = plain_and_etp_rnn(n_in=3, n_rec=4, n_out=2)
         inputs = _inputs(4, 3)
         got = online_param_gradients_singlestep_naive(
@@ -302,7 +302,7 @@ class TestDelayedRewardRnn:
     """``delayed_reward_rnn`` -- credit that actually spans windows."""
 
     def test_credit_for_an_early_input_survives_to_the_end(self):
-        from braintrace._algorithm.oracle_models import delayed_reward_rnn
+        from braintrace._testing.oracle_models import delayed_reward_rnn
         spec = delayed_reward_rnn(n_in=2, n_rec=8, leak=0.95)
         T = 20
         inputs = _inputs(T, 2)
@@ -323,7 +323,7 @@ class TestDelayedRewardRnn:
             f'credit decays too fast to span windows: early={early}, late={late}')
 
     def test_the_output_is_scalar_per_step(self):
-        from braintrace._algorithm.oracle_models import delayed_reward_rnn
+        from braintrace._testing.oracle_models import delayed_reward_rnn
         spec = delayed_reward_rnn(n_in=2, n_rec=8)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -331,7 +331,7 @@ class TestDelayedRewardRnn:
         assert out.shape == (1, 1)
 
     def test_a_shorter_leak_kills_the_span_which_is_why_leak_is_a_parameter(self):
-        from braintrace._algorithm.oracle_models import delayed_reward_rnn
+        from braintrace._testing.oracle_models import delayed_reward_rnn
 
         def early_credit(leak):
             spec = delayed_reward_rnn(n_in=2, n_rec=8, leak=leak)

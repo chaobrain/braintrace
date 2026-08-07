@@ -67,7 +67,7 @@ which condition failed otherwise:
 from __future__ import annotations
 
 import itertools
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Set, Tuple
 
 import numpy as np
 

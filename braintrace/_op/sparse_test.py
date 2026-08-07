@@ -696,7 +696,7 @@ class TestBatchedSparseDRTRLOracle:
     """
 
     def test_batched_drtrl_matches_bptt(self):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients,
             online_param_gradients_singlestep_naive,
         )

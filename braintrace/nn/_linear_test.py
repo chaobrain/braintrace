@@ -828,7 +828,7 @@ class TestNnWeightFnExactness:
         return factory
 
     def test_signed_w_linear_matches_bptt(self):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
         )
         factory = self._rnn_factory(lambda: braintrace.nn.SignedWLinear(2 + 4, 4))
@@ -841,7 +841,7 @@ class TestNnWeightFnExactness:
         assert_param_gradients_close(online, bptt, atol=1e-4)
 
     def test_masked_linear_matches_bptt(self):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
         )
         mask = ((jnp.arange(6)[:, None] + jnp.arange(4)[None, :]) % 3 != 0).astype(float)
@@ -905,7 +905,7 @@ class TestScaledWSLinearWeightFn:
         through the standardized weight, another trainable map) and is
         intentionally excluded from the exactness assertion.
         """
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
         )
         factory = self._rnn_factory()

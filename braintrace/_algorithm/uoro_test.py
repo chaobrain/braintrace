@@ -47,9 +47,9 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm import oracle_models as om
+from braintrace._testing import oracle_models as om
 from braintrace._algorithm.axes import ETraceConfig
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_unbiased_estimator,
     bptt_param_gradients,
     chunked_online_param_gradients,

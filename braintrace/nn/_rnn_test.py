@@ -463,6 +463,63 @@ class TestMiniLSTM:
         assert jnp.allclose(cell.h.value, 0.0)
 
 
+class TestCFNCell:
+    """Test CFNCell."""
+
+    def test_cfn_basic_creation(self):
+        """Test basic CFNCell creation."""
+        cell = braintrace.nn.CFNCell(in_size=64, out_size=128)
+        assert hasattr(cell, 'in_size')
+        assert hasattr(cell, 'out_size')
+        assert hasattr(cell, 'Wf')
+        assert hasattr(cell, 'Wi')
+        assert hasattr(cell, 'Wh')
+
+    def test_cfn_init_state(self):
+        """Test CFNCell state initialization."""
+        cell = braintrace.nn.CFNCell(in_size=64, out_size=128)
+        cell.init_state(batch_size=10)
+        assert hasattr(cell, 'h')
+        assert cell.h.value.shape == (10, 128)
+
+    def test_cfn_forward_pass(self):
+        """Test CFNCell forward pass -- the exact call its docstring advertises."""
+        cell = braintrace.nn.CFNCell(in_size=64, out_size=128)
+        cell.init_state(batch_size=10)
+        x = brainstate.random.randn(10, 64)
+        h = cell(x)
+        assert h.shape == (10, 128)
+
+    def test_cfn_sequential_updates(self):
+        """Test CFNCell with sequential updates."""
+        cell = braintrace.nn.CFNCell(in_size=32, out_size=64)
+        cell.init_state(batch_size=8)
+
+        outputs = []
+        for _ in range(10):
+            x = brainstate.random.randn(8, 32)
+            outputs.append(cell(x))
+
+        assert len(outputs) == 10
+        assert all(o.shape == (8, 64) for o in outputs)
+
+    def test_cfn_reset_state(self):
+        """Test CFNCell state reset."""
+        cell = braintrace.nn.CFNCell(in_size=32, out_size=64)
+        cell.init_state(batch_size=8)
+
+        cell.h.value = jnp.ones_like(cell.h.value)
+        cell.reset_state(batch_size=8)
+        assert jnp.allclose(cell.h.value, 0.0)
+
+    def test_cfn_custom_activation(self):
+        """``activation`` accepts a string naming a brainstate.nn callable."""
+        cell = braintrace.nn.CFNCell(in_size=16, out_size=32, activation='relu')
+        cell.init_state(batch_size=4)
+        h = cell(brainstate.random.randn(4, 16))
+        assert h.shape == (4, 32)
+
+
 class TestLRUCell:
     """Test LRUCell."""
 

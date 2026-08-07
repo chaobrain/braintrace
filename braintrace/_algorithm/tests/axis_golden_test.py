@@ -55,7 +55,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_gradients_differ,
     assert_model_is_live,
     bptt_param_gradients,
@@ -64,7 +64,7 @@ from braintrace._algorithm.oracle import (
     online_param_gradients_singlestep_naive,
     relative_deviation,
 )
-from braintrace._algorithm import oracle_models
+from braintrace._testing import oracle_models
 
 GOLDEN_PATH = os.path.join(os.path.dirname(__file__), 'data', 'p2_golden.npz')
 

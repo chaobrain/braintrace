@@ -334,7 +334,7 @@ class TestElemwiseWeightFnExactness:
         return factory
 
     def test_d_rtrl_matches_bptt_with_elemwise_weight_fn(self):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
         )
         factory = self._factory(weight_fn=jnp.tanh)

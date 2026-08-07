@@ -37,14 +37,17 @@ from __future__ import annotations
 
 from ._primitive import ETPPrimitive, register_primitive
 from ._registries import (
+    BATCHED_COUNTERPARTS,
     BATCHED_PRIMITIVES,
     ETP_FAST_PATH_RULES,
     ETP_PRIMITIVES,
     ETP_RULES_INIT_DRTRL,
     ETP_RULES_INIT_PP,
+    ETP_RULES_INSTANT_DRTRL,
     ETP_RULES_PP_X_REPR,
     ETP_RULES_SNAP_ADJACENCY,
     ETP_RULES_SNAP_ANCHOR,
+    ETP_RULES_SOLVE_DRTRL,
     ETP_RULES_XY_TO_DW,
     ETP_RULES_DT_TO_T,
     ETP_TRAINABLE_INVARS_FNS,
@@ -52,9 +55,12 @@ from ._registries import (
     ETP_Y_OUTVAR_INDICES,
     FastPathRules,
     GRADIENT_ENABLED_PRIMITIVES,
+    get_batched_counterpart,
     get_fast_path_rules,
+    get_instant_drtrl_rule,
     get_pp_x_repr,
     get_snap_adjacency_rule,
+    get_solve_drtrl_rule,
     get_trainable_invars,
     get_x_invar_index,
     get_y_outvar_index,
@@ -62,8 +68,8 @@ from ._registries import (
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
     is_snap_anchored,
+    register_batched_counterpart,
 )
-from .conv import _etp_conv_impl
 from .conv import conv, etp_conv_p
 from .dense import etp_mm_p, etp_mv_p, matmul
 from .einsum import einsum, etp_einsum_p
@@ -89,9 +95,16 @@ __all__ = [
     'ETP_Y_OUTVAR_INDICES',
     'GRADIENT_ENABLED_PRIMITIVES',
     'BATCHED_PRIMITIVES',
+    'BATCHED_COUNTERPARTS',
+    'ETP_RULES_INSTANT_DRTRL',
+    'ETP_RULES_SOLVE_DRTRL',
     'is_etp_primitive',
     'is_etp_enable_gradient_primitive',
     'is_batched_primitive',
+    'register_batched_counterpart',
+    'get_batched_counterpart',
+    'get_instant_drtrl_rule',
+    'get_solve_drtrl_rule',
     'get_trainable_invars',
     'get_x_invar_index',
     'get_y_outvar_index',

@@ -3,6 +3,22 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 
+# `include-package-data` defaults to true for a pyproject-only configuration,
+# which re-adds every file in the sdist manifest to the wheel as *package data*
+# -- including the test payload `setup.py` prunes. The real package data here is
+# one file (`py.typed`), declared explicitly below, so the manifest sweep buys
+# nothing and is turned off.
+[tool.setuptools]
+include-package-data = false
+
+
+# Package-level exclusions. NOTE these patterns match *package* (dotted) names,
+# not file paths. Directories that only serve the test suite --
+# `braintrace._testing` and the `tests` subpackages -- are deliberately NOT
+# listed here: excluding them at discovery time would drop them from the sdist
+# as well, and the sdist is what downstream packagers build and run the suite
+# from. Everything test-only, packages and co-located `*_test.py` modules alike,
+# is pruned from the *wheel* by the `build_py` subclass in `setup.py`.
 [tool.setuptools.packages.find]
 exclude = [
     "dev*",
@@ -12,10 +28,7 @@ exclude = [
     "examples*",
     "build*",
     "dist*",
-    "dev*",
     "braintrace.egg-info*",
-    "braintrace/__pycache__*",
-    "braintrace/__init__.py",
 ]
 
 
@@ -100,12 +113,14 @@ addopts = "-m 'not diagnostic'"
 [tool.mypy]
 python_version = "3.14"
 files = ["braintrace"]
-# Test files, test-only helpers, and non-shipped sources are not part of the
-# typed public surface and are excluded from release type checking.
+# Test files and test-only fixtures are not part of the typed public surface and
+# are excluded from release type checking. `braintrace/_testing/` holds the whole
+# fixture cluster (reference models, BPTT oracle, scenario catalog); nothing
+# shipped imports it, so one directory-level exclusion replaces the previous
+# per-filename list.
 exclude = '''(?x)(
     _test\.py$
-    | model4test\.py$
-    | scenario_catalog\.py$
+    | ^braintrace/_testing/
 )'''
 # These None-defaulted parameters are genuinely optional throughout the
 # codebase; treat them as Optional rather than rewriting 39 signatures.
@@ -114,17 +129,16 @@ implicit_optional = true
 warn_redundant_casts = true
 no_implicit_reexport = false
 
-# `exclude` above removes test files from the checked set, but it does NOT apply
-# to files pulled in by an import. `_algorithm/oracle_models.py` imports the
-# layer classes from `_etrace_model_test.py` (deliberately -- the oracle wraps
-# those models rather than duplicating them), which re-admits that file and
-# surfaces its `brainpy.state.*` attribute errors. Those come from brainpy's
-# dynamic re-exports, the same reason `brainpy.*` is listed as untyped below;
-# they are not our errors, and the file is already outside the typed public
-# surface by the `exclude` policy. Suppress reporting for it specifically so the
-# policy holds however the file is reached.
+# `exclude` above removes files from the checked set, but it does NOT apply to
+# files pulled in by an import. The fixture modules import each other
+# (`oracle_models` wraps the layer classes in `models` rather than duplicating
+# them), which re-admits them and surfaces `brainpy.state.*` attribute errors
+# from brainpy's dynamic re-exports -- the same reason `brainpy.*` is listed as
+# untyped below. They are not our errors, and the package is outside the typed
+# public surface by the `exclude` policy. Suppress reporting for it so the
+# policy holds however these files are reached.
 [[tool.mypy.overrides]]
-module = ["braintrace._etrace_model_test"]
+module = ["braintrace._testing.*"]
 ignore_errors = true
 
 # Third-party scientific deps that ship without inline types or a py.typed
@@ -190,11 +204,32 @@ module = [
     "braintrace._algorithm.pp_prop",
     "braintrace._algorithm.e_prop",
     "braintrace._algorithm.ostl",
-    "braintrace._algorithm.otpe",
-    "braintrace._algorithm.ottt",
-    "braintrace._algorithm.osttp",
     "braintrace._algorithm._common",
     "braintrace._algorithm",
+    # Public-symbol owners added for 0.2.5. Each of these defines at least one
+    # name in `braintrace.__all__`, so leaving them out meant the "every public
+    # API is typed" invariant above did not actually cover them:
+    #   axes -> ETraceConfig            snap_n -> SnAp
+    #   uoro -> UORO                    three_factor -> ThreeFactor
+    #   sequence -> SequenceDriverMixin, ETraceVmap (etrace_grad/etrace_evolve)
+    #   dni -> DNI, SyntheticGradient, train_synthetic_gradient
+    #   random_projection_vjp -> RandomProjectionVjpAlgorithm
+    #   _op.{einsum,embedding,grouped} -> einsum, embedding, grouped_matmul
+    #   nn._embedding -> Embedding
+    "braintrace._algorithm.axes",
+    "braintrace._algorithm.snap_n",
+    "braintrace._algorithm.three_factor",
+    "braintrace._algorithm.uoro",
+    "braintrace._algorithm.sequence",
+    "braintrace._algorithm.dni",
+    "braintrace._algorithm.random_projection_vjp",
+    "braintrace._op._registries",
+    "braintrace._op.einsum",
+    "braintrace._op.embedding",
+    "braintrace._op.grouped",
+    "braintrace.nn._embedding",
+    "braintrace._state_managment",
+    "braintrace._compatible_imports",
 ]
 disallow_untyped_defs = true
 

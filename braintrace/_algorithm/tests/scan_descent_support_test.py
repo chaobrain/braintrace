@@ -206,13 +206,13 @@ class TestSubstepFold:
         assert jnp.shape(out) == (1, 4)
 
 
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_param_gradients_close,
     bptt_param_gradients,
     chunked_online_param_gradients,
     online_param_gradients,
 )
-from braintrace._algorithm.oracle_models import (
+from braintrace._testing.oracle_models import (
     scan_body_rnn,
     snn_scan_rnn,
     snn_scan_two_state_rnn,

@@ -705,7 +705,7 @@ from braintrace._compiler.hid_param_op import (
     PathClassification,
     _scan_jaxpr_for_etp_eqns,
 )
-from braintrace._compiler.scenario_catalog import (
+from braintrace._testing.scenario_catalog import (
     PytreeParamRNN,
     MaskedWeightRNN,
     StackedDeepRNN,
@@ -1171,7 +1171,7 @@ class TestCategoryO_NestedJit:
 # Category P — Branching fan-out (one y directly feeds two groups)
 # ---------------------------------------------------------------------------
 
-from braintrace._compiler.scenario_catalog import (
+from braintrace._testing.scenario_catalog import (
     BranchingFanOutRNN,
     ConstWeightParamBiasRNN,
 )
@@ -1281,7 +1281,7 @@ class TestCategoryQ_AnyTrainableKeyGating:
 # Category R — Complex module graphs (shared submodule, residual, deep nesting)
 # ---------------------------------------------------------------------------
 
-from braintrace._compiler.scenario_catalog import (
+from braintrace._testing.scenario_catalog import (
     SharedSubmoduleTwiceRNN,
     ResidualSkipRNN,
     DeepNestedModuleRNN,
@@ -1376,7 +1376,7 @@ class TestCategoryR_ComplexModuleGraphs:
 # Category S — While-hidden opaque forward (Phase 3)
 # ---------------------------------------------------------------------------
 
-from braintrace._compiler.scenario_catalog import (
+from braintrace._testing.scenario_catalog import (
     WhileSettleRNN,
     WhileSettleTwinRNN,
 )

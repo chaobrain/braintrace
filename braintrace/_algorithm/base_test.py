@@ -582,7 +582,7 @@ class TestETraceAlgorithmTwoLayerIntegration(unittest.TestCase):
 
 def test_report_before_compile_raises():
     import brainstate, pytest, braintrace
-    from braintrace._algorithm.oracle_models import tanh_rnn
+    from braintrace._testing.oracle_models import tanh_rnn
     model = tanh_rnn(n_in=3, n_rec=4, seed=0).factory()
     brainstate.nn.init_all_states(model, batch_size=1)
     algo = braintrace.D_RTRL(model)
@@ -593,7 +593,7 @@ def test_report_before_compile_raises():
 def test_report_after_compile_matches_show_graph():
     import brainstate, jax.numpy as jnp, braintrace
     from braintrace import CompilationReport
-    from braintrace._algorithm.oracle_models import tanh_rnn
+    from braintrace._testing.oracle_models import tanh_rnn
     model = tanh_rnn(n_in=3, n_rec=4, seed=0).factory()
     brainstate.nn.init_all_states(model, batch_size=1)
     algo = braintrace.D_RTRL(model)

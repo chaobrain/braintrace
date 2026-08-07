@@ -124,8 +124,9 @@ class EProp(ParamDimVjpAlgorithm):
         eligibility trace is filtered every step, per hidden-state channel.
         ``0`` disables filtering (the algorithm then reduces exactly to
         :class:`~braintrace.D_RTRL`).
-    random_feedback_key : jax.random.PRNGKey, optional
-        Seed for the random-feedback matrices. Required when
+    random_feedback_key : jax.Array, optional
+        PRNG key seeding the random-feedback matrices; obtain one from
+        :func:`brainstate.random.split_key`. Required when
         ``feedback='random'``; ignored otherwise.
     name : str, optional
         Name of the algorithm instance.

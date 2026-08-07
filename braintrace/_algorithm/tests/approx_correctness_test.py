@@ -19,7 +19,7 @@ guard for D_RTRL, and the rate-model approximation-exactness ceiling
 (F-21/F-22/F-23/F-29).
 
 The OTTT/OTPE-specific bias tests (F-01/F-04/F-07/F-08/F-09) were removed in
-0.3.0 along with those algorithms; see docs/specs for the roadmap. The metric
+0.2.5 along with those algorithms; see docs/specs for the roadmap. The metric
 helpers they exercised are retained and are the basis of the benchmark suite."""
 
 import brainstate
@@ -30,7 +30,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_direction_aligned,
     assert_gradients_differ,
     assert_param_gradients_close,
@@ -42,7 +42,7 @@ from braintrace._algorithm.oracle import (
     relative_magnitude,
     sign_agreement,
 )
-from braintrace._algorithm.oracle_models import (
+from braintrace._testing.oracle_models import (
     SNN_SPECS,
     tanh_rnn,
     two_state_rnn,

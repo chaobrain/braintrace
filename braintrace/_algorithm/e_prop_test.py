@@ -21,7 +21,7 @@ import jax.numpy as jnp
 
 import braintrace
 from braintrace._algorithm.e_prop import EProp
-from braintrace._algorithm.oracle_models import two_state_rnn
+from braintrace._testing.oracle_models import two_state_rnn
 
 
 def _lsnn_like():

@@ -28,7 +28,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_gradients_differ,
     assert_param_gradients_close,
     bptt_param_gradients,
@@ -36,7 +36,7 @@ from braintrace._algorithm.oracle import (
     online_param_gradients,
     relative_deviation,
 )
-from braintrace._algorithm.oracle_models import tanh_rnn
+from braintrace._testing.oracle_models import tanh_rnn
 
 T = 8
 CHUNK = 2

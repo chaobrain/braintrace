@@ -45,7 +45,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle_test import _FAMILIES, _xs_for
+from braintrace._testing.oracle_test import _FAMILIES, _xs_for
 
 LEAK = 0.9
 
@@ -171,7 +171,7 @@ _PARAMS = {
 
 
 def _sparse_drive(m, x, v):
-    from braintrace._algorithm.oracle_test import _sparse_csr
+    from braintrace._testing.oracle_test import _sparse_csr
     csr, _ = _sparse_csr()
     return braintrace.sparse_matmul(x, v[('w',)], sparse_mat=csr)
 
@@ -301,7 +301,7 @@ def test_a_tied_parameter_accumulates_both_relations():
     # two vjps. A projector keyed per relation without accumulation would return
     # one of them, which is the same shape and therefore invisible to a shape
     # check.
-    from braintrace._algorithm import oracle_models as om
+    from braintrace._testing import oracle_models as om
     spec = om.tied_weight_rnn(n_rec=4)
     x = jnp.asarray(np.random.RandomState(0).randn(1, 4).astype('float32')) * 0.3
 
@@ -344,7 +344,7 @@ def test_the_projector_is_linear_in_nu():
 def test_one_hidden_factor_per_group_and_one_parameter_factor_per_group_path():
     # ``two_island_rnn`` is the *only* multi-group fixture at coupled scope; see
     # the test below for why no pre-existing spec can carry this assertion.
-    from braintrace._algorithm import oracle_models as om
+    from braintrace._testing import oracle_models as om
     spec = om.two_island_rnn(n_in=3, n_rec=3)
     model = spec.factory()
     brainstate.nn.init_all_states(model, batch_size=1)
@@ -374,7 +374,7 @@ def test_coupled_scope_merges_the_stacked_layers_into_one_group():
     the per-group and per-(group, path) clauses above would be satisfied by a
     single group holding both paths, and the test would prove nothing.
     """
-    from braintrace._algorithm import oracle_models as om
+    from braintrace._testing import oracle_models as om
     spec = om.stacked_tanh_rnn(n_in=4, n_rec=4)
     xs = spec.make_inputs(2, 4)
 
@@ -392,7 +392,7 @@ def test_coupled_scope_merges_the_stacked_layers_into_one_group():
 
 
 def test_a_tied_weight_shares_one_hidden_factor_and_one_parameter_factor():
-    from braintrace._algorithm import oracle_models as om
+    from braintrace._testing import oracle_models as om
     spec = om.tied_weight_rnn(n_rec=4)
     model = spec.factory()
     brainstate.nn.init_all_states(model, batch_size=1)

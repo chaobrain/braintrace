@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 import braintrace
-from braintrace._etrace_model_test import (
+from braintrace._testing.models import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,
     ALIF_ExpCo_Dense_Layer,

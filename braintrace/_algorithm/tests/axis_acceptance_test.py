@@ -36,8 +36,8 @@ import pytest
 
 import braintrace
 from braintrace import ETraceConfig
-from braintrace._algorithm import oracle_models as om
-from braintrace._algorithm.oracle import (
+from braintrace._testing import oracle_models as om
+from braintrace._testing.oracle import (
     assert_gradients_differ,
     assert_model_is_live,
     chunked_online_param_gradients,

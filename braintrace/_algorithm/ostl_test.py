@@ -354,7 +354,7 @@ def _off_block_diagonal_factory(n_in=3, n_rec=3, seed=0):
 def _ostl_recurrent_rel_err(factory, xs):
     """Max relative error between the BPTT oracle and OSTLRecurrent's
     single-step-naive online gradient, for the (single) ETP weight ``w``."""
-    from braintrace._algorithm.oracle import (
+    from braintrace._testing.oracle import (
         bptt_param_gradients,
         online_param_gradients_singlestep_naive,
     )

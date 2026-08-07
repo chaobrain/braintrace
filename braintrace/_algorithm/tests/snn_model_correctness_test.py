@@ -31,7 +31,7 @@ import brainunit as u
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_gradients_differ,
     assert_model_is_live,
     assert_param_gradients_close,
@@ -39,7 +39,7 @@ from braintrace._algorithm.oracle import (
     chunked_online_param_gradients,
     online_param_gradients,
 )
-from braintrace._algorithm.oracle_models import SNN_SPECS
+from braintrace._testing.oracle_models import SNN_SPECS
 
 T = 6
 N_IN = 4

@@ -59,7 +59,7 @@ from braintrace import (
     compile_etrace_graph,
 )
 from braintrace._compiler.hid_param_op import PathClassification
-from braintrace._compiler.scenario_catalog import (
+from braintrace._testing.scenario_catalog import (
     PartialPathRNN,
     SharedTiedWeightRNN,
     StackedDeepRNN,

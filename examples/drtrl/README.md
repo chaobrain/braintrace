@@ -4,7 +4,7 @@ A tutorial-linear walk through ``braintrace.D_RTRL`` — the online
 eligibility-trace gradient estimator.
 
 Each file is self-contained. Read them in order (01 → 11) to follow the
-companion tutorial at `docs/tutorials/drtrl.md`.
+companion tutorial at `docs/tutorials/drtrl.ipynb`.
 
 ## How to run
 
@@ -34,7 +34,7 @@ All examples run on CPU in roughly 1–2 minutes. Task 09 (MNIST) requires
 
 ## Tutorial
 
-See `docs/tutorials/drtrl.md`.
+See `docs/tutorials/drtrl.ipynb`.
 
 ## Tests
 

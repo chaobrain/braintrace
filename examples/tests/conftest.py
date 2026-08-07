@@ -17,7 +17,7 @@ a *deleted/donated* buffer. The next ordered-effect op then calls
     or donated buffer
 
 This only surfaces once enough heavy cases have run before a token-using case in
-the same process (e.g. the ``test_compile_modes`` cases ahead of the ``100``/
+the same process (e.g. the ``compile_modes_test`` cases ahead of the ``100``/
 ``101`` smoke cases), which is why each file passes in isolation but the combined
 run fails.
 

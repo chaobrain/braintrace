@@ -21,7 +21,7 @@ import brainunit as u
 
 import braintrace
 from braintrace._compiler.hidden_pertubation import add_hidden_perturbation_in_module
-from braintrace._etrace_model_test import (
+from braintrace._testing.models import (
     IF_Delta_Dense_Layer,
     LIF_ExpCo_Dense_Layer,
     ALIF_ExpCo_Dense_Layer,

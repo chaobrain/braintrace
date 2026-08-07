@@ -194,10 +194,14 @@ class BPTTTrainer(Trainer):
             return out, loss
 
         def _bptt_grad_step():
-            # 在T时刻之前，模型更新其状态及其eligibility trace
+            # Warmup: advance hidden state only, no loss. This is the BPTT
+            # baseline -- there is no eligibility trace on this path (the
+            # comment here used to claim otherwise, copied from the online
+            # path before the driver migration).
             n_sim = self.n_seq + 10
             _ = brainstate.transform.for_loop(model, inputs[:n_sim])
-            # 在T时刻之后，模型开始在线学习
+            # Scored window: run the remaining steps and collect their losses,
+            # which the enclosing grad() then backpropagates through in full.
             outs, losses = brainstate.transform.for_loop(_run_step_train, inputs[n_sim:], targets)
             return losses.mean(), outs
 

@@ -16,7 +16,7 @@
 """Acceptance tests for ``learning_signal='modulatory'`` (M1--M4).
 
 Every criterion here runs on the **single-step** recipe of
-:func:`~braintrace._algorithm.oracle.online_param_gradients_singlestep_naive`,
+:func:`~braintrace._testing.oracle.online_param_gradients_singlestep_naive`,
 because :class:`~braintrace.ThreeFactor` is single-step by construction. Under
 multi-step, ``_solve_weight_gradients`` adds the within-window reverse-AD
 gradient of the ETP parameters on top of the trace contraction, so replacing the
@@ -40,9 +40,9 @@ import pytest
 from jax.experimental import io_callback
 
 import braintrace
-from braintrace._algorithm import oracle_models as om
+from braintrace._testing import oracle_models as om
 from braintrace._algorithm.axes import ETraceConfig
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     online_param_gradients_singlestep_naive,
     relative_deviation,
 )

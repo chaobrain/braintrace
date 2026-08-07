@@ -771,7 +771,7 @@ class TestTheDefaultHooksAreInert:
         assert algo._get_update_aux() is None
 
     def test_etp_routed_paths_reads_the_compiled_graph(self):
-        from braintrace._algorithm import oracle_models as om
+        from braintrace._testing import oracle_models as om
         spec = om.plain_and_etp_rnn(n_in=3, n_rec=4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)
@@ -785,7 +785,7 @@ class TestTheExitCotangentTemplate:
     """``_exit_cotangent_grads``: zero everywhere but the exit hiddens."""
 
     def _algo(self):
-        from braintrace._algorithm import oracle_models as om
+        from braintrace._testing import oracle_models as om
         spec = om.plain_and_etp_rnn(n_in=3, n_rec=4)
         model = spec.factory()
         brainstate.nn.init_all_states(model, batch_size=1)

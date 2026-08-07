@@ -32,6 +32,7 @@ Linear Layers
    Linear
    GroupedLinear
    SignedWLinear
+   ScaledWSLinear
    SparseLinear
    LoRA
 
@@ -80,6 +81,7 @@ the new hidden state (or, for :class:`LRUCell`, the projected output).
    MiniGRU
    MiniLSTM
    LRUCell
+   CFNCell
 
 
 Readout Layers

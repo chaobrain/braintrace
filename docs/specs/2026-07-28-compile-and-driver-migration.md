@@ -2,7 +2,7 @@
 
 Status: spec, describing work carried out
 Baseline: commit `f935856` (squash-merge of PR #151)
-Target release: 0.3.0
+Target release: 0.2.5
 
 ## Goal
 

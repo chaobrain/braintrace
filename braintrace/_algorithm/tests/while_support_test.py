@@ -58,12 +58,12 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._algorithm.oracle import (
+from braintrace._testing.oracle import (
     assert_param_gradients_close,
     online_param_gradients,
     online_param_gradients_singlestep_naive,
 )
-from braintrace._algorithm.oracle_models import (
+from braintrace._testing.oracle_models import (
     while_settle_rnn,
     while_settle_twin_rnn,
 )

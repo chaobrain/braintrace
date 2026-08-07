@@ -672,7 +672,7 @@ class TestMatmulWeightFnExactness:
         return factory
 
     def test_d_rtrl_matches_bptt_with_weight_fn(self):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
         )
         factory = self._factory(weight_fn=lambda w: w ** 2)
@@ -685,7 +685,7 @@ class TestMatmulWeightFnExactness:
         assert_param_gradients_close(online, bptt, atol=1e-4)
 
     def test_d_rtrl_matches_bptt_with_tanh_weight_fn(self):
-        from braintrace._algorithm.oracle import (
+        from braintrace._testing.oracle import (
             bptt_param_gradients, online_param_gradients, assert_param_gradients_close,
         )
         factory = self._factory(weight_fn=jnp.tanh)

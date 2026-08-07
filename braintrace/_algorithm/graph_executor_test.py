@@ -20,7 +20,7 @@ import jax.numpy as jnp
 import brainunit as u
 
 import braintrace
-from braintrace._etrace_model_test import (
+from braintrace._testing.models import (
     ALIF_STPExpCu_Dense_Layer,
 )
 

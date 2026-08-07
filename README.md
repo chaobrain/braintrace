@@ -31,6 +31,47 @@ Alternatively, you can install `BrainX`, which bundles `braintrace` with other c
 pip install BrainX -U
 ```
 
+## Quickstart
+
+Mark the trainable operations with an ETP primitive (here, via `braintrace.nn`
+layers, which use them internally), then compile the model into a learner and
+drive a sequence. There is no scan to write and no special parameter class —
+weights stay plain `brainstate.ParamState`.
+
+```python
+import brainstate
+import jax.numpy as jnp
+import braintrace
+
+class GRUNet(brainstate.nn.Module):
+    def __init__(self, n_in, n_rec, n_out):
+        super().__init__()
+        self.rnn = braintrace.nn.GRUCell(n_in, n_rec)
+        self.out = braintrace.nn.Linear(n_rec, n_out)
+
+    def update(self, x):
+        return self.out(self.rnn(x))
+
+model = GRUNet(3, 8, 1)
+
+# One call: initialise states, compile the eligibility-trace graph,
+# return a ready learner.
+learner = braintrace.compile(model, braintrace.D_RTRL, jnp.zeros((1, 3)), batch_size=1)
+
+def step_loss(x, y):
+    return jnp.mean((learner(x) - y) ** 2)
+
+xs = brainstate.random.randn(100, 1, 3)   # (time, batch, features)
+ys = brainstate.random.randn(100, 1, 1)
+
+# Drives the sequence and accumulates online gradients -- O(1) memory in T.
+grads, losses = learner.etrace_grad(xs, ys, step_fn=step_loss, return_value=True)
+```
+
+Swap `braintrace.D_RTRL` for `pp_prop`, `SnAp`, `UORO`, `ThreeFactor`, `DNI`,
+`EProp`, the OSTL variants, or an explicit `braintrace.ETraceConfig` to change
+the learning rule; nothing else in the snippet changes.
+
 ## Documentation
 
 The official documentation is hosted on Read the Docs: [https://brainx.chaobrain.com/braintrace](https://brainx.chaobrain.com/braintrace)
