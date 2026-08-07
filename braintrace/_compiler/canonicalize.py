@@ -217,6 +217,33 @@ def _is_etp_eqn(eqn: JaxprEqn) -> bool:
     return is_etp_primitive(eqn.primitive)
 
 
+# A buffered :func:`~braintrace._compiler.diagnostics.emit` call: the keyword
+# arguments are built where the decision is made and replayed verbatim once the
+# canonicalization fixpoint has settled. See ``_emit_pending``.
+_PendingDiagnostic = Dict[str, Any]
+
+
+def _emit_pending(pending: List[_PendingDiagnostic]) -> None:
+    """Emit buffered skip diagnostics collected by the final sweep.
+
+    Each canonicalization sweep copies through the equations it cannot rewrite,
+    so a sweep-time ``emit`` would fire once per fixpoint iteration for the same
+    equation. Instead every sweep *buffers* its skip diagnostics, the driver
+    keeps only the latest buffer, and this helper replays it once. The settling
+    sweep rewrote nothing, so it visited each surviving top-level equation
+    exactly once and its buffer holds exactly one entry per skipped equation —
+    no identity-keyed deduplication (and no reliance on equation objects staying
+    alive across sweeps) is needed.
+
+    Parameters
+    ----------
+    pending : list of dict
+        Keyword argument dicts for :func:`~braintrace._compiler.diagnostics.emit`.
+    """
+    for kwargs in pending:
+        emit(**kwargs)
+
+
 def if_convert_conds(
     closed_jaxpr: ClosedJaxpr,
     *,
@@ -290,21 +317,22 @@ def if_convert_conds(
     # Fixpoint loop: converting a cond can surface user ``jit`` equations
     # from its branches, and their inlined bodies can expose further conds.
     # Each iteration converts what is visible, then flattens surfaced jits;
-    # nesting depth is finite, so this terminates. ``skip_warned`` carries
-    # the equations already reported as skipped, so a relevant-but-unsafe
-    # cond warns once, not once per iteration.
+    # nesting depth is finite, so this terminates. Each sweep buffers (rather
+    # than emits) its skip diagnostics; only the settling sweep's buffer is
+    # emitted, so a relevant-but-unsafe cond warns once, not once per
+    # iteration. See ``_emit_pending``.
     result = closed_jaxpr
-    skip_warned: set = set()
+    pending: List[_PendingDiagnostic] = []
     while True:
-        converted, n_converted = _convert_conds_once(
+        converted, n_converted, pending = _convert_conds_once(
             result,
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
             hidden_outvars=hidden_outvars,
-            skip_warned=skip_warned,
             policy=policy,
         )
         if n_converted == 0:
+            _emit_pending(pending)
             return result
         result = inline_jit_calls(converted)
 
@@ -315,18 +343,19 @@ def _convert_conds_once(
     weight_invars: Container[Var],
     hidden_invars: Container[Var],
     hidden_outvars: Container[Var],
-    skip_warned: set,
     policy: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
 ):
     """One conversion sweep over the top-level equations.
 
-    Returns ``(closed_jaxpr, n_converted)``; the input object itself when
-    nothing is converted.
+    Returns ``(closed_jaxpr, n_converted, pending)``; the input object itself
+    when nothing is converted. ``pending`` holds the skip diagnostics observed
+    by this sweep, buffered for the caller to emit once the fixpoint settles.
     """
     jaxpr = closed_jaxpr.jaxpr
     if not any(is_cond_primitive(eqn) for eqn in jaxpr.eqns):
-        return closed_jaxpr, 0
+        return closed_jaxpr, 0, []
 
+    pending: List[_PendingDiagnostic] = []
     extra_constvars: List[Var] = []
     extra_consts: List[Any] = []
     new_eqns: List[JaxprEqn] = []
@@ -454,18 +483,16 @@ def _convert_conds_once(
                         },
                     )
                     return
-                if id(eqn) not in skip_warned:
-                    skip_warned.add(id(eqn))
-                    emit(
-                        kind=DiagnosticKind.COND_CONVERSION_SKIPPED,
-                        level=DiagnosticLevel.WARNING,
-                        message=(
-                            f'An ETP-relevant cond ({reason}) was NOT '
-                            f'if-converted because {bad}; it stays opaque and '
-                            f'the existing control-flow restrictions apply.'
-                        ),
-                        context={'reason': bad, 'relevance': reason},
-                    )
+                pending.append(dict(
+                    kind=DiagnosticKind.COND_CONVERSION_SKIPPED,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'An ETP-relevant cond ({reason}) was NOT '
+                        f'if-converted because {bad}; it stays opaque and '
+                        f'the existing control-flow restrictions apply.'
+                    ),
+                    context={'reason': bad, 'relevance': reason},
+                ))
             # Not converted: keep the cond eqn (resolved when inside a branch).
             if subst is None:
                 new_eqns.append(eqn)
@@ -491,7 +518,7 @@ def _convert_conds_once(
         handle_eqn(eqn, lambda atom: atom, None)
 
     if n_converted == 0:
-        return closed_jaxpr, 0
+        return closed_jaxpr, 0, pending
 
     new_jaxpr = Jaxpr(
         constvars=list(jaxpr.constvars) + extra_constvars,
@@ -502,7 +529,7 @@ def _convert_conds_once(
         debug_info=jaxpr.debug_info,
     )
     result = ClosedJaxpr(new_jaxpr, list(closed_jaxpr.consts) + extra_consts)
-    return result, n_converted
+    return result, n_converted, pending
 
 
 # ---------------------------------------------------------------------------
@@ -608,20 +635,22 @@ def unroll_inner_scans(
     # Fixpoint: unrolling a scan can surface user ``jit`` equations and
     # nested scans from its body. Each sweep unrolls the visible top-level
     # scans, then flattens surfaced jits; nesting depth is finite, so this
-    # terminates. ``skip_warned`` carries the equations already reported, so
-    # a relevant-but-ineligible scan warns once, not once per sweep.
+    # terminates. Each sweep buffers (rather than emits) its skip
+    # diagnostics; only the settling sweep's buffer is emitted, so a
+    # relevant-but-ineligible scan warns once, not once per sweep. See
+    # ``_emit_pending``.
     result = closed_jaxpr
-    skip_warned: set = set()
+    pending: List[_PendingDiagnostic] = []
     while True:
-        converted, n_unrolled = _unroll_scans_once(
+        converted, n_unrolled, pending = _unroll_scans_once(
             result,
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
             hidden_outvars=hidden_outvars,
             policy=policy,
-            skip_warned=skip_warned,
         )
         if n_unrolled == 0:
+            _emit_pending(pending)
             return result
         result = inline_jit_calls(converted)
 
@@ -633,16 +662,18 @@ def _unroll_scans_once(
     hidden_invars: Container[Var],
     hidden_outvars: Container[Var],
     policy: ControlFlowPolicy,
-    skip_warned: set,
 ):
     """One unrolling sweep over the top-level equations.
 
-    Returns ``(closed_jaxpr, n_unrolled)``; the input object itself when
-    nothing is unrolled.
+    Returns ``(closed_jaxpr, n_unrolled, pending)``; the input object itself
+    when nothing is unrolled. ``pending`` holds the skip diagnostics observed
+    by this sweep, buffered for the caller to emit once the fixpoint settles.
     """
     jaxpr = closed_jaxpr.jaxpr
     if not any(is_scan_primitive(eqn) for eqn in jaxpr.eqns):
-        return closed_jaxpr, 0
+        return closed_jaxpr, 0, []
+
+    pending: List[_PendingDiagnostic] = []
 
     # Consumption of the original scan outvars, for dead-output elision.
     # Downstream equations keep referencing the original outvars (they are
@@ -882,41 +913,39 @@ def _unroll_scans_once(
             continue
         bad = _scan_static_ineligibility(eqn, policy)
         if bad is not None:
-            if id(eqn) not in skip_warned:
-                skip_warned.add(id(eqn))
-                # Matches the descent-eligibility rule in
-                # ``scan_descent._descent_blockers``: any positive-length
-                # scan beyond the limit descends, including when unrolling
-                # is disabled entirely (limit <= 0).
-                over_limit = eqn.params['length'] > policy.scan_unroll_limit
-                if over_limit and policy.scan_descent == 'auto':
-                    # An over-limit scan is no longer a dead end: the
-                    # scan-descent pass (Phase 4) picks it up downstream.
-                    emit(
-                        kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
-                        level=DiagnosticLevel.INFO,
-                        message=(
-                            f'An ETP-relevant scan ({reason}) was NOT '
-                            f'unrolled because {bad}; structured scan '
-                            f'descent will handle it (see '
-                            f'ControlFlowPolicy.scan_descent).'
-                        ),
-                        context={'reason': bad, 'relevance': reason},
-                    )
-                else:
-                    emit(
-                        kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
-                        level=DiagnosticLevel.WARNING,
-                        message=(
-                            f'An ETP-relevant scan ({reason}) was NOT '
-                            f'unrolled because {bad}; it stays opaque and '
-                            f'the existing control-flow restrictions apply. '
-                            f'Raise ControlFlowPolicy.scan_unroll_limit or '
-                            f'restructure the loop if its weights should '
-                            f'learn online.'
-                        ),
-                        context={'reason': bad, 'relevance': reason},
-                    )
+            # Matches the descent-eligibility rule in
+            # ``scan_descent._descent_blockers``: any positive-length
+            # scan beyond the limit descends, including when unrolling
+            # is disabled entirely (limit <= 0).
+            over_limit = eqn.params['length'] > policy.scan_unroll_limit
+            if over_limit and policy.scan_descent == 'auto':
+                # An over-limit scan is no longer a dead end: the
+                # scan-descent pass (Phase 4) picks it up downstream.
+                pending.append(dict(
+                    kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
+                    level=DiagnosticLevel.INFO,
+                    message=(
+                        f'An ETP-relevant scan ({reason}) was NOT '
+                        f'unrolled because {bad}; structured scan '
+                        f'descent will handle it (see '
+                        f'ControlFlowPolicy.scan_descent).'
+                    ),
+                    context={'reason': bad, 'relevance': reason},
+                ))
+            else:
+                pending.append(dict(
+                    kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
+                    level=DiagnosticLevel.WARNING,
+                    message=(
+                        f'An ETP-relevant scan ({reason}) was NOT '
+                        f'unrolled because {bad}; it stays opaque and '
+                        f'the existing control-flow restrictions apply. '
+                        f'Raise ControlFlowPolicy.scan_unroll_limit or '
+                        f'restructure the loop if its weights should '
+                        f'learn online.'
+                    ),
+                    context={'reason': bad, 'relevance': reason},
+                ))
             new_eqns.append(eqn)
             continue
         num_consts, num_carry = scan_num_consts_carry(eqn)
@@ -925,24 +954,22 @@ def _unroll_scans_once(
             v for v in eqn.invars[num_prefix:] if reaches_weight(v)
         ]
         if sliced_weight:
-            if id(eqn) not in skip_warned:
-                skip_warned.add(id(eqn))
-                emit(
-                    kind=DiagnosticKind.RELATION_EXCLUDED_SLICED_WEIGHT,
-                    level=DiagnosticLevel.WARNING,
-                    message=(
-                        f'An ETP-relevant scan ({reason}) was NOT unrolled '
-                        f'because it scans over a trainable weight (a '
-                        f'stacked parameter passed as xs). Each unrolled '
-                        f'iteration would consume a *slice* of the '
-                        f'parameter, which relation analysis cannot yet '
-                        f'attribute correctly. Pass per-iteration weights '
-                        f'as separate parameters, or keep the loop out of '
-                        f'online learning.'
-                    ),
-                    context={'relevance': reason,
-                             'n_sliced': len(sliced_weight)},
-                )
+            pending.append(dict(
+                kind=DiagnosticKind.RELATION_EXCLUDED_SLICED_WEIGHT,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'An ETP-relevant scan ({reason}) was NOT unrolled '
+                    f'because it scans over a trainable weight (a '
+                    f'stacked parameter passed as xs). Each unrolled '
+                    f'iteration would consume a *slice* of the '
+                    f'parameter, which relation analysis cannot yet '
+                    f'attribute correctly. Pass per-iteration weights '
+                    f'as separate parameters, or keep the loop out of '
+                    f'online learning.'
+                ),
+                context={'relevance': reason,
+                         'n_sliced': len(sliced_weight)},
+            ))
             new_eqns.append(eqn)
             continue
 
@@ -968,7 +995,7 @@ def _unroll_scans_once(
         )
 
     if n_unrolled == 0:
-        return closed_jaxpr, 0
+        return closed_jaxpr, 0, pending
 
     new_jaxpr = Jaxpr(
         constvars=list(jaxpr.constvars) + extra_constvars,
@@ -979,7 +1006,7 @@ def _unroll_scans_once(
         debug_info=jaxpr.debug_info,
     )
     result = ClosedJaxpr(new_jaxpr, list(closed_jaxpr.consts) + extra_consts)
-    return result, n_unrolled
+    return result, n_unrolled, pending
 
 
 # ---------------------------------------------------------------------------
@@ -1035,34 +1062,39 @@ def canonicalize_control_flow(
             f"policy.cond must be 'convert' or 'opaque', got {policy.cond!r}."
         )
 
+    # Each sweep buffers its skip diagnostics rather than emitting them; only
+    # the latest buffer per pass survives, and it is emitted once the joint
+    # fixpoint settles. The settling iteration ran both sweeps over the final
+    # jaxpr without rewriting anything, so its buffers hold exactly one entry
+    # per equation that stayed opaque. See ``_emit_pending``.
     result = closed_jaxpr
-    cond_skip_warned: set = set()
-    scan_skip_warned: set = set()
+    cond_pending: List[_PendingDiagnostic] = []
+    scan_pending: List[_PendingDiagnostic] = []
     while True:
         n_total = 0
         if policy.cond == 'convert':
-            converted, n = _convert_conds_once(
+            converted, n, cond_pending = _convert_conds_once(
                 result,
                 weight_invars=weight_invars,
                 hidden_invars=hidden_invars,
                 hidden_outvars=hidden_outvars,
-                skip_warned=cond_skip_warned,
                 policy=policy,
             )
             if n:
                 result = inline_jit_calls(converted)
                 n_total += n
         if policy.scan_unroll_limit > 0:
-            converted, n = _unroll_scans_once(
+            converted, n, scan_pending = _unroll_scans_once(
                 result,
                 weight_invars=weight_invars,
                 hidden_invars=hidden_invars,
                 hidden_outvars=hidden_outvars,
                 policy=policy,
-                skip_warned=scan_skip_warned,
             )
             if n:
                 result = inline_jit_calls(converted)
                 n_total += n
         if n_total == 0:
+            _emit_pending(cond_pending)
+            _emit_pending(scan_pending)
             return result
