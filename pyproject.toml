@@ -66,6 +66,16 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+    # JAX is imported directly throughout the package (the compiler's
+    # compatibility layer starts with `import jax`), so it is declared here
+    # rather than borrowed from a sibling package's metadata. The floor is the
+    # lowest version the CI matrix runs (`.github/workflows/CI.yml`); no upper
+    # cap is pinned, because every JAX-version-sensitive site in
+    # `_compatible_imports.py` is capability-detected rather than
+    # version-pinned, and a published cap cannot be relaxed for artifacts
+    # already on PyPI. Rationale in
+    # `docs/specs/2026-08-07-e05-declare-jax-dependency.md`.
+    "jax>=0.8.0",
     "brainstate>=0.5.2",
     "brainunit",
     "brainevent>=0.1.2",
@@ -82,6 +92,14 @@ dynamic = ["version"]
 "Source Code" = "https://github.com/chaobrain/braintrace"
 
 
+# Backend selectors. These stay unversioned on purpose: extras of the *same*
+# distribution are additive, not alternative, so the `jax>=0.8.0` floor in
+# `[project].dependencies` already applies here and stating it again in five
+# places would only let it drift. `braintrace[cuda12]` resolves to one `jax`
+# satisfying `>=0.8.0` *with* the `cuda12` extra, which is what pulls in
+# `jax-cuda12-plugin`; the bare core requirement cannot force a CPU build,
+# because the backend lives in additional plugin packages rather than in the
+# `jax` wheel itself.
 [project.optional-dependencies]
 cpu = ["jax[cpu]"]
 cuda12 = ["jax[cuda12]"]
