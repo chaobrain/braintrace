@@ -1,6 +1,7 @@
 -r requirements.txt
 
 matplotlib
+psutil  # examples/003-snn-memory-and-speed-evaluation-*.py read host RSS on the CPU backend
 
 
 pytest

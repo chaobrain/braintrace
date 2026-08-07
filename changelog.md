@@ -290,6 +290,18 @@ and by five new learning rules (`SnAp`, `UORO`, `ThreeFactor`, `DNI`,
   also still called `element_wise(weight, fn=...)`, predating that
   parameter's rename to `weight_fn`. All affected notebooks were re-executed
   end-to-end to confirm they now run cleanly.
+- **CI runs the example suites.** `examples/tests/` and
+  `examples/pp_prop/tests/` both existed and both passed locally, but the CI
+  test job ran `pytest braintrace/` only, so neither was ever executed — which
+  is how the two `AttributeError` / `TypeError` bugs fixed in #153 reached
+  `main` in the first place. They now run in a dedicated `Examples` job, kept
+  out of the four-way JAX matrix because multiplying a 13-minute integration
+  smoke run across four JAX versions buys nothing. The files were also renamed
+  from the `test_*.py` prefix to the `*_test.py` suffix the rest of the repo
+  uses. The job earned its place immediately: it caught that
+  `examples/003-snn-memory-and-speed-evaluation-*.py` import `psutil` on the
+  CPU backend without anything declaring it — green locally only because
+  developers happen to have it installed. It is now in `requirements-dev.txt`.
 
 ### Documentation
 
