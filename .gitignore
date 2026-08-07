@@ -196,10 +196,7 @@ cython_debug/
 /examples/online-based-training/figs/
 /dev/
 /.VSCodeCounter/
-/docs/_static/model-dynamics-supported.pptx
 /temp/
-/docs/_static/etrace_op_functions.pptx
-/docs/_static/etrace_op_functions.pdf
 /.claude/
 /docs/changelog.md
 /braintrace/etp/JAX_INTERPRETER.md
@@ -215,5 +212,12 @@ docs/_static/css/brainx-header.css
 docs/_static/js/brainx-header.js
 docs/_static/css/brainx-footer.css
 docs/_static/js/brainx-footer.js
+
+# Editable masters for docs figures (PowerPoint/PDF). These are large binaries
+# that are authored locally and never tracked; only the small rendered image a
+# docs page actually references belongs in git. See
+# docs/specs/2026-08-07-e08-prune-unreferenced-static-assets.md.
+/docs/_static/*.pptx
+/docs/_static/*.pdf
 /.agents/
 /.worktrees/
