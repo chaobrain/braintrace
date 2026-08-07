@@ -28,7 +28,7 @@
 
 
 from enum import Enum
-from typing import Optional
+from typing import Any, Callable, Optional, Union
 
 import brainstate
 
@@ -90,11 +90,11 @@ class ETraceParam(brainstate.ParamState):
 
     def __init__(
         self,
-        weight,
+        weight: Any,
         op: ETraceOp,
         grad: Optional[object] = None,
         name: Optional[str] = None,
-    ):
+    ) -> None:
         super().__init__(weight, name=name)
         if not isinstance(op, ETraceOp):
             raise TypeError(f'op must be ETraceOp, got {type(op)}')
@@ -106,7 +106,7 @@ class ETraceParam(brainstate.ParamState):
         self.gradient = grad
         self.is_etrace = True
 
-    def execute(self, x):
+    def execute(self, x: Any) -> Any:
         return self.op(x, self.value)
 
 
@@ -142,17 +142,22 @@ class ElemWiseParam(ETraceParam):
     """
     __module__ = 'braintrace'
 
+    # Narrows the inherited ``ETraceParam.op`` for type checking only: the
+    # constructor below guarantees an ``ElemWiseOp``, whose ``__call__`` takes
+    # the weight alone. A bare annotation creates no class attribute at runtime.
+    op: ElemWiseOp
+
     def __init__(
         self,
-        weight,
-        op=(lambda w: w),
+        weight: Any,
+        op: Union[ElemWiseOp, Callable] = (lambda w: w),
         name: Optional[str] = None,
-    ):
+    ) -> None:
         if not isinstance(op, ElemWiseOp):
             op = ElemWiseOp(op)
         super().__init__(weight, op=op, grad=ETraceGrad.full, name=name)
 
-    def execute(self):  # type: ignore[override]
+    def execute(self) -> Any:  # type: ignore[override]
         return self.op(self.value)
 
 
@@ -192,11 +197,11 @@ class NonTempParam(brainstate.ParamState):
 
     def __init__(
         self,
-        value,
-        op,
+        value: Any,
+        op: Union[ETraceOp, Callable],
         name: Optional[str] = None,
-        **_kwargs,
-    ):
+        **_kwargs: Any,
+    ) -> None:
         super().__init__(value, name=name)
         if isinstance(op, ETraceOp):
             self._op: Optional[ETraceOp] = op
@@ -207,7 +212,7 @@ class NonTempParam(brainstate.ParamState):
             self._op = None
             self.op = op
 
-    def execute(self, x):
+    def execute(self, x: Any) -> Any:
         return self.op(x, self.value)
 
 
@@ -243,10 +248,10 @@ class FakeETraceParam(object):
     """
     __module__ = 'braintrace'
 
-    def __init__(self, value, op):
+    def __init__(self, value: Any, op: Union[ETraceOp, Callable]) -> None:
         self.value = value
         if isinstance(op, ETraceOp):
-            self._op = op
+            self._op: Optional[ETraceOp] = op
             self.op = op.raw_xw_to_y
         else:
             if not callable(op):
@@ -254,7 +259,7 @@ class FakeETraceParam(object):
             self._op = None
             self.op = op
 
-    def execute(self, x):
+    def execute(self, x: Any) -> Any:
         return self.op(x, self.value)
 
 
@@ -292,10 +297,10 @@ class FakeElemWiseParam(object):
 
     def __init__(
         self,
-        weight,
-        op=(lambda w: w),
+        weight: Any,
+        op: Union[ETraceOp, Callable] = (lambda w: w),
         name: Optional[str] = None,
-    ):
+    ) -> None:
         self._is_etrace_op = False
         if isinstance(op, ETraceOp):
             if not isinstance(op, ElemWiseOp):
@@ -303,7 +308,9 @@ class FakeElemWiseParam(object):
                     f'op must be ElemWiseOp when an ETraceOp is supplied, got {type(op)}'
                 )
             self._op: Optional[ElemWiseOp] = op
-            self.op = op.raw_xw_to_y
+            # ``Callable`` (i.e. ``Callable[..., Any]``): the two branches bind
+            # callables of different arity, matched by ``execute`` below.
+            self.op: Callable = op.raw_xw_to_y
             self._is_etrace_op = True
         else:
             if not callable(op):
@@ -313,7 +320,7 @@ class FakeElemWiseParam(object):
         self.value = weight
         self.name = name
 
-    def execute(self):
+    def execute(self) -> Any:
         if self._is_etrace_op:
             return self.op(None, self.value)
         return self.op(self.value)

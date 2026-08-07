@@ -210,18 +210,23 @@ class HiddenParamOpRelation(NamedTuple):
 
     # backward compat aliases
     @property
-    def x(self):
+    def x(self) -> Optional[Var]:
         return self.x_var
 
     @property
-    def y(self):
+    def y(self) -> Var:
         return self.y_var
 
     @property
-    def path(self):
+    def path(self) -> Optional[Path]:
         return next(iter(self.trainable_paths.values()), None)
 
-    def y_to_hidden_groups(self, y_val, const_vals, concat_hidden_vals=True):
+    def y_to_hidden_groups(
+        self,
+        y_val: jax.Array,
+        const_vals: Dict[Var, jax.Array],
+        concat_hidden_vals: bool = True,
+    ) -> List[Any]:
         """Evaluate the transition jaxprs mapping ``y`` to hidden-group values.
 
         Parameters
@@ -244,7 +249,8 @@ class HiddenParamOpRelation(NamedTuple):
         vals_of_hidden_groups = []
         for jaxpr, group in zip(self.y_to_hidden_group_jaxprs, self.hidden_groups):
             consts = [const_vals[var] for var in jaxpr.constvars]
-            hidden_vals = jax.core.eval_jaxpr(jaxpr, consts, y_val)
+            # ``list[Array]`` before concatenation, a single ``Array`` after.
+            hidden_vals: Any = jax.core.eval_jaxpr(jaxpr, consts, y_val)
             if concat_hidden_vals:
                 hidden_vals = group.concat_hidden(hidden_vals)
             vals_of_hidden_groups.append(hidden_vals)
@@ -811,7 +817,7 @@ def find_hidden_param_op_relations_from_jaxpr(
     weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
-    **_ignored,
+    **_ignored: Any,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
     producers = build_producer_map(jaxpr)
@@ -1165,8 +1171,8 @@ def find_hidden_param_op_relations_from_minfo(
 
 def find_hidden_param_op_relations_from_module(
     model: brainstate.nn.Module,
-    *model_args,
-    **model_kwargs,
+    *model_args: Any,
+    **model_kwargs: Any,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find ETP relations from a model.
 

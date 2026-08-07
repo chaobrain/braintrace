@@ -49,7 +49,7 @@ equations rather than spinning forever.
 """
 
 from dataclasses import dataclass
-from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import jax
 
@@ -68,7 +68,7 @@ from braintrace._compatible_imports import (
 from braintrace._misc import CompilationError
 from braintrace._op import is_etp_primitive
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
-from .jaxpr_graph import build_producer_map, inline_jit_calls
+from .jaxpr_graph import Atom, build_producer_map, inline_jit_calls
 
 __all__ = [
     'ControlFlowPolicy',
@@ -186,7 +186,7 @@ class ControlFlowPolicy:
     scan_descent: str = 'auto'
     fixpoint_iteration_limit: int = 64
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if self.scan_descent not in ('auto', 'off'):
             raise ValueError(
                 f"ControlFlowPolicy.scan_descent must be 'auto' or 'off', "
@@ -458,7 +458,7 @@ def _convert_conds_once(
     hidden_outvars: Container[Var],
     policy: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     converted_log: Optional[List[JaxprEqn]] = None,
-):
+) -> Tuple[ClosedJaxpr, int, List[_PendingDiagnostic]]:
     """One conversion sweep over the top-level equations.
 
     Returns ``(closed_jaxpr, n_converted, pending)``; the input object itself
@@ -481,7 +481,11 @@ def _convert_conds_once(
     def fresh_like(v: Var) -> Var:
         return new_var('', v.aval)
 
-    def relevance_reason(resolved_invars, outvars, branches) -> Optional[str]:
+    def relevance_reason(
+        resolved_invars: Sequence[Atom],
+        outvars: Sequence[Var],
+        branches: Sequence[Any],
+    ) -> Optional[str]:
         for v in resolved_invars:
             if isinstance(v, Var):
                 if v in weight_invars:
@@ -521,7 +525,7 @@ def _convert_conds_once(
                         )
         return None
 
-    def inline_branch(branch_closed, operand_atoms) -> List[Any]:
+    def inline_branch(branch_closed: Any, operand_atoms: Sequence[Atom]) -> List[Any]:
         """Splice one branch body into ``new_eqns`` with every internal var
         freshened; return the branch's output atoms."""
         br = getattr(branch_closed, 'jaxpr', branch_closed)
@@ -538,7 +542,7 @@ def _convert_conds_once(
         for iv, atom in zip(br.invars, operand_atoms):
             subst[iv] = atom
 
-        def resolve(atom):
+        def resolve(atom: Atom) -> Atom:
             if isinstance(atom, Var):
                 return subst.get(atom, atom)
             return atom
@@ -547,7 +551,11 @@ def _convert_conds_once(
             handle_eqn(sub_eqn, resolve, subst)
         return [resolve(v) for v in br.outvars]
 
-    def handle_eqn(eqn: JaxprEqn, resolve, subst: Optional[Dict[Var, Any]]) -> None:
+    def handle_eqn(
+        eqn: JaxprEqn,
+        resolve: Callable[[Atom], Atom],
+        subst: Optional[Dict[Var, Any]],
+    ) -> None:
         """Process one equation. ``subst`` is ``None`` at the top level (the
         equation's vars are kept); inside a branch, invars are resolved and
         outvars freshened into ``subst``."""
@@ -800,7 +808,7 @@ def _unroll_scans_once(
     hidden_outvars: Container[Var],
     policy: ControlFlowPolicy,
     converted_log: Optional[List[JaxprEqn]] = None,
-):
+) -> Tuple[ClosedJaxpr, int, List[_PendingDiagnostic]]:
     """One unrolling sweep over the top-level equations.
 
     Returns ``(closed_jaxpr, n_unrolled, pending)``; the input object itself

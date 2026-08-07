@@ -67,11 +67,11 @@ which condition failed otherwise:
 from __future__ import annotations
 
 import itertools
-from typing import List, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import List, NamedTuple, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 
-from braintrace._compatible_imports import Jaxpr, JaxprEqn, Var
+from braintrace._compatible_imports import Jaxpr, JaxprEqn, Literal, Var
 from braintrace._misc import NotSupportedError
 from braintrace._op import (
     get_snap_adjacency_rule,
@@ -258,7 +258,7 @@ def _is_position_preserving(eqn: JaxprEqn, varshape: Tuple[int, ...]) -> bool:
     return True
 
 
-def _aligned_shape(var, varshape: Tuple[int, ...]) -> bool:
+def _aligned_shape(var: Union[Var, Literal], varshape: Tuple[int, ...]) -> bool:
     """Whether *var* has exactly the group's position layout."""
     aval = getattr(var, 'aval', None)
     return tuple(getattr(aval, 'shape', ())) == varshape
@@ -381,7 +381,7 @@ def _mixing_axis_pattern(
     eqn: JaxprEqn,
     varshape: Tuple[int, ...],
     hit_positions: Set[int],
-):
+) -> Union[str, np.ndarray]:
     """The last-axis pattern of a mixing equation, or a reason string.
 
     Returns the boolean ``(d, d)`` pattern on success and a human-readable

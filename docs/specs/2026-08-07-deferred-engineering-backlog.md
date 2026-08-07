@@ -138,6 +138,13 @@ nothing but does change what a shallow clone gets, so it is a maintainer call.
 ## E-09 — the `_compiler` and `_legacy` packages are outside the typing gate
 
 Tracked as [#164](https://github.com/chaobrain/braintrace/issues/164).
+**Resolved** — both packages are now in the `disallow_untyped_defs` module list
+and fully annotated (93 `no-untyped-def` errors cleared: 54 in `_compiler`, 39 in
+`_legacy`). The baseline, the annotation categories, and every place precision
+was deliberately given up are recorded in
+[`2026-08-07-e09-type-gate-compiler-legacy.md`](2026-08-07-e09-type-gate-compiler-legacy.md).
+The paragraph below is left in its original wording as the record of the state
+this audit found.
 
 `pyproject.toml`'s `disallow_untyped_defs` list was extended in 0.2.5 to cover
 every module owning a public symbol. Two packages remain outside it:

@@ -299,7 +299,7 @@ class ScanDescentBundle(NamedTuple):
     hoist as jaxpr outputs."""
 
 
-def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle]:
+def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[ScanDescentBundle]:
     """Analyze one descendable scan and rebuild it with stacked ys.
 
     Runs the flat hidden-group / relation finders on the scan *body* (with
@@ -497,7 +497,7 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo) -> Optional[ScanDescentBundle
     )
 
 
-def apply_scan_descent(minfo) -> Tuple['ModuleInfo', List[ScanDescentBundle]]:
+def apply_scan_descent(minfo: 'ModuleInfo') -> Tuple['ModuleInfo', List[ScanDescentBundle]]:
     """Descend every eligible top-level scan in ``minfo`` and rewrite its jaxpr.
 
     Walks the top-level equations of ``minfo.jaxpr``; for each ETP-relevant

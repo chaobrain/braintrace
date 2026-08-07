@@ -48,6 +48,22 @@
   Resolves [#162](https://github.com/chaobrain/braintrace/issues/162); see
   `docs/specs/2026-08-07-e07-state-management-rename.md`.
 
+### Internal
+
+- **`braintrace._compiler` and `braintrace._legacy` are now inside the typing
+  gate.** The `disallow_untyped_defs` module list in `pyproject.toml` is what
+  makes "every shipped def is annotated" a property `mypy` enforces rather than a
+  convention. Two packages were still outside it — the whole jaxpr-analysis layer
+  that every algorithm depends on, and the frozen v0.1.x back-compat shim. Both
+  are now listed and fully annotated: 93 `no-untyped-def` errors cleared (54 in
+  `_compiler`, 39 in `_legacy`). No runtime behaviour changed; the only
+  non-annotation edit is a corrected `Returns` docstring on
+  `ETraceGraph.call_hidden_perturb`, which claimed to return the model outputs
+  when it returns the same four-element tuple as a normal forward call.
+
+  Resolves [#164](https://github.com/chaobrain/braintrace/issues/164); see
+  `docs/specs/2026-08-07-e09-type-gate-compiler-legacy.md`.
+
 
 ## Version 0.2.5
 

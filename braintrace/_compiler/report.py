@@ -9,7 +9,7 @@ eligibility-trace compilation result. It is a pure view: it owns no state beyond
 the graph it wraps, and it is safe to build lazily whenever a graph is available.
 """
 
-from typing import Dict, List, Optional, Set, Tuple, cast
+from typing import IO, Dict, List, Optional, Set, Tuple, cast
 
 import brainstate
 from brainstate.util import FlattedDict
@@ -203,7 +203,7 @@ class CompilationReport:
 
         return msg
 
-    def show(self, level: int = 1, *, file=None) -> None:
+    def show(self, level: int = 1, *, file: Optional[IO[str]] = None) -> None:
         """Print :meth:`to_str` to ``file`` (stdout by default).
 
         Parameters

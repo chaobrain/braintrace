@@ -14,7 +14,7 @@
 # ==============================================================================
 
 import functools
-from typing import Dict, Sequence, List, Tuple, Optional, NamedTuple, Any
+from typing import Dict, Sequence, List, Tuple, Optional, NamedTuple, Any, cast
 
 import brainstate
 import jax
@@ -51,7 +51,11 @@ __all__ = [
 ]
 
 
-def _model_that_not_allow_param_assign(model, *args_, **kwargs_):
+def _model_that_not_allow_param_assign(
+    model: brainstate.nn.Module,
+    *args_: Any,
+    **kwargs_: Any,
+) -> Any:
     with brainstate.StateTraceStack() as trace:
         out = model(*args_, **kwargs_)
 
@@ -69,7 +73,7 @@ def _check_consistent_states_between_model_and_compiler(
     compiled_model_states: Sequence[brainstate.State],
     retrieved_model_states: Dict[Path, brainstate.State],
     verbose: bool = True,  # whether to print the information
-):
+) -> None:
     id_to_compiled_state = {
         id(st): st
         for st in compiled_model_states
@@ -119,10 +123,10 @@ def _check_consistent_states_between_model_and_compiler(
 
 
 def _check_in_out_consistent_units(
-    state_tree_invars,
-    state_tree_outvars,
-    state_tree_path,
-):
+    state_tree_invars: Sequence[PyTree],
+    state_tree_outvars: Sequence[PyTree],
+    state_tree_path: Sequence[Path],
+) -> None:
     assert len(state_tree_invars) == len(state_tree_outvars), 'The number of invars and outvars should be the same.'
     assert len(state_tree_invars) == len(state_tree_path), 'The number of invars and paths should be the same.'
     for invar, outvar, path in zip(state_tree_invars, state_tree_outvars, state_tree_path):
@@ -143,9 +147,9 @@ def _check_in_out_consistent_units(
 
 def abstractify_model(
     model: brainstate.nn.Module,
-    *model_args,
-    **model_kwargs
-):
+    *model_args: Any,
+    **model_kwargs: Any,
+) -> Tuple[brainstate.transform.StatefulFunction, brainstate.util.FlattedDict]:
     """
     Abstracts a model into a stateful representation suitable for compilation and state extraction.
 
@@ -174,7 +178,10 @@ def abstractify_model(
         "The model should be an instance of brainstate.nn.Module. "
         "Since it allows the explicit definition of the model structure."
     )
-    model_retrieved_states = brainstate.graph.states(model)
+    # ``brainstate.graph.states`` is declared as returning a ``FlattedDict`` *or*
+    # a tuple of them; the tuple form is only produced when ``*filters`` are
+    # passed, and none are here.
+    model_retrieved_states = cast(brainstate.util.FlattedDict, brainstate.graph.states(model))
 
     # --- stateful model, for extracting states, weights, and variables --- #
     #
@@ -369,7 +376,7 @@ class ModuleInfo(NamedTuple):
         items['closed_jaxpr'] = closed_jaxpr
         return ModuleInfo(**items)
 
-    def split_state_outvars(self):
+    def split_state_outvars(self) -> Tuple[PyTree, PyTree, PyTree]:
         """Split the state outvars into weight, hidden, and other states.
 
         Returns
@@ -381,11 +388,16 @@ class ModuleInfo(NamedTuple):
         other_state_jaxvar_tree : PyTree of Var
             The other-state tree of jaxpr variables.
         """
+        # ``sequence_split_state_values`` returns a 2-tuple when
+        # ``include_weight=False`` and a 3-tuple otherwise; the default (used
+        # here) is the 3-tuple form, which the union return type cannot express.
         (
             weight_jaxvar_tree,
             hidden_jaxvar,
             other_state_jaxvar_tree
-        ) = sequence_split_state_values(self.compiled_model_states, self.state_tree_outvars)
+        ) = sequence_split_state_values(  # type: ignore[misc]
+            self.compiled_model_states, self.state_tree_outvars
+        )
         return weight_jaxvar_tree, hidden_jaxvar, other_state_jaxvar_tree
 
     def jaxpr_call(
@@ -433,7 +445,11 @@ class ModuleInfo(NamedTuple):
 
         return self._process(*args, jaxpr_outs=jaxpr_outs)
 
-    def _process(self, *args, jaxpr_outs: Sequence[jax.Array]):
+    def _process(
+        self,
+        *args: Inputs,
+        jaxpr_outs: Sequence[jax.Array],
+    ) -> Tuple[Outputs, ETraceVals, StateVals, TempData]:
 
         # intermediate values contain three parts:
         #
@@ -504,9 +520,9 @@ ModuleInfo.__module__ = 'braintrace'
 
 def extract_module_info(
     model: brainstate.nn.Module,
-    *model_args,
+    *model_args: Any,
     control_flow: Optional[ControlFlowPolicy] = None,
-    **model_kwargs
+    **model_kwargs: Any,
 ) -> ModuleInfo:
     """Extract the model information for the ETrace compiler.
 
@@ -575,7 +591,7 @@ def extract_module_info(
 
     # state information
     cache_key = stateful_model.get_arg_cache_key(*model_args, **model_kwargs)
-    compiled_states = stateful_model.get_states_by_cache(cache_key)
+    compiled_states: Sequence[brainstate.State] = stateful_model.get_states_by_cache(cache_key)
     compiled_states = brainstate.util.PrettyList(compiled_states)
 
     state_id_to_path: Dict[StateID, Path] = {
@@ -594,7 +610,9 @@ def extract_module_info(
     jaxpr = closed_jaxpr.jaxpr
 
     # out information
-    out_shapes = stateful_model.get_out_shapes_by_cache(cache_key)[0]
+    # brainstate types the cached out-shapes as the broad ``PyTree``; at runtime
+    # it is the ``(out_shapes, state_shapes)`` pair the tracer recorded.
+    out_shapes = stateful_model.get_out_shapes_by_cache(cache_key)[0]  # type: ignore[index]
     state_vals = [state.value for state in compiled_states]
     in_avals, _ = jax.tree.flatten((model_args, model_kwargs))
     out_avals, _ = jax.tree.flatten(out_shapes)

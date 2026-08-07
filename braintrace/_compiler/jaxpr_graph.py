@@ -29,16 +29,23 @@ memory-address hashes for jaxpr ``Var`` objects).
 """
 
 from collections import deque
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Sequence, TypeAlias, Union
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
     Jaxpr,
     JaxprEqn,
+    Literal,
     Var,
     is_jit_primitive,
     new_var,
 )
+
+# A jaxpr equation input: either a variable or an inlined constant. JAX spells
+# this ``Atom``, but that name is private and has moved between releases, so the
+# union is written out here (mirroring ``_compatible_imports``' policy of not
+# depending on private JAX paths).
+Atom: TypeAlias = Union[Var, Literal]
 
 __all__ = [
     'build_producer_map',
@@ -128,7 +135,7 @@ def _contains_jit_eqn(jaxpr: Jaxpr) -> bool:
     return any(is_jit_primitive(eqn) for eqn in jaxpr.eqns)
 
 
-def _sub_closed_jaxprs(eqn: JaxprEqn):
+def _sub_closed_jaxprs(eqn: JaxprEqn) -> Iterator[ClosedJaxpr]:
     """Yield the ``ClosedJaxpr`` bodies of a control-flow equation.
 
     Covers ``scan`` (``jaxpr``), ``while`` (``cond_jaxpr``/``body_jaxpr``),
@@ -228,7 +235,7 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
     # result see the same vars for untouched equations.
     top_subst: Dict[Var, Any] = {}  # Var -> Var | Literal
 
-    def resolve_top(atom):
+    def resolve_top(atom: Atom) -> Atom:
         if isinstance(atom, Var):
             return top_subst.get(atom, atom)
         return atom
@@ -237,7 +244,7 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
     extra_consts: List[Any] = []
     new_eqns: List[JaxprEqn] = []
 
-    def splice(inner_closed, call_arg_atoms) -> List[Any]:
+    def splice(inner_closed: ClosedJaxpr, call_arg_atoms: Sequence[Atom]) -> List[Any]:
         """Inline one jit body with every internal var freshened; return the
         body's (resolved) output atoms.
 
@@ -257,7 +264,7 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
         for iv, arg in zip(inner.invars, call_arg_atoms):
             local[iv] = arg
 
-        def res(atom):
+        def res(atom: Atom) -> Atom:
             if isinstance(atom, Var):
                 return local.get(atom, atom)
             return atom
