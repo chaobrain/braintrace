@@ -1262,5 +1262,227 @@ class TestScanModelCompilation:
         assert any(jnp.any(jnp.abs(leaf) > 0) for leaf in leaves_scan)
 
 
+def _records_of(reporter, kind):
+    return [r for r in reporter.records() if r.kind is kind]
+
+
+def _warning_count(caught, needle):
+    return sum(needle in str(w.message) for w in caught)
+
+
+class TestSkipWarningDedup:
+    """Skip warnings are deduplicated per equation, not per message.
+
+    The canonicalization passes run to a fixpoint and copy through every
+    equation they cannot rewrite, so a naive implementation re-warns once per
+    sweep. The suppression must be exact in both directions: one record per
+    skipped equation regardless of how many sweeps run (no under-suppression),
+    and one record *per equation* even when two distinct equations produce
+    byte-identical messages (no over-suppression).
+    """
+
+    def test_two_distinct_unsafe_conds_each_warn_once(self):
+        # Both conds are relevant (they consume the weight invar) and unsafe
+        # for the same reason, so their messages are identical -- a
+        # message-keyed dedup would collapse them into one.
+        def f(x, w):
+            a = jax.lax.cond(
+                jnp.sum(x) > 1.,
+                lambda: jax.lax.while_loop(
+                    lambda v: jnp.sum(v) < 10., lambda v: v + 1., x),
+                lambda: braintrace.matmul(x, w),
+            )
+            b = jax.lax.cond(
+                jnp.sum(x) > 2.,
+                lambda: jax.lax.while_loop(
+                    lambda v: jnp.sum(v) < 20., lambda v: v + 2., x),
+                lambda: braintrace.matmul(x, w),
+            )
+            return a + b
+
+        closed = jax.make_jaxpr(f)(jnp.ones(3), jnp.eye(3))
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning) as caught:
+                conv = _convert(closed, weights=[closed.jaxpr.invars[1]])
+        assert _primitive_names(conv).count('cond') == 2
+        recs = _records_of(reporter, DiagnosticKind.COND_CONVERSION_SKIPPED)
+        assert len(recs) == 2
+        assert len({r.message for r in recs}) == 1  # identical messages
+        assert _warning_count(caught, 'NOT if-converted') == 2
+
+    def test_unsafe_cond_after_convertible_cond_warns_once(self):
+        # Mirror image of test_skipped_cond_warns_once_across_fixpoint_
+        # iterations: the unsafe cond sits AFTER the convertible one, so its
+        # position in the equation list shifts as the earlier cond expands.
+        @jax.jit
+        def jitted(a, w):
+            return jax.lax.cond(
+                jnp.max(a) > 2.,
+                lambda: braintrace.matmul(a, w),
+                lambda: a * 5.,
+            )
+
+        def f(x, w):
+            safe = jax.lax.cond(
+                jnp.sum(x) > 0.,
+                lambda: jitted(x, w),
+                lambda: x * 2.,
+            )
+            unsafe = jax.lax.cond(
+                jnp.sum(safe) > 1.,
+                lambda: jax.lax.while_loop(
+                    lambda v: jnp.sum(v) < 10., lambda v: v + 1., safe),
+                lambda: braintrace.matmul(safe, w),
+            )
+            return unsafe
+
+        closed = jax.make_jaxpr(f)(jnp.ones(3), jnp.eye(3))
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning) as caught:
+                conv = _convert(closed, weights=[closed.jaxpr.invars[1]])
+        assert _primitive_names(conv).count('cond') == 1
+        assert len(
+            _records_of(reporter, DiagnosticKind.COND_CONVERSION_SKIPPED)
+        ) == 1
+        assert _warning_count(caught, 'NOT if-converted') == 1
+
+    def _two_scan_jaxpr(self, len_a, len_b):
+        def f(w, h0, xs_a, xs_b):
+            def body(h, x):
+                return jnp.tanh(braintrace.matmul(x, w) + h), h
+            h1, _ = jax.lax.scan(body, h0, xs_a)
+            h2, _ = jax.lax.scan(body, h1, xs_b)
+            return h2
+
+        w = jnp.eye(3) * 0.5
+        h0 = jnp.zeros(3)
+        return jax.make_jaxpr(f)(
+            w, h0, jnp.ones((len_a, 3)), jnp.ones((len_b, 3))
+        )
+
+    def test_two_distinct_ineligible_scans_each_warn_once(self):
+        # Two over-limit scans of the SAME length: identical messages again.
+        closed = self._two_scan_jaxpr(5, 5)
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning) as caught:
+                conv = _unroll(
+                    closed,
+                    weights=[closed.jaxpr.invars[0]],
+                    policy=ControlFlowPolicy(scan_unroll_limit=3,
+                                             scan_descent='off'),
+                )
+        assert _primitive_names(conv).count('scan') == 2
+        recs = _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        assert len(recs) == 2
+        assert len({r.message for r in recs}) == 1
+        assert _warning_count(caught, 'NOT unrolled') == 2
+
+    @pytest.mark.parametrize('len_a,len_b', [(2, 5), (5, 2)])
+    def test_one_eligible_one_ineligible_warns_once(self, len_a, len_b):
+        # Either order: unrolling the eligible scan rewrites the equation list
+        # and shifts the ineligible one, but it must still warn exactly once
+        # across the resulting multi-sweep fixpoint.
+        closed = self._two_scan_jaxpr(len_a, len_b)
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning) as caught:
+                conv = _unroll(
+                    closed,
+                    weights=[closed.jaxpr.invars[0]],
+                    policy=ControlFlowPolicy(scan_unroll_limit=3,
+                                             scan_descent='off'),
+                )
+        assert _primitive_names(conv).count('scan') == 1
+        assert len(
+            _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        ) == 1
+        assert _warning_count(caught, 'NOT unrolled') == 1
+
+    def test_two_distinct_sliced_weight_scans_each_warn_once(self):
+        def f(ws, h0):
+            def body(h, w_t):
+                return jnp.tanh(braintrace.matmul(h, w_t)), h
+            h1, _ = jax.lax.scan(body, h0, ws)
+            h2, _ = jax.lax.scan(body, h1 * 0.5, ws)
+            return h2
+
+        ws = jnp.stack([jnp.eye(3)] * 2) * 0.5
+        closed = jax.make_jaxpr(f)(ws, jnp.ones(3))
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning) as caught:
+                conv = _unroll(closed, weights=[closed.jaxpr.invars[0]])
+        assert _primitive_names(conv).count('scan') == 2
+        assert len(_records_of(
+            reporter, DiagnosticKind.RELATION_EXCLUDED_SLICED_WEIGHT
+        )) == 2
+        assert _warning_count(caught, 'scans over a trainable weight') == 2
+
+    def test_joint_driver_reports_each_skip_once(self):
+        # An eligible scan drives several joint iterations (its body's cond
+        # only surfaces after unrolling); the opaque scan and the unsafe cond
+        # must each be reported exactly once.
+        def f(w, h0, xs_short, xs_long):
+            def body(h, x):
+                drive = jax.lax.cond(
+                    jnp.sum(x) > 0.,
+                    lambda: braintrace.matmul(x, w),
+                    lambda: x * 2.,
+                )
+                return jnp.tanh(drive + h), h
+
+            h1, _ = jax.lax.scan(body, h0, xs_short)
+            h2, _ = jax.lax.scan(body, h1, xs_long)
+            return jax.lax.cond(
+                jnp.sum(h2) > 1.,
+                lambda: jax.lax.while_loop(
+                    lambda v: jnp.sum(v) < 10., lambda v: v + 1., h2),
+                lambda: braintrace.matmul(h2, w),
+            )
+
+        closed = jax.make_jaxpr(f)(
+            jnp.eye(3) * 0.5, jnp.zeros(3), jnp.ones((2, 3)), jnp.ones((5, 3))
+        )
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning) as caught:
+                conv = canonicalize_control_flow(
+                    closed,
+                    weight_invars={closed.jaxpr.invars[0]},
+                    hidden_invars=set(),
+                    hidden_outvars=set(),
+                    policy=ControlFlowPolicy(scan_unroll_limit=3,
+                                             scan_descent='off'),
+                )
+        names = _primitive_names(conv)
+        assert names.count('scan') == 1
+        assert names.count('cond') == 1
+        assert len(
+            _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        ) == 1
+        assert len(
+            _records_of(reporter, DiagnosticKind.COND_CONVERSION_SKIPPED)
+        ) == 1
+        assert _warning_count(caught, 'NOT unrolled') == 1
+        assert _warning_count(caught, 'NOT if-converted') == 1
+
+    def test_skip_records_describe_the_final_jaxpr(self):
+        # The emitted record must survive to the settled jaxpr: the reported
+        # scan is still present as an opaque `scan` equation afterwards.
+        closed = self._two_scan_jaxpr(2, 5)
+        with diagnostic_context() as reporter:
+            with pytest.warns(UserWarning, match='NOT unrolled'):
+                conv = _unroll(
+                    closed,
+                    weights=[closed.jaxpr.invars[0]],
+                    policy=ControlFlowPolicy(scan_unroll_limit=3,
+                                             scan_descent='off'),
+                )
+        recs = _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        assert len(recs) == 1
+        assert recs[0].level is DiagnosticLevel.WARNING
+        n_opaque = sum(
+            eqn.primitive.name == 'scan' for eqn in conv.jaxpr.eqns
+        )
+        assert n_opaque == len(recs)
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
