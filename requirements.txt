@@ -1,4 +1,4 @@
-jax
+jax>=0.8.0
 numpy
 brainstate>=0.5.2
 brainunit
