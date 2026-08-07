@@ -437,7 +437,34 @@ class HiddenGroup(NamedTuple):
         jax.Array
             A single array containing all hidden-state values concatenated
             along the last axis.
+
+        Raises
+        ------
+        ValueError
+            If ``splitted_hid_vals`` does not have exactly one entry per hidden
+            state in the group.
+
+        Notes
+        -----
+        The length check is not decorative. Before it existed this method zipped
+        the value list against :attr:`hidden_states`, and ``zip`` truncates to the
+        shorter argument: a *short* value list produced a concatenated array with
+        a too-narrow trailing axis instead of an error, so a mis-routed cotangent
+        surfaced later as a shape mismatch in unrelated trace math -- or not at
+        all, when the widths happened to coincide. It is an ``if ... raise`` and
+        not an ``assert`` so that ``python -O`` cannot strip it.
+
+        The check reads only Python-level lengths, never array data, so it costs
+        nothing in the compiled program.
         """
+        splitted_hid_vals = list(splitted_hid_vals)
+        if len(splitted_hid_vals) != len(self.hidden_states):
+            raise ValueError(
+                f'Hidden group {self.index} has {len(self.hidden_states)} hidden '
+                f'state(s) {list(self.hidden_paths)}, but concat_hidden() was '
+                f'given {len(splitted_hid_vals)} value(s). Pass exactly one value '
+                f'per hidden state, in the order of the group\'s hidden_paths.'
+            )
         splitted_hid_vals = [
             val
             if isinstance(st, HiddenGroupState) else
@@ -464,8 +491,35 @@ class HiddenGroup(NamedTuple):
         list of jax.Array
             A list of split hidden-state arrays. For non-``HiddenGroupState``
             values, the last dimension is squeezed.
+
+        Raises
+        ------
+        ValueError
+            If the trailing axis of ``concat_hid_vals`` is not
+            :attr:`num_state` wide, i.e. the array is not this group's
+            concatenated slab.
+
+        Notes
+        -----
+        The width check is the inverse of :meth:`concat_hidden`'s length check
+        and closes the same silent path. ``u.math.split`` at this group's
+        cumulative boundaries returns one part per hidden state plus a trailing
+        remainder, and that remainder is dropped by the ``zip`` below -- so a
+        *too wide* slab silently loses its surplus, and a *too narrow* one
+        silently yields empty parts. Like the sibling check this is an
+        ``if ... raise`` rather than an ``assert`` so ``python -O`` cannot strip
+        it, and it reads only the static shape.
         """
         num_states = [st.num_state for st in self.hidden_states]
+        shape = u.math.shape(concat_hid_vals)
+        if len(shape) == 0 or shape[-1] != sum(num_states):
+            raise ValueError(
+                f'Hidden group {self.index} concatenates its hidden states '
+                f'{list(self.hidden_paths)} into a trailing axis of width '
+                f'{sum(num_states)}, but split_hidden() was given an array of '
+                f'shape {tuple(shape)}. Pass this group\'s concatenated slab, '
+                f'as produced by concat_hidden().'
+            )
         indices = np.cumsum(num_states)
         splitted_hid_vals = u.math.split(concat_hid_vals, indices, axis=-1)
         splitted_hid_vals = [

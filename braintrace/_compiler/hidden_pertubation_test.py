@@ -444,3 +444,65 @@ class TestWhileDetach:
         minfo = braintrace.extract_module_info(cell, x, control_flow=policy)
         with pytest.raises(NotImplementedError):
             add_hidden_perturbation_from_minfo(minfo)
+
+
+# ---------------------------------------------------------------------------
+# E-01: perturbation data -> hidden-group data must raise, not assert
+#
+# `perturb_data_to_hidden_group_data` maps perturbation values onto paths
+# positionally, so a length disagreement re-attributes every value past the
+# mismatch. The guard used to be an `assert`, which `python -O` strips, and a
+# group asking for an unperturbed path used to surface as a bare `KeyError`.
+# ---------------------------------------------------------------------------
+
+class TestPerturbDataToHiddenGroupDataGuards:
+
+    @staticmethod
+    def _perturbation():
+        gru = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(gru)
+        x = brainstate.random.randn(3)
+        perturb = add_hidden_perturbation_in_module(gru, x)
+        groups, _ = braintrace.find_hidden_groups_from_module(gru, x)
+        return perturb, list(groups)
+
+    def test_wrong_length_raises_value_error_not_assertion_error(self):
+        import jax.numpy as jnp
+
+        perturb, groups = self._perturbation()
+        data = perturb.init_perturb_data()
+        too_long = list(data) + [jnp.zeros_like(data[0])]
+
+        with pytest.raises(ValueError) as exc:
+            perturb.perturb_data_to_hidden_group_data(too_long, groups)
+        message = str(exc.value)
+        assert 'perturb data' in message
+        assert str(len(too_long)) in message
+
+    def test_wrong_length_short_raises(self):
+        perturb, groups = self._perturbation()
+        with pytest.raises(ValueError):
+            perturb.perturb_data_to_hidden_group_data([], groups)
+
+    def test_unperturbed_path_is_named(self):
+        perturb, groups = self._perturbation()
+        data = perturb.init_perturb_data()
+        # Same cardinality, but the perturbed path no longer matches what the
+        # group asks for -- previously a bare `KeyError`.
+        renamed = perturb._replace(
+            perturb_hidden_paths=[('not', 'the', 'group', 'path')]
+            * len(perturb.perturb_hidden_paths)
+        )
+
+        with pytest.raises(ValueError) as exc:
+            renamed.perturb_data_to_hidden_group_data(data, groups)
+        message = str(exc.value)
+        assert str(groups[0].hidden_paths[0]) in message
+        assert 'not' in message
+
+    def test_well_formed_data_still_maps(self):
+        perturb, groups = self._perturbation()
+        out = perturb.perturb_data_to_hidden_group_data(perturb.init_perturb_data(), groups)
+        assert len(out) == len(groups)
+        for arr, group in zip(out, groups):
+            assert arr.shape == (*group.varshape, group.num_state)
