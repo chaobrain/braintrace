@@ -1,5 +1,5 @@
-ETP Operators & Core Types
-==========================
+ETP Operators
+=============
 
 .. currentmodule:: braintrace
 

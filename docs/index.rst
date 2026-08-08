@@ -215,9 +215,9 @@ differentiable ecosystem for full-scale brain simulation.
    :maxdepth: 2
    :caption: API Reference
 
-   Release Notes <changelog.md>
-   ETP Operators <apis/concepts.rst>
-   Compiler and Executor <apis/compiler.rst>
-   Algorithms <apis/algorithms.rst>
-   Neural Network Layers <apis/nn.rst>
-   Others <apis/primitives.rst>
+   changelog.md
+   apis/concepts.rst
+   apis/compiler.rst
+   apis/algorithms.rst
+   apis/nn.rst
+   apis/primitives.rst

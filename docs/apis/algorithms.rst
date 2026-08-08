@@ -1,5 +1,5 @@
-Online-Learning Algorithms
-==========================
+Algorithms
+==========
 
 .. currentmodule:: braintrace
 

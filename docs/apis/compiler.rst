@@ -1,5 +1,5 @@
-Compiler, Executor & Diagnostics
-================================
+Compilers
+=========
 
 .. currentmodule:: braintrace
 

@@ -1,5 +1,5 @@
-Neural-Network Layers
-=====================
+Neural Networks
+===============
 
 .. currentmodule:: braintrace.nn
 

@@ -1,5 +1,5 @@
-Custom ETP Primitives
-=====================
+Custom Primitives
+=================
 
 .. currentmodule:: braintrace
 
