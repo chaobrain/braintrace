@@ -137,11 +137,11 @@ and the two algorithm tutorials.
       **1** :doc:`Quickstart <quickstart/quickstart>` · **2**
       :doc:`Core Concepts <quickstart/concepts>`
 
-   Online Training
+   Online Learning Routines
       **3** :doc:`RNN Online Learning <tutorials/rnn_online_learning>` · **4**
       :doc:`SNN Online Learning <tutorials/snn_online_learning>`
 
-   Algorithm selection
+   Online Learning Algorithms
       **5** :doc:`Choose an Algorithm <apis/algorithms>` · **6**
       :doc:`D-RTRL <tutorials/drtrl>` · **7**
       :doc:`pp-prop <tutorials/pp_prop>`

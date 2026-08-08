@@ -1,5 +1,5 @@
-Building Neural Networks for Online Learning
-============================================
+Online Learning Networks
+========================
 
 Build an online-learning-ready recurrent model in three connected steps. First,
 ETP operators mark the parameterized computations that participate in online

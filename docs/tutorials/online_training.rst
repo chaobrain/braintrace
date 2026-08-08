@@ -1,5 +1,5 @@
-Online Training
-===============
+Online Learning Routines
+========================
 
 Take a model from definition to an executable online-learning workflow. These
 chapters use compact tasks to make state handling, trace updates, and training
@@ -30,7 +30,7 @@ Choose a workflow
       :link: snn_online_learning
       :link-type: doc
 
-      Build a recurrent LIF network, train it with ES-D-RTRL, and inspect how
+      Build a recurrent LIF network, train it with pp-prop, and inspect how
       factorized traces differ from D-RTRL.
 
       **Best for:** spike-based dynamics, surrogate gradients, and physical
