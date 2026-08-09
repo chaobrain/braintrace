@@ -1,10 +1,12 @@
 """Unit tests for examples/pp_prop/_shared.py data generators."""
 
+import builtins
 import importlib.util
 import pathlib
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 
 def _load_shared():
@@ -48,3 +50,17 @@ def test_make_poisson_mnist_shape_and_labels():
     assert xs.shape == (20, 8, 64)
     assert ys.shape == (8,)
     assert set(np.unique(np.asarray(ys)).tolist()).issubset({0, 1, 2})
+
+
+def test_make_poisson_mnist_fails_when_sklearn_is_missing(monkeypatch):
+    module = _load_shared()
+    import_fn = builtins.__import__
+
+    def import_without_sklearn(name, *args, **kwargs):
+        if name == "sklearn.datasets":
+            raise ImportError("missing sklearn")
+        return import_fn(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_sklearn)
+    with pytest.raises(RuntimeError, match="examples extra"):
+        module.make_poisson_mnist(seed=0)

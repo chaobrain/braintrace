@@ -1,10 +1,9 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-"""12 · Flagship classification --- pp_prop vs BPTT on Poisson-MNIST (10 classes).
+"""12 · Small pp_prop and BPTT API smoke comparison on sklearn digits.
 
-Trains two identical LIF RSNNs on the same Poisson-encoded sklearn digits,
-one with pp_prop, one with BPTT. Reports per-epoch loss and final accuracy.
-Demonstrates that pp_prop tracks BPTT's performance with the O(BI+BO)
-memory footprint advertised by the algorithm.
+This script checks that both training routes execute and return finite metrics.
+It is not a controlled effectiveness benchmark; example 15 provides fixed
+splits, multiple seeds, native sparse recurrence, and held-out acceptance.
 """
 
 import pathlib
@@ -89,7 +88,7 @@ def main(n_epochs: int = 4, batch_size: int = 32, num_step: int = 25, plot: bool
         )
         acc_pp = _eval(model_pp, xs_e, ys_e)
         acc_bp = _eval(model_bp, xs_e, ys_e)
-        print(f"[12-flagship] final acc  pp_prop={acc_pp:.3f}  bptt={acc_bp:.3f}")
+        print(f"[12-smoke] final acc  pp_prop={acc_pp:.3f}  bptt={acc_bp:.3f}")
 
     if plot:
         import matplotlib.pyplot as plt
@@ -98,7 +97,7 @@ def main(n_epochs: int = 4, batch_size: int = 32, num_step: int = 25, plot: bool
         ax.plot(bp_losses, label="BPTT")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
-        ax.set_title("12 · pp_prop vs BPTT on Poisson-MNIST")
+        ax.set_title("12 · pp_prop vs BPTT API smoke")
         ax.legend()
         fig.tight_layout()
         plt.show()

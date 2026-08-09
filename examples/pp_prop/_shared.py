@@ -81,7 +81,7 @@ def make_poisson_mnist(
     digits: Sequence[int] = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9),
     seed: int | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Poisson-encoded sklearn 8x8 digits. Falls back to synthetic patterns if sklearn missing."""
+    """Return Poisson-encoded sklearn 8x8 digits."""
     try:
         from sklearn.datasets import load_digits
         data = load_digits()
@@ -90,11 +90,10 @@ def make_poisson_mnist(
         mask = np.isin(labels, list(digits))
         imgs = imgs[mask]
         labels = labels[mask]
-    except ImportError:
-        rng_fallback = np.random.default_rng(seed)
-        n_per = 50
-        imgs = rng_fallback.random((n_per * len(digits), 8, 8)).astype(np.float32)
-        labels = np.repeat(np.arange(len(digits)), n_per)
+    except ImportError as error:
+        raise RuntimeError(
+            "Poisson digit examples require the BrainTrace examples extra"
+        ) from error
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(labels), size=(num_batch,))
     flat = imgs[idx].reshape(num_batch, 64)

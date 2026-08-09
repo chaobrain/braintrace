@@ -97,8 +97,9 @@ cpu = ["jax[cpu]", "brainevent[cpu]>=0.2.0"]
 cuda12 = ["jax[cuda12]", "brainevent[cuda12]>=0.2.0"]
 cuda13 = ["jax[cuda13]", "brainevent[cuda13]>=0.2.0"]
 tpu = ["jax[tpu]", "brainevent[tpu]>=0.2.0"]
-testing = ["pytest", "pytest-cov", "jax[cpu]", "brainevent[cpu]>=0.2.0", "hypothesis"]
-dev = ["pytest", "pytest-cov", "jax[cpu]", "brainevent[cpu]>=0.2.0", "hypothesis", "mypy>=1.8", "build"]
+examples = ["scikit-learn>=1.8", "psutil>=7.0", "matplotlib>=3.10"]
+testing = ["pytest", "pytest-cov", "jax[cpu]", "brainevent[cpu]>=0.2.0", "hypothesis", "scikit-learn>=1.8", "psutil>=7.0", "matplotlib>=3.10"]
+dev = ["pytest", "pytest-cov", "jax[cpu]", "brainevent[cpu]>=0.2.0", "hypothesis", "scikit-learn>=1.8", "psutil>=7.0", "matplotlib>=3.10", "mypy>=1.8", "build"]
 
 
 [tool.setuptools.package-data]

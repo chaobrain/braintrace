@@ -2,6 +2,7 @@
 
 matplotlib
 psutil  # examples/003-snn-memory-and-speed-evaluation-*.py read host RSS on the CPU backend
+scikit-learn>=1.8
 
 
 pytest
