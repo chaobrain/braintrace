@@ -2,7 +2,6 @@ jax>=0.8.0
 numpy
 brainstate>=0.5.2
 brainunit
-brainevent>=0.1.2
+brainevent[cpu]>=0.2.0
 brainpy-state
 braintools
-

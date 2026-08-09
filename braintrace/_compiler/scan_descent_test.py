@@ -483,3 +483,54 @@ class TestApplyScanDescentPipeline:
         assert len(graph.hidden_param_op_relations) == 0
         assert sum(1 for g in graph.hidden_groups
                    if g.descent is not None) == 1
+
+    def test_descended_etrace_parameter_with_outer_plain_use_is_rejected(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.eye(2))
+                self.h = brainstate.HiddenState(jnp.zeros(2))
+
+            def update(self, x):
+                def substep(_):
+                    self.h.value = jnp.tanh(
+                        braintrace.matmul(self.h.value + x, self.w.value)
+                    )
+                    return self.h.value
+
+                hidden = brainstate.transform.for_loop(
+                    substep, jnp.arange(8)
+                )[-1]
+                return hidden + 2 * jnp.sum(self.w.value)
+
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='compiled ETP ownership.*unrepresented differentiable path',
+        ):
+            braintrace.compile_etrace_graph(
+                Net(), jnp.ones(2), control_flow=DESCENT_POLICY
+            )
+
+    def test_exclusive_descended_etrace_parameter_is_accepted(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.eye(2))
+                self.h = brainstate.HiddenState(jnp.zeros(2))
+
+            def update(self, x):
+                def substep(_):
+                    self.h.value = jnp.tanh(
+                        braintrace.matmul(self.h.value + x, self.w.value)
+                    )
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(8)
+                )[-1]
+
+        graph = braintrace.compile_etrace_graph(
+            Net(), jnp.ones(2), control_flow=DESCENT_POLICY
+        )
+
+        assert graph.etrace_param_paths == frozenset({('w',)})

@@ -47,7 +47,7 @@ from braintrace._typing import (
     PyTree,
     Path,
     DTypeLike,
-    ETraceX_Key,
+    ETraceRawX_Key,
     ETraceDF_Key,
     ETraceWG_Key,
     Hid2WeightJacobian,
@@ -146,7 +146,7 @@ def _init_param_dim_state(
 def _update_param_dim_etrace_scan_fn(
     hist_etrace_vals: Dict[ETraceWG_Key, jax.Array],
     jacobians: Tuple[
-        Dict[ETraceX_Key, jax.Array],  # the weight x
+        Dict[ETraceRawX_Key, jax.Array],  # the weight x
         Dict[ETraceDF_Key, jax.Array],  # the weight df
         Sequence[jax.Array],  # the hidden group Jacobians
     ],
@@ -204,7 +204,7 @@ def _update_param_dim_etrace_scan_fn(
     #       * key: the tuple of the weight y jax var and the hidden state jax var
     #       * value: the weight y gradients
     #
-    etrace_xs_at_t: Dict[ETraceX_Key, jax.Array] = jacobians[0]
+    etrace_xs_at_t: Dict[ETraceRawX_Key, jax.Array] = jacobians[0]
     etrace_ys_at_t: Dict[ETraceDF_Key, jax.Array] = jacobians[1]
 
     #
@@ -390,7 +390,7 @@ def relation_instant_term(
 
 def _apply_relation_step(
     hist_etrace_vals: Dict[ETraceWG_Key, jax.Array],
-    etrace_xs_at_t: Dict[ETraceX_Key, jax.Array],
+    etrace_xs_at_t: Dict[ETraceRawX_Key, jax.Array],
     etrace_ys_at_t: Dict[ETraceDF_Key, jax.Array],
     hid_group_jacobians: Any,
     relations: Any,
@@ -551,7 +551,7 @@ def _chunk_supported(relation: HiddenParamOpRelation, fast_solve: bool) -> bool:
 def _update_param_dim_etrace_chunked(
     hist_etrace_vals: Dict[ETraceWG_Key, PyTree],
     stacked_jacobians: Tuple[
-        Dict[ETraceX_Key, jax.Array],   # stacked weight x, leading axis T
+        Dict[ETraceRawX_Key, jax.Array],  # stacked weight x, leading axis T
         Dict[ETraceDF_Key, jax.Array],  # stacked weight df, leading axis T
         Sequence[jax.Array],            # stacked hidden-group Jacobians
     ],
@@ -1230,21 +1230,28 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
 
         self._assert_compiled()
 
-        # get the wight id
-        weight_id = (
-            id(weight)
-            if isinstance(weight, brainstate.ParamState) else
-            id(self.graph_executor.path_to_states[weight])
-        )
+        if isinstance(weight, brainstate.ParamState):
+            target_state = weight
+        else:
+            try:
+                target_state = self.graph_executor.path_to_states[weight]
+            except (KeyError, TypeError) as error:
+                raise ValueError(
+                    f'No eligibility trace found for parameter {weight!r}.') from error
+        if not isinstance(target_state, brainstate.ParamState):
+            raise ValueError(
+                f'No eligibility trace found for parameter {weight!r}.')
 
-        find_this_weight = False
+        found = False
         etraces = dict()
         relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
-            primary_state = next(iter(relation.trainable_param_states.values()), None)
-            if primary_state is None or id(primary_state) != weight_id:
+            if not any(
+                state is target_state
+                for state in relation.trainable_param_states.values()
+            ):
                 continue
-            find_this_weight = True
+            found = True
 
             # retrieve the etrace data
             group: HiddenGroup
@@ -1252,8 +1259,9 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
                 key = (id(relation.y_var), group.index)
                 etraces[key] = self.etrace_bwg[key].value
 
-        if not find_this_weight:
-            raise ValueError(f'Do not the etrace of the given weight: {weight}.')
+        if not found:
+            raise ValueError(
+                f'No eligibility trace found for parameter {weight!r}.')
         return etraces
 
     def _get_etrace_data(self) -> Dict:

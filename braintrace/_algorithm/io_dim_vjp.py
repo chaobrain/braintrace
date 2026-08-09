@@ -26,6 +26,8 @@
 
 from __future__ import annotations
 
+import math
+from numbers import Integral, Real
 from functools import partial
 from typing import Callable, Dict, Tuple, Optional, Sequence, Any
 
@@ -34,7 +36,12 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._compiler import ControlFlowPolicy, HiddenGroup, HiddenParamOpRelation
+from braintrace._compiler import (
+    ControlFlowPolicy,
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    HiddenGroup,
+    HiddenParamOpRelation,
+)
 from braintrace._op import (
     etp_elemwise_p,
     ETP_RULES_XY_TO_DW,
@@ -50,6 +57,7 @@ from braintrace._typing import (
     PyTree,
     WeightVals,
     Path,
+    ETraceRawX_Key,
     ETraceX_Key,
     ETraceDF_Key,
     Hid2WeightJacobian,
@@ -95,29 +103,31 @@ def _format_decay_and_rank(decay_or_rank: Any) -> Tuple[float, int]:
 
     Raises
     ------
+    TypeError
+        If the input is neither a real decay nor an integer rank.
     ValueError
-        If the input is neither a float nor an integer, or if the float is not
-        in the range [0, 1), or if the integer is not greater than 0.
+        If the decay is not finite and in ``[0, 1)``, or the rank is less than
+        one.
 
     Notes
     -----
     The lower bound is inclusive so that ``temporal_recursion='none'`` is
-    expressible as a float. It introduces no new numerical regime: decay 0
-    was already reachable as ``decay_or_rank=1`` (rank 1 -> decay 0), and the
-    bias correction's exponent ``running_index + 1`` is always >= 1, so
-    ``0 ** k`` is 0 and the correction factor is exactly 1.
+    expressible as a float. Decay zero is also reachable as rank one.
     """
-    # number of approximation rank and the decay factor
-    if isinstance(decay_or_rank, float):
-        assert 0 <= decay_or_rank < 1, f'The decay should be in [0, 1). While we got {decay_or_rank}. '
-        decay = decay_or_rank  # (num_rank - 1) / (num_rank + 1)
+    if isinstance(decay_or_rank, bool):
+        raise TypeError('decay_or_rank must be an integer rank or float decay.')
+    if isinstance(decay_or_rank, Integral):
+        num_rank = int(decay_or_rank)
+        if num_rank < 1:
+            raise ValueError(f'rank must be at least 1, got {decay_or_rank!r}.')
+        decay = (num_rank - 1) / (num_rank + 1)
+    elif isinstance(decay_or_rank, Real):
+        decay = float(decay_or_rank)
+        if not math.isfinite(decay) or not 0 <= decay < 1:
+            raise ValueError(f'decay must be in [0, 1), got {decay_or_rank!r}.')
         num_rank = round(2. / (1 - decay) - 1)
-    elif isinstance(decay_or_rank, int):
-        assert decay_or_rank > 0, f'The num_rank should be greater than 0. While we got {decay_or_rank}. '
-        num_rank = decay_or_rank
-        decay = (num_rank - 1) / (num_rank + 1)  # (num_rank - 1) / (num_rank + 1)
     else:
-        raise ValueError('Please provide "num_rank" (int) or "decay" (float, 0 <= decay < 1). ')
+        raise TypeError('decay_or_rank must be an integer rank or float decay.')
     return decay, num_rank
 
 
@@ -153,6 +163,25 @@ def _format_decays(decay_or_rank: Any) -> Tuple[float, float]:
     else:
         x_side = f_side = decay_or_rank
     return (_format_decay_and_rank(x_side)[0], _format_decay_and_rank(f_side)[0])
+
+
+def _f_trace_bias_correction(decay_f: float, trace_steps: int) -> jax.Array:
+    """Return the f-trace warm-up normalizer."""
+    if decay_f == 0.:
+        return jnp.asarray(1.)
+    trace_step_count = jnp.asarray(trace_steps)
+    correction = -jnp.expm1(trace_step_count * math.log(decay_f))
+    return jnp.where(trace_step_count == 0, jnp.asarray(1.), correction)
+
+
+def _io_x_trace_key(relation: HiddenParamOpRelation) -> ETraceX_Key | None:
+    """Return the input-trace key for a hidden-parameter relation."""
+    if relation.x_var is None:
+        return None
+    raw_key = etrace_x_key(relation.x_var)
+    if get_pp_x_repr(relation.primitive) is None:
+        return raw_key, 0
+    return raw_key, id(relation)
 
 
 def _expon_smooth(old: Any, new: Any, decay: Any) -> Any:
@@ -255,15 +284,15 @@ def _init_IO_dim_state(
     #
     # we need to initialize the eligibility trace states for the weight x and the df.
 
-    # "relation.x_var" may be repeatedly used in the graph
-    if not (relation.primitive is etp_elemwise_p):
-        assert relation.x_var is not None  # non-elemwise primitives always have an x_var
-        x_key = id(relation.x_var)
+    x_var = relation.x_var
+    if x_var is not None:
+        x_key = _io_x_trace_key(relation)
+        assert x_key is not None
         if x_key not in etrace_xs:
             x_repr_fn = get_pp_x_repr(relation.primitive)
             if x_repr_fn is None:
-                shape = relation.x_var.aval.shape
-                dtype = relation.x_var.aval.dtype
+                shape = x_var.aval.shape
+                dtype = x_var.aval.dtype
             else:
                 # the trace filters the primitive's x *representation*
                 # (e.g. embedding: the one-hot encoding of its integer
@@ -272,7 +301,7 @@ def _init_IO_dim_state(
                 x_aval = jax.eval_shape(
                     lambda x_, _fn=x_repr_fn, _w=weight_avals: _fn(x_, _w),
                     jax.ShapeDtypeStruct(
-                        relation.x_var.aval.shape, relation.x_var.aval.dtype),
+                        x_var.aval.shape, x_var.aval.dtype),
                 )
                 shape, dtype = x_aval.shape, x_aval.dtype
             etrace_xs[x_key] = EligibilityTrace(u.math.zeros(shape, dtype))
@@ -331,7 +360,7 @@ def _update_IO_dim_etrace_scan_fn(
         Dict[ETraceDF_Key, jax.Array]
     ],
     jacobians: Tuple[
-        Dict[ETraceX_Key, jax.Array],  # the weight x
+        Dict[ETraceRawX_Key, jax.Array],  # the weight x
         Dict[ETraceDF_Key, jax.Array],  # the weight df
         Sequence[jax.Array],  # the hidden group Jacobians
     ],
@@ -391,7 +420,7 @@ def _update_IO_dim_etrace_scan_fn(
     # For the weight df, it is a dictionary,
     #    {ETraceDF_Key: jax.Array}
     #
-    xs: Dict[ETraceX_Key, jax.Array] = jacobians[0]
+    xs: Dict[ETraceRawX_Key, jax.Array] = jacobians[0]
     dfs: Dict[ETraceDF_Key, jax.Array] = jacobians[1]
 
     #
@@ -423,27 +452,22 @@ def _update_IO_dim_etrace_scan_fn(
     #   update the weight x using the equation:
     #           x^t = α * x^t-1 + x^t, where α is the decay factor.
     #
-    # A primitive may register an IO-dim x representation (e.g. embedding
-    # filters the one-hot encoding of its integer indices, which is what the
-    # lookup is linear in); apply it to the raw per-step x before filtering.
-    x_repr_fns: Dict[ETraceX_Key, Any] = {}
     relation: HiddenParamOpRelation
     for relation in hid_weight_op_relations:
-        if relation.x_var is None:
+        trace_key = _io_x_trace_key(relation)
+        if trace_key is None or trace_key in new_etrace_xs:
             continue
+        raw_key = etrace_x_key(relation.x_var)
+        x_t = xs[raw_key]
         x_repr_fn = get_pp_x_repr(relation.primitive)
         if x_repr_fn is not None:
-            x_repr_fns[etrace_x_key(relation.x_var)] = (
-                x_repr_fn,
-                {k: v.aval for k, v in relation.trainable_vars.items()},
+            x_t = x_repr_fn(
+                x_t,
+                {key: var.aval for key, var in relation.trainable_vars.items()},
             )
-    check_dict_keys(hist_xs, xs)
-    for xkey in hist_xs.keys():
-        x_t = xs[xkey]
-        if xkey in x_repr_fns:
-            x_repr_fn, weight_avals = x_repr_fns[xkey]
-            x_t = x_repr_fn(x_t, weight_avals)
-        new_etrace_xs[xkey] = _low_pass_filter(hist_xs[xkey], x_t, decay_x)
+        new_etrace_xs[trace_key] = _low_pass_filter(
+            hist_xs[trace_key], x_t, decay_x)
+    check_dict_keys(hist_xs, new_etrace_xs)
 
     for relation in hid_weight_op_relations:
 
@@ -524,7 +548,7 @@ def _solve_IO_dim_weight_gradients(
     dG_hidden_groups: Sequence[jax.Array],  # same length as total hidden groups
     weight_hidden_relations: Sequence[HiddenParamOpRelation],
     weight_vals: Dict[Path, WeightVals],
-    running_index: int,
+    trace_steps: int,
     decay_f: float,
     fast_solve: bool = True,
 ) -> None:
@@ -549,11 +573,8 @@ def _solve_IO_dim_weight_gradients(
         parameters and operations.
     weight_vals : Dict[Path, WeightVals]
         A dictionary containing the current values of the weights, keyed by their paths.
-    running_index : int
-        The current index in the running sequence, used to compute the correction factor.
-        See F-30 in ``docs/specs/2026-07-25-known-limitations.md``: this counts
-        ``update()`` calls, not trace steps, so the correction is exact only for
-        single-step input.
+    trace_steps : int
+        The number of timesteps represented by the current traces.
     decay_f : float
         The f-side decay factor used in the exponential smoothing process, a value
         in ``[0, 1)``. Only the f-side is corrected: the x-side low-pass has no
@@ -562,25 +583,16 @@ def _solve_IO_dim_weight_gradients(
         Whether to use the per-primitive fast contraction instead of the legacy
         vmap path.
     """
-    # Bias correction for exponential smoothing
-    #   ε_f^t = α ε_f^{t-1} + (1-α) x_t  =>  E[ε_f^t] = x · (1 - α^{t+1})
-    # so unbiased estimator divides by (1 - α^{t+1}) = (1 - decay^{t+1}).
-    correction_factor = 1. - u.math.power(decay_f, running_index + 1)
-    correction_factor = u.math.where(running_index < 1000, correction_factor, 1.)
-    # Clamp guards degenerate decay=0 (rank=1): correction is exactly 1 then,
-    # but keep clamp for numerical safety in the early-step power computation.
-    correction_factor = u.math.maximum(correction_factor, 1e-8)
-    correction_factor = jax.lax.stop_gradient(correction_factor)
+    correction_factor = jax.lax.stop_gradient(
+        _f_trace_bias_correction(decay_f, trace_steps))
 
     xs, dfs = hist_etrace_data
 
     relation: HiddenParamOpRelation
     for relation in weight_hidden_relations:
 
-        if not (relation.primitive is etp_elemwise_p):
-            x = xs[id(relation.x_var)]
-        else:
-            x = None
+        x_key = _io_x_trace_key(relation)
+        x = None if x_key is None else xs[x_key]
 
         # Build the weights dict consumed by xy_to_dw.
         weights_dict = {
@@ -660,14 +672,20 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     the input/output-factorized estimator of Wang et al. [1]_ on the RTRL
     foundation of Williams and Zipser [2]_.
 
+    Parameter routing is path-granular and exclusive. Paths owned by compiled
+    ETP relations receive eligibility-trace gradients, while plain-only paths
+    receive exact reverse-mode gradients for the current VJP window. Compilation
+    rejects a ParamState whose pytree leaves participate in both categories.
+
     Parameters
     ----------
     model : brainstate.nn.Module
         The model function, which receives the input arguments and returns the
-        model output.
+        model output. Its ETP-routed and plain-only parameter paths follow the
+        routing contract described above.
     decay_or_rank : float, int, or tuple of two floats or ints
         Parameterization of the exponential smoothing factor. A float in
-        :math:`(0, 1)` is used directly as the decay. A positive integer
+        :math:`[0, 1)` is used directly as the decay. A positive integer
         :math:`r` is converted to :math:`\alpha=(r-1)/(r+1)`. The integer form
         does not allocate :math:`r` separate trace factors; both forms use the
         same input/output-factorized trace structure. A two-item tuple
@@ -697,6 +715,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
     random_feedback_key : jax.Array, optional
         Key used to initialize fixed random-feedback projections when the
         selected config requests them.
+    snap_max_jacobian_elements : int, optional
+        Maximum number of elements in a materialized hidden Jacobian.
 
     Notes
     -----
@@ -808,24 +828,34 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         control_flow: Optional[ControlFlowPolicy] = None,
         config: Optional[ETraceConfig] = None,
         random_feedback_key: Optional[jax.Array] = None,
+        snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     ) -> None:
         decay_x, decay_f = _format_decays(decay_or_rank)
+        if config is not None and not isinstance(config, ETraceConfig):
+            raise TypeError(
+                f'config must be an ETraceConfig, got {type(config).__name__}.')
+        if config is not None and not config.is_factorized:
+            raise ValueError(
+                f'{type(self).__name__} is the input/output-factorized trace '
+                f'engine, but the config asks for '
+                f'trace_factorization={config.trace_factorization!r}. Use '
+                f'the engine matching the factorization, or '
+                f'braintrace.compile(model, config, ...) which picks it for you.'
+            )
+        if config is not None and (decay_x, decay_f) != (
+            config.decay_x, config.decay_f
+        ):
+            raise ValueError(
+                f'decay_or_rank resolves to {(decay_x, decay_f)!r}, but config '
+                f'uses {(config.decay_x, config.decay_f)!r}.'
+            )
         if config is None:
             config = ETraceConfig(
                 trace_factorization='io_factorized', decay=(decay_x, decay_f))
         super().__init__(model, name=name, vjp_method=vjp_method,
                          control_flow=control_flow, config=config,
-                         random_feedback_key=random_feedback_key)
-        if not self.config.is_factorized:
-            raise ValueError(
-                f'{type(self).__name__} is the input/output-factorized trace '
-                f'engine, but the config asks for '
-                f'trace_factorization={self.config.trace_factorization!r}. Use '
-                f'the engine matching the factorization, or '
-                f'braintrace.compile(model, config, ...) which picks it for you.'
-            )
-        # The config is authoritative once given: an explicit `config` and a
-        # `decay_or_rank` must not disagree about the same number.
+                         random_feedback_key=random_feedback_key,
+                         snap_max_jacobian_elements=snap_max_jacobian_elements)
         self.decay_x = self.config.decay_x
         self.decay_f = self.config.decay_f
         self.fast_solve = fast_solve
@@ -908,27 +938,33 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
         """
         self._assert_compiled()
 
-        # the weight ID
-        weight_id = (
-            id(weight)
-            if isinstance(weight, brainstate.ParamState) else
-            id(self.graph_executor.path_to_states[weight])
-        )
+        if isinstance(weight, brainstate.ParamState):
+            target_state = weight
+        else:
+            try:
+                target_state = self.graph_executor.path_to_states[weight]
+            except (KeyError, TypeError) as error:
+                raise ValueError(
+                    f'No eligibility trace found for parameter {weight!r}.') from error
+        if not isinstance(target_state, brainstate.ParamState):
+            raise ValueError(
+                f'No eligibility trace found for parameter {weight!r}.')
 
         etrace_xs = dict()
         etrace_dfs = dict()
-        find_this_weight = False
+        found = False
         relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
-            primary_state = next(iter(relation.trainable_param_states.values()), None)
-            if primary_state is None or id(primary_state) != weight_id:
+            if not any(
+                state is target_state
+                for state in relation.trainable_param_states.values()
+            ):
                 continue
-            find_this_weight = True
+            found = True
 
-            # get the weight_op input
-            wx_var = etrace_x_key(relation.x_var)
-            if wx_var is not None:
-                etrace_xs[wx_var] = self.etrace_xs[wx_var].value
+            x_key = _io_x_trace_key(relation)
+            if x_key is not None:
+                etrace_xs[x_key] = self.etrace_xs[x_key].value
 
             # get the weight_op df
             wy_var = relation.y_var
@@ -936,8 +972,9 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             for group in relation.hidden_groups:
                 df_key = etrace_df_key(wy_var, group.index)
                 etrace_dfs[df_key] = self.etrace_dfs[df_key].value
-        if not find_this_weight:
-            raise ValueError(f'Do not the etrace of the given weight: {weight}.')
+        if not found:
+            raise ValueError(
+                f'No eligibility trace found for parameter {weight!r}.')
         return etrace_xs, etrace_dfs
 
     def _get_etrace_data(self) -> Tuple[
@@ -1108,7 +1145,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
     def _solve_weight_gradients(
         self,
-        running_index: int,
+        trace_steps: int,
         etrace_h2w_at_t: Tuple[
             Dict[ETraceX_Key, jax.Array],
             Dict[ETraceDF_Key, jax.Array]
@@ -1131,8 +1168,8 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
         Parameters
         ----------
-        running_index : int
-            The current timestep index, used for correction factor calculation.
+        trace_steps : int
+            The number of timesteps represented by the current traces.
         etrace_h2w_at_t : Tuple[Dict[ETraceX_Key, jax.Array], Dict[ETraceDF_Key, jax.Array]]
             The eligibility trace data at the current timestep, containing:
 
@@ -1179,7 +1216,7 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             dl_to_hidden_groups,
             self.graph.hidden_param_op_relations,
             weight_vals,
-            running_index,
+            trace_steps,
             # The correction undoes the f-side exponential-smoothing warm-up
             # bias; the x-side low-pass has none to undo.
             self.decay_f,

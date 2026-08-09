@@ -8,6 +8,5 @@ pytest
 pytest-cov  # coverage measurement + Codecov XML report
 pytest-xdist  # parallel test execution (-n); memory bound lives in conftest.py
 hypothesis  # property-based tests (compiler_property_test, diagnostic_exploration_test)
-numba  # for brainevent cpu operator
 mypy>=1.8  # static type checking
 build  # PEP 517 wheel/sdist builds for packaging checks

@@ -283,18 +283,21 @@ class TestPlainAndEtpRnn:
         assert spec.etp_param_keys == (('w',),)
         assert spec.plain_param_keys == (('win',), ('wout',))
 
-    def test_single_step_zeroes_every_plain_key(self):
-        # F-33. Not a truncation -- an absence. Pinned on the fixture that makes
-        # it visible, so a single-step rule's silence about plain parameters is a
-        # recorded property rather than a surprise.
+    def test_single_step_keeps_local_plain_gradients(self):
         from braintrace._testing.oracle_models import plain_and_etp_rnn
         spec = plain_and_etp_rnn(n_in=3, n_rec=4, n_out=2)
         inputs = _inputs(4, 3)
+        ref = bptt_param_gradients(spec.factory, inputs)
         got = online_param_gradients_singlestep_naive(
             spec.factory, inputs,
             algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='single-step'))
-        assert float(jnp.abs(got[('win',)]).max()) == 0.0
-        assert float(jnp.abs(got[('wout',)]).max()) == 0.0
+        assert float(jnp.abs(got[('win',)]).max()) > 1e-6
+        np.testing.assert_allclose(
+            np.asarray(got[('wout',)]), np.asarray(ref[('wout',)]), atol=1e-5)
+        gap = float(np.abs(
+            np.asarray(got[('win',)]) - np.asarray(ref[('win',)])
+        ).max())
+        assert gap > 1e-3
         assert float(jnp.abs(got[('w',)]).max()) > 1e-6
 
 

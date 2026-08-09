@@ -67,8 +67,10 @@ which condition failed otherwise:
 from __future__ import annotations
 
 import itertools
-from typing import List, NamedTuple, Optional, Sequence, Set, Tuple, Union
+from numbers import Integral
+from typing import Callable, List, NamedTuple, Optional, Sequence, Set, Tuple, Union
 
+import jax
 import numpy as np
 
 from braintrace._compatible_imports import Jaxpr, JaxprEqn, Literal, Var
@@ -88,6 +90,8 @@ __all__ = [
     'build_snap_pattern',
     'close_adjacency',
     'flat_adjacency',
+    'prove_elementwise_transform',
+    'prove_position_preserving',
 ]
 
 #: Default ceiling on the widened block Jacobian ``Dg``, in elements:
@@ -102,6 +106,14 @@ __all__ = [
 #: rejects the 512 case, which is a configuration error worth naming rather
 #: than an out-of-memory crash deep inside the Jacobian extraction.
 DEFAULT_MAX_JACOBIAN_ELEMENTS = 1 << 24
+
+
+def _validate_max_jacobian_elements(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise TypeError('snap_max_jacobian_elements must be an integer.')
+    if value < 1:
+        raise ValueError('snap_max_jacobian_elements must be at least 1.')
+    return int(value)
 
 # Equations that map position ``p`` of their input to position ``p`` of their
 # output and touch no other position. Deliberately an allow-list: a deny-list
@@ -119,14 +131,15 @@ _POSITION_PRESERVING_PRIMITIVES = frozenset({
     'sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'atan2',
     'sinh', 'cosh', 'tanh', 'asinh', 'acosh', 'atanh',
     # special
-    'erf', 'erfc', 'erf_inv', 'lgamma', 'digamma',
+    'erf', 'erfc', 'erf_inv', 'lgamma', 'digamma', 'exprel',
     # rounding / clamping / selection
     'floor', 'ceil', 'round', 'clamp', 'select_n',
     # comparison / logical
     'eq', 'ne', 'lt', 'le', 'gt', 'ge', 'and', 'or', 'xor', 'not',
     'is_finite',
     # structural no-ops
-    'convert_element_type', 'stop_gradient', 'copy', 'real', 'imag', 'conj',
+    'broadcast_in_dim', 'convert_element_type', 'stop_gradient', 'copy',
+    'real', 'imag', 'conj',
 })
 
 
@@ -235,7 +248,11 @@ def _is_mixing(eqn: JaxprEqn) -> bool:
     )
 
 
-def _is_position_preserving(eqn: JaxprEqn, varshape: Tuple[int, ...]) -> bool:
+def _is_position_preserving(
+    eqn: JaxprEqn,
+    varshape: Tuple[int, ...],
+    reachable_inputs: Set[int],
+) -> bool:
     """Whether *eqn* maps each position to itself and touches no other.
 
     Requires an allow-listed elementwise primitive whose reachable operands and
@@ -247,13 +264,30 @@ def _is_position_preserving(eqn: JaxprEqn, varshape: Tuple[int, ...]) -> bool:
             return False
     elif eqn.primitive.name not in _POSITION_PRESERVING_PRIMITIVES:
         return False
-    rank = len(varshape)
-    for v in list(eqn.invars) + list(eqn.outvars):
+    if eqn.primitive.name == 'broadcast_in_dim':
+        source_shape = tuple(getattr(eqn.invars[0].aval, 'shape', ()))
+        if source_shape:
+            expected_dimensions = tuple(
+                range(len(varshape) - len(source_shape), len(varshape))
+            )
+            expected_shape = varshape[-len(source_shape):]
+            if (
+                tuple(eqn.params['broadcast_dimensions']) != expected_dimensions
+                or source_shape != expected_shape
+            ):
+                return False
+    variables = [eqn.invars[index] for index in reachable_inputs]
+    variables.extend(eqn.outvars)
+    for v in variables:
         aval = getattr(v, 'aval', None)
         shape = tuple(getattr(aval, 'shape', ()))
         if shape == ():
             continue  # a scalar operand broadcasts to every position alike
-        if len(shape) < rank or shape[:rank] != varshape:
+        try:
+            broadcast_shape = np.broadcast_shapes(shape, varshape)
+        except ValueError:
+            return False
+        if broadcast_shape != varshape:
             return False
     return True
 
@@ -277,6 +311,56 @@ def _all_full(varshape: Tuple[int, ...]) -> Tuple[np.ndarray, ...]:
 
 def _all_identity(varshape: Tuple[int, ...]) -> Tuple[np.ndarray, ...]:
     return tuple(np.eye(d, dtype=bool) for d in varshape)
+
+
+def prove_position_preserving(
+    transition_jaxpr: Jaxpr,
+    varshape: Tuple[int, ...],
+    *,
+    hidden_invars: Optional[Sequence[Var]] = None,
+) -> Optional[str]:
+    """Return ``None`` when every reachable equation preserves positions."""
+    varshape = tuple(int(d) for d in varshape)
+    if not varshape:
+        return None
+    seeds = transition_jaxpr.invars if hidden_invars is None else hidden_invars
+    reachable: Set[Var] = {v for v in seeds if isinstance(v, Var)}
+    for eqn in transition_jaxpr.eqns:
+        hits = {
+            index
+            for index, var in enumerate(eqn.invars)
+            if isinstance(var, Var) and var in reachable
+        }
+        if not hits:
+            continue
+        if _is_mixing(eqn):
+            return f"equation '{eqn.primitive.name}' mixes hidden positions."
+        if not _is_position_preserving(eqn, varshape, hits):
+            return (
+                f"equation '{eqn.primitive.name}' is not an elementwise "
+                f"position-preserving operation."
+            )
+        reachable.update(var for var in eqn.outvars if isinstance(var, Var))
+    return None
+
+
+def prove_elementwise_transform(
+    transform: Callable[[object], object],
+    input_aval: object,
+) -> Optional[str]:
+    """Return ``None`` when a transform preserves every input position."""
+    input_shape = tuple(int(d) for d in getattr(input_aval, 'shape', ()))
+    input_dtype = getattr(input_aval, 'dtype', None)
+    abstract_input = jax.ShapeDtypeStruct(input_shape, input_dtype)
+    transformed = jax.make_jaxpr(transform)(abstract_input).jaxpr
+    if len(transformed.outvars) != 1:
+        return f'transform returns {len(transformed.outvars)} values, expected one.'
+    output_shape = tuple(getattr(transformed.outvars[0].aval, 'shape', ()))
+    if output_shape != input_shape:
+        return (
+            f'transform changes shape from {input_shape} to {output_shape}.'
+        )
+    return prove_position_preserving(transformed, input_shape)
 
 
 def analyze_position_adjacency(
@@ -360,7 +444,7 @@ def analyze_position_adjacency(
             if isinstance(outcome, str):
                 return _conservative(outcome)
             last = outcome
-        elif not _is_position_preserving(eqn, varshape):
+        elif not _is_position_preserving(eqn, varshape, set(hits)):
             return _conservative(
                 f"equation '{eqn.primitive.name}' on the hidden path is not an "
                 f"elementwise position-preserving operation, so it may relabel or "

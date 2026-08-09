@@ -28,6 +28,8 @@ with BPTT rather than match it element-wise. Coverage:
 * gradient behaviour — directional alignment with BPTT and fast/legacy parity.
 """
 
+import math
+
 import brainstate
 import jax
 import jax.numpy as jnp
@@ -39,9 +41,11 @@ import braintrace
 from braintrace._algorithm import EligibilityTrace
 from braintrace._testing import oracle
 from braintrace._testing import oracle_models as om
+from braintrace._testing.scenario_catalog import PartialPathRNN
 from braintrace._algorithm.io_dim_vjp import (
     IODimVjpAlgorithm,
     _expon_smooth,
+    _f_trace_bias_correction,
     _format_decay_and_rank,
     _low_pass_filter,
 )
@@ -57,6 +61,9 @@ EXACT_MODELS = {
 RNN_CELLS = [
     braintrace.nn.GRUCell,
     braintrace.nn.LSTMCell,
+]
+
+MIXED_PATH_RNN_CELLS = [
     braintrace.nn.MGUCell,
     braintrace.nn.MinimalRNNCell,
 ]
@@ -74,6 +81,105 @@ def _compiled(model, *, x=None, decay_or_rank=0.9, **kwargs):
     algo.compile_graph(x)
     algo.init_etrace_state()
     return algo
+
+
+class _ElementWiseTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.w = brainstate.ParamState(jnp.array([0.1, -0.2], dtype=jnp.float32))
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, x):
+        self.h.value = jnp.tanh(
+            self.h.value + x + braintrace.element_wise(self.w.value)
+        )
+        return self.h.value
+
+
+class _MixedOwnershipTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.w = brainstate.ParamState(jnp.ones(2, dtype=jnp.float32))
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, x):
+        w = self.w.value
+        self.h.value = jnp.tanh(
+            self.h.value + x + braintrace.element_wise(w) + 2 * w
+        )
+        return self.h.value
+
+
+class _DenseBiasTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.w = brainstate.ParamState(jnp.eye(2, dtype=jnp.float32))
+        self.b = brainstate.ParamState(jnp.array([0.1, 0.2], dtype=jnp.float32))
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, x):
+        self.h.value = jnp.tanh(
+            self.h.value + braintrace.matmul(x, self.w.value, self.b.value)
+        )
+        return self.h.value
+
+
+class _TwoEmbeddingTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.a = brainstate.ParamState(
+            jnp.arange(6, dtype=jnp.float32).reshape(3, 2) / 10
+        )
+        self.b = brainstate.ParamState(
+            jnp.arange(10, dtype=jnp.float32).reshape(5, 2) / 10
+        )
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, token):
+        self.h.value = jnp.tanh(
+            self.h.value
+            + braintrace.embedding(token, self.a.value)
+            + braintrace.embedding(token, self.b.value)
+        )
+        return self.h.value
+
+
+class _SharedRawInputTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.a = brainstate.ParamState(jnp.eye(2, dtype=jnp.float32))
+        self.b = brainstate.ParamState(jnp.eye(2, dtype=jnp.float32) * 0.5)
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, x):
+        self.h.value = jnp.tanh(
+            braintrace.matmul(x, self.a.value)
+            + braintrace.matmul(x, self.b.value)
+        )
+        return self.h.value
+
+
+class _MixedInputTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.table = brainstate.ParamState(
+            jnp.arange(6, dtype=jnp.float32).reshape(3, 2) / 10
+        )
+        self.weight = brainstate.ParamState(jnp.eye(2, dtype=jnp.float32))
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, token, x):
+        self.h.value = jnp.tanh(
+            braintrace.embedding(token, self.table.value)
+            + braintrace.matmul(x, self.weight.value)
+        )
+        return self.h.value
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +207,7 @@ class TestFormatDecayAndRank:
 
     @pytest.mark.parametrize('bad', [1.0, 1.5, -0.1])
     def test_float_out_of_range_raises(self, bad):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             _format_decay_and_rank(bad)
 
     def test_zero_decay_is_admitted(self):
@@ -117,11 +223,21 @@ class TestFormatDecayAndRank:
 
     @pytest.mark.parametrize('bad', [0, -1, -10])
     def test_nonpositive_rank_raises(self, bad):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             _format_decay_and_rank(bad)
 
     @pytest.mark.parametrize('bad', ['0.9', None, (0.9,)])
     def test_invalid_type_raises(self, bad):
+        with pytest.raises(TypeError):
+            _format_decay_and_rank(bad)
+
+    @pytest.mark.parametrize('bad', [True, False])
+    def test_boolean_is_not_a_rank(self, bad):
+        with pytest.raises(TypeError):
+            _format_decay_and_rank(bad)
+
+    @pytest.mark.parametrize('bad', [math.nan, math.inf, -math.inf])
+    def test_non_finite_decay_raises(self, bad):
         with pytest.raises(ValueError):
             _format_decay_and_rank(bad)
 
@@ -173,7 +289,7 @@ class TestConstruction:
 
     @pytest.mark.parametrize('bad', [1.5, -0.2])
     def test_invalid_decay_float_raises(self, bad):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             IODimVjpAlgorithm(_build(om.tanh_rnn), decay_or_rank=bad)
 
     def test_zero_decay_is_admitted(self):
@@ -184,11 +300,11 @@ class TestConstruction:
 
     @pytest.mark.parametrize('bad', [0, -3])
     def test_invalid_rank_int_raises(self, bad):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             IODimVjpAlgorithm(_build(om.tanh_rnn), decay_or_rank=bad)
 
     def test_invalid_decay_type_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             IODimVjpAlgorithm(_build(om.tanh_rnn), decay_or_rank='bad')
 
     @pytest.mark.parametrize('method', ['single-step', 'multi-step'])
@@ -197,8 +313,56 @@ class TestConstruction:
         assert algo.vjp_method == method
 
     def test_invalid_vjp_method_raises(self):
-        with pytest.raises((AssertionError, ValueError)):
+        with pytest.raises(ValueError):
             IODimVjpAlgorithm(_build(om.tanh_rnn), decay_or_rank=0.9, vjp_method='nope')
+
+    def test_mixed_parameter_ownership_is_rejected(self):
+        model = _MixedOwnershipTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = IODimVjpAlgorithm(model, decay_or_rank=0.9)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='compiled ETP ownership.*unrepresented differentiable path',
+        ):
+            algo.compile_graph(jnp.ones(2))
+
+    def test_partial_direct_and_indirect_relation_is_rejected(self):
+        model = PartialPathRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        algo = IODimVjpAlgorithm(model, decay_or_rank=0.9)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algo.compile_graph(jnp.ones(3))
+        assert not algo.is_compiled
+
+    def test_independent_direct_relations_may_share_one_parameter(self):
+        spec = om.tied_weight_rnn(n_rec=4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = IODimVjpAlgorithm(model, decay_or_rank=0.9)
+        algo.compile_graph(spec.make_inputs(1, 4)[0])
+        assert algo.is_compiled
+        assert len(algo.graph.hidden_param_op_relations) == 2
+
+    def test_matching_config_decay_is_accepted(self):
+        config = braintrace.ETraceConfig(
+            trace_factorization='io_factorized', decay=(0.9, 0.5)
+        )
+        algo = IODimVjpAlgorithm(
+            _build(om.tanh_rnn), decay_or_rank=(0.9, 0.5), config=config
+        )
+        assert (algo.decay_x, algo.decay_f) == (0.9, 0.5)
+
+    def test_conflicting_config_decay_raises(self):
+        config = braintrace.ETraceConfig(
+            trace_factorization='io_factorized', decay=(0.9, 0.5)
+        )
+        with pytest.raises(ValueError, match='decay_or_rank.*config'):
+            IODimVjpAlgorithm(
+                _build(om.tanh_rnn), decay_or_rank=(0.9, 0.4), config=config
+            )
 
     @pytest.mark.parametrize('flag', [True, False])
     def test_fast_solve_stored(self, flag):
@@ -259,6 +423,33 @@ class TestStateLifecycle:
         with pytest.raises(ValueError):
             algo.get_etrace_of(model.w)
 
+    def test_get_etrace_of_elementwise_has_no_x_trace(self):
+        model = _ElementWiseTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model, x=jnp.ones(2))
+        xs, dfs = algo.get_etrace_of(model.w)
+        assert xs == {}
+        assert dfs
+
+    def test_get_etrace_of_dense_bias_matches_weight_relation(self):
+        model = _DenseBiasTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model, x=jnp.ones(2))
+        weight_traces = algo.get_etrace_of(model.w)
+        bias_traces = algo.get_etrace_of(model.b)
+        path_traces = algo.get_etrace_of(('b',))
+        assert weight_traces[0].keys() == bias_traces[0].keys()
+        assert weight_traces[1].keys() == bias_traces[1].keys()
+        assert path_traces[0].keys() == bias_traces[0].keys()
+        assert path_traces[1].keys() == bias_traces[1].keys()
+
+    def test_get_etrace_of_missing_path_raises_value_error(self):
+        model = _DenseBiasTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model, x=jnp.ones(2))
+        with pytest.raises(ValueError, match='No eligibility trace'):
+            algo.get_etrace_of(('missing',))
+
 
 # ---------------------------------------------------------------------------
 # Forward / update mechanics
@@ -288,6 +479,7 @@ class TestForwardUpdate:
         outs = algo(braintrace.MultiStepData(inputs))
         assert outs.shape[0] == 6
         assert bool(jnp.all(jnp.isfinite(outs)))
+        assert int(algo.running_index.value) == 6
 
     def test_traces_change_after_update(self):
         algo = _compiled(_build(om.tanh_rnn))
@@ -386,6 +578,18 @@ class TestRNNCells:
         for leaf in leaves:
             assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
 
+    @pytest.mark.parametrize('cls', MIXED_PATH_RNN_CELLS)
+    def test_mixed_path_cells_are_rejected(self, cls):
+        model = cls(4, 5)
+        brainstate.nn.init_all_states(model)
+        algo = IODimVjpAlgorithm(model, decay_or_rank=0.9)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algo.compile_graph(brainstate.random.rand(4))
+        assert not algo.is_compiled
+
 
 # ---------------------------------------------------------------------------
 # Internal Batching() mode — elemwise eligibility trace regression
@@ -412,24 +616,8 @@ class TestElemwiseBatchingMode:
 
 
 class TestBiasCorrectionTimeIndex:
-    """F-30: the f-side de-biasing correction counts ``update()`` calls, not trace steps.
 
-    ``_solve_IO_dim_weight_gradients`` divides the f-side estimator by
-    ``1 - decay ** (running_index + 1)`` to undo exponential-smoothing warm-up
-    bias (``io_dim_vjp.py:493``). That is exact only if ``running_index`` counts
-    the smoothing steps the trace has taken. It does not: it advances once per
-    ``update()`` call (``vjp_base.py:319``) while the trace scan advances once
-    per *sequence element* (``io_dim_vjp.py:934-943``).
-
-    These tests pin the current, biased behaviour deliberately — they are a
-    description, not an endorsement. Changing the index to a true step count is
-    a numerical change to ``pp_prop`` / ``OSTLFeedforward`` and is out of scope
-    for the P2 axis decomposition, whose acceptance criterion is that no
-    preset's gradients move.
-    """
-
-    def test_running_index_counts_calls_not_trace_steps(self):
-        """The structural claim: one T-step call advances the index by one."""
+    def test_running_index_counts_trace_steps(self):
         spec = om.tanh_rnn(n_in=3, n_rec=4, seed=0)
         xs = spec.make_inputs(6, 3, seed=0)
         algo = _compiled(
@@ -437,48 +625,131 @@ class TestBiasCorrectionTimeIndex:
             decay_or_rank=0.9, vjp_method='multi-step',
         )
         algo(braintrace.MultiStepData(xs))
-        assert int(algo.running_index.value) == 1, (
-            'F-30 no longer holds: running_index tracked the 6 trace steps. If '
-            'this was deliberate, update the finding and regenerate the goldens.'
+        assert int(algo.running_index.value) == 6
+
+    def test_multistep_solver_receives_the_window_entry_trace_age(self):
+        spec = om.nonzero_init_rnn(n_rec=2, h0=0.4, seed=0)
+        xs = spec.make_inputs(6, 2, seed=0)
+        model = _build(lambda: spec, batch_size=None)
+        algo = _compiled(
+            model, x=xs[0], decay_or_rank=0.9,
+            vjp_method='multi-step',
+        )
+        weight_vals = {
+            path: state.value for path, state in algo.param_states.items()
+        }
+        hidden_vals = {
+            path: state.value for path, state in algo.hidden_states.items()
+        }
+        other_vals = {
+            path: state.value for path, state in algo.other_states.items()
+        }
+        trace_vals = algo._get_etrace_data()
+
+        first, first_res = algo._update_fn_fwd(
+            (braintrace.MultiStepData(xs[:2]),),
+            weight_vals, hidden_vals, other_vals, trace_vals, 2,
+        )
+        second, second_res = algo._update_fn_fwd(
+            (braintrace.MultiStepData(xs[2:4]),),
+            weight_vals, first[1], first[2], first[3], 4,
+        )
+        _, third_res = algo._update_fn_fwd(
+            (braintrace.MultiStepData(xs[4:]),),
+            weight_vals, second[1], second[2], second[3], 6,
         )
 
-    def test_correction_bias_is_measurable_through_a_finite_window(self):
-        """The consequence: the mis-indexed correction moves the gradient.
+        assert [int(first_res[3]), int(second_res[3]), int(third_res[3])] == [0, 2, 4]
 
-        Compares the shipped behaviour against the same run with the index
-        forced to the true trace-step count, over a finite window — the shipped
-        full-window path is exact reverse-mode and blind to the trace (F-23), so
-        the difference is unobservable there and this test would be vacuous.
-        """
-        n_steps, chunk, decay = 6, 2, 0.9
-        spec = om.tanh_rnn(n_in=3, n_rec=4, seed=0)
-        xs = spec.make_inputs(n_steps, 3, seed=0)
-        oracle.assert_model_is_live(spec.factory, xs, min_norm=1e-6)
+    def test_zero_age_bias_correction_is_neutral(self):
+        assert float(_f_trace_bias_correction(0.9, 0)) == 1.0
 
-        def run(force_true_step_count: bool):
-            model = _build(lambda: spec)
-            algo = _compiled(
-                model, x=xs[0], decay_or_rank=decay, vjp_method='multi-step')
-            params = model.states(brainstate.ParamState)
-            total = None
-            # test-support chunk loop (3 iterations), not a model step driver
-            for k, start in enumerate(range(0, n_steps, chunk)):
-                if force_true_step_count:
-                    algo.running_index.value = k * chunk + chunk - 1
-                g = brainstate.transform.grad(
-                    lambda seq: (algo(braintrace.MultiStepData(seq)) ** 2).sum(),
-                    params,
-                )(xs[start:start + chunk])
-                total = g if total is None else jax.tree.map(
-                    lambda a, b: a + b, total, g)
-            return total
-
-        oracle.assert_gradients_differ(
-            oracle.flat_gradient_leaves(run(False)),
-            oracle.flat_gradient_leaves(run(True)),
-            # measured 6.8e-04; float32 round-off on this tree is ~1e-8
-            min_rel=1e-5,
+    @pytest.mark.parametrize('decay', [0.0, 0.9, 0.9999])
+    def test_trace_age_is_independent_of_window_partition(self, decay):
+        spec = om.nonzero_init_rnn(n_rec=2, h0=0.4, seed=0)
+        xs = spec.make_inputs(6, 2, seed=0)
+        whole_model = _build(lambda: spec, batch_size=None)
+        chunked_model = _build(lambda: spec, batch_size=None)
+        whole = _compiled(
+            whole_model, x=xs[0], decay_or_rank=decay,
+            vjp_method='multi-step',
         )
+        chunked = _compiled(
+            chunked_model, x=xs[0], decay_or_rank=decay,
+            vjp_method='multi-step',
+        )
+
+        whole(braintrace.MultiStepData(xs))
+        chunked(braintrace.MultiStepData(xs[:2]))
+        chunked(braintrace.MultiStepData(xs[2:4]))
+        chunked(braintrace.MultiStepData(xs[4:]))
+
+        whole_traces = [state.value for state in whole.etrace_xs.values()]
+        whole_traces += [state.value for state in whole.etrace_dfs.values()]
+        chunked_traces = [state.value for state in chunked.etrace_xs.values()]
+        chunked_traces += [state.value for state in chunked.etrace_dfs.values()]
+        assert int(whole.running_index.value) == 6
+        assert int(chunked.running_index.value) == 6
+        assert len(whole_traces) == len(chunked_traces) == 2
+        for actual, expected in zip(chunked_traces, whole_traces):
+            npt.assert_allclose(actual, expected, rtol=2e-6, atol=1e-7)
+        reference = 1.0 if decay == 0.0 else -math.expm1(6 * math.log(decay))
+        npt.assert_allclose(
+            _f_trace_bias_correction(decay, whole.running_index.value),
+            reference,
+            rtol=2e-6,
+            atol=1e-12,
+        )
+
+    @pytest.mark.parametrize('decay', [0.0, 0.9, 0.9999])
+    @pytest.mark.parametrize('completed_steps', [1, 6, 1000, 1001])
+    def test_stable_correction_matches_reference(self, decay, completed_steps):
+        expected = 1.0 if decay == 0.0 else -math.expm1(
+            completed_steps * math.log(decay)
+        )
+        actual = _f_trace_bias_correction(decay, completed_steps)
+        npt.assert_allclose(actual, expected, rtol=2e-6, atol=1e-12)
+
+    def test_high_decay_has_no_step_1000_discontinuity(self):
+        before = float(_f_trace_bias_correction(0.9999, 1000))
+        after = float(_f_trace_bias_correction(0.9999, 1001))
+        assert 1.0 < after / before < 1.002
+
+
+class TestInputTraceKeys:
+
+    def test_different_embedding_representations_do_not_collide(self):
+        model = _TwoEmbeddingTraceNet()
+        brainstate.nn.init_all_states(model)
+        token = jnp.array(1, dtype=jnp.int32)
+        algo = _compiled(model, x=token)
+        out = algo(token)
+        a_xs, _ = algo.get_etrace_of(model.a)
+        b_xs, _ = algo.get_etrace_of(model.b)
+        assert out.shape == (2,)
+        assert {tuple(value.shape) for value in a_xs.values()} == {(3,)}
+        assert {tuple(value.shape) for value in b_xs.values()} == {(5,)}
+
+    def test_untransformed_shared_input_keeps_one_trace(self):
+        model = _SharedRawInputTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model, x=jnp.ones(2))
+        assert len(algo.etrace_xs) == 1
+
+    def test_transformed_and_raw_trace_keys_share_one_comparable_type(self):
+        model = _MixedInputTraceNet()
+        brainstate.nn.init_all_states(model)
+        token = jnp.array(1, dtype=jnp.int32)
+        x = jnp.ones(2, dtype=jnp.float32)
+        algo = IODimVjpAlgorithm(model, decay_or_rank=0.9)
+        algo.compile_graph(token, x)
+        algo.init_etrace_state()
+
+        out = algo(token, x)
+
+        assert out.shape == (2,)
+        assert len(algo.etrace_xs) == 2
+        assert all(isinstance(key, tuple) for key in algo.etrace_xs)
 
 
 def _docstring_rnn():

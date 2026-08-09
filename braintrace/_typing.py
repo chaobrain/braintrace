@@ -89,7 +89,8 @@ dG_State: TypeAlias = Sequence[PyTree]  # gradients of other states
 VarID: TypeAlias = int
 
 HiddenGroupName: TypeAlias = str
-ETraceX_Key: TypeAlias = VarID
+ETraceRawX_Key: TypeAlias = VarID
+ETraceX_Key: TypeAlias = Tuple[VarID, int]
 ETraceY_Key: TypeAlias = VarID
 ETraceDF_Key: TypeAlias = Tuple[VarID, HiddenGroupName]
 
@@ -114,7 +115,7 @@ Hid2HidDiagJacobian: TypeAlias = Dict[
     Dict[HiddenOutVar, List[jax.Array]]
 ]
 Hid2WeightJacobian: TypeAlias = Tuple[
-    Dict[ETraceX_Key, jax.Array],
+    Dict[ETraceRawX_Key, jax.Array],
     Dict[ETraceDF_Key, jax.Array]
 ]
 Hid2HidJacobian: TypeAlias = Dict[

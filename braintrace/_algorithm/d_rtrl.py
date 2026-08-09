@@ -49,7 +49,8 @@ class D_RTRL(ParamDimVjpAlgorithm):
     Parameters
     ----------
     model : brainstate.nn.Module
-        Recurrent model whose ETP-routed parameters are trained online.
+        Recurrent model whose ETP-routed parameters receive eligibility
+        gradients and whose plain parameters receive local VJP gradients.
     name : str, optional
         Name of the algorithm instance.
     vjp_method : {'single-step', 'multi-step'}, optional
@@ -67,7 +68,8 @@ class D_RTRL(ParamDimVjpAlgorithm):
     random_feedback_key : jax.Array, optional
         Key for fixed random-feedback projections requested by ``config``.
     snap_max_jacobian_elements : int, optional
-        Maximum permitted size of each SnAp widened block Jacobian.
+        Maximum number of elements in a materialized full hidden Jacobian or
+        widened sparse block Jacobian.
 
     See Also
     --------

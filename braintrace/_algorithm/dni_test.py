@@ -877,15 +877,8 @@ class TestTheDelayedRewardTask:
             f'nothing may beat the oracle: {oracle_last} vs {trained_last}')
 
 
-# ---------------------------------------------------------------------------
-# The two structural boundaries of the pass-2 routing (F-36, F-37).
-#
-# Both are limitations rather than bugs, and both are pinned here so that a
-# future change to the routing has to decide about them on purpose.
-# ---------------------------------------------------------------------------
-
-class TestMixedRoutingIsPathGranular:
-    """F-36: one parameter used both as an ETP weight and plainly."""
+class TestMixedRoutingIsRejected:
+    """F-36: mixed ETP/plain ownership fails before gradient execution."""
 
     @staticmethod
     def _spec():
@@ -907,32 +900,15 @@ class TestMixedRoutingIsPathGranular:
         return om.ModelSpec(factory=Net, etp_param_keys=(('w',),),
                             plain_param_keys=())
 
-    def test_the_plain_occurrence_gets_no_future_credit(self):
-        """The whole leaf is skipped, plain occurrence included.
-
-        `_etp_routed_paths()` answers per *path*, and the gradient dictionaries are
-        keyed per path too, so "add the future term to the plain occurrences of
-        `w` but not the ETP ones" is not a statement the routing can make. The
-        conservative choice is taken -- skip the leaf, since double-counting the
-        ETP half would be the worse error -- and the consequence is that the plain
-        half's cross-window credit is lost.
-
-        Pinned by equality against the `M == 0` run: if a future change makes the
-        routing occurrence-granular, this test fails and F-36 comes off the list.
-        """
-        spec = self._spec()
-        inputs = _inputs(t=T, n=N_REC)
-        live = _arrays(chunked_online_param_gradients(
-            spec.factory, inputs,
-            algo_factory=lambda m: DNI(
-                m, synthesizer=_ConstantSynthesizer(_group_shapes(), 0.3)),
-            chunk_size=CHUNK), [('w',)])
-        off = _arrays(chunked_online_param_gradients(
-            spec.factory, inputs,
-            algo_factory=lambda m: DNI(
-                m, synthesizer=SyntheticGradient(_group_shapes())),
-            chunk_size=CHUNK), [('w',)])
-        np.testing.assert_allclose(live[('w',)], off[('w',)], rtol=1e-6, atol=1e-7)
+    def test_mixed_parameter_path_is_rejected_at_compile_time(self):
+        model = self._spec().factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        learner = DNI(model)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='compiled ETP ownership.*unrepresented differentiable path',
+        ):
+            learner.compile_graph(jnp.ones((1, N_REC)))
 
     def test_a_purely_plain_parameter_does_get_it_which_gives_the_above_teeth(self):
         # Without this half, an implementation that injected nothing anywhere

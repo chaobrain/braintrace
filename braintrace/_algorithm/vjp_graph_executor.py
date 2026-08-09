@@ -39,6 +39,7 @@
 
 from __future__ import annotations
 
+from math import prod
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import brainstate
@@ -53,10 +54,12 @@ from braintrace._compatible_imports import Var, wrap_init
 from braintrace._compiler import (
     ControlFlowPolicy,
     DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    ETraceGraph,
     HiddenGroup,
     HiddenParamOpRelation,
     compile_etrace_graph,
 )
+from braintrace._compiler.hid_param_op import PathClassification
 from braintrace._input_data import (
     get_single_step_data,
     split_input_data_types,
@@ -64,18 +67,18 @@ from braintrace._input_data import (
     has_multistep_data,
 )
 from braintrace._misc import (
+    NotSupportedError,
     etrace_df_key,
     etrace_x_key,
 )
 from braintrace._state_management import (
     assign_dict_state_values,
-    split_dict_states_v2
 )
 from braintrace._typing import (
     Outputs,
     ETraceVals,
     StateVals,
-    ETraceX_Key,
+    ETraceRawX_Key,
     ETraceDF_Key,
     Hid2WeightJacobian,
     HiddenGroupJacobian,
@@ -170,8 +173,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
     sparse_n : int, optional
         SnAp order for ``recurrence_scope='sparse_n'``. Default ``None``.
     snap_max_jacobian_elements : int, optional
-        Ceiling on each group's widened block Jacobian, ``P * (K * S) ** 2``
-        elements; only consulted when *sparse_n* is given.
+        Maximum number of elements in a materialized full hidden Jacobian or
+        widened sparse block Jacobian.
     control_flow : ControlFlowPolicy, optional
         Policy governing control-flow canonicalization during graph
         compilation. ``None`` (default) uses
@@ -205,10 +208,11 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         )
 
         # the VJP method
-        assert vjp_method in ('single-step', 'multi-step'), (
-            'The VJP method should be either "single-step" or "multi-step". '
-            f'While we got {vjp_method}. '
-        )
+        if vjp_method not in ('single-step', 'multi-step'):
+            raise ValueError(
+                'The VJP method should be either "single-step" or "multi-step". '
+                f'Got {vjp_method!r}.'
+            )
         self.vjp_method = vjp_method
         # Whether ``_compute_hid2hid_jacobian`` keeps the full transition
         # Jacobian rather than extracting per-position blocks.
@@ -252,11 +256,12 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             The positional arguments for the model.
         """
 
-        # process the inputs
+        self._compiled_graph = None
+        self._state_id_to_path = None
+
         args = get_single_step_data(*args)
 
-        # compile the graph
-        self._compiled_graph = compile_etrace_graph(
+        graph = compile_etrace_graph(
             self.model, *args,
             include_hidden_perturb=self.is_single_step_vjp,
             include_recurrent_mixing=self.include_recurrent_mixing,
@@ -264,12 +269,64 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             snap_max_jacobian_elements=self.snap_max_jacobian_elements,
             control_flow=self.control_flow,
         )
+        self._assert_etrace_paths_are_complete(graph)
+        self._assert_materialized_jacobians_are_affordable(graph)
+        self._compiled_graph = graph
+
+    def _assert_etrace_paths_are_complete(self, graph: ETraceGraph) -> None:
+        for relation in graph.hidden_param_op_relations:
+            mixed_paths = [
+                path
+                for path, classification in relation.path_classification.items()
+                if classification == PathClassification.MIXED
+            ]
+            if not mixed_paths:
+                continue
+            raise NotSupportedError(
+                'VJP eligibility traces cannot represent a trainable ETP '
+                'relation that reaches a hidden state through both a direct '
+                'path and an indirect path through another trainable ETP '
+                f'primitive. {relation.primitive.name} has mixed paths to '
+                f'{mixed_paths!r}. Rewrite the recurrence so each trainable '
+                'ETP relation reaches the hidden state only directly.'
+            )
+
+    def _assert_materialized_jacobians_are_affordable(
+        self,
+        graph: ETraceGraph,
+    ) -> None:
+        """Reject graphs whose execution would materialize an oversized Jacobian."""
+        limit = self.snap_max_jacobian_elements
+        for group in graph.hidden_groups:
+            materializes_full = (
+                self.full_jacobian
+                or group.snap is not None
+                or not group.is_diagonal_recurrence
+            )
+            if not materializes_full:
+                continue
+            positions = prod(group.varshape) if group.varshape else 1
+            elements = (positions * group.num_state) ** 2
+            if elements <= limit:
+                continue
+            dtype = jnp.asarray(
+                u.get_mantissa(group.hidden_states[0].value)
+            ).dtype
+            byte_count = elements * dtype.itemsize
+            raise NotSupportedError(
+                f'Hidden group {group.index} ({group.hidden_paths}) requires a '
+                f'full hidden Jacobian with P={positions}, S={group.num_state}: '
+                f'{elements} elements ({byte_count} bytes as {dtype}), exceeding '
+                f'snap_max_jacobian_elements={limit}. Use '
+                f"recurrence_scope='diagonal', a smaller hidden group, or an "
+                f'explicitly larger ceiling when that allocation is intentional.'
+            )
 
     def _compute_hid2weight_jacobian(
         self,
         intermediate_values: Dict[Var, jax.Array]
     ) -> Tuple[
-        Dict[ETraceX_Key, jax.Array],
+        Dict[ETraceRawX_Key, jax.Array],
         Dict[ETraceDF_Key, jax.Array]
     ]:
         """
@@ -543,7 +600,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             etrace_states,
             non_etrace_params,
             other_states
-        ) = split_dict_states_v2(self.states)
+        ) = self.partition_states()
 
         etrace_param_vals = {path: st.value for path, st in etrace_params.items()}
         etrace_state_vals = {path: st.value for path, st in etrace_states.items()}
@@ -726,7 +783,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             etrace_hidden_states,
             non_etrace_param_states,
             other_states
-        ) = split_dict_states_v2(self.states)
+        ) = self.partition_states()
 
         if self.is_single_step_vjp:
             etrace_param_vals = dict()

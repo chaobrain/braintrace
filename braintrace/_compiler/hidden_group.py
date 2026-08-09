@@ -77,7 +77,11 @@ from .base import JaxprEvaluation, find_matched_vars
 from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
-from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS, build_snap_pattern
+from .position_graph import (
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    _validate_max_jacobian_elements,
+    build_snap_pattern,
+)
 
 __all__ = [
     'HiddenGroup',
@@ -361,7 +365,10 @@ class HiddenGroup(NamedTuple):
         ``block_diagonal_last_dim`` with ``use_forward_mode=True``) --
         same values, different derivative mode.
         """
-        fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
+        def fn(hid: jax.Array) -> jax.Array:
+            return self.concat_hidden(
+                self.transition(self.split_hidden(hid), input_vals)
+            )
         concat_hid = self.concat_hidden(hidden_vals)
         needs_fwd = _transition_contains_while(self.transition_jaxpr)
         if self.snap is not None:
@@ -414,7 +421,10 @@ class HiddenGroup(NamedTuple):
         the transition, i.e. under ``include_recurrent_mixing``. Rule 11
         guarantees that by requiring ``recurrence_scope='coupled'``.
         """
-        fn = lambda hid: self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
+        def fn(hid: jax.Array) -> jax.Array:
+            return self.concat_hidden(
+                self.transition(self.split_hidden(hid), input_vals)
+            )
         concat_hid = self.concat_hidden(hidden_vals)
         needs_fwd = _transition_contains_while(self.transition_jaxpr)
         return full_position_jacobian(fn, concat_hid, use_forward_mode=needs_fwd)
@@ -1367,9 +1377,9 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # unset and no pre-P3 code path changes.
         self.sparse_n = sparse_n
 
-        # Ceiling on the widened block Jacobian, in elements. Only consulted
-        # when ``sparse_n`` is set; see ``DEFAULT_MAX_JACOBIAN_ELEMENTS``.
-        self.snap_max_jacobian_elements = snap_max_jacobian_elements
+        self.snap_max_jacobian_elements = _validate_max_jacobian_elements(
+            snap_max_jacobian_elements
+        )
 
         # the hidden state groups
         self.hidden_outvar_to_invar = hidden_outvar_to_invar
@@ -1618,6 +1628,20 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         """
         if self.sparse_n is None or group.descent is not None:
             return group
+        positions = int(np.prod(group.varshape)) if group.varshape else 1
+        elements = (positions * group.num_state) ** 2
+        if elements > self.snap_max_jacobian_elements:
+            dtype = jnp.asarray(u.get_mantissa(group.hidden_states[0].value)).dtype
+            byte_count = elements * dtype.itemsize
+            raise NotSupportedError(
+                f"recurrence_scope='sparse_n' requires a transient full hidden "
+                f'Jacobian for group {group.index} ({group.hidden_paths}) with '
+                f'P={positions}, S={group.num_state}: {elements} elements '
+                f'({byte_count} bytes as {dtype}), exceeding '
+                f'snap_max_jacobian_elements={self.snap_max_jacobian_elements}. '
+                f'Use a smaller hidden group, recurrence_scope=\'diagonal\', or '
+                f'an explicitly larger ceiling when that allocation is intentional.'
+            )
         pattern = build_snap_pattern(
             group.transition_jaxpr, group.varshape, self.sparse_n,
             num_state=group.num_state,

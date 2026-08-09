@@ -12,7 +12,9 @@ point below to begin.
 Installation
 ^^^^^^^^^^^^
 
-Choose the platform that will run JAX. BrainTrace requires Python 3.11 or newer.
+Choose the platform that will run JAX. Each platform extra also installs the
+matching BrainEvent backend dependencies. BrainTrace requires Python 3.11 or
+newer.
 
 .. container:: braintrace-installation
 

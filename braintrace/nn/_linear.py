@@ -148,14 +148,11 @@ class ScaledWSLinear(brainstate.nn.ScaledWSLinear):
         raw ``weight`` leaf exactly (the standardization Jacobian is recovered
         via ``jax.vjp``).
 
-        Note on post-ops: ``gain`` and ``bias`` are applied OUTSIDE the
-        matmul primitive as post-operations, so the eligibility trace tracks
-        only the standardized ``weight`` leaf.  ``gain`` and ``bias`` are
-        therefore non-temporal for the eligibility trace — in genuine online
-        training their trace-based gradient is partial.  (The multi-step VJP
-        *oracle* path used in tests, which autodiffs through the full rollout,
-        still recovers them exactly; only the online eligibility-trace gradient
-        is non-temporal.)
+        ``gain`` and ``bias`` are applied outside the matmul primitive while
+        sharing its ParamState. Eligibility-trace algorithms reject that mixed
+        ownership at compile time instead of returning partial gradients. Use
+        this layer for forward execution, or place those trainable leaves in
+        separate parameter states before online learning.
 
         Parameters
         ----------

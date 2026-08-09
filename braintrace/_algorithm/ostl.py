@@ -110,7 +110,8 @@ class OSTLRecurrent(ParamDimVjpAlgorithm):
     random_feedback_key : jax.Array, optional
         Key for fixed random-feedback projections requested by ``config``.
     snap_max_jacobian_elements : int, optional
-        Maximum permitted size of each SnAp widened block Jacobian.
+        Maximum number of elements in a materialized full hidden Jacobian or
+        widened sparse block Jacobian.
 
     Examples
     --------

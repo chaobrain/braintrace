@@ -1363,43 +1363,43 @@ class TestScanModelCompilation:
 
     N_REC, LOOPS = 4, 3
 
-    def _graph_for(self, cell_cls, **compile_kwargs):
+    def _model_input_for(self, cell_cls):
         with brainstate.random.seed_context(42):
             cell = cell_cls(self.N_REC, self.LOOPS)
         brainstate.nn.init_all_states(cell)
-        x = jnp.ones(self.N_REC)
+        return cell, jnp.ones(self.N_REC)
+
+    def _module_info_for(self, cell_cls, **compile_kwargs):
+        cell, x = self._model_input_for(cell_cls)
+        return braintrace.extract_module_info(cell, x, **compile_kwargs)
+
+    def _graph_for(self, cell_cls, **compile_kwargs):
+        cell, x = self._model_input_for(cell_cls)
         return braintrace.compile_etrace_graph(cell, x, **compile_kwargs)
 
-    def test_scan_model_compiles_without_scan_eqn(self):
-        graph = self._graph_for(_InnerLoopCell)
-        names = [eqn.primitive.name for eqn in graph.module_info.jaxpr.eqns]
+    def test_scan_model_canonicalizes_without_scan_eqn(self):
+        minfo = self._module_info_for(_InnerLoopCell)
+        names = [eqn.primitive.name for eqn in minfo.jaxpr.eqns]
         assert 'scan' not in names
         assert names.count('etp_mv') == 2 * self.LOOPS
 
-    def test_relation_parity_with_unrolled_model(self):
-        # Only the LAST sub-step's two ETP calls become relations: earlier
-        # sub-steps reach the hidden outvar exclusively through later ETP
-        # ops (the weight -> weight -> hidden invariant excludes them). The
-        # hand-flattened twin proves 2 is the canonical count.
-        g_scan = self._graph_for(_InnerLoopCell)
-        g_flat = self._graph_for(_UnrolledLoopCell)
-        assert len(g_scan.hidden_param_op_relations) == 2
-        assert len(g_flat.hidden_param_op_relations) == 2
-        assert all(
-            r.trainable_paths['weight'] == ('w',)
-            for r in g_scan.hidden_param_op_relations
-        )
-        scan_prims = sorted(
-            r.primitive.name for r in g_scan.hidden_param_op_relations
-        )
-        flat_prims = sorted(
-            r.primitive.name for r in g_flat.hidden_param_op_relations
-        )
-        assert scan_prims == flat_prims
+    def test_canonical_etrace_primitive_parity_with_unrolled_model(self):
+        scan = self._module_info_for(_InnerLoopCell)
+        flat = self._module_info_for(_UnrolledLoopCell)
+        scan_names = [eqn.primitive.name for eqn in scan.jaxpr.eqns]
+        flat_names = [eqn.primitive.name for eqn in flat.jaxpr.eqns]
+        scan_etrace_names = [name for name in scan_names if name.startswith('etp_')]
+        flat_etrace_names = [name for name in flat_names if name.startswith('etp_')]
+        assert scan_etrace_names == flat_etrace_names
+        assert len(scan_etrace_names) == 2 * self.LOOPS
 
     def test_unroll_diagnostic_recorded(self):
-        graph = self._graph_for(_InnerLoopCell)
-        records = graph.explain(kind=DiagnosticKind.SCAN_UNROLLED)
+        with diagnostic_context() as reporter:
+            self._module_info_for(_InnerLoopCell)
+        records = [
+            record for record in reporter.records()
+            if record.kind is DiagnosticKind.SCAN_UNROLLED
+        ]
         assert len(records) == 1
 
     def test_limit_zero_policy_keeps_existing_error(self):
@@ -1446,33 +1446,16 @@ class TestScanModelCompilation:
                 warnings.simplefilter('ignore', UserWarning)
                 self._graph_for(WhileCell)
 
-    def test_drtrl_gradient_parity_with_unrolled_model(self):
-        def build_and_grads(cell_cls):
-            with brainstate.random.seed_context(42):
-                model = cell_cls(self.N_REC, self.LOOPS)
-            learner = braintrace.compile(model, braintrace.D_RTRL, jnp.zeros(self.N_REC))
-            weights = model.states(brainstate.ParamState)
-            with brainstate.random.seed_context(7):
-                xs = brainstate.random.randn(6, self.N_REC)
-
-            def total_loss(xs):
-                def step(carry, x):
-                    out = learner(x)
-                    return carry, jnp.mean(jnp.asarray(out) ** 2)
-
-                _, ls = brainstate.transform.scan(step, None, xs)
-                return jnp.sum(ls)
-
-            return brainstate.transform.grad(total_loss, weights)(xs)
-
-        g_scan = build_and_grads(_InnerLoopCell)
-        g_flat = build_and_grads(_UnrolledLoopCell)
-        leaves_scan = jax.tree.leaves(g_scan)
-        leaves_flat = jax.tree.leaves(g_flat)
-        assert leaves_scan and len(leaves_scan) == len(leaves_flat)
-        for a, b in zip(leaves_scan, leaves_flat):
-            assert jnp.allclose(a, b, atol=1e-6), (a - b)
-        assert any(jnp.any(jnp.abs(leaf) > 0) for leaf in leaves_scan)
+    @pytest.mark.parametrize('cell_cls', [_InnerLoopCell, _UnrolledLoopCell])
+    def test_drtrl_rejects_unrepresented_internal_etrace_paths(self, cell_cls):
+        model, x = self._model_input_for(cell_cls)
+        learner = braintrace.D_RTRL(model)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='compiled ETP ownership.*unrepresented differentiable path',
+        ):
+            learner.compile_graph(x)
+        assert not learner.is_compiled
 
 
 def _records_of(reporter, kind):

@@ -106,6 +106,11 @@ And two more, established while building the driver:
 | P11 | `compile(vmap=True)` cannot batch a model that allocates its `HiddenState` in `__init__` (`BatchAxisError` on the first call); the fixture must defer state creation to `init_state`, as `braintrace.nn.ValinaRNNCell` does | `oracle_models.tanh_rnn` fails; `ValinaRNNCell` + a plain readout works |
 | P12 | under `vjp_method='single-step'` every **plain** (non-ETP) parameter's gradient is exactly zero (F-33), so any fixture asserting on a plain key must run `'multi-step'` or the assertion is vacuous | `docs/specs/2026-07-25-known-limitations.md` F-33; reproduced through the driver (`win` = `0.0` vs BPTT `0.65`) |
 
+**Status 2026-08-08:** P12/F-33 is resolved. Single-step execution now gives
+plain-only parameter paths their exact current-step VJP gradients; ETP-owned
+paths continue to receive eligibility-trace gradients. The row above is retained
+as the observation that shaped this historical design.
+
 Consequences, all load-bearing below:
 
 1. **Windowed *gradients* require `vjp_method='multi-step'`** (P1). The API
@@ -416,11 +421,9 @@ call, so the driver does not know which sequences to transpose. Requiring the
 *user* to transpose would put a subtle, silently-wrong-if-omitted step into the
 contract.
 
-Refusing costs nothing today: per P5 no example in the repository uses
-`MultiStepData` at all, let alone with `vmap=True`. Users needing windowed
+Examples 08 and 14 now demonstrate the supported route: users needing windowed
 gradients on a batch use the batched (non-vmap) mode, which carries the batch
-axis inside the compiled graph rather than outside it, and the error message says
-so.
+axis inside the compiled graph rather than outside it.
 
 Lifting this restriction — via an explicit transpose adapter and an `in_axes`
 that names the batch axis — is future work, and would need a test at `B != k`
@@ -438,9 +441,8 @@ Both methods are **continuations, not sessions**:
 - They leave the final state installed, so consecutive calls compose —
   `evolve(a); grad(b)` drives `a` then `b` over one continuous trajectory. This
   is what makes the warm-up idiom work.
-- `running_index` advances once per `update()` call, i.e. `T` times in plain
-  mode and `T // k` times under window mode. This asymmetry is the subject of
-  the F-30 interaction below.
+- `running_index` advances once per completed timestep: by one in plain mode
+  and by `k` for each `k`-step window, reaching `T` in both modes.
 - **On failure, state is left untouched.** A `step_fn` that raises mid-loop
   aborts before anything is written back: the body is traced into a functional
   `brainstate.transform.scan`, so state reaches the learner only when the whole
@@ -536,26 +538,12 @@ prefer `reduction='sum'` and divide themselves.
 
 ### F-30: window mode and the IO-factorized bias correction
 
-`docs/specs/2026-07-25-known-limitations.md` F-30 records that the IO-dim f-side
-de-biasing correction is **indexed by `update()` call count, not by trace-step
-count**, so it is exact only for single-step input — and that this is *preserved
-deliberately*, because fixing it moves `pp_prop` / `OSTLFeedforward` gradients.
-
-Window mode makes that latent condition reachable from a single keyword. A
-`k`-step window advances the trace `k` times but increments `running_index` once,
-so the correction lags the trace by a factor of `k`.
-
-Resolution: **document, do not refuse.** F-30 is a deliberate property of those
-engines, not a driver defect, and refusing would make the driver stricter than
-the algorithms it drives. Concretely:
-
-- `etrace_grad`'s docstring names F-30 under window mode for IO-factorized
-  engines (`pp_prop`, `ES_D_RTRL`, `OSTLFeedforward`, and any
-  `trace_factorization='io_factorized'` config).
-- A driver-level regression test pins the consequence, so a future F-30 fix is
-  detected here rather than only in `io_dim_vjp_test.py`.
-- F-30's row in known-limitations gains a sentence noting that
-  `etrace_grad(chunk_size=k >= 2)` is now a first-class way to reach it.
+F-30 was resolved on 2026-08-08. IO-factorized learners now index the f-side
+warm-up correction by the exact age of the trace being contracted. A `k`-step
+window advances the stored trace and `running_index` by `k`; its backward pass
+contracts the window-entry trace at age `0, k, 2k, ...`. Driver regressions
+require the corresponding ages and compare one six-step trace roll with three
+two-step rolls.
 
 ### DNI: matching the synthesizer's deployment contract
 
@@ -803,13 +791,13 @@ Co-located at `braintrace/_algorithm/sequence_test.py` (AGENTS.md rule 9).
     concatenation with a zero-weight prefix (this is test 14 read from the other
     side, kept separate because it pins *composition*, not masking).
 28. Repeated `etrace_grad` calls continue rather than reset; `running_index`
-    advances `T` times in plain mode and `T // k` times under window mode.
+    advances by `T` in both plain and window mode.
 
 **Algorithm interactions**
 
-29. F-30: on an IO-factorized engine, `chunk_size=k >= 2` produces the lagged
-    bias correction the limitation describes. A regression test, so a future F-30
-    fix surfaces here.
+29. F-30: one six-step trace roll and three two-step rolls produce the same
+    stored final traces and completed-step count; the multi-step solver receives
+    each window-entry trace age (`0, 2, 4` for the latter partition).
 30. F-35: a `reduction` mismatch between `train_synthetic_gradient` and
     `etrace_grad` degrades DNI, in the shape of the existing window-size test.
 31. The F-35 `chunk_size` correspondence is an identity: fitting with

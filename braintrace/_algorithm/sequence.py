@@ -316,15 +316,9 @@ class SequenceDriverMixin:
         ``chunk_size`` is what makes them easy to hit by accident, so they are
         named here rather than only in the limitations document.
 
-        **F-30, window mode on an IO-factorized engine.** ``pp_prop`` /
-        ``ES_D_RTRL`` / ``OSTLFeedforward``, and any
-        ``trace_factorization='io_factorized'`` config, undo the warm-up bias
-        of their f-side smoothing with a factor indexed by ``running_index``,
-        which counts ``update()`` calls. A ``k``-step window advances the trace
-        ``k`` times but ``running_index`` once, so the correction lags the trace
-        by a factor of ``k``. Measured at ``T=6, k=2, decay=0.9``: 2.1e-03
-        relative against the same run indexed by true trace steps. Driving with
-        ``chunk_size=None`` avoids it entirely.
+        **Window trace age.** ``running_index`` records completed timesteps, so
+        a ``k``-step window advances it by ``k``. IO-factorized learners use
+        that completed-step count for their f-trace warm-up correction.
 
         **F-35, DNI and the synthesizer's deployment contract.** A
         :func:`train_synthetic_gradient` fit is valid only for the exact

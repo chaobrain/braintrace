@@ -309,7 +309,7 @@ class TestTheTwoDrivingModes:
         """
         learner = _learner('single-step')
         learner.etrace_evolve(_inputs(), chunk_size=K)
-        assert learner.running_index.value == T // K
+        assert learner.running_index.value == T
 
     def test_a_learner_without_a_vjp_method_is_refused_in_window_mode(self):
         """Spec test 8.
@@ -621,9 +621,9 @@ class _VmapNet(brainstate.nn.Module):
     previously written against a fixture that could not run. ``ValinaRNNCell``
     defers its state to ``init_state``, which is the property that matters.
 
-    ``wout`` is a plain (non-ETP) parameter, so it is exactly zero under
-    ``vjp_method='single-step'`` (F-33); the vmap fixture therefore runs
-    ``'multi-step'``, which keeps every key live and the comparisons honest.
+    ``wout`` is a plain (non-ETP) parameter and receives exact local reverse-mode
+    gradients. The vmap fixture runs ``'multi-step'`` to cover sequence-window
+    execution as well as ETP routing.
     """
 
     def __init__(self, n_in=N_IN, n_rec=N_REC, seed=0):
@@ -890,9 +890,8 @@ class TestTheReturnSurface:
         The last is what rules out a ``weights`` argument that quietly changed
         the differentiation set as well as the reported keys.
 
-        Run at ``'multi-step'`` so ``win`` has a non-zero gradient at all --
-        under ``'single-step'`` every plain parameter is exactly zero (F-33)
-        and "excluded" would be indistinguishable from "included".
+        Run at ``'multi-step'`` so the subset comparison covers the same
+        sequence-window route used by the unrestricted control.
         """
         xs, ys = _inputs(), _targets()
 
@@ -1108,12 +1107,12 @@ class TestStateLifecycle:
                                     reduction='sum')
         oracle.assert_gradients_differ(_arrays(g_second), _arrays(g_reset))
 
-    def test_running_index_advances_once_per_window(self):
-        """Spec test 28, window half -- and the mechanism behind F-30."""
+    def test_running_index_advances_by_window_length(self):
+        """A windowed run records completed timesteps, not update calls."""
         learner = _learner('multi-step')
         learner.etrace_grad(_inputs(), _targets(),
                             step_fn=_window_step(learner, K), chunk_size=K)
-        assert learner.running_index.value == T // K
+        assert learner.running_index.value == T
 
 
 # ---------------------------------------------------------------------------
@@ -1123,68 +1122,15 @@ class TestStateLifecycle:
 class TestAlgorithmInteractions:
     """The driver must not launder a known limitation into a silent one."""
 
-    def test_window_mode_lags_the_io_factorized_bias_correction(self):
-        """Spec test 29 -- F-30, as a regression test.
-
-        F-30: the IO-dim f-side de-biasing correction is indexed by ``update()``
-        call count, not trace-step count. A ``k``-step window advances the trace
-        ``k`` times but ``running_index`` once, so the correction lags by ``k``.
-        This is *deliberate* upstream, so the test pins the consequence rather
-        than forbidding it -- a future F-30 fix should surface here.
-
-        Three arms, because the index claim alone is only the *prerequisite*:
-        asserting ``running_index == T // K`` would still pass if the correction
-        had no effect on the gradient at all, and the regression would be
-        vacuous. So the driver is also pinned against a hand-written window loop
-        (it must reproduce it exactly) and against the same loop with the index
-        forced to the true trace-step count (it must *not*). The forced arm is
-        the same construction ``io_dim_vjp_test`` uses for F-30.
-        """
+    def test_window_mode_uses_cumulative_trace_steps(self):
+        """Repeated windowed runs accumulate their represented timesteps."""
         xs, ys = _inputs(), _targets()
-
-        def build():
-            return _learner('multi-step', algorithm='pp_prop', decay_or_rank=0.9)
-
-        driver = build()
-        g_driver = driver.etrace_grad(xs, ys, step_fn=_window_step(driver, K),
-                                      chunk_size=K, reduction='sum')
-        assert driver.running_index.value == T // K, (
-            'F-30: running_index counts update() calls, so a windowed run '
-            'leaves the de-biasing correction indexed by windows, not steps')
-
-        def manual(force_true_step_count):
-            learner = build()
-            weights = learner.param_states
-            window = _window_step(learner, K)
-            total = None
-            # test-support window loop (3 iterations), not a model step driver
-            for w, start in enumerate(range(0, T, K)):
-                if force_true_step_count:
-                    learner.running_index.value = w * K + K - 1
-                g = brainstate.transform.grad(
-                    lambda xw, yw: jnp.sum(window(xw, yw)), weights
-                )(xs[start:start + K], ys[start:start + K])
-                total = g if total is None else jax.tree.map(
-                    lambda a, b: a + b, total, g)
-            return total
-
-        # The driver is plumbing: it must land on the shipped behaviour. Unlike
-        # the plain-mode comparisons, which are scan-vs-scan and do agree bit
-        # for bit, this one is a scan over stacked windows against a Python loop
-        # of separate grad calls -- two different graphs, so XLA is free to fuse
-        # them differently and jax <= 0.10 does, by one float32 ulp (measured
-        # 9.3e-10 absolute, 7.5e-08 relative). The tolerance is still three
-        # decades below the 2.1e-03 F-30 effect the next arm has to see, so it
-        # buys the ulp without weakening the claim.
-        _assert_trees_equal(g_driver, manual(False), atol=1e-8, rtol=1e-6,
-                            msg='windowed driver vs hand-written window loop')
-
-        # ...and the shipped behaviour must be measurably the biased one, or
-        # there would be nothing for a future F-30 fix to change.
-        oracle.assert_gradients_differ(
-            _arrays(g_driver), _arrays(manual(True)),
-            # measured 2.1e-03; float32 round-off on this tree is ~1e-8
-            min_rel=1e-5)
+        learner = _learner('multi-step', algorithm='pp_prop', decay_or_rank=0.9)
+        step_fn = _window_step(learner, K)
+        learner.etrace_grad(xs, ys, step_fn=step_fn, chunk_size=K)
+        assert learner.running_index.value == T
+        learner.etrace_grad(xs, ys, step_fn=step_fn, chunk_size=K)
+        assert learner.running_index.value == 2 * T
 
     def test_the_driver_and_dni_agree_on_what_chunk_size_one_means(self):
         """Spec test 31 -- the F-35 correspondence, as an identity.
@@ -1452,7 +1398,7 @@ class TestRobustness:
 
         windowed = _learner('multi-step')
         windowed.etrace_evolve(_inputs(), chunk_size=K)
-        assert windowed.running_index.value == T // K
+        assert windowed.running_index.value == T
 
     def test_evolve_with_a_custom_step_fn_does_not_wrap(self):
         """Spec test 34, continued -- supplying ``step_fn`` opts out of wrapping."""

@@ -148,47 +148,45 @@ class TestFormatDecayAndRank:
         assert _format_decay_and_rank(0.0) == (0.0, 1)
 
     def test_float_one_raises(self):
-        with pytest.raises(AssertionError, match="decay should be in"):
+        with pytest.raises(ValueError, match="decay must be in"):
             _format_decay_and_rank(1.0)
 
     def test_float_negative_raises(self):
-        with pytest.raises(AssertionError, match="decay should be in"):
+        with pytest.raises(ValueError, match="decay must be in"):
             _format_decay_and_rank(-0.5)
 
     def test_float_greater_than_one_raises(self):
-        with pytest.raises(AssertionError, match="decay should be in"):
+        with pytest.raises(ValueError, match="decay must be in"):
             _format_decay_and_rank(1.5)
 
     # --- invalid int inputs ---
 
     def test_int_zero_raises(self):
-        with pytest.raises(AssertionError, match="num_rank should be greater than 0"):
+        with pytest.raises(ValueError, match="rank must be at least 1"):
             _format_decay_and_rank(0)
 
     def test_int_negative_raises(self):
-        with pytest.raises(AssertionError, match="num_rank should be greater than 0"):
+        with pytest.raises(ValueError, match="rank must be at least 1"):
             _format_decay_and_rank(-3)
 
     # --- invalid types ---
 
     def test_string_raises(self):
-        with pytest.raises(ValueError, match="num_rank.*int.*or.*decay.*float"):
+        with pytest.raises(TypeError, match="integer rank or float decay"):
             _format_decay_and_rank("0.5")
 
     def test_none_raises(self):
-        with pytest.raises(ValueError, match="num_rank.*int.*or.*decay.*float"):
+        with pytest.raises(TypeError, match="integer rank or float decay"):
             _format_decay_and_rank(None)
 
     def test_list_raises(self):
-        with pytest.raises(ValueError, match="num_rank.*int.*or.*decay.*float"):
+        with pytest.raises(TypeError, match='integer rank or float decay'):
             _format_decay_and_rank([0.5])
 
-    def test_bool_treated_as_int(self):
-        # In Python, bool is a subclass of int, so True == 1 and False == 0
-        # True (==1) should pass the int branch with rank=1
-        decay, rank = _format_decay_and_rank(True)
-        assert rank == 1
-        assert decay == 0.0
+    @pytest.mark.parametrize('bad', [True, False])
+    def test_bool_is_rejected(self, bad):
+        with pytest.raises(TypeError, match='integer rank or float decay'):
+            _format_decay_and_rank(bad)
 
     # --- round-trip consistency ---
 
@@ -392,7 +390,7 @@ class TestPpPropInit:
     def test_invalid_vjp_method_raises(self):
         gru = braintrace.nn.GRUCell(3, 4)
         brainstate.nn.init_all_states(gru)
-        with pytest.raises(AssertionError, match="single-step.*multi-step"):
+        with pytest.raises(ValueError, match="single-step.*multi-step"):
             pp_prop(gru, decay_or_rank=0.9, vjp_method='invalid')
 
     def test_init_with_name(self):
@@ -587,7 +585,7 @@ class TestGetEtraceOf:
         _, algo = _make_compiled_algo()
         # Create a dummy ParamState that is not part of the model
         fake_param = brainstate.ParamState(jnp.zeros(10))
-        with pytest.raises(ValueError, match="Do not the etrace"):
+        with pytest.raises(ValueError, match="No eligibility trace"):
             algo.get_etrace_of(fake_param)
 
 
@@ -718,6 +716,48 @@ class TestPpPropForwardPass:
 class TestPpPropGradients:
     """Tests that gradients can be computed through the algorithm."""
 
+    def test_single_step_plain_gradients_match_exact_local_vjp(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.recurrent = brainstate.ParamState(
+                    jnp.array([[0.2, -0.1], [0.3, 0.4]])
+                )
+                self.input = brainstate.ParamState(
+                    jnp.array([[0.5, -0.2], [0.1, 0.3]])
+                )
+                self.readout = brainstate.ParamState(
+                    jnp.array([[0.7], [-0.4]])
+                )
+                self.h = brainstate.HiddenState(jnp.array([[0.25, -0.5]]))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    x @ self.input.value
+                    + braintrace.matmul(self.h.value, self.recurrent.value)
+                )
+                return braintrace.matmul(self.h.value, self.readout.value)
+
+        model = Net()
+        oracle = Net()
+        x = jnp.array([[0.6, -0.8]])
+        algo = braintrace.pp_prop(model, decay_or_rank=0.9, vjp_method='single-step')
+        algo.compile_graph(x)
+        algo.init_etrace_state()
+
+        got = brainstate.transform.grad(
+            lambda value: jnp.square(algo(value)).sum(),
+            model.states(brainstate.ParamState),
+        )(x)
+        expected = brainstate.transform.grad(
+            lambda value: jnp.square(oracle(value)).sum(),
+            oracle.states(brainstate.ParamState),
+        )(x)
+
+        for path in (('input',), ('readout',)):
+            np.testing.assert_allclose(got[path], expected[path], rtol=1e-6, atol=1e-7)
+            assert bool(jnp.any(got[path] != 0.0))
+
     def test_grad_single_step(self):
         n_in, n_rec = 3, 4
         gru, algo = _make_compiled_algo(n_in, n_rec)
@@ -774,8 +814,6 @@ class TestDiagOn:
             braintrace.nn.GRUCell,
             braintrace.nn.LSTMCell,
             braintrace.nn.LRUCell,
-            braintrace.nn.MGUCell,
-            braintrace.nn.MinimalRNNCell,
         ]
     )
     def test_rnn_single_step_vjp(self, cls):
@@ -809,8 +847,6 @@ class TestDiagOn:
             braintrace.nn.GRUCell,
             braintrace.nn.LSTMCell,
             braintrace.nn.LRUCell,
-            braintrace.nn.MGUCell,
-            braintrace.nn.MinimalRNNCell,
         ]
     )
     def test_rnn_multi_step_vjp(self, cls):
@@ -839,6 +875,26 @@ class TestDiagOn:
         print()
         grads = grad_single_step_vjp(inputs[1:2])
         print(brainstate.util.PrettyDict(grads))
+
+    @pytest.mark.parametrize(
+        'cls',
+        [braintrace.nn.MGUCell, braintrace.nn.MinimalRNNCell],
+    )
+    @pytest.mark.parametrize('vjp_method', ['single-step', 'multi-step'])
+    def test_mixed_path_rnn_is_rejected(self, cls, vjp_method):
+        model = cls(4, 5)
+        brainstate.nn.init_all_states(model)
+        algorithm = braintrace.pp_prop(
+            model,
+            decay_or_rank=0.9,
+            vjp_method=vjp_method,
+        )
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algorithm.compile_graph(brainstate.random.randn(4))
+        assert not algorithm.is_compiled
 
     @pytest.mark.parametrize(
         "cls",

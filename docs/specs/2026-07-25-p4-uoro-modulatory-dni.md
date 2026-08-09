@@ -656,6 +656,12 @@ ctor refusal in `ETraceVjpAlgorithm` (modulatory requires single-step, § Part 2
 makes the two inseparable in practice, so M4 asserts the zero rather than leaving
 a caller to discover it.
 
+**Status 2026-08-08:** F-33 is resolved. The compiled graph now partitions
+parameter paths before VJP: plain-only paths receive exact current-step
+reverse-mode gradients, while any path owned by an ETP relation remains wholly
+ETP-routed. The paragraph above records the behavior when this historical phase
+was accepted.
+
 ### `bootstrapped`
 
 **B1 — `M ≡ 0` is a bit-exact no-op**, and a *live* non-zero synthesiser must

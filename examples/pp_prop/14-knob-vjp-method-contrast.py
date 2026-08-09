@@ -1,9 +1,9 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-"""14 · single-step vs multi-step VJP vs BPTT head-to-head on DMS.
+"""14 · Single-step vs windowed multi-step pp-prop vs BPTT on DMS.
 
-Trains three identical LIF RSNNs on the same DMS data:
-one with vjp_method='single-step', one with 'multi-step', one with BPTT.
-Reports per-epoch loss and final accuracy for all three.
+The three LIF RSNNs start from identical parameters, receive the same data, and
+optimize the same final-step classification loss. The multi-step learner uses
+four 10-step windows by default.
 """
 
 import pathlib
@@ -30,8 +30,7 @@ class Net(brainstate.nn.Module):
 
 
 def _accuracy(outputs_seq, labels):
-    mean_out = outputs_seq.mean(axis=0)
-    return float(jnp.mean(jnp.argmax(mean_out, axis=-1) == labels))
+    return float(jnp.mean(jnp.argmax(outputs_seq[-1], axis=-1) == labels))
 
 
 def _eval(model, inputs, labels):
@@ -46,35 +45,56 @@ def _eval(model, inputs, labels):
     return _accuracy(outs, labels)
 
 
-def main(n_epochs: int = 4, batch_size: int = 32, num_step: int = 40, plot: bool = True) -> Dict:
+def _make(n_in: int, n_rec: int, n_out: int, seed: int):
+    with brainstate.random.seed_context(seed):
+        model = Net(n_in=n_in, n_rec=n_rec, n_out=n_out)
+        weights = model.states(brainstate.ParamState)
+        optimizer = braintools.optim.Adam(lr=1e-3)
+        optimizer.register_trainable_weights(weights)
+    return model, optimizer
+
+
+def main(
+    n_epochs: int = 4,
+    batch_size: int = 32,
+    num_step: int = 40,
+    plot: bool = True,
+    window_size: int = 10,
+) -> Dict:
     n_in = 16
     with brainstate.environ.context(dt=1.0 * u.ms):
-        def make():
-            m = Net(n_in=n_in, n_rec=64, n_out=2)
-            w = m.states(brainstate.ParamState)
-            o = braintools.optim.Adam(lr=1e-3)
-            o.register_trainable_weights(w)
-            return m, o
-
-        m_ss, o_ss = make()
-        m_ms, o_ms = make()
-        m_bp, o_bp = make()
+        m_ss, o_ss = _make(n_in, 64, 2, seed=0)
+        m_ms, o_ms = _make(n_in, 64, 2, seed=0)
+        m_bp, o_bp = _make(n_in, 64, 2, seed=0)
+        loss_mask = jnp.zeros((num_step,), dtype=jnp.float32).at[-1].set(1.0)
 
         @brainstate.transform.jit
         def train_ss(inputs, labels):
             return _shared.online_train_epoch_fixed_target(
-                m_ss, o_ss, inputs, labels, decay_or_rank=0.97, vjp_method="single-step"
+                m_ss, o_ss, inputs, labels,
+                decay_or_rank=0.97,
+                vjp_method="single-step",
+                vmap=False,
+                loss_mask=loss_mask,
+                reduction="mean",
             )
 
         @brainstate.transform.jit
         def train_ms(inputs, labels):
             return _shared.online_train_epoch_fixed_target(
-                m_ms, o_ms, inputs, labels, decay_or_rank=0.97, vjp_method="multi-step"
+                m_ms, o_ms, inputs, labels,
+                decay_or_rank=0.97,
+                vjp_method="multi-step",
+                chunk_size=window_size,
+                vmap=False,
+                loss_mask=loss_mask,
+                reduction="mean",
             )
 
         @brainstate.transform.jit
         def train_bp(inputs, labels):
-            return _shared.bptt_train_epoch_fixed_target(m_bp, o_bp, inputs, labels)
+            return _shared.bptt_train_epoch_fixed_target(
+                m_bp, o_bp, inputs, labels, loss_mask=loss_mask)
 
         ss_l, ms_l, bp_l = [], [], []
         for epoch in range(n_epochs):

@@ -150,11 +150,11 @@ class TestOSTLFeedforward(unittest.TestCase):
         assert abs(algo.decay - 0.5) < 1e-9
 
     def test_out_of_range_float_decay_rejected(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             OSTLFeedforward(_tiny_rec_net(), decay_or_rank=1.5)
 
     def test_bad_decay_type_rejected(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(TypeError):
             OSTLFeedforward(_tiny_rec_net(), decay_or_rank='nope')
 
     def test_training_decreases_loss(self):

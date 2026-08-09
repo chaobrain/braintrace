@@ -18,8 +18,11 @@ import unittest
 
 import brainstate
 import jax
+import jax.numpy as jnp
+import pytest
 
 import braintrace
+from braintrace._input_data import _count_update_steps
 
 
 class TestEtraceInputData(unittest.TestCase):
@@ -49,3 +52,24 @@ class TestEtraceInputData(unittest.TestCase):
         y, grad = jax.value_and_grad(f)(braintrace.MultiStepData(3.))
         self.assertEqual(y, 9)
         self.assertEqual(grad.data, 6)
+
+
+class TestCountUpdateSteps:
+
+    def test_plain_input_is_one_step(self):
+        assert _count_update_steps(jnp.ones((4,))) == 1
+
+    def test_multistep_pytree_uses_leading_dimension(self):
+        data = {'a': jnp.ones((6, 2)), 'b': (jnp.ones((6, 3)),)}
+        assert _count_update_steps(braintrace.MultiStepData(data)) == 6
+
+    def test_multiple_multistep_inputs_must_agree(self):
+        with pytest.raises(ValueError, match='same sequence size'):
+            _count_update_steps(
+                braintrace.MultiStepData(jnp.ones((3, 2))),
+                braintrace.MultiStepData(jnp.ones((4, 2))),
+            )
+
+    def test_empty_multistep_input_is_rejected(self):
+        with pytest.raises(ValueError, match='at least one timestep'):
+            _count_update_steps(braintrace.MultiStepData(jnp.ones((0, 2))))

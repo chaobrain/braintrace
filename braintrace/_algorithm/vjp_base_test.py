@@ -160,44 +160,44 @@ class TestInit:
 class TestVjpMethodValidation:
     """Tests for vjp_method parameter validation."""
 
-    def test_invalid_vjp_method_raises_assertion_error(self):
+    def test_invalid_vjp_method_raises_value_error(self):
         model = _make_gru()
-        with pytest.raises(AssertionError, match='single-step'):
+        with pytest.raises(ValueError, match='single-step'):
             ConcreteVjpAlgorithm(model, vjp_method='invalid')
 
-    def test_empty_string_raises_assertion_error(self):
+    def test_empty_string_raises_value_error(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method='')
 
-    def test_none_vjp_method_raises_assertion_error(self):
+    def test_none_vjp_method_raises_value_error(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method=None)
 
-    def test_typo_single_raises_assertion_error(self):
+    def test_typo_single_raises_value_error(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method='singlestep')
 
-    def test_typo_multi_raises_assertion_error(self):
+    def test_typo_multi_raises_value_error(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method='multistep')
 
     def test_case_sensitive(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method='Single-Step')
 
     def test_case_sensitive_multi(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method='Multi-Step')
 
-    def test_numeric_vjp_method_raises_assertion_error(self):
+    def test_numeric_vjp_method_raises_value_error(self):
         model = _make_gru()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             ConcreteVjpAlgorithm(model, vjp_method=42)
 
 
@@ -475,7 +475,6 @@ class TestWithDifferentModels:
 
     @pytest.mark.parametrize("cell_cls", [
         braintrace.nn.GRUCell,
-        braintrace.nn.MGUCell,
         braintrace.nn.ValinaRNNCell,
     ])
     def test_init_with_different_cells(self, cell_cls):
@@ -487,7 +486,6 @@ class TestWithDifferentModels:
 
     @pytest.mark.parametrize("cell_cls", [
         braintrace.nn.GRUCell,
-        braintrace.nn.MGUCell,
         braintrace.nn.ValinaRNNCell,
     ])
     def test_compile_with_different_cells(self, cell_cls):
@@ -497,6 +495,21 @@ class TestWithDifferentModels:
         x = jnp.ones((3,))
         algo.compile_graph(x)
         assert algo.is_compiled is True
+
+    @pytest.mark.parametrize("cell_cls", [
+        braintrace.nn.MGUCell,
+        braintrace.nn.MinimalRNNCell,
+    ])
+    def test_compile_rejects_mixed_path_cells(self, cell_cls):
+        model = cell_cls(3, 4)
+        brainstate.nn.init_all_states(model)
+        algo = ConcreteVjpAlgorithm(model)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algo.compile_graph(jnp.ones((3,)))
+        assert not algo.is_compiled
 
     @pytest.mark.parametrize("vjp_method", ['single-step', 'multi-step'])
     def test_compile_with_both_vjp_methods(self, vjp_method):
@@ -964,6 +977,7 @@ _E01_DASH_O_SCRIPT = textwrap.dedent(
     import brainunit as u
     import jax.numpy as jnp
     import braintrace
+    from braintrace._algorithm.io_dim_vjp import _format_decay_and_rank
     from braintrace._algorithm.vjp_base import _check_hidden_gradient_correspondence
 
     gru = braintrace.nn.GRUCell(3, 4)
@@ -1003,6 +1017,43 @@ _E01_DASH_O_SCRIPT = textwrap.dedent(
     else:
         print('CONCAT-NOT-RAISED')
         sys.exit(5)
+
+    for value, error_type in ((True, TypeError), (float('inf'), ValueError)):
+        try:
+            _format_decay_and_rank(value)
+        except error_type:
+            pass
+        else:
+            print('VALIDATION-NOT-RAISED')
+            sys.exit(6)
+
+    try:
+        braintrace.pp_prop(gru, 0.9, vjp_method='invalid')
+    except ValueError:
+        pass
+    else:
+        print('VJP-METHOD-NOT-RAISED')
+        sys.exit(7)
+
+    config = braintrace.ETraceConfig(
+        trace_factorization='io_factorized', decay=0.5)
+    try:
+        braintrace.IODimVjpAlgorithm(gru, 0.9, config=config)
+    except ValueError:
+        pass
+    else:
+        print('CONFIG-CONFLICT-NOT-RAISED')
+        sys.exit(8)
+
+    for ceiling, error_type in ((True, TypeError), (0, ValueError)):
+        try:
+            braintrace.pp_prop(
+                gru, 0.9, snap_max_jacobian_elements=ceiling)
+        except error_type:
+            pass
+        else:
+            print('CEILING-NOT-RAISED')
+            sys.exit(9)
 
     print('GUARDS-SURVIVED-DASH-O')
     """

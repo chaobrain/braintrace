@@ -45,12 +45,15 @@ from .hidden_group import (
     find_hidden_groups_from_minfo,
     HiddenGroup,
 )
-from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS
+from .position_graph import (
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    _validate_max_jacobian_elements,
+)
 from .hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     HiddenPerturbation,
 )
-from .scan_descent import apply_scan_descent
+from .scan_descent import ScanDescentBundle, apply_scan_descent
 from .module_info import (
     extract_module_info,
     ModuleInfo,
@@ -134,6 +137,21 @@ class ETraceGraph(NamedTuple):
     hidden_param_op_relations: Sequence[HiddenParamOpRelation]
     hidden_perturb: HiddenPerturbation | None
     diagnostics: Tuple[CompilationRecord, ...] = ()
+
+    @property
+    def etrace_param_paths(self) -> frozenset[Path]:
+        """Return parameter paths routed through eligibility traces.
+
+        Returns
+        -------
+        frozenset of Path
+            Every parameter path owned by at least one compiled ETP relation.
+        """
+        return frozenset(
+            path
+            for relation in self.hidden_param_op_relations
+            for path in relation.trainable_paths.values()
+        )
 
     def explain(
         self,
@@ -347,6 +365,29 @@ def _check_sparse_n_request(
         )
 
 
+def _descended_parameter_ownership(
+    minfo: ModuleInfo,
+    bundles: Sequence[ScanDescentBundle],
+) -> Tuple[frozenset[Path], Dict[int, frozenset[int]]]:
+    owned_paths = set()
+    boundary_inputs = {}
+    for bundle in bundles:
+        bundle_paths = {
+            path
+            for relation in bundle.relations
+            for path in relation.trainable_paths.values()
+        }
+        owned_paths.update(bundle_paths)
+        positions = frozenset(
+            index
+            for index, invar in enumerate(bundle.new_eqn.invars)
+            if minfo.invar_to_weight_path.get(invar) in bundle_paths
+        )
+        if positions:
+            boundary_inputs[id(bundle.new_eqn)] = positions
+    return frozenset(owned_paths), boundary_inputs
+
+
 def compile_etrace_graph(
     model: brainstate.nn.Module,
     *model_args: Tuple,
@@ -468,6 +509,9 @@ def compile_etrace_graph(
         1
     """
 
+    snap_max_jacobian_elements = _validate_max_jacobian_elements(
+        snap_max_jacobian_elements
+    )
     _check_sparse_n_request(sparse_n, include_recurrent_mixing)
 
     with compiler_context('compile_graph'), diagnostic_context() as reporter:
@@ -519,12 +563,18 @@ def compile_etrace_graph(
                 ))
         order_hidden_group_index(hidden_groups)
 
+        descended_owned_paths, descended_boundary_inputs = (
+            _descended_parameter_ownership(minfo, descent_bundles)
+        )
+
         # ---       evaluating the jaxpr for (hidden, param, op) relationships      --- #
 
         hidden_param_op_relations = list(find_hidden_param_op_relations_from_minfo(
             minfo=minfo,
             hid_path_to_group=hid_path_to_group,
             descended_scan_eqn_ids=descended_eqn_ids,
+            additional_owned_paths=descended_owned_paths,
+            additional_boundary_inputs=descended_boundary_inputs,
         ))
 
         # v1 restriction: an *outer* relation may not target a hidden state

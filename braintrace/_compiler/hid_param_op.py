@@ -71,7 +71,7 @@ from braintrace._op import (
     is_etp_primitive,
     is_etp_enable_gradient_primitive,
 )
-from braintrace._misc import git_issue_addr
+from braintrace._misc import NotSupportedError, git_issue_addr
 from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from braintrace._typing import (
     Path,
@@ -334,14 +334,9 @@ def _trace_var_to_param(
     Returns ``(path, processing_chain)`` where ``processing_chain`` is the
     deduplicated, insertion-ordered tuple of intermediate primitive types
     traversed (mask multiplication, weight_fn, etc.). When the var is the
-    raw ParamState invar, the chain is empty.
-
-    Known limitation: the backward BFS stops at the FIRST ParamState invar it
-    reaches. A trainable invar computed from *two* ParamStates (e.g.
-    ``w1 + w2``) is attributed to whichever the search reaches first; the
-    other's gradient is silently dropped. No library op produces such a
-    joint-parametric trainable input today — route each ParamState through
-    its own ETP op if you need both trained online.
+    raw ParamState invar, the chain is empty. A trainable input derived from
+    more than one ParamState leaf is rejected because one relation cannot
+    assign its gradient to multiple owners.
     """
     if cache is not None and var in cache:
         cached = cache[var]
@@ -352,7 +347,7 @@ def _trace_var_to_param(
     frontier: deque = deque([var])
     visited: Set[Var] = set()
     chain: Dict[Primitive, None] = {}
-    found_path: Optional[Path] = None
+    found_sources: Dict[Var, Path] = {}
     while frontier:
         v = frontier.popleft()
         if v in visited:
@@ -360,18 +355,117 @@ def _trace_var_to_param(
         visited.add(v)
         path = invar_to_weight_path.get(v)
         if path is not None:
-            found_path = path
-            break
+            found_sources[v] = path
+            continue
         eqn = producers.get(v)
         if eqn is not None:
             chain[eqn.primitive] = None
             for iv in eqn.invars:
                 if isinstance(iv, Var) and iv not in visited:
                     frontier.append(iv)
+    if len(found_sources) > 1:
+        source_paths = tuple(found_sources.values())
+        raise NotSupportedError(
+            f'An ETP trainable input depends on multiple ParamState leaves '
+            f'from paths {source_paths}. One compiled relation cannot assign '
+            f'its gradient to multiple parameter owners. Route each leaf '
+            f'through its own ETP primitive.'
+        )
+    found_path = next(iter(found_sources.values()), None)
     chain_tuple = tuple(chain)
     if cache is not None:
         cache[var] = (found_path, chain_tuple) if found_path is not None else None
     return found_path, chain_tuple
+
+
+def _has_plain_parameter_path(
+    source_vars: Sequence[Var],
+    consumers: Dict[Var, List[JaxprEqn]],
+    semantic_outvars: Set[Var],
+    boundary_inputs: Dict[int, FrozenSet[int]],
+) -> bool:
+    """Return whether a parameter source reaches output outside ETP ownership."""
+    frontier: deque = deque(source_vars)
+    visited: Set[Var] = set()
+    while frontier:
+        var = frontier.popleft()
+        if var in visited:
+            continue
+        visited.add(var)
+        if var in semantic_outvars:
+            return True
+        for eqn in consumers.get(var, []):
+            owned_inputs = boundary_inputs.get(id(eqn), frozenset())
+            positions = {
+                index for index, invar in enumerate(eqn.invars)
+                if invar == var
+            }
+            if positions and positions.issubset(owned_inputs):
+                continue
+            if eqn.primitive.name == 'stop_gradient':
+                continue
+            for outvar in eqn.outvars:
+                if isinstance(outvar, Var) and outvar not in visited:
+                    frontier.append(outvar)
+    return False
+
+
+def _reject_mixed_parameter_ownership(
+    jaxpr: Jaxpr,
+    etp_eqns: Sequence[JaxprEqn],
+    relations: Sequence[HiddenParamOpRelation],
+    invar_to_weight_path: Dict[Var, Path],
+    weight_path_to_invars: Optional[Dict[Path, List[Var]]],
+    semantic_outvars: Optional[FrozenSet[Var]],
+    additional_owned_paths: FrozenSet[Path],
+    additional_boundary_inputs: Optional[Dict[int, FrozenSet[int]]],
+) -> None:
+    """Reject ParamState paths split between ETP and plain differentiation."""
+    owned_paths = set(additional_owned_paths)
+    owned_paths.update(
+        path for relation in relations for path in relation.trainable_paths.values()
+    )
+    if not owned_paths:
+        return
+    sources_by_path: Dict[Path, List[Var]] = {
+        path: list(invars)
+        for path, invars in (weight_path_to_invars or {}).items()
+    }
+    for invar, path in invar_to_weight_path.items():
+        sources = sources_by_path.setdefault(path, [])
+        if invar not in sources:
+            sources.append(invar)
+    relation_y_vars = {relation.y_var for relation in relations}
+    boundary_inputs = dict(additional_boundary_inputs or {})
+    for eqn in etp_eqns:
+        if _resolve_eqn_vars(eqn)[1] in relation_y_vars:
+            owned = frozenset(
+                get_trainable_invars(eqn.primitive, eqn.params).values()
+            )
+            boundary_inputs[id(eqn)] = (
+                boundary_inputs.get(id(eqn), frozenset()) | owned
+            )
+    if semantic_outvars is None:
+        parameter_invars = set(invar_to_weight_path)
+        semantic = {
+            outvar for outvar in jaxpr.outvars
+            if isinstance(outvar, Var) and outvar not in parameter_invars
+        }
+    else:
+        semantic = set(semantic_outvars)
+    consumers = build_consumer_map(jaxpr)
+    for path in owned_paths:
+        source_vars = tuple(dict.fromkeys(sources_by_path.get(path, ())))
+        if _has_plain_parameter_path(
+            source_vars, consumers, semantic, boundary_inputs
+        ):
+            raise NotSupportedError(
+                f'ParamState at path {path} has compiled ETP ownership and '
+                f'an unrepresented differentiable path. That path may be '
+                f'plain or an ETP occurrence hidden behind another trainable '
+                f'ETP primitive. Use separate ParamState objects or make every '
+                f'trainable occurrence a compiled relation.'
+            )
 
 
 def _resolve_weight_leaf_idx(
@@ -817,6 +911,9 @@ def find_hidden_param_op_relations_from_jaxpr(
     weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    semantic_outvars: Optional[FrozenSet[Var]] = None,
+    additional_owned_paths: FrozenSet[Path] = frozenset(),
+    additional_boundary_inputs: Optional[Dict[int, FrozenSet[int]]] = None,
     **_ignored: Any,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
@@ -1045,6 +1142,16 @@ def find_hidden_param_op_relations_from_jaxpr(
             },
         )
 
+    _reject_mixed_parameter_ownership(
+        jaxpr,
+        etp_eqns,
+        relations,
+        invar_to_weight_path,
+        weight_path_to_invars,
+        semantic_outvars,
+        additional_owned_paths,
+        additional_boundary_inputs,
+    )
     return tuple(relations)
 
 
@@ -1114,6 +1221,8 @@ def find_hidden_param_op_relations_from_minfo(
     minfo: ModuleInfo,
     hid_path_to_group: Dict[Path, HiddenGroup],
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    additional_owned_paths: FrozenSet[Path] = frozenset(),
+    additional_boundary_inputs: Optional[Dict[int, FrozenSet[int]]] = None,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find ETP relations from a ``ModuleInfo``.
 
@@ -1157,6 +1266,19 @@ def find_hidden_param_op_relations_from_minfo(
     for v, p in minfo.invar_to_weight_path.items():
         invar_to_weight_path.setdefault(v, p)
 
+    semantic_outvars = {
+        outvar for outvar in minfo.jaxpr.outvars[:minfo.num_var_out]
+        if isinstance(outvar, Var)
+    }
+    for outvar_tree, state in zip(
+        minfo.state_tree_outvars, minfo.compiled_model_states
+    ):
+        if not isinstance(state, brainstate.ParamState):
+            semantic_outvars.update(
+                outvar for outvar in jax.tree.leaves(outvar_tree)
+                if isinstance(outvar, Var)
+            )
+
     return find_hidden_param_op_relations_from_jaxpr(
         jaxpr=minfo.jaxpr,
         invar_to_weight_path=invar_to_weight_path,
@@ -1166,6 +1288,9 @@ def find_hidden_param_op_relations_from_minfo(
         weight_path_to_invars=weight_path_to_invars,
         control_flow=minfo.control_flow,
         descended_scan_eqn_ids=descended_scan_eqn_ids,
+        semantic_outvars=frozenset(semantic_outvars),
+        additional_owned_paths=additional_owned_paths,
+        additional_boundary_inputs=additional_boundary_inputs,
     )
 
 

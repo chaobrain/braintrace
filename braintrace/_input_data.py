@@ -257,3 +257,29 @@ def has_multistep_data(*args: Any) -> bool:
     """
     leaves, _ = jax.tree.flatten(args, is_leaf=is_input)
     return any(isinstance(leaf, MultiStepData) for leaf in leaves)
+
+
+def _count_update_steps(*args: Any) -> int:
+    """Return the common timestep count carried by the inputs."""
+    leaves, _ = jax.tree.flatten(args, is_leaf=is_input)
+    lengths = []
+    has_multi = False
+    for leaf in leaves:
+        if not isinstance(leaf, MultiStepData):
+            continue
+        has_multi = True
+        for value in jax.tree.leaves(leaf.data):
+            shape = jax.numpy.shape(value)
+            if not shape:
+                raise ValueError('MultiStepData leaves must have a leading time axis.')
+            lengths.append(shape[0])
+    if not has_multi:
+        return 1
+    if not lengths:
+        raise ValueError('MultiStepData must contain at least one array leaf.')
+    if len(set(lengths)) != 1:
+        raise ValueError(f'MultiStepData leaves must have the same sequence size, got {lengths}.')
+    length = int(lengths[0])
+    if length < 1:
+        raise ValueError('MultiStepData must contain at least one timestep.')
+    return length

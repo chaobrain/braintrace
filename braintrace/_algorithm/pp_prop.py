@@ -38,7 +38,9 @@ class pp_prop(IODimVjpAlgorithm):
     Parameters
     ----------
     model : brainstate.nn.Module
-        Recurrent model whose ETP-routed parameters are trained online.
+        Recurrent model. Parameter paths owned by compiled ETP relations receive
+        eligibility-trace gradients; plain-only paths receive exact reverse-mode
+        gradients for the current VJP window.
     decay_or_rank : float, int, or tuple of two floats or ints
         Exponential-smoothing decay, integer rank parameterization, or separate
         input/output-side settings.
@@ -55,6 +57,8 @@ class pp_prop(IODimVjpAlgorithm):
         ``decay_or_rank``.
     random_feedback_key : jax.Array, optional
         Key for fixed random-feedback projections requested by ``config``.
+    snap_max_jacobian_elements : int, optional
+        Maximum number of elements in a materialized hidden Jacobian.
 
     See Also
     --------

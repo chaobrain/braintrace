@@ -39,6 +39,7 @@ import braintrace
 from braintrace._algorithm import EligibilityTrace
 from braintrace._testing import oracle
 from braintrace._testing import oracle_models as om
+from braintrace._testing.scenario_catalog import PartialPathRNN
 from braintrace._algorithm.d_rtrl import D_RTRL
 from braintrace._algorithm.param_dim_vjp import (
     ParamDimVjpAlgorithm,
@@ -57,6 +58,9 @@ EXACT_MODELS = {
 RNN_CELLS = [
     braintrace.nn.GRUCell,
     braintrace.nn.LSTMCell,
+]
+
+MIXED_PATH_RNN_CELLS = [
     braintrace.nn.MGUCell,
     braintrace.nn.MinimalRNNCell,
 ]
@@ -78,6 +82,21 @@ def _compiled(model, *, x=None, **kwargs):
     return algo
 
 
+class _DenseBiasTraceNet(brainstate.nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.w = brainstate.ParamState(jnp.eye(2, dtype=jnp.float32))
+        self.b = brainstate.ParamState(jnp.array([0.1, 0.2], dtype=jnp.float32))
+        self.h = brainstate.HiddenState(jnp.zeros(2, dtype=jnp.float32))
+
+    def update(self, x):
+        self.h.value = jnp.tanh(
+            self.h.value + braintrace.matmul(x, self.w.value, self.b.value)
+        )
+        return self.h.value
+
+
 # ---------------------------------------------------------------------------
 # Construction & validation
 # ---------------------------------------------------------------------------
@@ -91,13 +110,24 @@ class TestConstruction:
         assert algo.trace_dtype is None
         assert algo.is_compiled is False
 
+    def test_partial_direct_and_indirect_relation_is_rejected(self):
+        model = PartialPathRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        algo = ParamDimVjpAlgorithm(model)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algo.compile_graph(jnp.ones(3))
+        assert not algo.is_compiled
+
     @pytest.mark.parametrize('method', ['single-step', 'multi-step'])
     def test_vjp_method_stored(self, method):
         algo = ParamDimVjpAlgorithm(_build(om.tanh_rnn), vjp_method=method)
         assert algo.vjp_method == method
 
     def test_invalid_vjp_method_raises(self):
-        with pytest.raises((AssertionError, ValueError)):
+        with pytest.raises(ValueError):
             ParamDimVjpAlgorithm(_build(om.tanh_rnn), vjp_method='nonsense')
 
     @pytest.mark.parametrize('flag', [True, False])
@@ -163,6 +193,23 @@ class TestStateLifecycle:
         algo = ParamDimVjpAlgorithm(model)
         with pytest.raises(ValueError):
             algo.get_etrace_of(model.w)
+
+    def test_get_etrace_of_dense_bias_matches_weight_relation(self):
+        model = _DenseBiasTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model, x=jnp.ones(2))
+        weight_traces = algo.get_etrace_of(model.w)
+        bias_traces = algo.get_etrace_of(model.b)
+        path_traces = algo.get_etrace_of(('b',))
+        assert weight_traces.keys() == bias_traces.keys()
+        assert path_traces.keys() == bias_traces.keys()
+
+    def test_get_etrace_of_missing_path_raises_value_error(self):
+        model = _DenseBiasTraceNet()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model, x=jnp.ones(2))
+        with pytest.raises(ValueError, match='No eligibility trace'):
+            algo.get_etrace_of(('missing',))
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +481,18 @@ class TestRNNCells:
         assert leaves
         for leaf in leaves:
             assert bool(jnp.all(jnp.isfinite(u.get_mantissa(leaf))))
+
+    @pytest.mark.parametrize('cls', MIXED_PATH_RNN_CELLS)
+    def test_mixed_path_cells_are_rejected(self, cls):
+        model = cls(4, 5)
+        brainstate.nn.init_all_states(model)
+        algo = ParamDimVjpAlgorithm(model)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algo.compile_graph(brainstate.random.rand(4))
+        assert not algo.is_compiled
 
 
 # ---------------------------------------------------------------------------

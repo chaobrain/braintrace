@@ -38,6 +38,115 @@ from braintrace._testing.models import (
 
 
 class TestCompileGraphRNN(unittest.TestCase):
+    def test_compiled_graph_owns_exclusive_etrace_parameter_paths(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.recurrent = brainstate.ParamState(jnp.ones((2, 2)))
+                self.input = brainstate.ParamState(jnp.ones((2, 2)))
+                self.readout = brainstate.ParamState(jnp.ones((2, 1)))
+                self.h = brainstate.HiddenState(jnp.ones((1, 2)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    braintrace.matmul(self.h.value, self.recurrent.value)
+                    + x @ self.input.value
+                )
+                return braintrace.matmul(self.h.value, self.readout.value)
+
+        graph = braintrace.compile_etrace_graph(Net(), jnp.ones((1, 2)))
+
+        self.assertEqual(graph.etrace_param_paths, frozenset({('recurrent',)}))
+
+    def test_mixed_etrace_and_plain_use_of_one_leaf_is_rejected(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones(2))
+                self.h = brainstate.HiddenState(jnp.zeros(2))
+
+            def update(self, x):
+                w = self.w.value
+                self.h.value = jnp.tanh(
+                    self.h.value + x + braintrace.element_wise(w) + 2 * w
+                )
+                return self.h.value
+
+        with self.assertRaisesRegex(
+            braintrace.NotSupportedError,
+            'compiled ETP ownership.*unrepresented differentiable path',
+        ):
+            braintrace.compile_etrace_graph(Net(), jnp.ones(2))
+
+    def test_mixed_ownership_is_rejected_across_pytree_leaves(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.shared = brainstate.ParamState(
+                    (jnp.ones(2), jnp.full(2, 0.5))
+                )
+                self.h = brainstate.HiddenState(jnp.zeros(2))
+
+            def update(self, x):
+                etp_leaf, plain_leaf = self.shared.value
+                self.h.value = jnp.tanh(
+                    self.h.value
+                    + x
+                    + braintrace.element_wise(etp_leaf)
+                    + 2 * plain_leaf
+                )
+                return self.h.value
+
+        with self.assertRaisesRegex(
+            braintrace.NotSupportedError,
+            "ParamState at path \\('shared',\\)",
+        ):
+            braintrace.compile_etrace_graph(Net(), jnp.ones(2))
+
+    def test_trainable_invar_from_multiple_param_states_is_rejected(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w1 = brainstate.ParamState(jnp.eye(2))
+                self.w2 = brainstate.ParamState(jnp.eye(2))
+                self.h = brainstate.HiddenState(jnp.zeros(2))
+
+            def update(self, x):
+                effective_weight = self.w1.value + self.w2.value
+                self.h.value = jnp.tanh(
+                    self.h.value
+                    + braintrace.matmul(x, effective_weight)
+                )
+                return self.h.value
+
+        with self.assertRaisesRegex(
+            braintrace.NotSupportedError,
+            'depends on multiple ParamState leaves',
+        ):
+            braintrace.compile_etrace_graph(Net(), jnp.ones(2))
+
+    def test_trainable_invar_from_two_leaves_of_one_state_is_rejected(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.shared = brainstate.ParamState(
+                    (jnp.eye(2), jnp.eye(2))
+                )
+                self.h = brainstate.HiddenState(jnp.zeros(2))
+
+            def update(self, x):
+                left, right = self.shared.value
+                self.h.value = jnp.tanh(
+                    self.h.value + braintrace.matmul(x, left + right)
+                )
+                return self.h.value
+
+        with self.assertRaisesRegex(
+            braintrace.NotSupportedError,
+            'depends on multiple ParamState leaves',
+        ):
+            braintrace.compile_etrace_graph(Net(), jnp.ones(2))
+
     def test_gru_one_layer(self):
         n_in = 3
         n_out = 4
@@ -491,3 +600,18 @@ class TestCompileEtraceGraphSparseNGuards(unittest.TestCase):
                 model, x, sparse_n=2, include_recurrent_mixing=True,
                 snap_max_jacobian_elements=8)
         assert 'snap_max_jacobian_elements' in str(ctx.exception)
+
+    def test_invalid_jacobian_ceiling_is_rejected_by_the_compiler(self):
+        model, x = self._model()
+        cases = (
+            (True, TypeError),
+            (float('inf'), TypeError),
+            (1.5, TypeError),
+            (0, ValueError),
+        )
+        for value, error in cases:
+            with self.subTest(value=value):
+                with self.assertRaises(error):
+                    braintrace.compile_etrace_graph(
+                        model, x, snap_max_jacobian_elements=value
+                    )

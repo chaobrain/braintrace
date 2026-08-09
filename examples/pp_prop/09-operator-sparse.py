@@ -1,37 +1,35 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-"""09 · Sparse recurrent weights via a fixed connectivity mask.
+"""09 · Native CSR recurrent weights with pp-prop.
 
-The recurrent block of a LIF RSNN uses `braintrace.nn.Linear` with a
-Bernoulli sparsity mask on the recurrent rows. Zero entries stay frozen at
-zero because Linear multiplies the weight by `w_mask` on every forward
-pass; pp_prop sees the combined op as a dense matmul and gradients for
-absent connections are zeroed by the same mask.
-
-Note: the sparse ETP primitive `etp_sp_mm_p` exists but `brainunit.sparse`
-COO/CSR formats lack JAX batching rules today (same constraint noted for
-`examples/drtrl/06-operator-sparse.py`). This masked-dense fallback still
-exercises `pp_prop` over a sparse connectivity pattern end-to-end.
+The feed-forward projection remains dense while the recurrent projection uses
+``braintrace.nn.SparseLinear`` over a direct ``brainevent.CSR`` structure. The
+fixed-degree connectivity and trainable values both scale with represented
+edges, and the batched path lowers through the sparse ETP primitive.
 """
 
+import importlib.util
 import pathlib
-import sys
-from typing import Dict
+from typing import Dict, Optional
 
+import brainevent
 import brainpy.state
 import brainstate
 import braintools
-import jax.numpy as jnp
-import numpy as np
 import brainunit as u
+import jax.numpy as jnp
 
 import braintrace
 
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-import _shared  # noqa: E402
+_shared_path = pathlib.Path(__file__).resolve().with_name("_shared.py")
+_shared_spec = importlib.util.spec_from_file_location("_pp_prop_shared", _shared_path)
+if _shared_spec is None or _shared_spec.loader is None:
+    raise ImportError(f"Cannot load pp-prop shared helpers from {_shared_path}")
+_shared = importlib.util.module_from_spec(_shared_spec)
+_shared_spec.loader.exec_module(_shared)
 
 
 class SparseLIFCell(brainstate.nn.Module):
-    """LIF cell whose recurrent rows obey a fixed Bernoulli sparsity mask."""
+    """LIF cell with dense feed-forward and native sparse recurrent projections."""
 
     def __init__(
         self,
@@ -44,6 +42,7 @@ class SparseLIFCell(brainstate.nn.Module):
         V_th: u.Quantity = 1.0 * u.mV,
         ff_scale: float = 2.0,
         rec_scale: float = 1.0,
+        sparse_backend: Optional[str] = None,
     ):
         super().__init__()
         self.neu = brainpy.state.LIF(
@@ -52,18 +51,31 @@ class SparseLIFCell(brainstate.nn.Module):
             V_initializer=braintools.init.ZeroInit(unit=u.mV),
         )
         ff_w = braintools.init.KaimingNormal(ff_scale, unit=u.mA)((n_in, n_rec))
-        rec_w = braintools.init.KaimingNormal(rec_scale, unit=u.mA)((n_rec, n_rec))
-        w = u.math.concatenate([ff_w, rec_w], axis=0)
-        rng = np.random.default_rng(seed)
-        ff_mask = np.ones((n_in, n_rec), dtype=np.float32)
-        rec_mask = (rng.random((n_rec, n_rec)) < density).astype(np.float32)
-        w_mask = jnp.asarray(np.concatenate([ff_mask, rec_mask], axis=0))
-        self.syn = brainpy.state.AlignPostProj(
+        rec_csr = _fixed_degree_csr(
+            n_rec=n_rec,
+            density=density,
+            scale=rec_scale,
+            seed=seed,
+            backend=sparse_backend,
+        )
+        rec_linear = braintrace.nn.SparseLinear(rec_csr, b_init=None)
+        rec_params = dict(rec_linear.weight.value)
+        rec_params["weight"] = rec_params["weight"] * u.mA
+        rec_linear.weight.value = rec_params
+        self.ff_syn = brainpy.state.AlignPostProj(
             comm=braintrace.nn.Linear(
-                n_in + n_rec, n_rec, w_init=w,
+                n_in, n_rec, w_init=ff_w,
                 b_init=braintools.init.ZeroInit(unit=u.mA),
-                w_mask=w_mask,
             ),
+            syn=brainpy.state.Expon(
+                n_rec, tau=tau_syn,
+                g_initializer=braintools.init.ZeroInit(unit=u.mA),
+            ),
+            out=brainpy.state.CUBA(scale=1.),
+            post=self.neu,
+        )
+        self.rec_syn = brainpy.state.AlignPostProj(
+            comm=rec_linear,
             syn=brainpy.state.Expon(
                 n_rec, tau=tau_syn,
                 g_initializer=braintools.init.ZeroInit(unit=u.mA),
@@ -73,25 +85,79 @@ class SparseLIFCell(brainstate.nn.Module):
         )
 
     def update(self, x):
-        self.syn(u.math.concatenate([x, self.neu.get_spike()], axis=-1))
+        self.ff_syn(x)
+        self.rec_syn(self.neu.get_spike())
         self.neu(0. * u.mA)
         return self.neu.get_spike()
 
 
+def _fixed_degree_csr(
+    n_rec: int,
+    density: float,
+    scale: float,
+    seed: int,
+    backend: Optional[str],
+) -> brainevent.CSR:
+    """Build an O(nnz) fixed-out-degree recurrent CSR matrix."""
+    if not 0.0 < density <= 1.0:
+        raise ValueError(f"density must be in (0, 1], got {density!r}")
+    degree = max(1, min(n_rec, round(n_rec * density)))
+    rng = brainstate.random.RandomState(seed)
+    offsets = jnp.sort(
+        rng.choice(jnp.arange(n_rec, dtype=jnp.int32), size=degree, replace=False)
+    )
+    rows = jnp.arange(n_rec, dtype=jnp.int32)[:, None]
+    indices = jnp.sort((rows + offsets[None, :]) % n_rec, axis=1).reshape(-1)
+    indptr = jnp.arange(n_rec + 1, dtype=jnp.int32) * degree
+    values = rng.randn(n_rec * degree) * (scale / n_rec) ** 0.5
+    return brainevent.CSR(
+        values,
+        indices,
+        indptr,
+        shape=(n_rec, n_rec),
+        backend=backend,
+    )
+
+
 class Net(brainstate.nn.Module):
-    def __init__(self, n_in: int, n_rec: int, n_out: int, density: float):
+    def __init__(
+        self,
+        n_in: int,
+        n_rec: int,
+        n_out: int,
+        density: float,
+        sparse_backend: Optional[str] = None,
+    ):
         super().__init__()
-        self.cell = SparseLIFCell(n_in=n_in, n_rec=n_rec, density=density)
+        self.cell = SparseLIFCell(
+            n_in=n_in,
+            n_rec=n_rec,
+            density=density,
+            sparse_backend=sparse_backend,
+        )
         self.readout = _shared.LeakyReadout(n_rec=n_rec, n_out=n_out)
 
     def update(self, x):
         return self.readout(self.cell(x))
 
 
-def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 25, plot: bool = True) -> Dict:
+def main(
+    n_epochs: int = 3,
+    batch_size: int = 32,
+    num_step: int = 25,
+    plot: bool = True,
+    sparse_backend: Optional[str] = None,
+) -> Dict:
+    """Train the native sparse recurrent example and return its losses."""
     digits = (0, 1, 2, 3)
     with brainstate.environ.context(dt=1.0 * u.ms):
-        model = Net(n_in=64, n_rec=96, n_out=len(digits), density=0.1)
+        model = Net(
+            n_in=64,
+            n_rec=96,
+            n_out=len(digits),
+            density=0.1,
+            sparse_backend=sparse_backend,
+        )
         weights = model.states(brainstate.ParamState)
         opt = braintools.optim.Adam(lr=1e-3)
         opt.register_trainable_weights(weights)

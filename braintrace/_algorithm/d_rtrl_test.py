@@ -165,7 +165,7 @@ class TestParamDimVjpAlgorithmInit:
 
     def test_invalid_vjp_method_raises(self):
         model = self._make_model()
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match='single-step.*multi-step'):
             ParamDimVjpAlgorithm(model, vjp_method='invalid-method')
 
     def test_name_set(self):
@@ -482,8 +482,6 @@ class TestDiagOn2:
             braintrace.nn.GRUCell,
             braintrace.nn.LSTMCell,
             braintrace.nn.LRUCell,
-            braintrace.nn.MGUCell,
-            braintrace.nn.MinimalRNNCell,
         ]
     )
     def test_rnn_multi_step_vjp(self, cls):
@@ -512,6 +510,25 @@ class TestDiagOn2:
         print()
         grads = grad_single_step_vjp(inputs[1:2])
         print(brainstate.util.PrettyDict(grads))
+
+    @pytest.mark.parametrize(
+        'cls',
+        [braintrace.nn.MGUCell, braintrace.nn.MinimalRNNCell],
+    )
+    @pytest.mark.parametrize('vjp_method', ['single-step', 'multi-step'])
+    def test_mixed_path_rnn_is_rejected(self, cls, vjp_method):
+        model = cls(4, 5)
+        brainstate.nn.init_all_states(model)
+        algorithm = braintrace.ParamDimVjpAlgorithm(
+            model,
+            vjp_method=vjp_method,
+        )
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='both a direct path and an indirect path',
+        ):
+            algorithm.compile_graph(brainstate.random.randn(4))
+        assert not algorithm.is_compiled
 
     @pytest.mark.parametrize(
         "cls",

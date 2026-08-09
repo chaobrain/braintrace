@@ -22,7 +22,6 @@ The single-step-only OTTT/OTPE/OSTTP equivalence and deferral tests
 for the roadmap."""
 
 import brainstate
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -102,9 +101,6 @@ _EXACT_MULTISTEP_ALGOS = {
 # relations): trace state keyed per relation instance + per-path gradient
 # accumulation. Scan unrolling (Phase 2) multiplies relations per weight and
 # depends on it.
-# scan_body exercises the Phase 2 inner-scan unrolling: ETP matmuls inside a
-# `for_loop` body must stay BPTT-exact after the scan is unrolled at
-# extraction time.
 # while_twin anchors the Phase 3 while-hidden equivalence to ground truth: it
 # is the hand-composed (no-while) twin of while_settle_rnn, so proving
 # twin == BPTT here plus while == twin (while_support_test.py, single-step)
@@ -113,7 +109,6 @@ _EXACT_CASES = (
     [('tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('stacked_tanh_rnn', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('tied_weight', a) for a in _EXACT_MULTISTEP_ALGOS]
-    + [('scan_body', a) for a in _EXACT_MULTISTEP_ALGOS]
     + [('leaky_linear', 'D_RTRL')]
     + [('cond_gate', 'D_RTRL')]
     + [('while_twin', 'D_RTRL'), ('while_twin', 'pp_prop_full')]
@@ -171,6 +166,20 @@ def test_exact_multistep_matches_bptt(model_name, algo_name):
         spec.factory, inputs, algo_factory=_EXACT_MULTISTEP_ALGOS[algo_name]
     )
     assert_param_gradients_close(g_online, g_bptt, atol=ATOL_BPTT)
+
+
+@pytest.mark.parametrize('algo_name', _EXACT_MULTISTEP_ALGOS)
+def test_scan_body_rejects_unrepresented_internal_etrace_paths(algo_name):
+    spec = _model_spec('scan_body')
+    model = spec.factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    algo = _EXACT_MULTISTEP_ALGOS[algo_name](model)
+    with pytest.raises(
+        braintrace.NotSupportedError,
+        match='compiled ETP ownership.*unrepresented differentiable path',
+    ):
+        algo.compile_graph(_inputs(1, 3)[0])
+    assert not algo.is_compiled
 
 
 # --- Task 4: cross-algorithm equivalence matrix (multi-step) -----------------

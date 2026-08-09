@@ -13,7 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Sequence, Tuple, List, Hashable, Dict, Mapping, Any
+from typing import AbstractSet, Sequence, Tuple, List, Dict, Mapping, Any
 
 import brainstate
 
@@ -162,7 +162,8 @@ def sequence_split_state_values(
 
 
 def split_dict_states_v2(
-    states: Dict[Path, brainstate.State]
+    states: Mapping[Path, brainstate.State],
+    etrace_param_paths: AbstractSet[Path],
 ) -> Tuple[
     Dict[Path, brainstate.ParamState],
     Dict[Path, brainstate.HiddenState],
@@ -177,36 +178,43 @@ def split_dict_states_v2(
         This function is important since it determines what ParamState should be
         trained with the eligibility trace and what should not.
 
-    This function categorizes the given states into four distinct groups based on their types:
-    etrace parameter states, hidden states, parameter states, and other states. It is crucial
-    for determining which ParamState should be trained with the eligibility trace.
+    This function categorizes the given states into four distinct groups based on
+    their types and the parameter paths selected by the compiled ETP graph.
 
     Parameters
     -----------
-    states : Dict[Path, brainstate.State]
+    states : Mapping[Path, brainstate.State]
         A dictionary where keys are paths and values are state objects to be split.
+    etrace_param_paths : AbstractSet[Path]
+        Parameter paths owned by compiled ETP relations.
 
     Returns
     --------
     Tuple[Dict[Path, brainstate.ParamState], Dict[Path, brainstate.HiddenState], Dict[Path, brainstate.ParamState], Dict[Path, brainstate.State]]
         A tuple containing four dictionaries:
-        - etrace_param_states: ParamState instances used with ETP primitives (all ParamState for now).
+        - etrace_param_states: ParamState instances owned by compiled ETP relations.
         - hidden_states: The hidden states.
-        - param_states: Other ParamState not used with ETP primitives (empty — split determined by compiler).
+        - param_states: Other ParamState instances.
         - other_states: The other states.
     """
     etrace_param_states = dict()
     hidden_states = dict()
-    param_states: dict = dict()  # stays empty; value type cannot be inferred
+    param_states = dict()
     other_states = dict()
     for key, st in states.items():
         if isinstance(st, brainstate.HiddenState):
             hidden_states[key] = st
         elif isinstance(st, brainstate.ParamState):
-            # All ParamState go to etrace_param_states.
-            # The compiler determines which ones actually participate
-            # in ETP via primitive scanning.
-            etrace_param_states[key] = st
+            if key in etrace_param_paths:
+                etrace_param_states[key] = st
+            else:
+                param_states[key] = st
         else:
             other_states[key] = st
+    missing_paths = set(etrace_param_paths).difference(etrace_param_states)
+    if missing_paths:
+        raise ValueError(
+            f'The compiled ETP graph refers to parameter paths absent from the '
+            f'model states: {sorted(map(str, missing_paths))}.'
+        )
     return etrace_param_states, hidden_states, param_states, other_states

@@ -68,6 +68,16 @@ def _jax_requirement(dependencies) -> Optional[str]:
     return None
 
 
+def _brainevent_requirement(dependencies, extra: Optional[str] = None) -> Optional[str]:
+    """Return the requirement string naming BrainEvent and an optional extra."""
+    suffix = rf'\[{re.escape(extra)}\]' if extra is not None else r'(?:\[[^\]]+\])?'
+    pattern = rf'^\s*brainevent\s*{suffix}\s*([<>=!~]|$)'
+    for dep in dependencies:
+        if re.match(pattern, dep):
+            return dep
+    return None
+
+
 def _floor(requirement: str) -> Tuple[int, ...]:
     """Extract the ``>=`` floor of a requirement as a comparable tuple."""
     match = re.search(r'>=\s*([0-9]+(?:\.[0-9]+)*)', requirement)
@@ -159,12 +169,27 @@ class TestBackendExtrasSurviveTheCoreDependency:
     @pytest.mark.parametrize('extra', BACKEND_EXTRAS)
     def test_extra_requests_the_backend_flavoured_jax(self, extra):
         optional = _load_pyproject()['project']['optional-dependencies']
-        assert optional[extra] == [f'jax[{extra}]']
+        assert f'jax[{extra}]' in optional[extra]
+
+    @pytest.mark.parametrize('extra', BACKEND_EXTRAS)
+    def test_extra_requests_the_backend_flavoured_brainevent(self, extra):
+        metadata = _load_pyproject()['project']
+        core = _brainevent_requirement(metadata['dependencies'])
+        backend = _brainevent_requirement(metadata['optional-dependencies'][extra], extra)
+        assert core is not None
+        assert backend is not None
+        assert _floor(backend) == _floor(core)
+
+    @pytest.mark.parametrize('extra', ('testing', 'dev'))
+    def test_cpu_test_extras_install_brainevent_cpu_backend(self, extra):
+        optional = _load_pyproject()['project']['optional-dependencies']
+        assert _brainevent_requirement(optional[extra], 'cpu') is not None
 
     def test_extras_do_not_restate_the_floor(self):
         # The floor lives in exactly one place so it cannot drift; an extra that
         # grew its own `>=` would be a second source of truth.
         optional = _load_pyproject()['project']['optional-dependencies']
         for extra in BACKEND_EXTRAS:
-            for dep in optional[extra]:
-                assert '>=' not in dep, (extra, dep)
+            requirement = _jax_requirement(optional[extra])
+            assert requirement is not None
+            assert '>=' not in requirement, (extra, requirement)

@@ -16,20 +16,19 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict, Tuple, Any, List, Optional, Sequence
+from typing import Callable, Dict, Tuple, Any, Optional, Sequence
 
 import brainstate
 import jax
 import jax.numpy as jnp
 import brainunit as u
 
-from braintrace._input_data import has_multistep_data
+from braintrace._input_data import _count_update_steps, has_multistep_data
 from braintrace._state_management import assign_state_values_v2
 from braintrace._typing import (
     Path,
     PyTree,
     Outputs,
-    WeightID,
     WeightVals,
     HiddenVals,
     StateVals,
@@ -41,7 +40,12 @@ from braintrace._typing import (
     dG_State,
 )
 from braintrace._compiler import ControlFlowPolicy, DEFAULT_MAX_JACOBIAN_ELEMENTS
-from braintrace._op import is_snap_anchored
+from braintrace._compiler.position_graph import (
+    prove_elementwise_transform,
+    prove_position_preserving,
+)
+from braintrace._misc import NotSupportedError
+from braintrace._op import etp_elemwise_p, is_snap_anchored
 from ._common import FixedRandomFeedback
 from .axes import ETraceConfig
 from .base import ETraceAlgorithm
@@ -384,8 +388,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         Key used to initialize fixed random-feedback projections when
         ``config.learning_signal='random_feedback'``.
     snap_max_jacobian_elements : int, optional
-        Maximum number of elements permitted in each SnAp widened block
-        Jacobian. The default is ``16777216``.
+        Maximum number of elements permitted in a materialized full hidden
+        Jacobian or widened sparse block Jacobian. The default is ``16777216``.
 
     Notes
     -----
@@ -445,11 +449,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     ):
 
-        # the VJP method
-        assert vjp_method in ('single-step', 'multi-step'), (
-            'The VJP method should be either "single-step" or "multi-step". '
-            f'While we got {vjp_method}. '
-        )
+        if vjp_method not in ('single-step', 'multi-step'):
+            raise ValueError(
+                'vjp_method must be either "single-step" or "multi-step", '
+                f'got {vjp_method!r}.'
+            )
         self.vjp_method = vjp_method
 
         # the learning-rule coordinate
@@ -534,11 +538,57 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     # axis: recurrence_scope
     # ------------------------------------------------------------------ #
 
-    def compile_graph(self, *args: Any) -> None:
-        super().compile_graph(*args)
-        if self.is_compiled:
-            self._assert_recurrence_scope_is_honoured()
-            self._assert_relations_are_snap_anchored()
+    def _validate_compiled_graph(self) -> None:
+        self._assert_recurrence_scope_is_honoured()
+        self._assert_relations_are_snap_anchored()
+        self._assert_factorized_params_are_direct()
+        self._assert_factorized_tails_preserve_positions()
+
+    def _assert_factorized_params_are_direct(self) -> None:
+        if self.config.trace_factorization != 'io_factorized':
+            return
+        for relation in self.graph.hidden_param_op_relations:
+            for key, chain in relation.trainable_processing_chains.items():
+                if chain:
+                    raise NotSupportedError(
+                        'pp-prop requires each trainable ETP input to come '
+                        'directly from its ParamState. External preprocessing '
+                        f'of {relation.primitive.name} {key!r} is unsupported. '
+                        'Pass the ParamState value directly, or move the '
+                        'transform into the primitive weight_fn, kernel_fn, '
+                        'or bias_fn.'
+                    )
+
+    def _assert_factorized_tails_preserve_positions(self) -> None:
+        if self.config.trace_factorization != 'io_factorized':
+            return
+        for relation in self.graph.hidden_param_op_relations:
+            weight_fn = relation.eqn_params.get('weight_fn')
+            if relation.primitive is etp_elemwise_p and weight_fn is not None:
+                reason = prove_elementwise_transform(
+                    weight_fn,
+                    relation.trainable_vars['weight'].aval,
+                )
+                if reason is not None:
+                    raise NotSupportedError(
+                        'pp-prop requires element_wise(weight_fn=...) to '
+                        f'preserve every raw-weight position and shape: {reason}'
+                    )
+            pairs = zip(
+                relation.y_to_hidden_group_jaxprs,
+                relation.hidden_groups,
+            )
+            for transition, group in pairs:
+                reason = prove_position_preserving(
+                    transition,
+                    group.varshape,
+                )
+                if reason is not None:
+                    raise NotSupportedError(
+                        f'pp-prop requires a position-preserving path from '
+                        f'{relation.primitive.name} to hidden group '
+                        f'{group.index} ({group.hidden_paths}): {reason}'
+                    )
 
     def _assert_recurrence_scope_is_honoured(self) -> None:
         """Raise if a non-diagonal ``recurrence_scope`` cannot be delivered.
@@ -837,6 +887,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         # check the compilation
         self._assert_compiled()
+        completed_steps = self.running_index.value + _count_update_steps(*args)
 
         # state values
         weight_vals = {
@@ -883,7 +934,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             hidden_vals,
             other_vals,
             last_etrace_vals,
-            self.running_index.value,
+            completed_steps,
             aux,
         )
 
@@ -906,9 +957,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         #
         self._assign_etrace_data(new_etrace_vals)  # call the protocol method
 
-        # update the running index
-        running_index = self.running_index.value + 1
-        self.running_index.value = jax.lax.stop_gradient(jnp.where(running_index >= 0, running_index, 0))
+        self.running_index.value = jax.lax.stop_gradient(completed_steps)
 
         # return the model output
         return out
@@ -1082,6 +1131,11 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         # returns
         old_etrace_vals = etrace_vals
+        trace_steps = (
+            running_index - _count_update_steps(*args)
+            if self.graph_executor.is_multi_step_vjp
+            else running_index
+        )
         fwd_out = (out, hiddens, oth_states, new_etrace_vals)
         fwd_res = (
             residuals,
@@ -1091,7 +1145,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 new_etrace_vals
             ),
             weight_vals,
-            running_index,
+            trace_steps,
             args,  # threaded to _update_fn_bwd for the learning-signal hook
             aux,  # per-call auxiliary data (see _get_update_aux), also threaded to the hook
             # `learning_signal='bootstrapped'`: the synthetic cotangent for the
@@ -1132,7 +1186,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             residuals,  # the residuals of the VJP computation, for computing the gradients of input arguments
             etrace_vals_at_t_or_t_minus_1,  # the eligibility trace data at the current or last time step
             weight_vals,  # the weight id to its value mapping
-            running_index,  # the running index
+            trace_steps,
             args,  # original update(*args) tuple, used by _compute_learning_signal
             aux,  # per-call auxiliary data from _get_update_aux, also used by _compute_learning_signal
             exit_cotangent,  # `bootstrapped`: synthetic cotangent at h^exit, or None
@@ -1331,9 +1385,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 dg_args_future,
                 dg_last_hiddens_future,
                 dg_non_etrace_params_future,
-                dg_etrace_params_future,    # plain paths only: see below
+                dg_etrace_params_future,
                 dg_oth_states_future,
-                _dg_hid_perturb_future,     # ditto; the signal is pass 1 only
+                _dg_hid_perturb_future,
             ) = jax.tree.unflatten(in_tree, cts_future)
 
             def _add_leaf(x: Any, y: Any) -> Any:
@@ -1351,13 +1405,6 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
             dg_args = _add(dg_args, dg_args_future)
             dg_oth_states = _add(dg_oth_states, dg_oth_states_future)
-            # The ETP/plain split cannot be read off *which dict* a parameter
-            # arrives in: under multi-step the reverse pass delivers the
-            # within-window gradient of every trainable parameter -- plain ones
-            # included -- through `dg_etrace_params`, leaving
-            # `dg_non_etrace_params` empty. The authority on which parameters
-            # have a trace carrying their cross-window credit is the compiled
-            # graph, so ask it by path.
             etp_paths = self._etp_routed_paths()
             dg_non_etrace_params = _add_future_for_plain_paths(
                 dg_non_etrace_params, dg_non_etrace_params_future, etp_paths)
@@ -1375,7 +1422,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # It's logic may be different for different etrace algorithms.
         #
         dg_weights = self._solve_weight_gradients(
-            running_index,
+            trace_steps,
             etrace_vals_at_t_or_t_minus_1,
             dl2h_at_t_or_t_minus_1,
             weight_vals,
@@ -1409,21 +1456,14 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     def _etp_routed_paths(self) -> set:
         """The parameter paths whose cross-window credit an eligibility trace carries.
 
-        Read off the compiled graph rather than inferred from which gradient
-        dictionary a parameter turns up in, because that grouping does not mean
-        what its name suggests: under multi-step, the within-window reverse pass
-        delivers the gradient of *every* trainable parameter through
-        ``dg_etrace_params``, plain ones included.
+        The compiled graph is the sole authority for path ownership.
 
         Returns
         -------
         set
             Paths appearing in some ``hidden_param_op_relation``.
         """
-        paths: set = set()
-        for relation in self.graph.hidden_param_op_relations:
-            paths.update(relation.trainable_paths.values())
-        return paths
+        return set(self.graph.etrace_param_paths)
 
     def _inject_exit_cotangent(self, exit_hiddens: Dict[Path, Any], aux: Any) -> Any:
         """Override hook. The synthetic cotangent to add at the window-exit hidden values.

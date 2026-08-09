@@ -93,16 +93,40 @@ class TestSequenceSplitStateValues:
 
 
 class TestSplitDictStatesV2:
-    def test_categorises_states_by_type(self):
-        w = brainstate.ParamState(jnp.ones(2))
+    def test_categorises_param_states_by_compiled_paths(self):
+        w_etp = brainstate.ParamState(jnp.ones(2))
+        w_plain = brainstate.ParamState(jnp.ones(2))
         h = brainstate.HiddenState(jnp.zeros(3))
         o = brainstate.LongTermState(jnp.zeros(1))
-        states = {("w",): w, ("h",): h, ("o",): o}
+        states = {
+            ("w_etp",): w_etp,
+            ("w_plain",): w_plain,
+            ("h",): h,
+            ("o",): o,
+        }
 
-        etrace_params, hidden, params, other = split_dict_states_v2(states)
+        etrace_params, hidden, params, other = split_dict_states_v2(
+            states,
+            frozenset({("w_etp",)}),
+        )
 
-        assert etrace_params == {("w",): w}
+        assert etrace_params == {("w_etp",): w_etp}
+        assert params == {("w_plain",): w_plain}
         assert hidden == {("h",): h}
         assert other == {("o",): o}
-        # ParamState selection is decided by the compiler, so this stays empty.
-        assert params == {}
+
+    def test_a_graph_owned_path_is_never_duplicated_as_plain(self):
+        etrace = brainstate.ParamState(jnp.ones(2))
+        plain = brainstate.ParamState(jnp.ones(2))
+
+        etrace_params, _, params, _ = split_dict_states_v2(
+            {("etrace",): etrace, ("plain",): plain},
+            frozenset({("etrace",)}),
+        )
+
+        assert etrace_params == {("etrace",): etrace}
+        assert params == {("plain",): plain}
+
+    def test_a_compiled_path_missing_from_model_states_is_rejected(self):
+        with pytest.raises(ValueError, match='absent from the model states'):
+            split_dict_states_v2({}, frozenset({("missing",)}))

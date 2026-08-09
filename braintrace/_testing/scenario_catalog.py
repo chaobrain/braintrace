@@ -120,8 +120,9 @@ class ElemwiseOnlyRNN(brainstate.nn.Module):
 # ---------------------------------------------------------------------------
 
 class PytreeParamRNN(brainstate.nn.Module):
-    """ParamState holds a dict ``{'W': ..., 'b': ...}``; only ``W`` is used
-    via ETP. The compiler must resolve the right pytree leaf and report
+    """ParamState holds a one-leaf dict ``{'W': ...}`` used via ETP.
+
+    The compiler must resolve the pytree leaf and report
     ``weight_leaf_idx`` consistent with ``jax.tree.leaves`` ordering.
     """
 
@@ -129,8 +130,8 @@ class PytreeParamRNN(brainstate.nn.Module):
         super().__init__()
         self.theta = brainstate.ParamState({
             'W': brainstate.random.randn(n_in + n_out, n_out),
-            'b': brainstate.random.randn(n_out),
         })
+        self.bias = brainstate.random.randn(n_out)
         self.h = brainstate.HiddenState(jnp.zeros(n_out))
 
     def init_state(self, *args, **kwargs):
@@ -139,7 +140,7 @@ class PytreeParamRNN(brainstate.nn.Module):
     def update(self, x):
         xh = jnp.concatenate([x, self.h.value])
         y = braintrace.matmul(xh, self.theta.value['W'])
-        self.h.value = jnp.tanh(y + self.theta.value['b'])
+        self.h.value = jnp.tanh(y + self.bias)
         return self.h.value
 
 
@@ -358,10 +359,9 @@ class ScanBodyRNN(brainstate.nn.Module):
 
     ETP primitives inside a ``scan`` body: the full pipeline unrolls the
     inner scan at extraction time (Phase 2 canonicalization, see
-    ``_compiler/canonicalize.py``). Only the *last* sub-step's ETP ops
-    become relations — earlier sub-steps reach the hidden state through
-    another trainable ETP op and are excluded per the
-    weight->weight->hidden invariant.
+    ``_compiler/canonicalize.py``). Earlier sub-steps reach the hidden state
+    through later trainable ETP operations, so executable trace compilation
+    rejects this fixture instead of omitting their gradients.
     """
 
     def __init__(self, n: int, loops: int = 3):

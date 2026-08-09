@@ -726,8 +726,9 @@ from braintrace._testing.scenario_catalog import (
 # ---------------------------------------------------------------------------
 
 class TestCategoryH_PytreeWeight:
-    """One ``ParamState`` holds ``{'W': ..., 'b': ...}``; only ``W`` is fed
-    to the ETP primitive. The compiler must register a single relation
+    """One ``ParamState`` holds ``{'W': ...}`` and feeds it to ETP.
+
+    The compiler must register a single relation
     pointing at the ParamState path and resolve ``weight_leaf_idx``
     to the index of ``W`` in the pytree-leaves enumeration."""
 
@@ -743,9 +744,7 @@ class TestCategoryH_PytreeWeight:
         assert rel.primitive is etp_mv_p
         # The weight tensor we matmul'd has shape (n_in + n_out, n_out).
         assert tuple(rel.trainable_vars['weight'].aval.shape) == (3 + 4, 4)
-        # trainable_leaf_indices must point at *some* leaf of the ParamState
-        # value (jax.tree.leaves of {'W': ..., 'b': ...} has two leaves).
-        assert 0 <= rel.trainable_leaf_indices['weight'] <= 1
+        assert rel.trainable_leaf_indices['weight'] == 0
 
     def test_pytree_weight_processing_chain_empty(self):
         """``W`` is consumed directly — no mask/weight_fn equations.
@@ -949,11 +948,10 @@ class TestCategoryN_ControlFlow:
     full pipeline, ETP-relevant ``cond``/``scan`` equations normally never
     reach the scanner: conds are if-converted into inlined branches +
     ``select_n`` and eligible scans are unrolled at extraction time
-    (``_compiler/canonicalize.py``), so their weights DO participate as
-    relations — see ``test_cond_branches_full_pipeline_converts`` and
-    ``test_scan_body_full_pipeline_unrolls``. Only ineligible scans (too
-    long, effectful, while-in-body) and ``while`` still fall through to
-    the scanner."""
+    (``_compiler/canonicalize.py``). Converted cond branches participate as
+    relations. Repeated scan-body uses fail closed when earlier occurrences
+    cannot become relations. Ineligible scans and ``while`` still fall through
+    to the scanner."""
 
     def test_cond_branches_full_pipeline_converts(self):
         model = CondBranchRNN(3, 4)
@@ -966,21 +964,23 @@ class TestCategoryN_ControlFlow:
         kinds = [r.kind for r in graph.diagnostics]
         assert DiagnosticKind.COND_IF_CONVERTED in kinds
 
-    def test_scan_body_full_pipeline_unrolls(self):
+    def test_scan_body_canonicalizes_then_fails_closed(self):
         model = ScanBodyRNN(4, loops=3)
         brainstate.nn.init_all_states(model)
-        with warnings.catch_warnings():
-            # Earlier sub-steps' weights are excluded per the
-            # weight->weight->hidden invariant and warn about it.
-            warnings.simplefilter('ignore', UserWarning)
-            graph = compile_etrace_graph(model, jnp.ones(4))
-        names = [eqn.primitive.name for eqn in graph.module_info.jaxpr.eqns]
+        with diagnostic_context() as reporter:
+            minfo = braintrace.extract_module_info(model, jnp.ones(4))
+        names = [eqn.primitive.name for eqn in minfo.jaxpr.eqns]
         assert 'scan' not in names
-        # Only the final sub-step's two ETP ops are relations; the earlier
-        # sub-steps reach `h` through another trainable ETP op.
-        assert len(graph.hidden_param_op_relations) == 2
-        kinds = [r.kind for r in graph.diagnostics]
+        assert names.count('etp_mv') == 6
+        kinds = [record.kind for record in reporter.records()]
         assert DiagnosticKind.SCAN_UNROLLED in kinds
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with pytest.raises(
+                braintrace.NotSupportedError,
+                match='compiled ETP ownership.*unrepresented differentiable path',
+            ):
+                compile_etrace_graph(model, jnp.ones(4))
 
     def test_scan_body_etp_default_policy_raises(self):
         """Default policy (``etp_in_control_flow='error'``): an ETP primitive

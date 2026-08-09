@@ -1,10 +1,9 @@
 # Copyright 2026 BrainX Ecosystem Limited. Licensed under the Apache License, 2.0.
-"""08 · vjp_method='multi-step' on delayed-match-to-sample.
+"""08 · Windowed multi-step pp-prop on delayed-match-to-sample.
 
-Multi-step VJP lets pp_prop combine gradients computed at multiple time steps
-(partial L^{t'}/partial h^{t-k}). Useful when the task has a sparse target signal
-(one label per sequence) and we still want temporal credit assignment on top
-of the eligibility-trace diagonal approximation.
+The default run uses four 10-step windows. Only the final sequence output is
+supervised, while every timestep still advances the model and eligibility
+traces.
 """
 
 import pathlib
@@ -30,13 +29,20 @@ class Net(brainstate.nn.Module):
         return self.readout(self.cell(x))
 
 
-def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 40, plot: bool = True) -> Dict:
+def main(
+    n_epochs: int = 3,
+    batch_size: int = 32,
+    num_step: int = 40,
+    plot: bool = True,
+    window_size: int = 10,
+) -> Dict:
     n_in = 16
     with brainstate.environ.context(dt=1.0 * u.ms):
         model = Net(n_in=n_in, n_rec=64, n_out=2)
         weights = model.states(brainstate.ParamState)
         opt = braintools.optim.Adam(lr=1e-3)
         opt.register_trainable_weights(weights)
+        loss_mask = jnp.zeros((num_step,), dtype=jnp.float32).at[-1].set(1.0)
 
         @brainstate.transform.jit
         def train_step(inputs, labels):
@@ -44,6 +50,10 @@ def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 40, plot: bool
                 model, opt, inputs, labels,
                 decay_or_rank=0.97,
                 vjp_method="multi-step",
+                chunk_size=window_size,
+                vmap=False,
+                loss_mask=loss_mask,
+                reduction="mean",
             )
 
         losses = []
@@ -52,10 +62,10 @@ def main(n_epochs: int = 3, batch_size: int = 32, num_step: int = 40, plot: bool
                 num_step=num_step, num_batch=batch_size, n_in=n_in, fr_hz=80.0, dt=1e-3, seed=epoch,
             )
             losses.append(float(train_step(xs, ys)))
-            print(f"[08-vjp-multi] epoch {epoch}  loss={losses[-1]:.4f}")
+            print(f"[08-windowed-multi] epoch {epoch}  loss={losses[-1]:.4f}")
 
     if plot:
-        _shared.plot_loss_curve(losses, title="08 · vjp_method='multi-step'")
+        _shared.plot_loss_curve(losses, title="08 · Windowed multi-step pp-prop")
     assert jnp.isfinite(jnp.asarray(losses[-1]))
     return {"losses": losses}
 

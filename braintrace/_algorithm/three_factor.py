@@ -147,11 +147,12 @@ class ThreeFactor(ParamDimVjpAlgorithm):
 
     Notes
     -----
-    Under single-step, every **plain** (non-ETP) parameter's gradient is exactly
-    zero (F-33) -- not merely truncated. Since this preset is single-step by
-    construction, a model whose parameters are partly plain will train only its
-    ETP-routed parameters here. Route the parameters you intend to modulate
-    through an ETP primitive (``braintrace.matmul`` and friends).
+    Under single-step, plain-only parameter paths receive exact current-step
+    reverse-mode gradients. Paths owned by an ETP relation receive the
+    modulated eligibility-trace gradient instead. Compilation rejects a
+    ParamState whose pytree leaves are used through both ETP relations and
+    plain differentiable operations. Split those uses across separate states
+    or route every trainable use through ETP primitives.
 
     The modulator is a genuine data dependency of the traced computation, not a
     lazily-read attribute: it is read synchronously at the top of ``update()``

@@ -432,7 +432,8 @@ Spec: [`2026-07-25-p4-uoro-modulatory-dni.md`](2026-07-25-p4-uoro-modulatory-dni
 
 Delivered: `RandomProjectionVjpAlgorithm` + `UORO`, the `modulatory` branch +
 `ThreeFactor`, the `_inject_exit_cotangent` two-pass hook + `SyntheticGradient`,
-`DNI` and `train_synthetic_gradient`. Three new findings (F-32, F-33, F-34) and
+`DNI` and `train_synthetic_gradient`. Three new findings (F-32, F-33, F-34;
+F-33 and F-34 resolved on 2026-08-08) and
 lessons 31–38 below. What each acceptance criterion actually established, and
 what it did not, is recorded in the three suites' docstrings; the honest summary
 is that UORO's unbiasedness and DNI's *routing* are pinned exactly, while DNI's
@@ -949,19 +950,18 @@ for running one.
     test called `algo(x)` without an outer `grad`, because that is what a user
     debugging their shapes does first.
 
-36. **Do not infer a category from which container it arrives in.** DNI's whole
-    correctness claim is a split — the synthetic cotangent must reach the plain
-    parameters and must not reach the ETP ones — and the backward pass appears to
-    hand that split over for free, in `dg_etrace_params` versus
-    `dg_non_etrace_params`. It does not (F-34): under multi-step, *every*
-    trainable parameter arrives in `dg_etrace_params`, plain ones included, and
-    `dg_non_etrace_params` is empty. The first implementation therefore added the
+36. **Do not infer a category from which container it arrives in.** Before
+    F-34 was fixed, DNI's whole correctness claim depended on a split that the
+    backward pass did not provide: under multi-step, every trainable parameter
+    arrived in `dg_etrace_params`, plain ones included, and
+    `dg_non_etrace_params` was empty. The first implementation therefore added the
     future term to an empty dictionary and was a **perfect no-op** — every test of
     the form "M == 0 is a no-op" passed, and so did every ETP invariance test. It
     was caught only by B1's other half, "a live synthesiser must *change* the
     plain gradients", which measured a deviation of exactly `0.0`. Name-shaped
     assumptions about someone else's data structure need a test that fails when
-    they are wrong, and for a *split*, that means testing both sides.
+    they are wrong, and for a *split*, that means testing both sides. Since
+    2026-08-08 the compiled ETP path set partitions both containers explicitly.
 
 37. **Two coordinates in the same axis can want opposite execution options.**
     `modulatory` is only meaningful under `single-step` — under multi-step the

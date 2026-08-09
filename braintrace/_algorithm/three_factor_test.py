@@ -140,6 +140,21 @@ def _singlestep_gradients(spec, inputs, *, modulator, algo_factory=None,
     return total
 
 
+def _local_vjp_gradients(spec, inputs):
+    """Sum exact current-step reverse-mode gradients over a sequence."""
+    model = spec.factory()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    params = model.states(brainstate.ParamState)
+
+    per_step = brainstate.transform.for_loop(
+        lambda x: brainstate.transform.grad(
+            lambda value: (model(value) ** 2).sum(), params
+        )(x),
+        inputs,
+    )
+    return jax.tree.map(lambda values: jnp.sum(values, axis=0), per_step)
+
+
 # ---------------------------------------------------------------------------
 # M1: degenerate equality, with the negative control that gives it teeth.
 # ---------------------------------------------------------------------------
@@ -478,28 +493,48 @@ class TestItDoesSomethingMeasurably:
         assert np.abs(pos).max() > 1e-4, 'the gradient must not be trivially zero'
         np.testing.assert_allclose(neg, -pos, rtol=1e-6, atol=1e-7)
 
-    def test_every_plain_parameter_gets_an_exact_zero_which_is_f_33(self):
-        """The half of ``ThreeFactor`` a caller is most likely to be bitten by.
-
-        ``ThreeFactor`` is single-step-only (the ctor refuses multi-step, M3), and
-        single-step zeroes every **plain** parameter's gradient *exactly* -- F-33
-        in ``docs/specs/2026-07-25-known-limitations.md``. So a modulated learner
-        trains its ETP-routed weights and nothing else: ``win`` and ``wout`` here
-        come back as exact zeros, not as truncated approximations.
-
-        This is a property of ``vjp_method``, not of the modulator, but the two are
-        inseparable for this preset, so it is asserted here rather than left for a
-        caller to discover by watching a readout never move.
-        """
+    def test_every_plain_parameter_gets_its_exact_local_vjp_gradient(self):
+        """Single-step routes plain paths through exact current-step reverse AD."""
         spec = om.plain_and_etp_rnn(n_in=H, n_rec=H)
-        g = _arrays(_singlestep_gradients(spec, _inputs(), modulator=1.0),
-                    [('w',), ('win',), ('wout',)])
-        assert np.abs(g[('w',)]).max() > 1e-6, (
+        inputs = _inputs()
+        got = _arrays(
+            _singlestep_gradients(spec, inputs, modulator=1.0),
+            [('w',), ('win',), ('wout',)],
+        )
+        expected = _arrays(
+            _local_vjp_gradients(spec, inputs),
+            [('win',), ('wout',)],
+        )
+        assert np.abs(got[('w',)]).max() > 1e-6, (
             'the ETP parameter must be trained, else this test is vacuous')
         for key in [('win',), ('wout',)]:
-            np.testing.assert_array_equal(
-                g[key], np.zeros_like(g[key]),
-                err_msg=f'{key} must be an exact zero under single-step (F-33)')
+            np.testing.assert_allclose(
+                got[key], expected[key], rtol=1e-6, atol=1e-7,
+                err_msg=f'{key} must use its exact local VJP gradient')
+            assert np.abs(got[key]).max() > 1e-6
+
+    def test_mixed_parameter_ownership_is_rejected(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((1, H)))
+                self.h = brainstate.HiddenState(jnp.zeros((1, H)))
+
+            def update(self, x):
+                w = self.w.value
+                self.h.value = jnp.tanh(
+                    self.h.value + x + braintrace.element_wise(w) + 2 * w
+                )
+                return self.h.value
+
+        model = Net()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.ThreeFactor(model, modulator=1.0)
+        with pytest.raises(
+            braintrace.NotSupportedError,
+            match='compiled ETP ownership.*unrepresented differentiable path',
+        ):
+            algo.compile_graph(jnp.ones((1, H)))
 
     def test_a_scalar_reward_drives_total_activity_in_the_signalled_direction(self):
         # The descent smoke test. With a scalar modulator ``m`` broadcast to every
@@ -509,9 +544,6 @@ class TestItDoesSomethingMeasurably:
         # must *increase* it. The mirrored control is the point: a rule that
         # ignored the modulator's sign would move the same way both times.
         #
-        # ETP-only fixture on purpose: under single-step every *plain*
-        # parameter's gradient is exactly zero (F-33), so a model with plain
-        # parameters would leave part of itself untrained and muddy the reading.
         spec = om.nonzero_init_rnn(n_rec=H, h0=0.4)
         inputs = _inputs(t=6, scale=0.4)
 

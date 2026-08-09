@@ -885,9 +885,9 @@ def plain_and_etp_rnn(
     | ``win``  | 4.289 | 3.175 (truncated) |
     | ``wout`` | 4.060 | 4.060 (nothing to truncate) |
 
-    Note that under ``vjp_method='single-step'`` *both* plain keys are identically
-    zero, not merely truncated (F-33), so this fixture belongs to the multi-step
-    windowed path.
+    Under ``vjp_method='single-step'`` both plain keys receive their exact
+    current-step VJP gradients. ``win`` still lacks cross-step future credit,
+    while ``wout`` remains exact because it has no recurrent future dependence.
 
     Parameters
     ----------

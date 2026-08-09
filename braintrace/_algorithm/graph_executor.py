@@ -37,7 +37,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 import brainstate
 
@@ -47,7 +47,9 @@ from braintrace._compiler import (
     ETraceGraph,
     compile_etrace_graph,
 )
+from braintrace._compiler.position_graph import _validate_max_jacobian_elements
 from .._input_data import get_single_step_data
+from .._state_management import split_dict_states_v2
 from .._typing import Path
 
 __all__ = [
@@ -78,8 +80,8 @@ class ETraceGraphExecutor:
         carries the derived n-step neighbourhood its trace is widened onto.
         ``None`` (default) for every other scope.
     snap_max_jacobian_elements: int, optional
-        Ceiling on each group's widened block Jacobian, ``P * (K * S) ** 2``
-        elements; only consulted when *sparse_n* is given.
+        Maximum number of elements in any materialized full hidden Jacobian or
+        widened sparse block Jacobian.
     control_flow: ControlFlowPolicy, optional
         Policy governing control-flow canonicalization (cond if-conversion,
         scan unrolling, structured scan descent, ...) during graph
@@ -113,8 +115,9 @@ class ETraceGraphExecutor:
         # other scope, which leaves each hidden group's ``snap`` pattern unset.
         self.sparse_n = sparse_n
 
-        # ceiling on the widened block Jacobian; only read when sparse_n is set
-        self.snap_max_jacobian_elements = snap_max_jacobian_elements
+        self.snap_max_jacobian_elements = _validate_max_jacobian_elements(
+            snap_max_jacobian_elements
+        )
 
         # control-flow canonicalization policy; None -> compiler default
         self.control_flow = control_flow
@@ -186,6 +189,21 @@ class ETraceGraphExecutor:
         if self._state_id_to_path is None:
             self._state_id_to_path = {id(state): path for path, state in self.states.items()}
         return self._state_id_to_path
+
+    def partition_states(self) -> Tuple[
+        Dict[Path, brainstate.ParamState],
+        Dict[Path, brainstate.HiddenState],
+        Dict[Path, brainstate.ParamState],
+        Dict[Path, brainstate.State],
+    ]:
+        """Partition model states according to the compiled ETP graph.
+
+        Returns
+        -------
+        tuple of dict
+            ETP parameters, hidden states, plain parameters, and other states.
+        """
+        return split_dict_states_v2(self.states, self.graph.etrace_param_paths)
 
     def compile_graph(self, *args: Any) -> None:
         r"""

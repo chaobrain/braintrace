@@ -120,6 +120,31 @@ class TestGroupMerging(unittest.TestCase):
 
 
 class Test_find_hidden_groups_from_module:
+
+    def test_invalid_jacobian_ceiling_is_rejected(self):
+        model = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(model)
+        inputs = brainstate.random.rand(3)
+        minfo = braintrace.extract_module_info(model, inputs)
+        finders = (
+            lambda value: braintrace.find_hidden_groups_from_module(
+                model, inputs, snap_max_jacobian_elements=value
+            ),
+            lambda value: braintrace.find_hidden_groups_from_minfo(
+                minfo, snap_max_jacobian_elements=value
+            ),
+        )
+        cases = (
+            (True, TypeError),
+            (float('inf'), TypeError),
+            (1.5, TypeError),
+            (0, ValueError),
+        )
+        for finder in finders:
+            for value, error in cases:
+                with pytest.raises(error):
+                    finder(value)
+
     @pytest.mark.parametrize(
         "cls",
         [

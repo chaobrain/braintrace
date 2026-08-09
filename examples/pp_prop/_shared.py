@@ -98,7 +98,9 @@ def make_poisson_mnist(
     rng = np.random.default_rng(seed)
     idx = rng.integers(0, len(labels), size=(num_batch,))
     flat = imgs[idx].reshape(num_batch, 64)
-    label_idx = np.array([list(digits).index(int(l)) for l in labels[idx]], dtype=np.int32)
+    label_idx = np.array(
+        [list(digits).index(int(label)) for label in labels[idx]], dtype=np.int32
+    )
     p = flat[None, :, :] * rate_hz * dt
     spikes = (rng.random((num_step, num_batch, 64)) < p).astype(np.float32)
     return jnp.asarray(spikes), jnp.asarray(label_idx)
@@ -319,6 +321,17 @@ class LeakyReadout(brainstate.nn.Module):
 # --- Training helpers ----------------------------------------------------
 
 
+def _masked_mean(losses: jnp.ndarray, mask: jnp.ndarray | None) -> jnp.ndarray:
+    """Return the mean over active sequence losses."""
+    if mask is None:
+        return losses.mean()
+    if mask.shape != losses.shape:
+        raise ValueError(
+            f"loss mask shape {mask.shape} does not match losses {losses.shape}"
+        )
+    return jnp.sum(losses * mask) / jnp.maximum(jnp.sum(mask), 1.0)
+
+
 def online_train_epoch(
     model: brainstate.nn.Module,
     opt,
@@ -356,28 +369,43 @@ def online_train_epoch_fixed_target(
     target_labels: jnp.ndarray,
     decay_or_rank=0.95,
     vjp_method: str = "single-step",
+    *,
+    chunk_size: int | None = None,
+    vmap: bool = True,
+    loss_mask: jnp.ndarray | None = None,
+    reduction: str = "sum",
 ) -> jnp.ndarray:
-    """Classification variant: fixed label per batch, softmax-xent loss applied each step."""
+    """Train fixed-label sequences with optional windowing and loss masking."""
     import braintrace
     vmap_model = braintrace.compile(
         model, braintrace.pp_prop, inputs[0],
-        batch_size=inputs.shape[1], vmap=True,
+        batch_size=inputs.shape[1], vmap=vmap,
         decay_or_rank=decay_or_rank, vjp_method=vjp_method,
     )
 
-    # The label is fixed per batch, so it is closed over rather than passed as a
-    # second sequence -- one sequence is enough to define T.
-    def step_loss(inp):
-        out = vmap_model(inp)
+    windowed = chunk_size is not None and chunk_size > 1
+
+    def output_loss(out):
         return braintools.metric.softmax_cross_entropy_with_integer_labels(
             out, target_labels
         ).mean()
 
+    def step_loss(inp):
+        model_input = braintrace.MultiStepData(inp) if windowed else inp
+        out = vmap_model(model_input)
+        return jax.vmap(output_loss)(out) if windowed else output_loss(out)
+
     grads, step_losses = vmap_model.etrace_grad(
-        inputs, step_fn=step_loss, reduction='sum', return_value=True)
+        inputs,
+        step_fn=step_loss,
+        chunk_size=chunk_size,
+        mask=loss_mask,
+        reduction=reduction,
+        return_value=True,
+    )
     grads = brainstate.nn.clip_grad_norm(grads, 1.0)
     opt.update(grads)
-    return step_losses.mean()
+    return _masked_mean(step_losses, loss_mask)
 
 
 def bptt_train_epoch_fixed_target(
@@ -385,6 +413,8 @@ def bptt_train_epoch_fixed_target(
     opt,
     inputs: jnp.ndarray,
     target_labels: jnp.ndarray,
+    *,
+    loss_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """BPTT baseline with per-step softmax-cross-entropy over a fixed label."""
     weights = model.states(brainstate.ParamState)
@@ -406,7 +436,7 @@ def bptt_train_epoch_fixed_target(
 
     def bptt_body():
         _, losses = brainstate.transform.for_loop(run_step, inputs)
-        return losses.mean()
+        return _masked_mean(losses, loss_mask)
 
     grads, loss = brainstate.transform.grad(bptt_body, weights, return_value=True)()
     grads = brainstate.nn.clip_grad_norm(grads, 1.0)

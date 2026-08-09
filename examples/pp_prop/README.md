@@ -38,7 +38,7 @@ if sklearn is missing).
 | 06 | `06-batching-batched.py`            | Batching via the batched ETP primitive path             |
 | 07 | `07-vjp-single-step.py`             | `vjp_method='single-step'` (default)                    |
 | 08 | `08-vjp-multi-step.py`              | `vjp_method='multi-step'` for temporal credit           |
-| 09 | `09-operator-sparse.py`             | Sparse recurrent connectivity (masked-dense fallback)   |
+| 09 | `09-operator-sparse.py`             | Native CSR recurrent connectivity with SparseLinear     |
 | 10 | `10-operator-lora.py`               | Low-rank recurrence via `braintrace.lora_matmul`        |
 | 11 | `11-operator-conv.py`               | Conv-SNN via `braintrace.nn.Conv2d`                     |
 | 12 | `12-classification-neuromorphic.py` | Flagship: pp_prop vs BPTT on Poisson-MNIST (10 classes) |

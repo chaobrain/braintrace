@@ -18,11 +18,28 @@ import unittest
 import brainstate
 import jax.numpy as jnp
 import brainunit as u
+import pytest
 
 import braintrace
 from braintrace._testing.models import (
     ALIF_STPExpCu_Dense_Layer,
 )
+
+
+@pytest.mark.parametrize('value', [True, False, 1.0, '10'])
+def test_jacobian_ceiling_rejects_non_integer_values(value):
+    model = braintrace.nn.GRUCell(2, 2)
+    with pytest.raises(TypeError, match='must be an integer'):
+        braintrace.ETraceGraphExecutor(
+            model, snap_max_jacobian_elements=value)
+
+
+@pytest.mark.parametrize('value', [0, -1])
+def test_jacobian_ceiling_rejects_non_positive_values(value):
+    model = braintrace.nn.GRUCell(2, 2)
+    with pytest.raises(ValueError, match='at least 1'):
+        braintrace.ETraceGraphExecutor(
+            model, snap_max_jacobian_elements=value)
 
 
 class TestShowGraph(unittest.TestCase):
@@ -86,3 +103,29 @@ class TestControlFlowThreading(unittest.TestCase):
         algo = braintrace.D_RTRL(model, control_flow=policy)
         algo.compile_graph(jnp.ones((3,), dtype='float32'))
         assert algo.graph.module_info.control_flow is policy
+
+
+class TestStatePartitioning(unittest.TestCase):
+    def test_executor_uses_the_compiled_graph_partition(self):
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.recurrent = brainstate.ParamState(jnp.ones((2, 2)))
+                self.input = brainstate.ParamState(jnp.ones((2, 2)))
+                self.readout = brainstate.ParamState(jnp.ones((2, 1)))
+                self.h = brainstate.HiddenState(jnp.ones((1, 2)))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(
+                    braintrace.matmul(self.h.value, self.recurrent.value)
+                    + x @ self.input.value
+                )
+                return braintrace.matmul(self.h.value, self.readout.value)
+
+        executor = braintrace.ETraceGraphExecutor(Net())
+        executor.compile_graph(jnp.ones((1, 2)))
+
+        etrace_params, _, plain_params, _ = executor.partition_states()
+
+        self.assertEqual(set(etrace_params), {('recurrent',)})
+        self.assertEqual(set(plain_params), {('input',), ('readout',)})

@@ -19,11 +19,14 @@ It has been integrated into our establishing [brain modeling ecosystem](https://
 
 ## Installation
 
-``braintrace`` requires Python 3.11 or newer and supports Linux, macOS, and Windows. You can install ``braintrace`` via pip:
+``braintrace`` requires Python 3.11 or newer and supports Linux, macOS, and Windows. Install the CPU backend via pip:
 
 ```bash
-pip install braintrace --upgrade
+pip install -U "braintrace[cpu]"
 ```
+
+For NVIDIA GPU and TPU commands, choose the matching platform extra in the
+[installation guide](https://brainx.chaobrain.com/braintrace/quickstart/installation.html).
 
 Alternatively, you can install `BrainX`, which bundles `braintrace` with other compatible packages for a comprehensive brain modeling ecosystem:
 

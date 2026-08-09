@@ -105,10 +105,10 @@ class SnAp(ParamDimVjpAlgorithm):
         Execution option, forwarded verbatim: whether to use the per-primitive
         fast contraction instead of the legacy vmap path.
     snap_max_jacobian_elements : int, optional
-        Ceiling on each hidden group's widened block Jacobian,
-        ``P * (K * S) ** 2`` elements. Raising it is how a deliberately large
-        neighbourhood is admitted; the default rejects roughly half a gigabyte
-        per operator. Forwarded to the compiler.
+        Ceiling on each hidden group's transient full Jacobian,
+        ``(P * S) ** 2``, and retained widened block Jacobian,
+        ``P * (K * S) ** 2``. Raising it admits deliberately large
+        neighbourhoods. Forwarded to the compiler.
     **kwargs : Any
         Additional options forwarded to
         :class:`~braintrace.ParamDimVjpAlgorithm`, including ``trace_dtype``,

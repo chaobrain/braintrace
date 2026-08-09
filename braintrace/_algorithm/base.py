@@ -95,12 +95,10 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
     is_compiled : bool
         Whether the etrace algorithm has been compiled.
     running_index : brainstate.LongTermState[int]
-        Zero-based count of previously-completed ``update()`` calls: it reads
-        ``0`` during the first call, ``1`` during the second, and so on --
-        i.e. the value used *inside* a given ``update()`` is the
-        pre-increment count, not the 1-based call number. It is incremented
-        by one immediately after each ``update()`` completes, and reset back
-        to ``0`` by ``reset_state()``.
+        Number of successfully completed model timesteps. A single-step call
+        advances it by one and a multi-step call advances it by the sequence
+        length. It is cumulative across calls and reset to zero by
+        ``reset_state()``.
     """
     __module__ = 'braintrace'
 
@@ -263,6 +261,9 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
             self._other_states
         ) = self.graph.module_info.retrieved_model_states.split(brainstate.ParamState, brainstate.HiddenState, ...)
 
+    def _validate_compiled_graph(self) -> None:
+        """Validate algorithm-specific requirements before trace allocation."""
+
     def compile_graph(self, *args: Any) -> None:
         r"""
         Compile the eligibility trace graph of the relationship between etrace weights, states and operators.
@@ -299,6 +300,7 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
 
             # --- the model etrace graph -- #
             self.graph_executor.compile_graph(*args)
+            self._validate_compiled_graph()
 
             # Structured scan descent (Phase 4): relations discovered inside
             # a descended scan body need a per-substep trace fold, and

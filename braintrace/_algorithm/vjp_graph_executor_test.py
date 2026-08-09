@@ -22,6 +22,8 @@ import numpy as np
 import brainunit as u
 
 import braintrace
+from braintrace._compiler.hid_param_op import PathClassification
+from braintrace._testing.scenario_catalog import PartialPathRNN
 
 
 class TestETraceVjpGraphExecutor(unittest.TestCase):
@@ -43,7 +45,7 @@ class TestETraceVjpGraphExecutor(unittest.TestCase):
         self.assertEqual(executor.vjp_method, 'multi-step')
 
     def test_invalid_vjp_method(self):
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesRegex(ValueError, 'single-step.*multi-step'):
             braintrace.ETraceVjpGraphExecutor(self.model, vjp_method='invalid')
 
     def test_is_single_step_vjp(self):
@@ -61,6 +63,46 @@ class TestETraceVjpGraphExecutor(unittest.TestCase):
         x = jnp.ones((self.in_size,))
         executor.compile_graph(x)
         self.assertIsNotNone(executor._compiled_graph)
+
+    def test_mixed_relation_is_inspectable_but_not_executable(self):
+        model = PartialPathRNN(3, 4)
+        brainstate.nn.init_all_states(model)
+        x = jnp.ones(3)
+        graph = braintrace.compile_etrace_graph(model, x)
+        by_path = {
+            relation.trainable_paths['weight']: relation
+            for relation in graph.hidden_param_op_relations
+        }
+        self.assertEqual(
+            by_path[('w1',)].path_classification,
+            {('h',): PathClassification.MIXED},
+        )
+        executor = braintrace.ETraceVjpGraphExecutor(model)
+        with self.assertRaisesRegex(
+            braintrace.NotSupportedError,
+            'both a direct path and an indirect path',
+        ):
+            executor.compile_graph(x)
+        with self.assertRaisesRegex(ValueError, 'not compiled'):
+            _ = executor.graph
+
+    def test_independent_direct_relations_may_share_one_parameter(self):
+        from braintrace._testing import oracle_models as om
+
+        spec = om.tied_weight_rnn(n_rec=4)
+        model = spec.factory()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        executor = braintrace.ETraceVjpGraphExecutor(model)
+        executor.compile_graph(spec.make_inputs(1, 4)[0])
+        relations = executor.graph.hidden_param_op_relations
+        self.assertEqual(len(relations), 2)
+        self.assertTrue(all(
+            relation.trainable_paths['weight'] == ('w',)
+            and relation.path_classification == {
+                ('h',): PathClassification.ALL_DIRECT
+            }
+            for relation in relations
+        ))
 
     def test_solve_h2w_h2h_jacobian(self):
         executor = braintrace.ETraceVjpGraphExecutor(self.model)
@@ -141,6 +183,28 @@ class TestFullJacobianFlag(unittest.TestCase):
             self.assertEqual(u.math.shape(d), slab + (group.num_state,))
             self.assertEqual(u.math.shape(f), slab + slab)
             self.assertNotEqual(u.math.shape(d), u.math.shape(f))
+
+    def test_coupled_compile_rejects_an_oversized_jacobian(self):
+        executor, spec = self._executor(
+            include_recurrent_mixing=True,
+        )
+        inputs = spec.make_inputs(1, 4)[0]
+        executor.compile_graph(inputs)
+        executor.snap_max_jacobian_elements = 1
+        with self.assertRaisesRegex(braintrace.NotSupportedError, '1'):
+            executor.compile_graph(inputs)
+        with self.assertRaisesRegex(ValueError, 'not compiled'):
+            _ = executor.graph
+
+    def test_full_jacobian_compile_rejects_an_oversized_jacobian(self):
+        executor, spec = self._executor(
+            full_jacobian=True,
+            snap_max_jacobian_elements=1,
+        )
+        with self.assertRaisesRegex(braintrace.NotSupportedError, '1'):
+            executor.compile_graph(spec.make_inputs(1, 4)[0])
+        with self.assertRaisesRegex(ValueError, 'not compiled'):
+            _ = executor.graph
 
     def test_the_random_projection_engine_turns_the_flag_on(self):
         # The wiring that matters: the coordinate, not the caller, selects it.

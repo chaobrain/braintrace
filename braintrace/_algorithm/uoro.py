@@ -97,7 +97,7 @@ class UORO(RandomProjectionVjpAlgorithm):
     random_feedback_key : jax.Array, optional
         Required when combining with ``learning_signal='random_feedback'``.
     snap_max_jacobian_elements : int, optional
-        Passed through; unused at ``recurrence_scope='coupled'``.
+        Maximum number of elements in the materialized full hidden Jacobian.
 
     Examples
     --------
