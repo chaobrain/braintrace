@@ -20,6 +20,11 @@ narrow form back to float32 is no faster than reading float32 to begin with.
 The profiling that produced the section 5 fix was undertaken to locate the
 tensors worth quantizing; the fix is what that search actually found.
 
+Section 3 is a statement about the XLA CPU backend and nothing more. Section 7
+re-derives it on a CUDA device and **the verdict inverts**: every operation that
+lost from narrow storage on CPU wins from it on GPU. The section 5 fix inverts
+in the opposite direction, contributing nothing there.
+
 ## 2. Baseline characterisation
 
 Host: i9-12900H, 64 GiB DDR5, XLA CPU backend, JAX 0.11.0, `sparse_backend=jax_raw`.
@@ -48,7 +53,7 @@ Per-timestep buffer inventory from the optimized HLO:
 | Hidden Jacobian, transposed | `f32[32, 131072, 3, 3]` | 144 MiB | `out_axes=-2` |
 | Trace / signal tensors (x4) | `f32[32, 131072, 3]` | 48 MiB each | trace propagation |
 
-## 3. Does quantization pay for speed on this backend?
+## 3. Does quantization pay for speed on the XLA CPU backend?
 
 Decided by one measurement: the throughput of the integer-to-float conversion a
 quantized consumer must pay, against the throughput of simply reading float32.
@@ -135,7 +140,7 @@ budget, 4-bit scalar beats 3-bit-plus-QJL on both, because for these
 near-Gaussian post-rotation coordinates the scalar codebook is already near
 optimal. Both facts are asserted in `braintrace/_quant/_turboquant_test.py`.
 
-## 5. Adopted change: contract the hidden Jacobian without `dot_general`
+## 5. Adopted change: contract the hidden Jacobian without `dot_general` (CPU)
 
 Profiling attributed 63.4 ms of the 167 ms timestep to four operations around the
 hidden-group Jacobian, all bandwidth-bound and all far off roofline. Per-operation
@@ -161,6 +166,9 @@ identity, 144 MiB per timestep, purely to feed `vmap` over one-hot cotangents.
 It now calls the pullback once per basis vector against a broadcast one-hot,
 which keeps peak RSS at the baseline level.
 
+The defect this routes around is specific to the XLA CPU backend. Section 7
+shows both forms at roofline on GPU, where the change neither helps nor hurts.
+
 ## 6. Results
 
 Full tables in `docs/specs/2026-08-09-turboquant-sparse-benchmark-results.md`.
@@ -170,7 +178,67 @@ to 41.6 s (**1.24x**). Peak RSS 1.771 GiB to 1.815 GiB, a **2.5% regression**.
 Loss trajectories and final accuracies are identical to all printed digits on
 every seed.
 
-## 7. What was not pursued
+## 7. Does any of this survive a change of backend? Not as stated
+
+Re-derived with `examples/pp_prop/turboquant_gpu_probe.py --require-gpu` on an
+RTX 3080 Ti Laptop GPU, driver 595.79, JAX 0.11.0 CUDA 12, Python 3.12, in a
+container on the same host. Kernels are launched twenty times before one
+synchronization, because a single launch on this backend measures a 1.3 ms
+dispatch floor rather than the kernel; candidates are interleaved so thermal
+drift is charged to both.
+
+The conversion measurement that decided section 3 reverses:
+
+| Kernel | CPU Gelem/s | GPU Gelem/s |
+|---|---|---|
+| float32 elementwise | 3.03 | 58.2 |
+| int8 elementwise, no widening | 9.94 | 217.0 |
+| int8 widened to float32 | 3.81 | 87.9 |
+
+Widening is 1.51x faster than reading float32 here against 1.26x on CPU, and
+that margin is now enough to survive a consumer that also reads a float32
+operand and writes float32. On the benchmark's own shapes, at 131072 neurons:
+
+| Operation | CPU f32 | CPU int8 | GPU f32 | GPU int8 | GPU 4-bit |
+|---|---|---|---|---|---|
+| Jacobian contraction | 19.9 ms | 28.4 ms | 0.540 ms | **0.350 ms** | **0.347 ms** |
+| Batch reduction over `(nnz, batch)` | 13.4 ms | 18.4 ms | 0.301 ms | **0.129 ms** | -- |
+| Gather `(n,batch) -> (nnz,batch)` | 10.6 ms | 4.1 ms | 0.593 ms | **0.421 ms** | -- |
+
+Every operation wins from narrow storage on GPU, including the two arithmetic
+consumers that lost on CPU. The 4-bit column packs two Lloyd-Max codes per byte
+and decodes through `decode_centroids`, so it is the section 4 codec's own
+stored width rather than a plain int8 cast; the nibble unpack costs nothing
+measurable over int8 and saves half the bytes again.
+
+The float32 rates confirm the operations are still bandwidth-bound rather than
+launch-bound. Taking the streaming ceiling from the probe's own float32
+elementwise kernel, which moves 537 MB in 1.153 ms, gives 466 GB/s. The
+contraction moves 252 MB in 0.540 ms, also 466 GB/s, and the batch reduction
+moves 138 MB in 0.301 ms, 460 GB/s. Both float32 forms are saturated, so the
+speedups below them are the byte reduction and not a scheduling artefact.
+
+The narrow forms do not stay saturated, which is where the 4-bit column stops
+paying. int8 moves 138 MB in 0.350 ms, 395 GB/s, and 4-bit moves 120 MB in
+0.347 ms, 344 GB/s. Each halving of stored width buys less than the byte count
+promises because the unpack and codebook lookup consume the freed bandwidth as
+arithmetic. That is the same trade section 3 found fatal on CPU, appearing here
+in a milder form that the memory system can still absorb.
+
+**The section 5 fix contributes nothing on GPU.** The einsum runs at 0.543 ms
+and the unrolled form at 0.540 ms, and both sit at roofline. This is not a null
+result to be explained away: the unroll exists to route around a CPU
+vectorization defect that does not exist here, and with the operation already
+bandwidth-saturated there is no headroom for it to recover. End to end the two
+arms are indistinguishable, as section 6 of the results document records.
+
+So the two conclusions trade places. On CPU, quantization is unusable and the
+codegen fix is worth 1.25x. On GPU, the codegen fix is worth nothing and
+quantization is worth 1.5x to 2.3x per operation. Neither is a property of the
+algorithm; both are properties of the backend, and both were decided by
+measurement on the deployed shapes.
+
+## 8. What was not pursued
 
 The `brainevent.csrmm` jvp and transpose rules materialize three
 `(nnz, batch)` buffers, 128 MiB each, and account for roughly 59% of the
