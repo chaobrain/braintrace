@@ -138,7 +138,12 @@ optimal. Both facts are asserted in `braintrace/_quant/_turboquant_test.py`.
 ## 5. Adopted change: contract the hidden Jacobian without `dot_general`
 
 Profiling attributed 63.4 ms of the 167 ms timestep to four operations around the
-hidden-group Jacobian, all bandwidth-bound and all far off roofline.
+hidden-group Jacobian, all bandwidth-bound and all far off roofline. Per-operation
+timings in this section come from that single profiled run at 167 ms per timestep;
+section 6 reports medians over three seeds, where the baseline timestep is
+174.8 ms and the adopted arm 139.7 ms. The 35 ms actually recovered sits below
+the 47 ms this four-operation analysis predicts, so part of the modelled saving
+does not materialize.
 
 `_update_IO_dim_etrace_scan_fn` contracted the Jacobian with
 `jnp.einsum('...ij,...j->...i', ...)`. The contracted axis is the minor-most axis
