@@ -230,25 +230,26 @@ def measure_edge_buffers(shapes: ProbeShapes = ProbeShapes()) -> dict[str, float
     dict
         Timings for the batch reduction and the gather at both stored widths.
     """
-    edge_key, index_key = jax.random.split(jax.random.PRNGKey(2))
+    edge_key, index_key, source_key = jax.random.split(jax.random.PRNGKey(2), 3)
     edges = jax.random.normal(edge_key, (shapes.nnz, shapes.batch), jnp.float32)
-    scale = jnp.float32(jnp.max(jnp.abs(edges)) / 127.0)
-    narrow_edges = (edges / scale).astype(jnp.int8)
+    edge_scale = jnp.float32(jnp.max(jnp.abs(edges)) / 127.0)
+    narrow_edges = (edges / edge_scale).astype(jnp.int8)
     indices = jax.random.randint(index_key, (shapes.nnz,), 0, shapes.neurons)
-    source = jax.random.normal(edge_key, (shapes.neurons, shapes.batch), jnp.float32)
-    narrow_source = (source / scale).astype(jnp.int8)
+    source = jax.random.normal(source_key, (shapes.neurons, shapes.batch), jnp.float32)
+    source_scale = jnp.float32(jnp.max(jnp.abs(source)) / 127.0)
+    narrow_source = (source / source_scale).astype(jnp.int8)
     reduction = paired_bench({
         'batch_reduce_float32': (jax.jit(lambda x: jnp.sum(x, axis=1)), (edges,)),
         'batch_reduce_int8_stored': (
             jax.jit(lambda x, s: jnp.sum(x.astype(jnp.float32) * s, axis=1)),
-            (narrow_edges, scale),
+            (narrow_edges, edge_scale),
         ),
     })
     gather = paired_bench({
         'gather_float32': (jax.jit(lambda x, i: x[i]), (source, indices)),
         'gather_int8_stored': (
             jax.jit(lambda x, i, s: x[i].astype(jnp.float32) * s),
-            (narrow_source, indices, scale),
+            (narrow_source, indices, source_scale),
         ),
     })
     return {**reduction, **gather}

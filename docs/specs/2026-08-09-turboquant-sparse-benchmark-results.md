@@ -131,6 +131,14 @@ positive favours the optimized arm.
 | Validation | +0.012, -0.758, -0.258, +0.183, +0.342 s | +0.012 s |
 | Total worker | +0.72, -2.19, -1.05, +1.28, +1.22 s | +0.72 s |
 
+Two of those pairs are contaminated. Pairs 4 and 5 recorded warm updates of
+1.043, 0.630 and 0.533 s against a 0.22 s norm, a factor of three to five that a
+34 MHz clock drop cannot explain; something stalled, host contention or the WSL
+layer, and the cause was not identified. They are left in because the median
+absorbs them and dropping inconvenient runs is worse, but the two largest
+differences in every row above come from them. The thermal drift described in
+the previous table is a separate and much smaller effect.
+
 Every metric straddles zero and the per-pair spread exceeds the median by an
 order of magnitude. **On GPU the adopted change is indistinguishable from the
 baseline.** That is the expected result, not a measurement failure: section 7 of
@@ -172,9 +180,16 @@ trajectory amplifies over five updates.
 Spec section 7 has the measurements. The short version is that the section 3
 negative result is a CPU result only. On GPU, int8 storage makes the Jacobian
 contraction 1.54x faster, the batch reduction 2.34x faster and the gather 1.41x
-faster, and the section 4 codec's own 4-bit packing matches int8 on the
-contraction while halving the bytes again. None of that is wired into the
-benchmark; it says the door that is shut on CPU is open here.
+faster, and 4-bit Lloyd-Max packing matches int8 on the contraction while
+halving the bytes again.
+
+None of that is wired into the benchmark, and it is a weaker claim than it
+looks. Those speedups are measured on per-timestep transients, while the
+distortion figures earlier in this document are measured on stored state; the
+two sets share no tensor, and the probe prices no rotation on either side. What
+is established is the bandwidth narrow storage makes available on this device,
+not that a deployable codec would keep it at acceptable distortion. The door
+that is bolted shut on CPU is merely unlocked here.
 
 ## Reproduction
 

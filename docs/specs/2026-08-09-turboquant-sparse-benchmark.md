@@ -207,9 +207,11 @@ operand and writes float32. On the benchmark's own shapes, at 131072 neurons:
 
 Every operation wins from narrow storage on GPU, including the two arithmetic
 consumers that lost on CPU. The 4-bit column packs two Lloyd-Max codes per byte
-and decodes through `decode_centroids`, so it is the section 4 codec's own
-stored width rather than a plain int8 cast; the nibble unpack costs nothing
-measurable over int8 and saves half the bytes again.
+and decodes through `decode_centroids`, so it prices the codec's scalar stage
+rather than a plain int8 cast; the nibble unpack costs nothing measurable over
+int8 and saves half the bytes again. It is only the scalar stage: no rotation
+and no QJL residual, and the distortion it would cost on this tensor is not
+measured anywhere in this document.
 
 The float32 rates confirm the operations are still bandwidth-bound rather than
 launch-bound. Taking the streaming ceiling from the probe's own float32
@@ -231,6 +233,19 @@ result to be explained away: the unroll exists to route around a CPU
 vectorization defect that does not exist here, and with the operation already
 bandwidth-saturated there is no headroom for it to recover. End to end the two
 arms are indistinguishable, as section 6 of the results document records.
+
+These numbers do not compose with section 4, and the two sections must not be
+read as one result. Section 4 measures distortion on live stored state --
+`etrace_x`, `etrace_df`, the CSR values, the dense weight. This section measures
+speed on per-timestep transients -- the hidden Jacobian, the `(nnz, batch)`
+intermediate, the gather source. No tensor appears in both, so no tensor here has
+a known distortion and no tensor there has a known speed benefit. The probe also
+prices no rotation on either side, while section 4's central finding is that
+`etrace_x` needs one. On CPU a block-16 rotation cost 1.38 ms for a 16 MiB array,
+which extrapolates to roughly 12 ms on the 144 MiB Jacobian against a 19.9 ms
+contraction; the GPU cost of that rotation is unmeasured. What this section
+establishes is the bandwidth available from narrow storage, not the accuracy of
+any deployable codec.
 
 So the two conclusions trade places. On CPU, quantization is unusable and the
 codegen fix is worth 1.25x. On GPU, the codegen fix is worth nothing and
