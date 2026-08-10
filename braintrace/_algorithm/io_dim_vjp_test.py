@@ -44,6 +44,7 @@ from braintrace._testing import oracle_models as om
 from braintrace._testing.scenario_catalog import PartialPathRNN
 from braintrace._algorithm.io_dim_vjp import (
     IODimVjpAlgorithm,
+    _contract_hidden_jacobian,
     _expon_smooth,
     _f_trace_bias_correction,
     _format_decay_and_rank,
@@ -780,3 +781,45 @@ def test_docstring_compile_example_runs():
     assert y.shape == (1,)
     assert bool(jnp.all(jnp.isfinite(y)))
     assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+class TestContractHiddenJacobian:
+    """The unrolled Jacobian contraction must agree with the einsum it replaced."""
+
+    @pytest.mark.parametrize('varshape', [(1,), (4,), (3, 7), (2, 5, 3)])
+    @pytest.mark.parametrize('num_state', [1, 2, 3, 5])
+    def test_matches_einsum(self, varshape, num_state):
+        key = jax.random.PRNGKey(0)
+        jac_key, trace_key = jax.random.split(key)
+        jac = jax.random.normal(jac_key, (*varshape, num_state, num_state))
+        trace = jax.random.normal(trace_key, (*varshape, num_state))
+        npt.assert_allclose(
+            _contract_hidden_jacobian(jac, trace),
+            jnp.einsum('...ij,...j->...i', jac, trace),
+            rtol=1e-5,
+            atol=1e-6,
+        )
+
+    def test_identity_jacobian_returns_the_trace(self):
+        trace = jax.random.normal(jax.random.PRNGKey(1), (6, 3))
+        jac = jnp.broadcast_to(jnp.eye(3), (6, 3, 3))
+        npt.assert_allclose(_contract_hidden_jacobian(jac, trace), trace, atol=1e-6)
+
+    def test_zero_jacobian_kills_the_trace(self):
+        trace = jax.random.normal(jax.random.PRNGKey(2), (6, 3))
+        jac = jnp.zeros((6, 3, 3))
+        npt.assert_allclose(_contract_hidden_jacobian(jac, trace), 0.0, atol=1e-7)
+
+    def test_row_ordering_is_output_major(self):
+        jac = jnp.asarray([[[0.0, 1.0], [0.0, 0.0]]])
+        trace = jnp.asarray([[3.0, 5.0]])
+        npt.assert_allclose(_contract_hidden_jacobian(jac, trace), [[5.0, 0.0]])
+
+    def test_is_jit_compatible(self):
+        jac = jax.random.normal(jax.random.PRNGKey(3), (4, 2, 2))
+        trace = jax.random.normal(jax.random.PRNGKey(4), (4, 2))
+        npt.assert_allclose(
+            jax.jit(_contract_hidden_jacobian)(jac, trace),
+            _contract_hidden_jacobian(jac, trace),
+            atol=1e-6,
+        )

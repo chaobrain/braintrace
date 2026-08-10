@@ -594,9 +594,12 @@ def jacrev_last_dim(
     num_state = new_hid_vals.shape[-1]
     varshape = new_hid_vals.shape[:-1]
     assert num_state == hid_vals.shape[-1], 'Error: the number of input/output states should be the same.'
-    g_primals = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
-    jac = jax.vmap(f_vjp, in_axes=-2, out_axes=-2)(g_primals)
-    return jac[0]
+    basis = u.math.eye(num_state)
+    columns = [
+        f_vjp(u.math.broadcast_to(basis[index], (*varshape, num_state)))[0]
+        for index in range(num_state)
+    ]
+    return u.math.stack(columns, axis=-2)
 
 
 def jacfwd_last_dim(

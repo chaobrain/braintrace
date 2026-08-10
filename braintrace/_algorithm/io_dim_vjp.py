@@ -491,11 +491,7 @@ def _update_IO_dim_etrace_scan_fn(
             #
             df_key = etrace_df_key(relation.y_var, group.index)
             hid_jac = hid_group_jacobians[group.index]
-            pre_trace_df = jnp.einsum(
-                '...ij,...j->...i',
-                hid_jac,
-                hist_dfs[df_key]
-            )
+            pre_trace_df = _contract_hidden_jacobian(hid_jac, hist_dfs[df_key])
 
             #
             # Step 3:
@@ -506,6 +502,46 @@ def _update_IO_dim_etrace_scan_fn(
             new_etrace_dfs[df_key] = _expon_smooth(pre_trace_df, dfs[df_key], decay_f)
 
     return (new_etrace_xs, new_etrace_dfs), None
+
+
+def _contract_hidden_jacobian(hid_jac: jax.Array, trace: jax.Array) -> jax.Array:
+    """Contract a hidden-group Jacobian against a df trace over the state axis.
+
+    Mathematically this is ``einsum('...ij,...j->...i', hid_jac, trace)``. The
+    state axis is the minor-most axis of both operands and is tiny -- one entry
+    per hidden state in the group -- so ``dot_general`` emits a batched matvec
+    whose innermost loop is too short to vectorize. Unrolling the contraction
+    into ``num_state`` full-width multiply-accumulates keeps the leading
+    ``varshape`` axes contiguous, which is what the host vector units need.
+
+    Parameters
+    ----------
+    hid_jac : jax.Array
+        Hidden-to-hidden Jacobian of shape ``(*varshape, num_state, num_state)``.
+    trace : jax.Array
+        Eligibility df trace of shape ``(*varshape, num_state)``.
+
+    Returns
+    -------
+    jax.Array
+        Contracted trace of shape ``(*varshape, num_state)``.
+
+    Examples
+    --------
+    .. code-block:: python
+
+        >>> import jax.numpy as jnp
+        >>> from braintrace._algorithm.io_dim_vjp import _contract_hidden_jacobian
+        >>> jac = jnp.arange(4.).reshape(1, 2, 2)
+        >>> trace = jnp.asarray([[1., 1.]])
+        >>> _contract_hidden_jacobian(jac, trace).tolist()
+        [[1.0, 5.0]]
+    """
+    num_state = trace.shape[-1]
+    contracted = hid_jac[..., 0] * trace[..., 0:1]
+    for index in range(1, num_state):
+        contracted = contracted + hid_jac[..., index] * trace[..., index:index + 1]
+    return contracted
 
 
 def _reduce_to_param_shape(grad: jax.Array, param: jax.Array) -> jax.Array:
