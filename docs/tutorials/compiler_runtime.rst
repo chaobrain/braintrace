@@ -1,30 +1,22 @@
-Compiler & Runtime
-==================
+Online Learning Compilers
+=========================
 
-Follow the compiler workflow from a minimal recurrent model to a stacked one.
-Each chapter combines model compilation with report and graph inspection so
-that discovered hidden groups and ETP relations stay tied to the model that
-produced them.
+Follow one compiler workflow from a minimal recurrent model to a stacked one.
+The walkthrough keeps report and graph inspection beside the model that
+produced them, then compares the two compiled structures directly.
 
 Compile and inspect
 -------------------
 
-.. grid:: 1 1 2 2
+.. grid:: 1
    :gutter: 2
 
-   .. grid-item-card:: Single-Layer RNN
-      :link: single_layer_rnn
+   .. grid-item-card:: RNN Compiler Walkthrough
+      :link: rnn_compiler
       :link-type: doc
 
-      Compile one recurrent layer, read its compilation report, inspect its
-      ETP graph, and compare temporal and non-temporal parameters.
-
-   .. grid-item-card:: Two-Layer RNN
-      :link: two_layer_rnn
-      :link-type: doc
-
-      Compile stacked recurrent layers and inspect how the compiler separates
-      their hidden groups, retained relations, and excluded parameter paths.
+      Compile single-layer and two-layer RNNs in one page, inspect their
+      hidden groups and ETP relations, and compare the compiler decisions.
 
 Diagnostic workflow
 -------------------
@@ -47,5 +39,4 @@ Diagnostic workflow
    :hidden:
    :maxdepth: 1
 
-   single_layer_rnn.ipynb
-   two_layer_rnn.ipynb
+   rnn_compiler.ipynb
