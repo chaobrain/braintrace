@@ -148,7 +148,7 @@ and the two algorithm tutorials.
 
    Internals and application
       **8** :doc:`Operators for Online Learning <tutorials/five_primitive_functions>` · **9**
-      :doc:`Graph Compilation <tutorials/graph_compilation>` · **10**
+      :doc:`RNN Compiler Walkthrough <tutorials/rnn_compiler>` · **10**
       :doc:`Examples and Advanced Topics <examples/snn_examples>`
 
 

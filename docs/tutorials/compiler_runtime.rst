@@ -1,42 +1,33 @@
 Online Learning Compilers
 =========================
 
-Inspect what BrainTrace compiled before interpreting an online-learning result.
-These chapters connect model structure to hidden groups, ETP relations, and
-compiler diagnostics.
+Follow one compiler workflow from a minimal recurrent model to a stacked one.
+The walkthrough keeps report and graph inspection beside the model that
+produced them, then compares the two compiled structures directly.
 
-Inspect the runtime
+Compile and inspect
 -------------------
 
-.. grid:: 1 1 2 2
+.. grid:: 1
    :gutter: 2
 
-   .. grid-item-card:: Graph Compilation
-      :link: graph_compilation
+   .. grid-item-card:: RNN Compiler Walkthrough
+      :link: rnn_compiler
       :link-type: doc
 
-      Compile a recurrent model, inspect its ETP graph, and use
-      :func:`braintrace.compile_etrace_graph` when an algorithm wrapper is not
-      required.
-
-   .. grid-item-card:: Visualization
-      :link: visualization
-      :link-type: doc
-
-      Read ``learner.report`` and ``learner.graph`` to inspect included,
-      excluded, and grouped model state.
+      Compile single-layer and two-layer RNNs in one page, inspect their
+      hidden groups and ETP relations, and compare the compiler decisions.
 
 Diagnostic workflow
 -------------------
 
-1. Compile the smallest representative input and confirm that compilation
-   completes without errors.
-2. Check the discovered hidden groups and their state paths.
-3. Compare ETP weights with excluded or non-temporal weights.
-4. Inspect each weight-primitive-hidden relation rather than relying only on
-   relation counts.
-5. Resolve structural diagnostics before evaluating an algorithm's learning
-   behavior.
+1. Define the recurrent model and compile it with a representative input.
+2. Read ``learner.report`` for included, excluded, and diagnostic decisions.
+3. Inspect ``learner.graph`` to verify each parameter-primitive-hidden
+   relation behind the report.
+4. Compare the single-layer and two-layer results before generalizing an
+   expected grouping rule.
+5. Resolve structural diagnostics before evaluating learning behavior.
 
 .. important::
 
@@ -48,5 +39,4 @@ Diagnostic workflow
    :hidden:
    :maxdepth: 1
 
-   graph_compilation.ipynb
-   visualization.ipynb
+   rnn_compiler.ipynb
