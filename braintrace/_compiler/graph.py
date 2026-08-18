@@ -22,6 +22,7 @@ import brainstate
 import jax
 import numpy as np
 
+from braintrace._compatible_imports import jaxpr_all_invars
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     ETraceVals,
@@ -571,7 +572,7 @@ def compile_etrace_graph(
             if relation.control_flow_context is not None:
                 continue
             for hpo_jaxpr in relation.y_to_hidden_group_jaxprs:
-                for v in hpo_jaxpr.invars + hpo_jaxpr.constvars:
+                for v in jaxpr_all_invars(hpo_jaxpr):
                     out_wy2hid_jaxvars_dict[v] = None
         out_wy2hid_jaxvars = list(out_wy2hid_jaxvars_dict)
 

@@ -63,6 +63,7 @@ from braintrace._compatible_imports import (
     is_scan_primitive,
     is_while_primitive,
     is_cond_primitive,
+    jaxpr_constvars,
     scan_num_consts_carry,
 )
 from braintrace._op import is_etp_primitive, is_etp_enable_gradient_primitive
@@ -1621,6 +1622,11 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         pattern = build_snap_pattern(
             group.transition_jaxpr, group.varshape, self.sparse_n,
             num_state=group.num_state,
+            # Seed the adjacency walk from the hidden invars explicitly. Since
+            # JAX 0.11 the jaxpr's own ``invars`` also lists the constvars, so
+            # the implicit default would widen the seed set and inflate the
+            # derived pattern (usually all the way to conservative).
+            hidden_invars=group.hidden_invars,
             max_jacobian_elements=self.snap_max_jacobian_elements,
         )
         if pattern.conservative:
@@ -1764,7 +1770,10 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                     for outvar in hidden_outvars
                 ],
                 transition_jaxpr=jaxpr,
-                transition_jaxpr_constvars=list(jaxpr.constvars),
+                # ``write_jaxpr_of_hidden_group_transition`` gives the jaxpr one
+                # invar per hidden state; the leading remainder are the
+                # constvars bound from the forward pass.
+                transition_jaxpr_constvars=jaxpr_constvars(jaxpr, len(hidden_invars)),
                 is_diagonal_recurrence=not self.include_recurrent_mixing,
             )
             group = self._attach_snap_pattern(group)
@@ -1832,7 +1841,10 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 hidden_paths=[self.outvar_to_hidden_path[outvar]],
                 hidden_states=[self.path_to_state[self.outvar_to_hidden_path[outvar]]],
                 transition_jaxpr=zero_jaxpr,
-                transition_jaxpr_constvars=list(zero_jaxpr.constvars),
+                # Mirrors ``zero_jaxpr``'s ``constvars=[outvar], invars=[invar]``
+                # above -- read literally, not back off the jaxpr, which since
+                # JAX 0.11 no longer records the boundary for a value-less split.
+                transition_jaxpr_constvars=[outvar],
                 # A zero-recurrence transition (``D^t = 0``) is trivially diagonal;
                 # keep the flag mode-derived for uniformity (this fallback only
                 # fires in the default mode in practice).

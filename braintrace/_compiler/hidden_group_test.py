@@ -1975,3 +1975,46 @@ class TestSplitHiddenWidthGuard:
         assert len(parts) == 2
         np.testing.assert_array_equal(np.asarray(parts[0]), np.ones((2, 3)))
         np.testing.assert_array_equal(np.asarray(parts[1]), np.full((2, 3), 2.0))
+
+
+from braintrace._compatible_imports import jaxpr_all_invars
+
+
+class TestTransitionJaxprConstvarSplit:
+    """A compiled group's const/invar split stays intact on every JAX version.
+
+    JAX 0.11 merged ``ClosedJaxpr`` into ``Jaxpr`` and stopped recording the
+    boundary for an open jaxpr with symbolic-only constvars, which is exactly
+    what the compiler builds here. ``transition_jaxpr_constvars`` must therefore
+    be carried explicitly rather than read back off the jaxpr.
+    """
+
+    def _gru_group(self):
+        gru = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(gru)
+        groups, _ = find_hidden_groups_from_module(gru, brainstate.random.randn(3))
+        assert len(groups) == 1
+        return groups[0]
+
+    def test_constvars_are_the_leading_positional_inputs(self):
+        group = self._gru_group()
+        all_in = jaxpr_all_invars(group.transition_jaxpr)
+        n_const = len(all_in) - len(group.hidden_invars)
+        # A non-trivial split: reading ``.constvars`` back would give [] on 0.11.
+        assert n_const > 0
+        assert group.transition_jaxpr_constvars == all_in[:n_const]
+        assert list(group.hidden_invars) == all_in[n_const:]
+
+    def test_the_transition_evaluates_with_those_constvars(self):
+        # The arity failure that broke the suite on jaxlib 0.11.1 surfaces here.
+        group = self._gru_group()
+        input_vals = [
+            jnp.zeros(v.aval.shape, v.aval.dtype)
+            for v in group.transition_jaxpr_constvars
+        ]
+        hidden_vals = [
+            jnp.zeros(v.aval.shape, v.aval.dtype)
+            for v in group.hidden_invars
+        ]
+        out = group.transition(hidden_vals, input_vals)
+        assert len(out) == len(group.hidden_outvars)

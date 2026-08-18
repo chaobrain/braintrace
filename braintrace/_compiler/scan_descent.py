@@ -64,6 +64,7 @@ from braintrace._compatible_imports import (
     is_cond_primitive,
     is_scan_primitive,
     is_while_primitive,
+    jaxpr_all_invars,
     new_var,
     scan_num_consts_carry,
     scan_params_add_ys,
@@ -443,7 +444,7 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[Sca
         if r.x_var is not None:
             hoist_seen[r.x_var] = None
         for j in r.y_to_hidden_group_jaxprs:
-            for v in list(j.invars) + list(j.constvars):
+            for v in jaxpr_all_invars(j):
                 hoist_seen[v] = None
     for g in body_groups:
         for v in list(g.hidden_invars) + list(g.transition_jaxpr_constvars):

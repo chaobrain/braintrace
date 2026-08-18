@@ -195,3 +195,32 @@ class TestTrainableInvarsPopulatedForDense:
         assert r.trainable_leaf_indices['weight'] == 0
         assert r.trainable_processing_chains['weight'] == ()
         assert r.trainable_param_states['weight'] is not None
+
+
+class TestYToHiddenJaxprConstvarSplit:
+    """The ``y -> hidden group`` jaxprs keep a recoverable const/invar split.
+
+    Since JAX 0.11 an open jaxpr with symbolic-only constvars reports
+    ``constvars == []``, so the split is recovered from the invar count instead:
+    these jaxprs take exactly one invar, the relation's ``y_var``. The
+    executable counterpart of this assertion lives in
+    ``_testing/scenario_catalog_test.py::test_gru_y_to_hidden_groups_executes``.
+    """
+
+    def test_y_is_the_sole_invar_and_the_rest_are_constvars(self):
+        import jax.numpy as jnp
+        from braintrace._compatible_imports import jaxpr_all_invars, split_jaxpr_invars
+
+        gru = braintrace.nn.GRUCell(3, 4)
+        brainstate.nn.init_all_states(gru)
+        relations = find_hidden_param_op_relations_from_module(gru, jnp.zeros(3))
+
+        assert len(relations) > 0
+        checked = 0
+        for r in relations:
+            for jaxpr in r.y_to_hidden_group_jaxprs:
+                constvars, invars = split_jaxpr_invars(jaxpr, 1)
+                assert invars == [r.y_var]
+                assert constvars == jaxpr_all_invars(jaxpr)[:-1]
+                checked += 1
+        assert checked > 0
