@@ -1,6 +1,75 @@
 # Release Notes
 
 
+## Version 0.2.6
+
+A compatibility release: `braintrace` now works with **JAX / jaxlib 0.11**,
+which merged `ClosedJaxpr` into `Jaxpr` and, in doing so, silently changed
+what a compiler-built transition jaxpr reports about its own inputs. On 0.11.1
+that broke 690 of the 2902 tests in the suite; all of them pass again.
+
+Support for JAX 0.8 through 0.10 is unchanged — the fix derives the
+information JAX stopped storing rather than branching on a version, so there is
+one code path across every supported release. No public API changes.
+
+### Fixes
+
+- **Restored compatibility with JAX / jaxlib 0.11.** JAX 0.11 merged
+  `ClosedJaxpr` into `Jaxpr`: a jaxpr now holds a single positional input list
+  and derives the `constvars` / `invars` boundary from how many constant
+  *values* are attached, instead of storing it alongside the symbols. The ETP
+  compiler builds *transition jaxprs* — programs whose `invars` are the
+  differentiated inputs (a hidden state at `t-1`, or an ETP primitive's output
+  `y`) and whose `constvars` are surrounding intermediates bound from the
+  forward pass at execution time. Those carry symbols but no attached values,
+  so on 0.11 they began reporting `constvars == []` and folding the constvars
+  into `invars`.
+
+  Every consumer that recovered the split by reading `jaxpr.constvars` back
+  therefore passed too few values to `jax.core.eval_jaxpr`, which failed
+  arity checking with `ValueError: foreach() argument 2 is shorter than
+  argument 1` the first time any algorithm evaluated a transition. Since that
+  is the shared entry point for hidden→hidden and hidden→weight Jacobians, it
+  took down essentially every gradient path: D-RTRL, ES-D-RTRL / pp_prop,
+  EProp, OSTL, SnAp, UORO, DNI and all of the BPTT oracle cross-checks, across
+  every ETP primitive family (dense, LoRA, sparse, convolutional,
+  element-wise, embedding).
+
+  The split is now derived from the invar count — which every caller already
+  knows, since the invars are what it is about to feed in — via three helpers
+  in `braintrace._compatible_imports`: `jaxpr_all_invars`,
+  `split_jaxpr_invars` and `jaxpr_constvars`. `split_jaxpr_invars` range-checks
+  its argument, so a miscounted call raises at the compiler boundary rather
+  than producing a misaligned argument list. The full analysis is in
+  `docs/specs/2026-08-18-jax-011-jaxpr-merge-compat.md`.
+
+- **Fixed SnAp-n position analysis under JAX 0.11.** `build_snap_pattern` let
+  `analyze_position_adjacency` seed its reachability walk from the transition
+  jaxpr's own `invars`. Under the merged representation that set silently
+  widened to include every constvar, so the derived neighbourhood was inflated
+  — typically all the way to the conservative all-positions-couple fallback,
+  which is correct but costs orders of magnitude in trace size. The group's
+  `hidden_invars` are now passed explicitly.
+
+### Internal
+
+- `HiddenGroup.transition_jaxpr_constvars` is populated from the constvars the
+  builder actually used rather than read back off the constructed jaxpr,
+  matching how `Hidden2GroupTransition.other_invars` has always been handled.
+  Const-var collection in the graph executor, the compiled-graph output
+  registration and structured scan descent go through the new helpers.
+
+- The `jax-version` CI matrix pins `0.11.0` alongside `0.8.0` / `0.9.0` /
+  `0.10.0` and `latest`, so the merged-`Jaxpr` representation stays covered
+  once `latest` moves past it.
+
+- New regression coverage for the split itself: helper-level tests in
+  `braintrace/_compatible_imports_test.py` (round-trip, zero- and
+  all-constvar edges, out-of-range rejection) and compiler-level tests
+  asserting that a compiled group's recorded constvars match its jaxpr's
+  leading inputs and that the transition still evaluates.
+
+
 ## Version 0.2.5
 
 > **This patch release removes public API.** Despite the patch version number,

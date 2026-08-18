@@ -15,12 +15,16 @@
 
 import types
 
+import jax
 import jax.numpy as jnp
+import pytest
 from jax import jit, make_jaxpr, lax
 
 from braintrace._compatible_imports import (
+    Jaxpr,
     is_jit_primitive, is_scan_primitive, is_while_primitive,
     is_cond_primitive, scan_num_consts_carry, scan_params_add_ys,
+    jaxpr_all_invars, split_jaxpr_invars, jaxpr_constvars,
 )
 
 
@@ -79,6 +83,76 @@ class TestScanAddYs:
         assert len(new_params['ft_out']) == len(params['ft_out']) + 2
         assert len(new_carry) == len(old_carry)      # carry unchanged
         assert len(new_ys) == len(old_ys) + 2        # ys grew by 2
+
+
+def _open_jaxpr_with_split(num_constvars: int):
+    """An open jaxpr built the way the compiler builds transition jaxprs.
+
+    Symbolic ``constvars`` with no attached const *values* -- the shape JAX
+    0.11 no longer records a boundary for. Returns ``(jaxpr, constvars,
+    invars)`` so a test can compare against the intended split rather than
+    whatever the object reports.
+    """
+
+    def f(a, b, h):
+        return a * h + b
+
+    traced = make_jaxpr(f)(jnp.ones(3), jnp.ones(3), jnp.ones(3)).jaxpr
+    all_in = jaxpr_all_invars(traced)
+    constvars, invars = all_in[:num_constvars], all_in[num_constvars:]
+    jaxpr = Jaxpr(
+        constvars=constvars,
+        invars=invars,
+        outvars=traced.outvars,
+        eqns=traced.eqns,
+        debug_info=traced.debug_info,
+    )
+    return jaxpr, constvars, invars
+
+
+class TestJaxprInvarSplit:
+    """The const/invar split of a value-less open jaxpr survives JAX 0.11.
+
+    JAX 0.11 merged ``ClosedJaxpr`` into ``Jaxpr`` and derives
+    ``constvars``/``invars`` from how many const *values* are attached, so an
+    open jaxpr built with symbolic constvars reports ``constvars == []``. These
+    helpers recover the boundary from the known invar count instead.
+    """
+
+    def test_all_invars_is_the_eval_jaxpr_argument_order(self):
+        jaxpr, constvars, invars = _open_jaxpr_with_split(2)
+        assert jaxpr_all_invars(jaxpr) == [*constvars, *invars]
+
+    def test_split_recovers_the_intended_boundary(self):
+        jaxpr, constvars, invars = _open_jaxpr_with_split(2)
+        assert split_jaxpr_invars(jaxpr, len(invars)) == (constvars, invars)
+        assert jaxpr_constvars(jaxpr, len(invars)) == constvars
+
+    def test_the_recovered_consts_actually_evaluate(self):
+        # The regression that broke the whole suite on jaxlib 0.11.1: reading
+        # ``jaxpr.constvars`` back handed eval_jaxpr too few values.
+        jaxpr, _, invars = _open_jaxpr_with_split(2)
+        consts = [jnp.full((3,), 2.0), jnp.full((3,), 5.0)]
+        out = jax.core.eval_jaxpr(jaxpr, consts, jnp.full((3,), 3.0))
+        assert jnp.allclose(out[0], 2.0 * 3.0 + 5.0)
+
+    def test_zero_constvars_edge(self):
+        jaxpr, constvars, invars = _open_jaxpr_with_split(0)
+        assert constvars == []
+        assert jaxpr_constvars(jaxpr, len(invars)) == []
+
+    def test_all_constvars_edge(self):
+        jaxpr, constvars, invars = _open_jaxpr_with_split(3)
+        assert invars == []
+        assert jaxpr_constvars(jaxpr, 0) == constvars
+
+    @pytest.mark.parametrize('num_invars', [-1, 4])
+    def test_out_of_range_num_invars_raises(self, num_invars):
+        # A miscounted call must fail at the compiler boundary, not silently
+        # produce a misaligned eval_jaxpr argument list.
+        jaxpr, _, _ = _open_jaxpr_with_split(1)
+        with pytest.raises(ValueError, match='positional inputs'):
+            split_jaxpr_invars(jaxpr, num_invars)
 
 
 class TestPrimitive:

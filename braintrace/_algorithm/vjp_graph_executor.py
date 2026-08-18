@@ -49,7 +49,7 @@ from brainstate._compatible_import import get_aval
 from jax.interpreters import partial_eval as pe
 from jax.tree_util import register_pytree_node_class
 
-from braintrace._compatible_imports import Var, wrap_init
+from braintrace._compatible_imports import Var, jaxpr_constvars, wrap_init
 from braintrace._compiler import (
     ControlFlowPolicy,
     DEFAULT_MAX_JACOBIAN_ELEMENTS,
@@ -341,7 +341,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                 y_stack = intermediate_values[m[relation.y_var]]
                 cvars = list(dict.fromkeys(
                     v for j in relation.y_to_hidden_group_jaxprs
-                    for v in j.constvars))
+                    for v in jaxpr_constvars(j, 1)))
                 c_stacks = tuple(intermediate_values[m[v]] for v in cvars)
 
                 def _one_substep(
