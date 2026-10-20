@@ -41,7 +41,7 @@ name = "braintrace"
 description = "Enabling Scalable Online Learning for Brain Dynamics."
 readme = "README.md"
 license = { text = "Apache-2.0 license" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 authors = [{ name = "BrainTrace Developers", email = "chao.brain@qq.com" }]
 keywords = [
     "computational neuroscience",
@@ -54,10 +54,10 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
@@ -75,7 +75,7 @@ dependencies = [
     # version-pinned, and a published cap cannot be relaxed for artifacts
     # already on PyPI. Rationale in
     # `docs/specs/2026-08-07-e05-declare-jax-dependency.md`.
-    "jax>=0.8.0",
+    "jax>=0.9.0",
     "brainstate>=0.5.2",
     "brainunit",
     "brainevent>=0.1.2",
@@ -93,10 +93,10 @@ dynamic = ["version"]
 
 
 # Backend selectors. These stay unversioned on purpose: extras of the *same*
-# distribution are additive, not alternative, so the `jax>=0.8.0` floor in
+# distribution are additive, not alternative, so the `jax>=0.9.0` floor in
 # `[project].dependencies` already applies here and stating it again in five
 # places would only let it drift. `braintrace[cuda12]` resolves to one `jax`
-# satisfying `>=0.8.0` *with* the `cuda12` extra, which is what pulls in
+# satisfying `>=0.9.0` *with* the `cuda12` extra, which is what pulls in
 # `jax-cuda12-plugin`; the bare core requirement cannot force a CPU build,
 # because the backend lives in additional plugin packages rather than in the
 # `jax` wheel itself.
