@@ -14,7 +14,7 @@
 # ==============================================================================
 
 
-from typing import Dict, FrozenSet, List, Optional, Set, Sequence, NamedTuple, Any
+from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, cast
 
 import brainstate
 import jax.core
@@ -223,10 +223,10 @@ class HiddenPerturbation(NamedTuple):
                 f'got {len(bypass_hidden_data)}.'
             )
         by_path = dict(zip(self.bypass_hidden_paths, bypass_hidden_data))
-        per_perturb = [
-            by_path[path] if path in by_path else jnp.zeros(v.aval.shape, v.aval.dtype)
-            for path, v in zip(self.perturb_hidden_paths, self.perturb_vars)
-        ]
+        per_perturb = []
+        for path, v in zip(self.perturb_hidden_paths, self.perturb_vars):
+            aval = cast(jax.core.ShapedArray, v.aval)
+            per_perturb.append(by_path[path] if path in by_path else jnp.zeros(aval.shape, aval.dtype))
         return self.perturb_data_to_hidden_group_data(per_perturb, hidden_groups)
 
     def perturb_data_to_hidden_group_data(
@@ -372,7 +372,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         path_to_state: Dict[Path, brainstate.HiddenState],
         control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
         descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
-        weight_path_to_invars: Optional[Dict[Path, Sequence[Var]]] = None,
+        weight_path_to_invars: Optional[Mapping[Path, Sequence[Var]]] = None,
         bypass_merge_positions: Sequence[int] = (),
     ):
         # necessary data structures
@@ -486,7 +486,8 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         )
         param_bypass_keys = [k for k in bypass.bypass_keys if k[0] == 'param']
         hidden_bypass_keys = [k for k in bypass.bypass_keys if k[0] == 'hidden']
-        n_param_leaves = sum(len(self.weight_path_to_invars[k[1]]) for k in param_bypass_keys)
+        # one copy per hidden bypass (a hidden invar is a single leaf)
+        n_param_leaves = len(bypass.bypass_vars) - len(hidden_bypass_keys)
         jaxpr = Jaxpr(
             constvars=list(self.closed_jaxpr.jaxpr.constvars),
             invars=(
@@ -723,7 +724,7 @@ def add_hidden_perturbation_in_jaxpr(
     path_to_state: Dict[Path, brainstate.HiddenState],
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
-    weight_path_to_invars: Optional[Dict[Path, Sequence[Var]]] = None,
+    weight_path_to_invars: Optional[Mapping[Path, Sequence[Var]]] = None,
     bypass_merge_positions: Sequence[int] = (),
 ) -> HiddenPerturbation:
     """

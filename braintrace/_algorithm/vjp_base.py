@@ -1313,6 +1313,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         dg_weights_prev = None
         if prev_etrace_vals is not None:
             hidden_perturb = self.graph.hidden_perturb
+            if hidden_perturb is None:
+                raise ValueError(
+                    'The forward pass kept the previous eligibility trace for a '
+                    'hidden output bypass, but the compiled graph carries no '
+                    'hidden perturbation. Recompile the graph.'
+                )
             dl2h_prev = hidden_perturb.bypass_hidden_data_to_hidden_group_data(
                 [u.get_mantissa(dg_hidden_bypass[path]) for path in hidden_perturb.bypass_hidden_paths],
                 self.graph.hidden_groups,
@@ -1843,11 +1849,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         dict
             Parameter path to its gradient (``None`` for no contribution).
         """
+        hidden_perturb = self.graph.hidden_perturb
+        paths = [] if hidden_perturb is None else list(hidden_perturb.bypass_hidden_paths)
         raise NotImplementedError(
             f'{type(self).__name__} does not implement '
             f'`_solve_previous_trace_gradients`, which the hidden output bypass '
-            f'of the compiled graph (hidden states '
-            f'{list(self.graph.hidden_perturb.bypass_hidden_paths)}) needs.'
+            f'of the compiled graph (hidden states {paths}) needs.'
         )
 
     def _solve_weight_gradients(

@@ -56,7 +56,7 @@ reverse-mode rule) or an equation with effects (duplicating it would repeat
 the effect).
 """
 
-from typing import Dict, FrozenSet, Hashable, List, NamedTuple, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, Hashable, List, NamedTuple, Sequence, Set, Tuple, cast
 
 import jax
 import jax.numpy as jnp
@@ -102,8 +102,9 @@ class OutputBypass(NamedTuple):
     eqns: List[JaxprEqn]
     outvars: List
     bypass_vars: List[Var]
-    bypass_keys: List[Hashable]
-    dropped_keys: List[Hashable]
+    # the caller's source keys (``Any``: callers index into structured keys)
+    bypass_keys: List[Any]
+    dropped_keys: List[Any]
 
 
 def _is_blocking(eqn: JaxprEqn) -> bool:
@@ -115,8 +116,14 @@ def _is_blocking(eqn: JaxprEqn) -> bool:
         Jaxpr(constvars=[], invars=[], outvars=[], eqns=[eqn]))
 
 
+def _shaped(v: Var) -> jax.core.ShapedArray:
+    # every variable of a traced step is array-valued
+    aval = cast(jax.core.ShapedArray, v.aval)
+    return jax.core.ShapedArray(aval.shape, aval.dtype)
+
+
 def _is_inexact(v: Var) -> bool:
-    return jnp.issubdtype(v.aval.dtype, jnp.inexact)
+    return jnp.issubdtype(_shaped(v).dtype, jnp.inexact)
 
 
 def _find_cones(
@@ -211,7 +218,7 @@ def add_output_bypass(
     bypass_vars: List[Var] = []
     for key in bypass_keys:
         for v in sources[key]:
-            copy = new_var('', jax.core.ShapedArray(v.aval.shape, v.aval.dtype))
+            copy = new_var('', _shaped(v))
             bypass_vars.append(copy)
             if v not in cut_vars:
                 dup[v] = copy
@@ -221,7 +228,7 @@ def add_output_bypass(
 
     def _detached(v: Var) -> Var:
         if v not in detached:
-            fresh = new_var('', jax.core.ShapedArray(v.aval.shape, v.aval.dtype))
+            fresh = new_var('', _shaped(v))
             new_eqns.append(new_jaxpr_eqn([v], [fresh], stop_gradient_p, {}, set()))
             detached[v] = fresh
         return detached[v]
@@ -238,10 +245,7 @@ def add_output_bypass(
             v if isinstance(v, Literal) else (dup[v] if v in dup else _detached(v))
             for v in eqn.invars
         ]
-        dup_outvars = [
-            new_var('', jax.core.ShapedArray(ov.aval.shape, ov.aval.dtype))
-            for ov in eqn.outvars
-        ]
+        dup_outvars = [new_var('', _shaped(ov)) for ov in eqn.outvars]
         new_eqns.append(eqn.replace(invars=dup_invars, outvars=dup_outvars))
         for ov, dv in zip(eqn.outvars, dup_outvars):
             if ov not in cut_vars:
@@ -251,7 +255,8 @@ def add_output_bypass(
     merged: Dict[Var, Var] = {}
 
     def _like(v: Var, dtype=None) -> Var:
-        return new_var('', jax.core.ShapedArray(v.aval.shape, dtype or v.aval.dtype))
+        aval = _shaped(v)
+        return new_var('', jax.core.ShapedArray(aval.shape, dtype or aval.dtype))
 
     for k in merge_positions:
         v = outvars[k]

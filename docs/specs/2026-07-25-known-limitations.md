@@ -58,7 +58,7 @@ resolution, never that a test stopped being run.
 | F-30 | the IO-dim f-side de-biasing correction is indexed by `update()` call count, not by trace-step count, so it is exact only for single-step input | active, **preserved deliberately** — fixing it moves `pp_prop` / `OSTLFeedforward` gradients | `io_dim_vjp_test.py::TestBiasCorrectionTimeIndex`, both the structural claim and the finite-window consequence |
 | F-31 | on a hidden group whose `y -> hidden` tail is not position-preserving, *no* within-group scope reaches BPTT — saturated SnAp / full within-group RTRL included | active, **structural** — pre-P3, affects every `recurrence_scope`; the compiler detects the tail and warns | `_algorithm/snap_n_test.py::TestConservativeFallbackEndToEnd::test_a_relabelling_tail_defeats_saturation_and_says_so`, against the `roll=0` control; measured below |
 | F-32 | the coupled-scope transition is materialised as a dense `(*V, S, *V, S)` Jacobian, so `random_projection` costs `O((V·S)^2)` per group even though it only ever needs `D @ s_tilde` — one JVP would do | active, **deliberate**; a matrix-free `D_full` would need a JVP seam the executor does not have | `_algorithm/vjp_graph_executor_test.py::TestFullJacobianFlag::test_the_flag_changes_the_jacobian_shape` records the shape; UORO's docstring states the memory honestly |
-| F-33 | under `vjp_method='single-step'`, every **plain** (non-ETP) parameter's gradient is exactly **zero** — not merely truncated | active, **structural** | `oracle_models_test.py::test_single_step_zeroes_every_plain_key`, and for the preset that cannot avoid it, `three_factor_test.py::TestItDoesSomethingMeasurably::test_every_plain_parameter_gets_an_exact_zero_which_is_f_33`; consequence documented in `ThreeFactor`'s docstring |
+| F-33 | under `vjp_method='single-step'`, a **plain** (non-ETP) parameter whose path to the loss crosses a hidden state gets exactly **zero** — not merely truncated (a plain readout is exact since #185) | active, **structural** | `oracle_models_test.py::test_single_step_zeroes_plain_keys_that_feed_hidden_state`, and for the preset that cannot avoid it, `three_factor_test.py::TestItDoesSomethingMeasurably::test_every_plain_parameter_gets_an_exact_zero_which_is_f_33`; consequence documented in `ThreeFactor`'s docstring |
 | F-34 | in the multi-step backward pass, `dg_etrace_params` carries the within-window gradient of **every** trainable parameter, plain ones included, while `dg_non_etrace_params` is empty — so the ETP/plain split cannot be read off which dictionary a parameter arrives in | active, **naming only**; the graph is the authority | `_algorithm/vjp_base_test.py::TestTheDefaultHooksAreInert::test_etp_routed_paths_reads_the_compiled_graph`; `_etp_routed_paths()` exists because of this |
 | F-35 | a `train_synthetic_gradient` fit is valid only for the exact `(loss_fn, chunk_size)` pair it was given, and **nothing checks that deployment matches** — a mismatch is not degraded DNI but noise shaped like a cotangent, measurably worse than leaving DNI off | active, **documented not enforced**; the learner never sees the caller's objective, so it has nothing to compare against. Narrowed since: the helper no longer *introduces* a mismatch of its own — a sequence length that is not a multiple of `chunk_size` used to be truncated into a short final window, fitting one pair against a shorter future than any deployed window, and is now refused | `dni_test.py::TestALearnedSynthesiserHelps::test_training_on_the_wrong_window_size_is_worse_than_not_training` pins the `chunk_size` half; the `loss_fn` half is measured in B4's docstring (0.577 against 0.140 for `M ≡ 0`). Since the sequence driver, `chunk_size` is also a keyword on `etrace_grad`, so fit-vs-deploy mismatch is reachable without writing a window by hand — `sequence_test.py::TestAlgorithmInteractions::test_a_chunk_size_mismatch_degrades_a_fitted_synthesiser` fits at 1, deploys at 2 (2.0e-02 relative), with an untrained-synthesiser control at 1.3e-01 so the comparison is not between two no-ops. `reduction` is **not** a mismatch surface: it divides once after the scan and never enters the differentiated objective (`|mean − sum/T| = 7.5e-09`) |
 | F-36 | DNI's pass-2 routing is **path**-granular, so a parameter used *both* as an ETP weight and plainly loses the future credit of its plain occurrence — the whole leaf is skipped because the path is ETP-routed | active, **structural**; the gradient dictionaries are keyed by path, not by occurrence, so occurrence-level routing is not expressible without changing every engine's `_solve_weight_gradients` contract | `dni_test.py::TestMixedRoutingIsPathGranular` |
@@ -208,16 +208,20 @@ single-group model with an **elementwise** `y -> hidden` tail.
 
 ## Notes on F-33
 
-Under `vjp_method='single-step'` the residual jaxpr yields an **empty**
-`dg_etrace_params` and an empty `dg_non_etrace_params`, so `dG_weights[path]`
-is never written for a non-ETP parameter and stays `None` — which surfaces as an
+Under `vjp_method='single-step'` the residual jaxpr yields only the
+same-step *output-bypass* gradients in `dg_etrace_params` (#185): parameters
+whose path to an output crosses no new hidden value. A non-ETP parameter whose
+path to the loss crosses a hidden state has no trace and no bypass, so
+`dG_weights[path]` is never written and stays `None` — which surfaces as an
 exact zero, not as a truncated approximation. Measured on `plain_and_etp_rnn`
 (ETP `w`, plain `win`, `wout`): the single-step total gradient is exactly zero
-for both plain keys while `w` is finite.
+for `win`, while the readout `wout` equals BPTT (all of its credit is
+same-step) and `w` is finite. (Before #185 `wout` was zero too.)
 
 This is a property of the single-step window, not of any learning rule, but it
 bounds what a single-step-only rule can train. `ThreeFactor` is single-step by
-construction (see its docstring for why), so a model given to it will train only
+construction (see its docstring for why), and its modulatory signal replaces
+`dL/dh`, so it compiles without the bypass: a model given to it will train only
 its ETP-routed parameters. The rule for callers: route what you intend to
 modulate through an ETP primitive.
 
