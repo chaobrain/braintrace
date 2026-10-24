@@ -21,7 +21,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple, cast
 
 import brainstate
 
@@ -257,11 +257,16 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
         #   - the weight states, which is invariant during the training process
         #   - the hidden states, the recurrent states, which may be changed between different training epochs
         #   - the other states, which may be changed between different training epochs
+        # ``FlattedDict.split`` returns one ``FlattedDict`` per filter (the
+        # stubs only promise a ``NestedDict``)
         (
             self._param_states,
             self._hidden_states,
             self._other_states
-        ) = self.graph.module_info.retrieved_model_states.split(brainstate.ParamState, brainstate.HiddenState, ...)
+        ) = cast(
+            Tuple[brainstate.util.FlattedDict, brainstate.util.FlattedDict, brainstate.util.FlattedDict],
+            self.graph.module_info.retrieved_model_states.split(brainstate.ParamState, brainstate.HiddenState, ...),
+        )
 
     def compile_graph(self, *args: Any) -> None:
         r"""

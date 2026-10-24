@@ -247,6 +247,27 @@ class TestStateLifecycle:
         assert isinstance(result, tuple)
         assert len(result) == 2
 
+    def test_get_etrace_of_elementwise_weight(self):
+        # An element-wise relation has no x trace; only its df traces are returned.
+        class Leaky(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.full((3,), 0.5))
+
+            def init_state(self, *args, **kwargs):
+                self.h = brainstate.HiddenState(jnp.zeros(3))
+
+            def update(self, x):
+                self.h.value = 0.9 * self.h.value + braintrace.element_wise(self.w.value) * x
+                return self.h.value
+
+        model = Leaky()
+        brainstate.nn.init_all_states(model)
+        algo = _compiled(model)
+        xs, dfs = algo.get_etrace_of(model.w)
+        assert xs == {}
+        assert len(dfs) == 1
+
     def test_get_etrace_of_plain_weight_raises(self):
         model = _build(om.tanh_rnn)
         algo = _compiled(model)

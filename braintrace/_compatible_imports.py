@@ -23,6 +23,7 @@ __all__ = [
     'ClosedJaxpr',
     'Literal',
     'new_var',
+    'shaped_aval',
     'new_jaxpr_eqn',
     'stop_gradient_p',
     'is_jit_primitive',
@@ -37,7 +38,7 @@ __all__ = [
     'jaxpr_constvars',
 ]
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, cast
 
 from brainstate._compatible_import import Primitive, Var, JaxprEqn, Jaxpr, ClosedJaxpr, Literal, wrap_init
 
@@ -67,9 +68,30 @@ except ImportError:  # future JAX relocation: recover the primitive by tracing
 
 def new_var(suffix: Any, aval: Any) -> Var:
     if jax.__version_info__ < (0, 6, 2):
-        return Var(suffix, aval)
+        # the pre-0.6.2 constructor; the installed stubs only know ``Var(aval)``
+        return Var(suffix, aval)  # type: ignore[call-arg]
     else:
         return Var(aval)
+
+
+def shaped_aval(atom: Any) -> jax.core.ShapedArray:
+    """Return the aval of a jaxpr variable or literal as a ``ShapedArray``.
+
+    The JAX stubs type ``Var.aval`` as the abstract base ``AbstractValue``,
+    which has no ``shape`` / ``dtype`` / ``ndim``. Every atom of a traced
+    array program carries a ``ShapedArray``, so this only narrows the type.
+
+    Parameters
+    ----------
+    atom : Var or Literal
+        A jaxpr atom.
+
+    Returns
+    -------
+    jax.core.ShapedArray
+        Its aval.
+    """
+    return cast(jax.core.ShapedArray, atom.aval)
 
 
 def is_jit_primitive(eqn: JaxprEqn) -> bool:

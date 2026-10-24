@@ -64,6 +64,7 @@ from braintrace._compatible_imports import (
     new_jaxpr_eqn,
     new_var,
     scan_num_consts_carry,
+    shaped_aval,
 )
 from braintrace._misc import CompilationError
 from braintrace._op import is_etp_primitive
@@ -985,7 +986,7 @@ def _unroll_scans_once(
             outvar_map = final_carry_map if t == final_t else {}
             for body_eqn in body.eqns:
                 fresh_outvars = [
-                    outvar_map.get(v) if isinstance(v, Var) and v in outvar_map
+                    outvar_map[v] if isinstance(v, Var) and v in outvar_map
                     else fresh_like(v)
                     for v in body_eqn.outvars
                 ]
@@ -1007,7 +1008,7 @@ def _unroll_scans_once(
         for ov, final_atom in zip(eqn.outvars[:num_carry], carry_atoms):
             if ov not in consumed or final_atom is ov:
                 continue
-            shape = tuple(ov.aval.shape)
+            shape = tuple(shaped_aval(ov).shape)
             new_eqns.append(new_jaxpr_eqn(
                 [final_atom],
                 [ov],
@@ -1023,7 +1024,7 @@ def _unroll_scans_once(
         for j, ov in enumerate(eqn.outvars[num_carry:]):
             if ov not in consumed:
                 continue
-            stacked_shape = tuple(ov.aval.shape)
+            stacked_shape = tuple(shaped_aval(ov).shape)
             slice_shape = stacked_shape[1:]
             slice_vars = []
             for y_atom in ys_atoms[j]:

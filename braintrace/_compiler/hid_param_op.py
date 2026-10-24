@@ -49,6 +49,7 @@ from typing import (
     Sequence,
     Set,
     Tuple,
+    Union,
 )
 
 import brainstate
@@ -57,6 +58,7 @@ import jax
 from braintrace._compatible_imports import (
     Primitive,
     Var,
+    Literal,
     JaxprEqn,
     Jaxpr,
     is_jit_primitive,
@@ -64,6 +66,7 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     is_cond_primitive,
     jaxpr_constvars,
+    shaped_aval,
 )
 from braintrace._op import (
     get_trainable_invars,
@@ -287,8 +290,8 @@ HiddenParamOpRelation.__module__ = 'braintrace'
 
 def _resolve_eqn_trainable_invars(
     eqn: JaxprEqn,
-) -> Dict[str, Var]:
-    """Return ``{key: invar_var}`` for every trainable input of *eqn*."""
+) -> Dict[str, Union[Var, Literal]]:
+    """Return ``{key: invar_atom}`` for every trainable input of *eqn*."""
     key_to_idx = get_trainable_invars(eqn.primitive, eqn.params)
     return {k: eqn.invars[i] for k, i in key_to_idx.items()}
 
@@ -327,10 +330,10 @@ def _resolve_eqn_vars(
 # ---------------------------------------------------------------------------
 
 def _trace_var_to_param(
-    var: Var,
+    var: Union[Var, Literal],
     producers: Dict[Var, JaxprEqn],
     invar_to_weight_path: Dict[Var, Path],
-    cache: Optional[Dict[Var, Optional[Tuple[Path, Tuple[Primitive, ...]]]]] = None,
+    cache: Optional[Dict[Any, Optional[Tuple[Path, Tuple[Primitive, ...]]]]] = None,
 ) -> Tuple[Optional[Path], Tuple[Primitive, ...]]:
     """Trace *var* backward through the Jaxpr to its originating ``ParamState``.
 
@@ -883,7 +886,8 @@ def find_hidden_param_op_relations_from_jaxpr(
                 invar, producers, invar_to_weight_path,
                 cache=weight_trace_cache,
             )
-            if t_path is None:
+            # a literal never traces to a ParamState (its path is None)
+            if t_path is None or not isinstance(invar, Var):
                 # Trainable invar doesn't trace to any ParamState (e.g. a
                 # constant bias passed directly as a jnp.array). Emit an INFO
                 # diagnostic so users know no gradient will be produced for
@@ -945,23 +949,23 @@ def find_hidden_param_op_relations_from_jaxpr(
         path_class: Dict[Path, str] = {}
         for hvar in list(reachable_hvars):
             try:
-                jax.numpy.broadcast_shapes(y_var.aval.shape, hvar.aval.shape)
+                jax.numpy.broadcast_shapes(shaped_aval(y_var).shape, shaped_aval(hvar).shape)
             except ValueError:
                 emit(
                     kind=DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH,
                     level=DiagnosticLevel.WARNING,
                     message=(
                         f'ETP op {primitive.name}: weight={weight_path}, '
-                        f'y shape={y_var.aval.shape} not broadcastable with '
-                        f'hidden shape={hvar.aval.shape} at '
+                        f'y shape={shaped_aval(y_var).shape} not broadcastable with '
+                        f'hidden shape={shaped_aval(hvar).shape} at '
                         f'{outvar_to_hidden_path[hvar]}. Removing connection.'
                     ),
                     primitive=primitive,
                     weight_path=weight_path,
                     hidden_paths=(outvar_to_hidden_path[hvar],),
                     context={
-                        'y_shape': tuple(y_var.aval.shape),
-                        'hidden_shape': tuple(hvar.aval.shape),
+                        'y_shape': tuple(shaped_aval(y_var).shape),
+                        'hidden_shape': tuple(shaped_aval(hvar).shape),
                     },
                 )
                 reachable_hvars.pop(hvar, None)
