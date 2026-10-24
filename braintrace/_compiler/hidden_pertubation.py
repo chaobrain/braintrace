@@ -28,6 +28,7 @@ from braintrace._compatible_imports import (
     new_var,
     new_jaxpr_eqn,
     stop_gradient_p,
+    is_while_primitive,
 )
 from braintrace._misc import (
     git_issue_addr,
@@ -338,6 +339,11 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         # final revised equations
         self.revised_eqns: list = []
 
+        # ``while`` equations to detach: every loop whose result reaches a
+        # hidden outvar, directly or through further equations
+        self._while_ids_to_detach = _while_eqns_reaching(
+            self.closed_jaxpr.jaxpr, set(self.hidden_outvars))
+
         # revising equations
         self._eval_jaxpr(self.closed_jaxpr.jaxpr)
 
@@ -425,17 +431,21 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         self._eval_eqn(eqn)
 
     def _eval_while(self, eqn: JaxprEqn) -> None:
-        """Evaluate a ``while`` equation, detaching its inputs when it
-        produces a hidden state.
+        """Evaluate a ``while`` equation, detaching its inputs when its
+        result reaches a hidden state.
 
-        JAX cannot transpose ``while``, so a hidden-producing loop left
-        as-is would make ``jax.vjp`` of the perturbed step untraceable.
-        Every ``Var`` input of the loop is therefore routed through a
-        ``stop_gradient`` equation first; the perturbation add stays
-        outside the detach (see the class Notes).
+        JAX cannot transpose ``while``, so a loop on the path to a hidden
+        state left as-is would make ``jax.vjp`` of the perturbed step
+        untraceable. That holds whether the loop writes the hidden state
+        itself or its result passes through further equations first
+        (``h <- while(...)(h) + I``). Every ``Var`` input of such a loop is
+        therefore routed through a ``stop_gradient`` equation first; the
+        perturbation add stays outside the detach (see the class Notes).
+        A loop that reaches no hidden state (e.g. on the readout only) is
+        left unchanged.
         """
         check_unsupported_op(self, eqn, 'while')
-        if any(ov in self.hidden_jaxvars_to_remove for ov in eqn.outvars):
+        if id(eqn) in self._while_ids_to_detach:
             eqn = self._detach_invars(eqn)
         self._eval_eqn(eqn)
 
@@ -530,6 +540,25 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
 
     def _new_var_like(self, v: Var) -> Var:
         return new_var('', jax.core.ShapedArray(v.aval.shape, v.aval.dtype))
+
+
+def _while_eqns_reaching(jaxpr: Jaxpr, targets: Set[Var]) -> Set[int]:
+    """Return the ``id()`` of every top-level ``while`` equation whose
+    outputs reach one of ``targets``.
+
+    One backward pass: a variable is *needed* if a target depends on it,
+    and an equation is on a path to a target if any of its outputs is
+    needed.
+    """
+    needed = set(targets)
+    found: Set[int] = set()
+    for eqn in reversed(jaxpr.eqns):
+        if not any(ov in needed for ov in eqn.outvars):
+            continue
+        if is_while_primitive(eqn):
+            found.add(id(eqn))
+        needed.update(iv for iv in eqn.invars if isinstance(iv, Var))
+    return found
 
 
 def add_hidden_perturbation_in_jaxpr(

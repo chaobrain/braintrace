@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 
+import warnings
 from pprint import pprint
 
 import brainstate
@@ -369,30 +370,15 @@ class TestWhileDetach:
             np.asarray(out_loss), np.asarray(base_loss) + 0.25 * h0.size, rtol=1e-6
         )
 
-    def test_non_hidden_while_untouched(self):
+    @staticmethod
+    def _perturb_fn(f, h0, x):
         import jax
-        import jax.numpy as jnp
         from braintrace._compiler.hidden_pertubation import (
             JaxprEvalForHiddenPerturbation,
         )
-
-        def f(h_prev, x):
-            # the while computes an auxiliary value; the hidden state is
-            # produced by a plain tanh equation
-            def body(s):
-                i, v = s
-                return i + 1, v * 0.5
-
-            _, aux = jax.lax.while_loop(lambda s: s[0] < 2, body, (0, x))
-            h_new = jnp.tanh(h_prev + aux)
-            return h_new
-
-        h0 = jnp.zeros(3)
-        x = jnp.ones(3)
         closed = jax.make_jaxpr(f)(h0, x)
         h_in = closed.jaxpr.invars[0]
         h_out = closed.jaxpr.outvars[0]
-
         perturb = JaxprEvalForHiddenPerturbation(
             closed_jaxpr=closed,
             hidden_outvar_to_invar={h_out: h_in},
@@ -401,10 +387,67 @@ class TestWhileDetach:
             outvar_to_hidden_path={h_out: ('h',)},
             path_to_state={('h',): None},
         ).compile()
+        return closed, perturb
 
+    @staticmethod
+    def _halve_twice(v):
+        import jax
+        return jax.lax.while_loop(
+            lambda s: s[0] < 2, lambda s: (s[0] + 1, s[1] * 0.5), (0, v))[1]
+
+    @pytest.mark.parametrize('mode', ['indirect', 'input_fed'])
+    def test_while_reaching_hidden_indirectly_is_detached(self, mode):
+        """A loop whose result reaches the hidden state through further
+        equations is detached too, so the perturbed VJP is traceable (#186)."""
+        import jax
+        import jax.numpy as jnp
+        import numpy as np
+        from braintrace import DiagnosticKind
+        from braintrace._compiler.diagnostics import diagnostic_context
+
+        def f(h_prev, x):
+            if mode == 'indirect':
+                h_new = self._halve_twice(h_prev) + x      # while(h) + I
+            else:
+                h_new = jnp.tanh(h_prev + self._halve_twice(x))
+            return h_new, h_new.sum()
+
+        h0, x = jnp.ones(3), jnp.full(3, 2.0)
+        with diagnostic_context() as reporter, warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            closed, perturb = self._perturb_fn(f, h0, x)
         eqns = perturb.perturb_jaxpr.jaxpr.eqns
-        names = [e.primitive.name for e in eqns]
-        assert 'stop_gradient' not in names
+        (orig_while,) = [e for e in closed.jaxpr.eqns if e.primitive.name == 'while']
+        (new_while,) = [e for e in eqns if e.primitive.name == 'while']
+        assert list(new_while.invars) != list(orig_while.invars)
+        detaches = [r for r in reporter.records()
+                    if r.kind == DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD
+                    and r.context.get('site') == 'perturbation']
+        assert len(detaches) == 1
+
+        def loss(h, p):
+            return perturb.eval_jaxpr([h, x], [p])[1]
+
+        _, f_vjp = jax.vjp(loss, h0, jnp.zeros_like(h0))
+        dh0, dp = f_vjp(jnp.ones(()))
+        np.testing.assert_allclose(np.asarray(dp), np.ones(3), rtol=1e-6)
+        # values are unchanged by the detach
+        base = jax.core.eval_jaxpr(closed.jaxpr, closed.consts, h0, x)
+        out = perturb.eval_jaxpr([h0, x], [jnp.zeros(3)])
+        np.testing.assert_allclose(np.asarray(out[0]), np.asarray(base[0]), rtol=1e-6)
+
+    def test_while_not_reaching_hidden_untouched(self):
+        """A loop on the readout only reaches no hidden state: it is kept as
+        is (detaching it would silently zero dL/dh)."""
+        import jax.numpy as jnp
+
+        def f(h_prev, x):
+            h_new = jnp.tanh(h_prev + x)
+            return h_new, self._halve_twice(h_new).sum()
+
+        closed, perturb = self._perturb_fn(f, jnp.zeros(3), jnp.ones(3))
+        eqns = perturb.perturb_jaxpr.jaxpr.eqns
+        assert 'stop_gradient' not in [e.primitive.name for e in eqns]
         (orig_while,) = [e for e in closed.jaxpr.eqns if e.primitive.name == 'while']
         (new_while,) = [e for e in eqns if e.primitive.name == 'while']
         assert list(new_while.invars) == list(orig_while.invars)
