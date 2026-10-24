@@ -1665,6 +1665,40 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             )
         return group._replace(snap=pattern)
 
+    def _warn_copy_read_in_same_step(self, copy_var: Var) -> None:
+        """Warn when a pure hidden copy is also read towards an output this step.
+
+        ``copy_var`` is both ``h2^t`` (a pure copy) and ``h1^{t-1}``. A read of
+        it that reaches a model output or a non-hidden state, without first
+        passing through a new hidden value, cannot be told apart from a read
+        of ``h1^{t-1}``. It therefore gets no online learning signal.
+        """
+        reached = {copy_var}
+        for eqn in self.jaxpr.eqns:
+            if any(isinstance(v, Var) and v in reached for v in eqn.invars):
+                # stop at new hidden values: their own perturbation carries the signal
+                reached.update(ov for ov in eqn.outvars if ov not in self.hidden_outvar_to_invar)
+        # ``copy_var`` occupies its own hidden-state slot once; any further
+        # occurrence among the jaxpr outvars is a same-step read.
+        hits = [v for v in self.jaxpr.outvars if isinstance(v, Var) and v in reached]
+        if len(hits) <= 1:
+            return
+        copy_path = self.outvar_to_hidden_path[copy_var]
+        source_path = self.invar_to_hidden_path[copy_var]
+        emit(
+            kind=DiagnosticKind.HIDDEN_COPY_SAME_STEP_READ,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'Hidden state {copy_path} is written as a pure copy of the '
+                f'previous value of {source_path}, and that value also reaches '
+                f'an output in the same step. In the traced program the two are '
+                f'one variable, so this read gets no online learning signal. '
+                f'Read {copy_path} on the next step, or compute the output from '
+                f'a new hidden value.'
+            ),
+            hidden_paths=(copy_path, source_path),
+        )
+
     def _post_check(self) -> Tuple[
         Sequence[HiddenGroup],
         Dict[Path, HiddenGroup],
@@ -1706,6 +1740,18 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             + list(transition.connected_hidden_outvars)
             for transition in hidden_to_group_transition
         ]
+        # A pure copy ``h2^t = h1^{t-1}`` (a shift register) has no equation,
+        # so no transition records the edge, and ``h2`` would otherwise fall
+        # back to a zero-recurrence group (dropping ``d h2^t / d h1^{t-1} = 1``).
+        # Its outvar *is* ``h1``'s invar: merge it with ``h1``, and the group
+        # transition maps that invar straight to ``h2^t`` (an identity row).
+        for outvar, invar in self.hidden_outvar_to_invar.items():
+            if outvar is invar or outvar not in self.hidden_invar_to_outvar:
+                continue
+            if self.outvar_to_hidden_path[outvar] in self.descended_hidden_paths:
+                continue
+            outvar_groups.append([self.hidden_invar_to_outvar[outvar], outvar])
+            self._warn_copy_read_in_same_step(outvar)
         outvar_groups = _merge_groups_ordered(outvar_groups)
         outvar_order = {ov: i for i, ov in enumerate(self.hidden_outvar_to_invar)}
         outvar_groups = [
@@ -1910,6 +1956,17 @@ def write_jaxpr_of_hidden_group_transition(
     other_invars = [
         v for v in all_invars
         if v not in all_outvars and v not in hidden_invars
+    ]
+    # A member whose new value depends only on inputs/weights (an input latch
+    # ``latch^t = x @ w``) joins the group through *another* member's
+    # transition (one that reads ``latch^{t-1}``), so no collected equation
+    # produces ``latch^t``. Bind it from the forward pass as a constvar: its
+    # Jacobian rows are then exactly zero, as for the zero-recurrence fallback
+    # in ``_post_check``. A member that *is* a group invar (a pure copy) is
+    # already bound.
+    other_invars += [
+        v for v in dict.fromkeys(hidden_outvars)
+        if v not in all_outvars and v not in hidden_invars and v not in other_invars
     ]
 
     #
