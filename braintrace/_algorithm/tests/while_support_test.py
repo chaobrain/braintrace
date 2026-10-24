@@ -254,3 +254,119 @@ def test_upstream_layer_gradient_is_zero_behind_while_DOCUMENTED_LIMITATION():
     # the upstream weight: exactly zero under the while model, nonzero in the twin
     assert bool(jnp.all(jnp.asarray(g_while[('w1',)]) == 0))
     assert float(jnp.max(jnp.abs(jnp.asarray(g_twin[('w1',)])))) > 1e-4
+
+
+# --- #186: a weight-free while whose result reaches the hidden state indirectly --
+
+class _IndirectWhileCell(brainstate.nn.Module):
+    """The issue's cells (#186), each with an unrolled twin.
+
+    ``'leak'``: ``V <- while(0.9 * v, K)(V) + I`` -- the loop result passes
+    through an add before it is written. ``'input'``: the loop is fed only by
+    the input, ``V <- 0.9 V + (while(0.5 * v, K)(x)) @ w``. ``twin=True``
+    replaces the loop by the same arithmetic without control flow.
+    """
+
+    def __init__(self, mode, twin=False, n_in=3, n=4, k=4):
+        super().__init__()
+        self.mode, self.twin, self.k, self.n = mode, twin, k, n
+        with brainstate.random.seed_context(3):
+            self.w = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+
+    def init_state(self, batch_size=None, **kwargs):
+        shape = (self.n,) if batch_size is None else (batch_size, self.n)
+        self.V = brainstate.HiddenState(jnp.zeros(shape))
+
+    def _repeat(self, f, v):
+        if self.twin:
+            for _ in range(self.k):
+                v = f(v)
+            return v
+        return jax.lax.while_loop(
+            lambda c: c[0] < self.k, lambda c: (c[0] + 1, f(c[1])), (0, v))[1]
+
+    def update(self, x):
+        if self.mode == 'leak':
+            I = braintrace.matmul(x, self.w.value)
+            self.V.value = self._repeat(lambda v: 0.9 * v, self.V.value) + I
+        else:
+            aux = self._repeat(lambda v: 0.5 * v, x)
+            self.V.value = 0.9 * self.V.value + braintrace.matmul(aux, self.w.value)
+        return jnp.tanh(self.V.value)
+
+
+@pytest.mark.parametrize('mode', ['leak', 'input'])
+def test_indirect_while_equals_twin_etrace_grad(mode):
+    """The issue repro path: ``etrace_grad`` on the while cell trains and
+    equals the unrolled twin element-wise (it raised the reverse-through-while
+    ``ValueError`` before)."""
+    xs = _inputs(10, 3)
+    ys = jnp.full((10, 4), 0.3)
+
+    def grads(twin):
+        net = _IndirectWhileCell(mode, twin=twin)
+        brainstate.nn.init_all_states(net)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            learner = braintrace.compile(net, 'd_rtrl', xs[0])
+            return learner.etrace_grad(
+                xs, ys, step_fn=lambda x, y: jnp.mean((learner(x) - y) ** 2))
+
+    g_while, g_twin = grads(False), grads(True)
+    assert float(jnp.abs(g_twin[('w',)]).sum()) > 1e-4
+    assert_param_gradients_close(g_while, g_twin, atol=ATOL_EQUIV)
+
+
+@pytest.mark.parametrize('mode', ['leak', 'input'])
+def test_indirect_while_equals_twin_singlestep(mode):
+    inputs = _inputs(6, 3)
+
+    def grads(twin):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            return online_param_gradients_singlestep_naive(
+                lambda: _IndirectWhileCell(mode, twin=twin), inputs,
+                algo_factory=braintrace.D_RTRL)
+
+    assert_param_gradients_close(grads(False), grads(True), atol=ATOL_EQUIV)
+
+
+@pytest.mark.parametrize('mode', ['leak', 'input'])
+def test_indirect_while_twin_is_exact(mode):
+    """Anchor: the twin's D-RTRL gradient equals BPTT (finite-window oracle),
+    so the while == twin equalities above are equalities with ground truth."""
+    from braintrace._testing.oracle import (
+        bptt_param_gradients, chunked_online_param_gradients,
+    )
+    inputs = _inputs(6, 3)[:, None]
+    factory = lambda: _IndirectWhileCell(mode, twin=True)
+    online = chunked_online_param_gradients(
+        factory, inputs, chunk_size=2,
+        algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+    assert_param_gradients_close(online, bptt_param_gradients(factory, inputs), atol=ATOL_EQUIV)
+
+
+def test_readout_only_while_still_raises():
+    """A loop that reaches no hidden state is not detached: the
+    reverse-through-while error stays loud instead of a silent zero dL/dh."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w = brainstate.ParamState(jnp.ones((3, 4)))
+
+        def init_state(self, *args, **kwargs):
+            self.V = brainstate.HiddenState(jnp.zeros(4))
+
+        def update(self, x):
+            self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value)
+            return jax.lax.while_loop(
+                lambda c: c[0] < 3, lambda c: (c[0] + 1, 0.5 * c[1]), (0, self.V.value))[1]
+
+    net = Net()
+    brainstate.nn.init_all_states(net)
+    xs = _inputs(4, 3)
+    learner = braintrace.compile(net, 'd_rtrl', xs[0])
+    with pytest.raises(ValueError, match='while_loop'):
+        learner.etrace_grad(xs, jnp.zeros((4, 4)),
+                            step_fn=lambda x, y: jnp.mean((learner(x) - y) ** 2))
