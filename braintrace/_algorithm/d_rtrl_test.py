@@ -1112,3 +1112,93 @@ class TestCoupledTraceBoundedness:
         assert all(bool(jnp.all(jnp.isfinite(leaf))) for leaf in leaves)
         max_abs = max(float(jnp.max(jnp.abs(leaf))) for leaf in leaves)
         assert max_abs < 1e3, f'eligibility trace grew to {max_abs}'
+
+
+# ---------------------------------------------------------------------------
+# Hidden-to-hidden edges without an equation (#184)
+# ---------------------------------------------------------------------------
+
+class _LatchModel(brainstate.nn.Module):
+    """``latch`` depends only on the input; ``V`` reads the old latch.
+
+    ``workaround=True`` writes ``latch <- new + 0 * latch`` (the pre-fix
+    workaround), which keeps a hidden-to-hidden edge in the jaxpr.
+    """
+
+    def __init__(self, workaround=False, n_in=3, n=4):
+        super().__init__()
+        self.workaround = workaround
+        self.n = n
+        self.w = brainstate.ParamState(0.5 * jax.random.normal(jax.random.PRNGKey(0), (n_in, n)))
+
+    def init_state(self, batch_size=None, **kwargs):
+        shape = (self.n,) if batch_size is None else (batch_size, self.n)
+        self.latch = brainstate.HiddenState(jnp.zeros(shape))
+        self.V = brainstate.HiddenState(jnp.zeros(shape))
+
+    def update(self, x):
+        I = self.latch.value
+        new = braintrace.matmul(x, self.w.value)
+        self.latch.value = new + 0 * self.latch.value if self.workaround else new
+        self.V.value = 0.9 * self.V.value + I
+        return jnp.tanh(self.V.value)
+
+
+class _DelayLineModel(brainstate.nn.Module):
+    """Two-step delay line ``h2^t = h1^{t-1}`` (a pure copy) feeding ``V``."""
+
+    def __init__(self, workaround=False, n_in=3, n=4):
+        super().__init__()
+        self.workaround = workaround
+        self.n = n
+        self.w = brainstate.ParamState(0.5 * jax.random.normal(jax.random.PRNGKey(1), (n_in, n)))
+
+    def init_state(self, batch_size=None, **kwargs):
+        shape = (self.n,) if batch_size is None else (batch_size, self.n)
+        self.h1 = brainstate.HiddenState(jnp.zeros(shape))
+        self.h2 = brainstate.HiddenState(jnp.zeros(shape))
+        self.V = brainstate.HiddenState(jnp.zeros(shape))
+
+    def update(self, x):
+        old1, old2 = self.h1.value, self.h2.value
+        self.V.value = 0.9 * self.V.value + old2
+        self.h1.value = 0.5 * old1 + braintrace.matmul(x, self.w.value)
+        self.h2.value = old1 + 0 * old2 if self.workaround else old1
+        return jnp.tanh(self.V.value)
+
+
+class TestEquationFreeHiddenEdges:
+    """Input-only latches and pure copies train exactly under D-RTRL (#184)."""
+
+    xs = jax.random.uniform(jax.random.PRNGKey(7), (8, 1, 3))
+
+    @pytest.mark.parametrize('model_cls', [_LatchModel, _DelayLineModel])
+    @pytest.mark.parametrize('chunk_size', [1, 3])
+    def test_d_rtrl_matches_bptt(self, model_cls, chunk_size):
+        from braintrace._testing.oracle import (
+            assert_model_is_live, assert_param_gradients_close,
+            bptt_param_gradients, chunked_online_param_gradients,
+        )
+        assert_model_is_live(model_cls, self.xs)
+        online = chunked_online_param_gradients(
+            model_cls, self.xs, chunk_size=chunk_size,
+            algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
+        assert_param_gradients_close(online, bptt_param_gradients(model_cls, self.xs), atol=1e-5)
+
+    @pytest.mark.parametrize('model_cls', [_LatchModel, _DelayLineModel])
+    @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop'])
+    def test_matches_workaround(self, model_cls, algo):
+        xs = self.xs[:, 0]
+        ys = jnp.full((xs.shape[0], 4), 0.3)
+
+        def grads(workaround):
+            net = model_cls(workaround)
+            brainstate.nn.init_all_states(net)
+            learner = braintrace.compile(net, algo, xs[0])
+            return learner.etrace_grad(
+                xs, ys, step_fn=lambda x, y: jnp.mean((learner(x) - y) ** 2))
+
+        fixed, ref = grads(False), grads(True)
+        for k in ref:
+            assert float(jnp.abs(ref[k]).sum()) > 1e-6
+            npt.assert_allclose(fixed[k], ref[k], atol=1e-6)
