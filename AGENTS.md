@@ -10,7 +10,14 @@ Online learning for recurrent networks via Eligibility Trace Propagation (ETP).
 4. Bug? Write a test that reproduces it, then fix until the test passes.
 5. Every correction: reflect on the mistake, plan to avoid repeating it.
 6. All updates must be happened on the worktree branch, not main. 
-7. Write specs under `docs/specs` before implementation.
+7. Write a spec only when it will actually guide the implementation: the work
+   spans several modules or repos, changes a public API or the architecture,
+   has real design choices to settle first, or will take multiple sessions.
+   Skip it for bug fixes, small features, local refactors, and docs edits.
+   A spec goes in `docs/specs/YYYY-MM-DD-<slug>.md`, one file (no separate
+   -spec/-plan pairs), and stays short: goal, decisions with reasons, step
+   plan, how to verify. Specs are dated records: don't rewrite old ones to
+   match later changes.
 8. Tests should >90% coverage, but focus on meaningful tests that cover edge cases and critical paths, not just trivial lines. 
 9. Co-locate tests with the code under test: each module `foo.py` has its tests in a sibling `foo_test.py` (suffix style — never a separate `tests/` directory, never the `test_*.py` prefix). 
 10. **Never drive a model with a bare Python `for`/`while` loop when it runs repeatedly.** Python loops execute op-by-op (dispatch overhead, no fusion) and trace fresh each step; the `brainstate.transform` primitives lower the whole loop into one compiled XLA program, tracing the body only once. Pick by shape of the work:
