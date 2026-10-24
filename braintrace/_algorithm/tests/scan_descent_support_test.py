@@ -327,22 +327,17 @@ class TestDescentCorrectness:
         g_u = self._one_step_grads(UNROLL(), carry_readout=True)
         assert_param_gradients_close(g_d, g_u, atol=ATOL_EQUIV)
 
-    def test_single_step_ys_readout_drops_same_step_signal(self):
-        """v1 limitation pin: when the loss reads the hidden state through
-        the descended scan's stacked ys output (``for_loop(...)[-1]``)
-        instead of the carry, the same-step loss path bypasses the per-step
-        hidden perturbation (which is added to the scan's *carry* outvar),
-        so the single-step learning signal — and hence the one-step ETP
-        gradient — is zero. This parallels the documented Phase-3
-        while-hidden same-step limitation. Multi-step vjp is unaffected
-        (``test_wholeseq_descended_matches_bptt_diagonal_body`` uses the ys
-        readout). Fix at the model level: return ``self.h.value`` after the
-        loop."""
+    def test_single_step_ys_readout_matches_carry_readout(self):
+        """Reading the hidden state through the descended scan's stacked ys
+        output (``for_loop(...)[-1]``) instead of the carry bypasses the
+        per-step hidden perturbation (which is added to the scan's *carry*
+        outvar). That used to zero the one-step ETP gradient; the same-step
+        output-bypass gradient (#185) now carries the path, so both readouts
+        give the one-step BPTT gradient."""
         g_ys = self._one_step_grads(DESCEND(), carry_readout=False)
-        np.testing.assert_allclose(np.asarray(g_ys[('w',)]), 0.0, atol=0.0)
         g_carry = self._one_step_grads(DESCEND(), carry_readout=True)
         assert float(np.linalg.norm(np.asarray(g_carry[('w',)]))) > 1.0
-
+        assert_param_gradients_close(g_ys, g_carry, atol=ATOL_EQUIV)
 
 def test_default_policy_descends_long_scans():
     """Phase 4 default: an over-limit ETP scan compiles without any policy."""

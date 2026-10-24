@@ -147,6 +147,17 @@ class DiagnosticKind(str, Enum):
     # online learning signal (WARNING). Reads on the *next* step are exact.
     HIDDEN_COPY_SAME_STEP_READ = 'hidden_copy_same_step_read'
 
+    # Same-step bypass gradients (see _compiler/output_bypass.py)
+    #
+    # ``OUTPUT_BYPASSES_HIDDEN``: parameters reach a step output through a
+    # value that is not a new hidden state; under the single-step VJP their
+    # exact same-step gradient along that path is added (INFO).
+    # ``OUTPUT_BYPASS_DROPPED``: part of such a path crosses a ``while`` or an
+    # equation with effects, which cannot be duplicated; that part of the
+    # gradient is zero (WARNING).
+    OUTPUT_BYPASSES_HIDDEN = 'output_bypasses_hidden'
+    OUTPUT_BYPASS_DROPPED = 'output_bypass_dropped'
+
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
     PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'

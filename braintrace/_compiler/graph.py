@@ -183,6 +183,8 @@ class ETraceGraph(NamedTuple):
         args: Inputs,
         perturb_data: Sequence[jax.Array],
         old_state_vals: Optional[Sequence[jax.Array]] = None,
+        bypass_data: Sequence[jax.Array] = (),
+        bypass_hidden_data: Sequence[jax.Array] = (),
     ) -> Tuple[Outputs, ETraceVals, StateVals, TempData]:
         r"""Run the forward pass with additive perturbations injected at the hidden states.
 
@@ -202,6 +204,16 @@ class ETraceGraph(NamedTuple):
         old_state_vals : Sequence[jax.Array] or None, optional
             The state values to run from. When ``None`` (default) the current
             values of the compiled model states are used.
+        bypass_data : Sequence[jax.Array], optional
+            Values for the bypass parameter copies
+            (:attr:`HiddenPerturbation.bypass_vars`). Differentiating with
+            respect to them gives the parameters' same-step gradient along
+            paths that bypass every new hidden value. Defaults to none.
+        bypass_hidden_data : Sequence[jax.Array], optional
+            The previous values of the bypass hidden states
+            (:attr:`HiddenPerturbation.bypass_hidden_vars`). Differentiating
+            with respect to them gives the learning signal ``dL^t/dh^{t-1}``
+            along paths that bypass every new hidden value. Defaults to none.
 
         Returns
         -------
@@ -219,6 +231,8 @@ class ETraceGraph(NamedTuple):
         jaxpr_outs = self.hidden_perturb.eval_jaxpr(
             jax.tree.leaves((args, old_state_vals)),
             perturb_data,
+            bypass_data,
+            bypass_hidden_data,
         )
 
         return self.module_info._process(*args, jaxpr_outs=jaxpr_outs)
@@ -356,6 +370,7 @@ def compile_etrace_graph(
     sparse_n: Optional[int] = None,
     snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
     control_flow: Optional[ControlFlowPolicy] = None,
+    include_output_bypass: bool = True,
 ) -> ETraceGraph:
     """Construct the eligibility-trace graph for a given model and inputs.
 
@@ -374,6 +389,11 @@ def compile_etrace_graph(
         The positional arguments required by the model.
     include_hidden_perturb : bool, optional
         Whether to include hidden perturbations in the graph. Default ``True``.
+    include_output_bypass : bool, optional
+        Whether the hidden perturbation also yields the same-step gradients
+        along paths to the output that bypass every new hidden value (of the
+        parameters and of the previous hidden values). Default ``True``.
+        Ignored when *include_hidden_perturb* is ``False``.
     include_recurrent_mixing : bool, optional
         Hidden-group grouping mode for the hidden-to-hidden transition. When
         ``False`` (default, "without recurrence"), recurrent ETP mixing
@@ -609,7 +629,8 @@ def compile_etrace_graph(
 
         hidden_perturb = (
             add_hidden_perturbation_from_minfo(
-                minfo, descended_scan_eqn_ids=descended_eqn_ids)
+                minfo, descended_scan_eqn_ids=descended_eqn_ids,
+                include_output_bypass=include_output_bypass)
             if include_hidden_perturb else None
         )
 

@@ -42,7 +42,7 @@ from braintrace._typing import (
 )
 from braintrace._compiler import ControlFlowPolicy, DEFAULT_MAX_JACOBIAN_ELEMENTS
 from braintrace._op import is_snap_anchored
-from ._common import FixedRandomFeedback
+from ._common import FixedRandomFeedback, _update_dict
 from .axes import ETraceConfig
 from .base import ETraceAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
@@ -514,6 +514,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             # compiler metadata -- unlike ``sparse_n``, which needs
             # ``group.snap`` built at compile time.
             full_jacobian=config.trace_factorization == 'random_projection',
+            # A modulatory signal *replaces* dL/dh, so there is no reverse-AD
+            # signal for an output bypass to complete.
+            include_output_bypass=config.learning_signal != 'modulatory',
         )
 
         # super initialization
@@ -1105,8 +1108,19 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             # describe the rule without controlling it.
             (self._inject_exit_cotangent(hiddens, aux)
              if self.config.learning_signal == 'bootstrapped' else None),
+            # Single-step with a hidden output bypass (#185): the bypass learning
+            # signal dL^t/dh^{t-1} pairs with the *previous* trace e^{t-1}.
+            (old_etrace_vals if self._has_hidden_output_bypass() else None),
         )
         return fwd_out, fwd_res
+
+    def _has_hidden_output_bypass(self) -> bool:
+        """Whether a previous hidden value reaches the step output along a
+        path that bypasses every new hidden value (single-step only)."""
+        if not self.graph_executor.is_single_step_vjp:
+            return False
+        hidden_perturb = self.graph.hidden_perturb
+        return hidden_perturb is not None and len(hidden_perturb.bypass_hidden_paths) > 0
 
     def _update_fn_bwd(
         self,
@@ -1136,6 +1150,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             args,  # original update(*args) tuple, used by _compute_learning_signal
             aux,  # per-call auxiliary data from _get_update_aux, also used by _compute_learning_signal
             exit_cotangent,  # `bootstrapped`: synthetic cotangent at h^exit, or None
+            prev_etrace_vals,  # single-step hidden output bypass: e^{t-1}, or None
         ) = fwd_res
 
         (
@@ -1193,7 +1208,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_non_etrace_params,
             dg_etrace_params,
             dg_oth_states,
-            dg_hid_perturb_or_dl2h
+            dg_hid_perturb_or_dl2h,
+            dg_hidden_bypass,
         ) = jax.tree.unflatten(in_tree, cts_out)
 
         #
@@ -1208,18 +1224,6 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # compiled program.
         #
         if self.graph_executor.is_single_step_vjp:
-            if len(dg_etrace_params) != 0:
-                # Under `vjp_method='single-step'` the ETP weights are updated by
-                # the RTRL recursion, so the transposed jaxpr must not also hand
-                # back gradients for them.
-                raise ValueError(
-                    f'Under vjp_method=\'single-step\' the ETP weight gradients '
-                    f'come from the eligibility-trace recursion, so the backward '
-                    f'pass must not return any. It returned '
-                    f'{len(dg_etrace_params)} for '
-                    f'{sorted(map(str, dg_etrace_params))}. The compiled graph '
-                    f'and the graph executor disagree; recompile the graph.'
-                )
             hidden_perturb = self.graph.hidden_perturb
             if hidden_perturb is None:
                 raise ValueError(
@@ -1227,6 +1231,22 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                     'off the hidden perturbation variables, but the compiled '
                     'graph carries no hidden perturbation. Call `compile_graph()` '
                     'on this algorithm before running the backward pass.'
+                )
+            bypass_paths = set(hidden_perturb.bypass_param_paths)
+            if set(dg_etrace_params) != bypass_paths:
+                # Under `vjp_method='single-step'` the parameters' through-hidden
+                # credit comes from the eligibility trace; the transposed jaxpr
+                # may only hand back the same-step *bypass* gradient of the
+                # parameters the compiler found one for (#185). Anything else
+                # would count a path twice.
+                raise ValueError(
+                    f'Under vjp_method=\'single-step\' the parameter gradients '
+                    f'come from the eligibility-trace recursion, so the backward '
+                    f'pass may only return the same-step bypass gradients of '
+                    f'{sorted(map(str, bypass_paths))}. It returned '
+                    f'{len(dg_etrace_params)} for '
+                    f'{sorted(map(str, dg_etrace_params))}. The compiled graph '
+                    f'and the graph executor disagree; recompile the graph.'
                 )
             if len(hidden_perturb.perturb_vars) != len(dg_hid_perturb_or_dl2h):
                 raise ValueError(
@@ -1284,6 +1304,25 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         )
 
         #
+        # [3a] Single-step hidden output bypass (#185): an output read from
+        # h^{t-1} without going through h^t carries the learning signal
+        # dL^t/dh^{t-1}, which pairs with the previous trace e^{t-1}. Solved
+        # *before* the main contraction, which may advance stateful trace
+        # filters.
+        #
+        dg_weights_prev = None
+        if prev_etrace_vals is not None:
+            hidden_perturb = self.graph.hidden_perturb
+            dl2h_prev = hidden_perturb.bypass_hidden_data_to_hidden_group_data(
+                [u.get_mantissa(dg_hidden_bypass[path]) for path in hidden_perturb.bypass_hidden_paths],
+                self.graph.hidden_groups,
+            )
+            dl2h_prev = self._compute_learning_signal(dl2h_prev, (*args, aux))
+            dg_weights_prev = self._solve_previous_trace_gradients(
+                running_index, prev_etrace_vals, dl2h_prev, weight_vals,
+            )
+
+        #
         # [3b] `learning_signal='bootstrapped'`: the second linear pass.
         #
         # `eval_jaxpr` on the residual jaxpr is linear in the cotangents, so the
@@ -1334,6 +1373,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 dg_etrace_params_future,    # plain paths only: see below
                 dg_oth_states_future,
                 _dg_hid_perturb_future,     # ditto; the signal is pass 1 only
+                _dg_hidden_bypass_future,   # ditto
             ) = jax.tree.unflatten(in_tree, cts_future)
 
             def _add_leaf(x: Any, y: Any) -> Any:
@@ -1382,6 +1422,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             dg_non_etrace_params,
             dg_etrace_params,
         )
+        if dg_weights_prev is not None:
+            for path, dg in dg_weights_prev.items():
+                if dg is not None:
+                    _update_dict(dg_weights, path, dg)
 
         # The returned hidden cotangent carries the future term too: it is what
         # the *previous* window will receive, and what a synthesiser regresses on.
@@ -1755,6 +1799,56 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             if gid in self._random_feedback else s
             for gid, s in enumerate(signals)
         ]
+
+    def _solve_previous_trace_gradients(
+        self,
+        running_index: int,
+        etrace_h2w_at_t_minus_1: Any,
+        dl_to_hidden_groups: Sequence[jax.Array],
+        weight_vals: Any,
+    ) -> Dict[Path, Any]:
+        r"""Contract the previous eligibility trace with a learning signal.
+
+        .. note::
+
+            This is a protocol method that subclasses implement. It is called
+            only under ``vjp_method='single-step'`` when the compiled graph
+            has a hidden output bypass.
+
+        Computes
+
+        .. math::
+
+            \frac{\partial L^t}{\partial h^{t-1}}\Big|_{\mathrm{bypass}}
+            \cdot e^{t-1},
+
+        the credit of an output read from the previous hidden value along a
+        path that bypasses every new hidden value. The implementation must be
+        pure: it must not advance any per-step state (trace filters, ...).
+
+        Parameters
+        ----------
+        running_index : int
+            The running index of the current step (the count of earlier
+            ``update()`` calls).
+        etrace_h2w_at_t_minus_1 : Any
+            The eligibility trace before this step's update.
+        dl_to_hidden_groups : Sequence[jax.Array]
+            The bypass learning signal, one array per hidden group.
+        weight_vals : Any
+            The weight values.
+
+        Returns
+        -------
+        dict
+            Parameter path to its gradient (``None`` for no contribution).
+        """
+        raise NotImplementedError(
+            f'{type(self).__name__} does not implement '
+            f'`_solve_previous_trace_gradients`, which the hidden output bypass '
+            f'of the compiled graph (hidden states '
+            f'{list(self.graph.hidden_perturb.bypass_hidden_paths)}) needs.'
+        )
 
     def _solve_weight_gradients(
         self,

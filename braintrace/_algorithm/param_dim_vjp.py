@@ -1408,6 +1408,35 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
 
         return new_etrace
 
+    def _solve_previous_trace_gradients(
+        self,
+        running_index: int,
+        etrace_h2w_at_t_minus_1: Dict[ETraceWG_Key, PyTree],
+        dl_to_hidden_groups: Sequence[jax.Array],
+        weight_vals: Dict[Path, PyTree],
+    ) -> Dict[Path, PyTree]:
+        """Contract the previous trace with the hidden output-bypass signal.
+
+        See :meth:`ETraceVjpAlgorithm._solve_previous_trace_gradients`. With
+        trace filters active, the previous *filtered* trace (the filter's
+        current value, not yet advanced this step) is the one paired.
+        """
+        etrace = dict(etrace_h2w_at_t_minus_1)
+        if self._trace_filters:
+            for key, flt in self._trace_filters.items():
+                if key in etrace:
+                    etrace[key] = flt.value
+        dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
+        _solve_param_dim_weight_gradients(
+            etrace,
+            dG_weights,
+            dl_to_hidden_groups,
+            self.graph.hidden_param_op_relations,
+            weight_vals,
+            fast_solve=self.fast_solve,
+        )
+        return dG_weights
+
     def _solve_weight_gradients(
         self,
         running_index: int,

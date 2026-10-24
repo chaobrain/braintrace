@@ -665,6 +665,36 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
     # the boundary contraction
     # ------------------------------------------------------------------ #
 
+    def _solve_previous_trace_gradients(
+        self,
+        running_index: int,
+        etrace_h2w_at_t_minus_1: Dict[str, Any],
+        dl_to_hidden_groups: Sequence[jax.Array],
+        weight_vals: Dict[Path, PyTree],
+    ) -> Dict[Path, PyTree]:
+        """Contract the previous trace with the hidden output-bypass signal.
+
+        See :meth:`ETraceVjpAlgorithm._solve_previous_trace_gradients`.
+        """
+        return self._contract_trace(etrace_h2w_at_t_minus_1, dl_to_hidden_groups)
+
+    def _contract_trace(
+        self,
+        etrace: Dict[str, Any],
+        dl_to_hidden_groups: Sequence[jax.Array],
+    ) -> Dict[Path, Any]:
+        # ``sum_g (signal_g . s_tilde_g) * theta_tilde_g``
+        dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
+        for group in self.graph.hidden_groups:
+            gi = group.index
+            signal = u.get_mantissa(dl_to_hidden_groups[gi])
+            s_tilde = etrace[_S_TILDE][gi]
+            scale = jnp.sum(signal * s_tilde)
+            for path in self._etp_paths_of_group(group):
+                theta = etrace[_THETA_TILDE][(gi, path)]
+                _update_dict(dG_weights, path, _scale_tree(theta, scale))
+        return dG_weights
+
     def _solve_weight_gradients(
         self,
         running_index: int,
@@ -679,22 +709,14 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
         A scalar per group times a parameter-shaped array — the whole reason the
         parameter factor carries no hidden axis.
         """
-        dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
-
-        for group in self.graph.hidden_groups:
-            gi = group.index
-            signal = u.get_mantissa(dl_to_hidden_groups[gi])
-            s_tilde = etrace_h2w_at_t[_S_TILDE][gi]
-            scale = jnp.sum(signal * s_tilde)
-            for path in self._etp_paths_of_group(group):
-                theta = etrace_h2w_at_t[_THETA_TILDE][(gi, path)]
-                _update_dict(dG_weights, path, _scale_tree(theta, scale))
+        dG_weights = self._contract_trace(etrace_h2w_at_t, dl_to_hidden_groups)
 
         # the non-etrace weight gradients (reverse-AD, in-window)
         for path, dg in dl_to_nonetws_at_t.items():
             _update_dict(dG_weights, path, dg)
 
-        # the in-window direct term for etrace parameters (multi-step only)
+        # the in-window direct term for etrace parameters (multi-step), or
+        # the same-step output-bypass term (single-step, #185)
         if dl_to_etws_at_t is not None:
             for path, dg in dl_to_etws_at_t.items():
                 _update_dict(dG_weights, path, dg, error_when_no_key=True)
