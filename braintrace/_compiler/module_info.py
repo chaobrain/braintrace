@@ -468,8 +468,10 @@ class ModuleInfo(NamedTuple):
         #     - Outputs
         # 2. "jaxpr_outs[self.num_out:]" corresponds to extra output in  "augmented_jaxpr"
         #     - others
+        # (typed by variable: consumers look temporaries up by ``Var``; a
+        # literal state outvar is never looked up)
         temps = {
-            v: r for v, r in
+            cast(Var, v): r for v, r in
             zip(
                 self.jaxpr.outvars[self.num_var_out:],
                 jaxpr_outs[self.num_var_out:]

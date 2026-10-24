@@ -51,7 +51,7 @@ Jacobian extraction and the trace update see the substep axis.
    ETP mixing into a body transition has no consumer.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, TYPE_CHECKING
+from typing import Dict, List, NamedTuple, Optional, Sequence, Set, Tuple, TYPE_CHECKING, cast
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
@@ -65,6 +65,7 @@ from braintrace._compatible_imports import (
     new_var,
     scan_num_consts_carry,
     scan_params_add_ys,
+    shaped_aval,
 )
 from braintrace._op import is_etp_primitive
 from braintrace._typing import Path
@@ -266,7 +267,7 @@ def add_scan_ys(
     )
     new_closed = ClosedJaxpr(new_body, body_closed.consts)
     stacked = {
-        v: new_var('', v.aval.update(shape=(length, *v.aval.shape)))
+        v: new_var('', shaped_aval(v).update(shape=(length, *shaped_aval(v).shape)))
         for v in extra
     }
     new_params = scan_params_add_ys(
@@ -371,11 +372,13 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[Sca
     body_invar_to_hidden_path = {
         body.invars[num_consts + c]: p for c, p in carry_hidden.items()
     }
+    # (typed as variables: a hidden carry output is used as a variable key)
+    body_outvars = cast(List[Var], list(body.outvars))
     body_outvar_to_hidden_path = {
-        body.outvars[c]: p for c, p in carry_hidden.items()
+        body_outvars[c]: p for c, p in carry_hidden.items()
     }
     body_hidden_outvar_to_invar = {
-        body.outvars[c]: body.invars[num_consts + c]
+        body_outvars[c]: body.invars[num_consts + c]
         for c in carry_hidden
     }
     body_invar_to_weight_path: Dict[Var, Path] = {}
@@ -465,7 +468,8 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[Sca
     path_to_carry = {p: c for c, p in carry_hidden.items()}
     final_groups = []
     for g in body_groups:
-        outer_invars = [eqn.invars[num_consts + path_to_carry[p]]
+        # the v1 guard above checked every hidden carry init is a ``Var``
+        outer_invars = [cast(Var, eqn.invars[num_consts + path_to_carry[p]])
                         for p in g.hidden_paths]
         outer_outvars = [eqn.outvars[path_to_carry[p]] for p in g.hidden_paths]
         final_groups.append(g._replace(

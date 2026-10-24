@@ -13,10 +13,11 @@
 # limitations under the License.
 # ==============================================================================
 
-from typing import Container, Dict, Sequence, Set, List
+from typing import Container, Dict, Sequence, Set, List, Union
 
 from braintrace._compatible_imports import (
     Var,
+    Literal,
     Jaxpr,
     JaxprEqn,
     is_jit_primitive,
@@ -38,7 +39,7 @@ __all__ = [
 
 
 def find_matched_vars(
-    invars: Sequence[Var],
+    invars: Sequence[Union[Var, Literal]],
     invar_needed_in_oth_eqns: Container[Var]
 ) -> List[Var]:
     """
@@ -46,8 +47,8 @@ def find_matched_vars(
 
     Parameters
     ----------
-    invars : Sequence[Var]
-        The input variables of the equation.
+    invars : Sequence[Var or Literal]
+        The input atoms of the equation; literals never match.
     invar_needed_in_oth_eqns : Container[Var]
         The variables needed in the other equations (a set, or an
         insertion-ordered dict used as an ordered set).
@@ -65,7 +66,7 @@ def find_matched_vars(
 
 
 def find_element_exist_in_the_set(
-    elements: Sequence[Var],
+    elements: Sequence[Union[Var, Literal]],
     the_set: Set[Var]
 ) -> Var | None:
     """
@@ -73,8 +74,8 @@ def find_element_exist_in_the_set(
 
     Parameters
     ----------
-    elements : Sequence[Var]
-        The input variables of the equation.
+    elements : Sequence[Var or Literal]
+        The input atoms of the equation; literals never match.
     the_set : Set[Var]
         The set of the weight variables.
 

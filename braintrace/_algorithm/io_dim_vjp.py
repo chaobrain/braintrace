@@ -34,6 +34,7 @@ import jax
 import jax.numpy as jnp
 import brainunit as u
 
+from braintrace._compatible_imports import shaped_aval
 from braintrace._compiler import ControlFlowPolicy, HiddenGroup, HiddenParamOpRelation
 from braintrace._op import (
     etp_elemwise_p,
@@ -262,8 +263,8 @@ def _init_IO_dim_state(
         if x_key not in etrace_xs:
             x_repr_fn = get_pp_x_repr(relation.primitive)
             if x_repr_fn is None:
-                shape = relation.x_var.aval.shape
-                dtype = relation.x_var.aval.dtype
+                shape = shaped_aval(relation.x_var).shape
+                dtype = shaped_aval(relation.x_var).dtype
             else:
                 # the trace filters the primitive's x *representation*
                 # (e.g. embedding: the one-hot encoding of its integer
@@ -272,12 +273,12 @@ def _init_IO_dim_state(
                 x_aval = jax.eval_shape(
                     lambda x_, _fn=x_repr_fn, _w=weight_avals: _fn(x_, _w),
                     jax.ShapeDtypeStruct(
-                        relation.x_var.aval.shape, relation.x_var.aval.dtype),
+                        shaped_aval(relation.x_var).shape, shaped_aval(relation.x_var).dtype),
                 )
                 shape, dtype = x_aval.shape, x_aval.dtype
             etrace_xs[x_key] = EligibilityTrace(u.math.zeros(shape, dtype))
 
-    y_shape = relation.y_var.aval.shape
+    y_shape = shaped_aval(relation.y_var).shape
     group: HiddenGroup
     for group in relation.hidden_groups:
         # Exact match required, or (elemwise only) allow trailing-dim match
@@ -613,7 +614,7 @@ def _solve_IO_dim_weight_gradients(
             # gate the branch.)
             elemwise_batched = (
                 relation.primitive is etp_elemwise_p
-                and len(group.varshape) > relation.y_var.aval.ndim
+                and len(group.varshape) > shaped_aval(relation.y_var).ndim
             )
 
             if fast_solve:
@@ -926,8 +927,9 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
             find_this_weight = True
 
             # get the weight_op input
-            wx_var = etrace_x_key(relation.x_var)
-            if wx_var is not None:
+            # (an element-wise relation has no x trace)
+            if relation.x_var is not None:
+                wx_var = etrace_x_key(relation.x_var)
                 etrace_xs[wx_var] = self.etrace_xs[wx_var].value
 
             # get the weight_op df

@@ -14,7 +14,7 @@
 # ==============================================================================
 
 
-from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, cast
+from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, Union
 
 import brainstate
 import jax.core
@@ -23,6 +23,7 @@ import brainunit as u
 
 from braintrace._compatible_imports import (
     Var,
+    Literal,
     JaxprEqn,
     Jaxpr,
     ClosedJaxpr,
@@ -30,6 +31,7 @@ from braintrace._compatible_imports import (
     new_jaxpr_eqn,
     stop_gradient_p,
     is_while_primitive,
+    shaped_aval,
 )
 from braintrace._misc import (
     git_issue_addr,
@@ -185,7 +187,7 @@ class HiddenPerturbation(NamedTuple):
             One zero array per perturbation variable, matching its shape and
             dtype.
         """
-        return [jax.numpy.zeros(v.aval.shape, dtype=v.aval.dtype) for v in self.perturb_vars]
+        return [jax.numpy.zeros(shaped_aval(v).shape, dtype=shaped_aval(v).dtype) for v in self.perturb_vars]
 
     def bypass_hidden_data_to_hidden_group_data(
         self,
@@ -225,7 +227,7 @@ class HiddenPerturbation(NamedTuple):
         by_path = dict(zip(self.bypass_hidden_paths, bypass_hidden_data))
         per_perturb = []
         for path, v in zip(self.perturb_hidden_paths, self.perturb_vars):
-            aval = cast(jax.core.ShapedArray, v.aval)
+            aval = shaped_aval(v)
             per_perturb.append(by_path[path] if path in by_path else jnp.zeros(aval.shape, aval.dtype))
         return self.perturb_data_to_hidden_group_data(per_perturb, hidden_groups)
 
@@ -610,7 +612,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         returns a copy of *eqn* consuming the detached variables. Literal
         inputs are left untouched.
         """
-        new_invars = []
+        new_invars: List[Union[Var, Literal]] = []
         n_detached = 0
         for iv in eqn.invars:
             if not isinstance(iv, Var):
@@ -693,7 +695,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             )
 
     def _new_var_like(self, v: Var) -> Var:
-        return new_var('', jax.core.ShapedArray(v.aval.shape, v.aval.dtype))
+        return new_var('', jax.core.ShapedArray(shaped_aval(v).shape, shaped_aval(v).dtype))
 
 
 def _while_eqns_reaching(jaxpr: Jaxpr, targets: Set[Var]) -> Set[int]:
