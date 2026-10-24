@@ -249,7 +249,8 @@ def test_multi_step_needs_no_bypass(model, chunk_size):
     online = chunked_online_param_gradients(
         factory, xs, chunk_size=chunk_size,
         algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
-    assert_param_gradients_close(online, bptt_param_gradients(factory, xs), atol=1e-5)
+    # gradients are O(10): float32 summation order differs across JAX versions
+    assert_param_gradients_close(online, bptt_param_gradients(factory, xs), atol=1e-5, rtol=1e-5)
 
 
 def test_modulatory_signal_compiles_without_bypass():
