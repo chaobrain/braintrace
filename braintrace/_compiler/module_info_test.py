@@ -16,6 +16,7 @@
 from pprint import pprint
 
 import brainstate
+import jax.numpy as jnp
 import pytest
 import brainunit as u
 
@@ -141,3 +142,85 @@ class Test_extract_model_info:
             brainstate.nn.init_all_states(layer)
             minfo = braintrace.extract_module_info(layer, input)
             pprint(minfo)
+
+
+class _PlasticNet(brainstate.nn.Module):
+    # ``w`` is trained online; ``w_local`` is updated by a local Hebbian rule.
+    def __init__(self, plastic_cls=brainstate.ParamState, write_w=False, n_in=3, n=4):
+        super().__init__()
+        self.n = n
+        self.write_w = write_w
+        self.w = brainstate.ParamState(brainstate.random.randn(n_in, n))
+        self.w_local = plastic_cls(jnp.ones((n_in, n)))
+
+    def init_state(self, *args, **kwargs):
+        self.V = brainstate.HiddenState(jnp.zeros(self.n))
+
+    def update(self, x):
+        self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value) + x @ self.w_local.value
+        self.w_local.value = self.w_local.value + 1e-3 * jnp.outer(x, self.V.value)
+        if self.write_w:
+            self.w.value = self.w.value * 0.99
+        return self.V.value
+
+
+class _Outer(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layer = _PlasticNet()
+
+    def update(self, x):
+        return self.layer(x)
+
+
+class TestParamStateWriteError:
+    """``ParamState`` writes inside the online step raise an actionable error (#187)."""
+
+    def _compile(self, net):
+        brainstate.nn.init_all_states(net)
+        return braintrace.compile(net, 'd_rtrl', jnp.ones(3))
+
+    def test_message_names_path_and_patterns(self):
+        with pytest.raises(braintrace.NotSupportedError) as info:
+            self._compile(_PlasticNet())
+        msg = str(info.value)
+        assert "('w_local',)" in msg
+        assert 'ParamState(' not in msg
+        assert 'etrace_grad' in msg
+        assert 'LongTermState' in msg
+
+    def test_all_written_params_are_listed(self):
+        with pytest.raises(braintrace.NotSupportedError) as info:
+            self._compile(_PlasticNet(write_w=True))
+        msg = str(info.value)
+        assert "('w_local',)" in msg
+        assert "('w',)" in msg
+
+    def test_nested_module_path(self):
+        with pytest.raises(braintrace.NotSupportedError) as info:
+            self._compile(_Outer())
+        assert "('layer', 'w_local')" in str(info.value)
+
+    def test_unattached_param_falls_back_to_repr(self):
+        glob = brainstate.ParamState(jnp.zeros(4))
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)))
+
+            def init_state(self, *args, **kwargs):
+                self.V = brainstate.HiddenState(jnp.zeros(4))
+
+            def update(self, x):
+                self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value) + glob.value
+                glob.value = glob.value + 1.
+                return self.V.value
+
+        with pytest.raises(braintrace.NotSupportedError) as info:
+            self._compile(Net())
+        assert 'ParamState(' in str(info.value)
+
+    def test_long_term_state_compiles(self):
+        learner = self._compile(_PlasticNet(plastic_cls=brainstate.LongTermState))
+        assert learner is not None
