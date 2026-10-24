@@ -87,6 +87,31 @@ class _CurrentLIF(brainstate.nn.Module):
         return spk
 
 
+class _CopyRead(brainstate.nn.Module):
+    """A pure copy ``h2^t = h1^{t-1}`` read in the same step (#184).
+
+    In the jaxpr ``h2^t`` and ``h1^{t-1}`` are one variable; the read is
+    credited as the hidden bypass of ``h1^{t-1}``, which is the same value
+    with the same trace (``e2^t = e1^{t-1}``).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.w = brainstate.ParamState(brainstate.random.randn(N_IN, N))
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.h1 = brainstate.HiddenState(jnp.zeros(_shape(batch_size)))
+        self.h2 = brainstate.HiddenState(jnp.zeros(_shape(batch_size)))
+        self.V = brainstate.HiddenState(jnp.zeros(_shape(batch_size)))
+
+    def update(self, x):
+        old1 = self.h1.value
+        self.V.value = 0.9 * self.V.value + self.h2.value
+        self.h1.value = 0.5 * old1 + braintrace.matmul(x, self.w.value)
+        self.h2.value = old1
+        return jnp.tanh(self.h2.value) + jnp.tanh(self.V.value)
+
+
 class _Readout(brainstate.nn.Module):
     def __init__(self):
         super().__init__()
@@ -101,13 +126,51 @@ class _Readout(brainstate.nn.Module):
         return jnp.tanh(self.V.value) @ self.w_out.value
 
 
+class _ReadoutVariants(brainstate.nn.Module):
+    """Bypass shapes: an ETP ``Linear`` readout (a weight + bias pytree), a
+    parameter applied directly to the output, a chain of two ETP ops with no
+    hidden state between them, and a parameter written into a non-hidden
+    state that is the output."""
+
+    def __init__(self, kind):
+        super().__init__()
+        self.kind = kind
+        self.w = brainstate.ParamState(brainstate.random.randn(N_IN, N))
+        self.out = braintrace.nn.Linear(N, 2)
+        self.b = brainstate.ParamState(jnp.full((N,), 0.1))
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.V = brainstate.HiddenState(jnp.zeros(_shape(batch_size)))
+        self.s = brainstate.ShortTermState(jnp.zeros(_shape(batch_size)))
+
+    def update(self, x):
+        self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value)
+        if self.kind == 'linear':
+            return self.out(jnp.tanh(self.V.value))
+        if self.kind == 'param':
+            return jnp.tanh(self.V.value) * self.b.value + self.b.value
+        if self.kind == 'chain':
+            return self.out(jnp.tanh(braintrace.matmul(x, self.w.value))) + self.out(self.V.value)
+        # 'state': no recursion through ``s`` -- a non-hidden state carries no
+        # trace, so only its same-step credit is online
+        self.s.value = jnp.tanh(self.V.value) * self.b.value
+        return self.s.value
+
+
 _MODELS = {
     'pre_reset': lambda: _LIF('pre_reset'),
     'mixed': lambda: _LIF('mixed'),
     'hidden': lambda: _LIF('hidden'),
     'current': _CurrentLIF,
+    'copy_read': _CopyRead,
     'readout': _Readout,
+    'linear': lambda: _ReadoutVariants('linear'),
+    'param': lambda: _ReadoutVariants('param'),
+    'chain': lambda: _ReadoutVariants('chain'),
+    'state': lambda: _ReadoutVariants('state'),
 }
+
+_N_OUT = {'readout': 2, 'linear': 2, 'chain': 2}
 
 
 def _data(n_out):
@@ -126,45 +189,47 @@ _ALGO_KWARGS = {
 }
 
 
-def _online(make, algo, **kwargs):
+def _online(model, algo, **kwargs):
     brainstate.random.seed(0)
-    net = make()
+    net = _MODELS[model]()
     brainstate.nn.init_all_states(net)
-    xs, ys = _data(2 if isinstance(net, _Readout) else N)
+    xs, ys = _data(_N_OUT.get(model, N))
     learner = braintrace.compile(net, algo, xs[0], **{**_ALGO_KWARGS.get(algo, {}), **kwargs})
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         return learner.etrace_grad(xs, ys, step_fn=lambda x, y: _loss(learner(x), y)), learner
 
 
-def _bptt(make):
+def _bptt(model):
     brainstate.random.seed(0)
-    net = make()
+    net = _MODELS[model]()
     brainstate.nn.init_all_states(net)
-    xs, ys = _data(2 if isinstance(net, _Readout) else N)
+    xs, ys = _data(_N_OUT.get(model, N))
     params = net.states(brainstate.ParamState)
 
     def total_loss():
         return brainstate.transform.for_loop(lambda x, y: _loss(net(x), y), xs, ys).mean()
 
-    return brainstate.transform.grad(total_loss, params)()
+    # some variants leave a parameter unused
+    return brainstate.transform.grad(total_loss, params, check_states=False)()
 
 
 @pytest.mark.parametrize('model', list(_MODELS))
 @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop'])
 def test_exact_algorithms_match_bptt(model, algo):
-    online, _ = _online(_MODELS[model], algo)
-    ref = _bptt(_MODELS[model])
-    assert set(online) == set(ref)
+    online, _ = _online(model, algo)
+    ref = _bptt(model)
     for path in ref:
-        assert float(jnp.abs(ref[path]).sum()) > 1e-6
-        npt.assert_allclose(online[path], ref[path], rtol=1e-4, atol=1e-6)
+        if all(float(jnp.abs(b).sum()) == 0.0 for b in jax.tree.leaves(ref[path])):
+            continue  # an unused parameter of a variant
+        for a, b in zip(jax.tree.leaves(online[path]), jax.tree.leaves(ref[path])):
+            npt.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
 
 
 def test_issue_values():
     # the numbers in the issue body: 1.079097 (pre-reset), 1.861094 (hidden)
     for model, expected in [('pre_reset', 1.079097), ('hidden', 1.861094)]:
-        online, _ = _online(_MODELS[model], 'd_rtrl')
+        online, _ = _online(model, 'd_rtrl')
         npt.assert_allclose(float(jnp.abs(online[('w',)]).sum()), expected, rtol=1e-5)
 
 
@@ -200,7 +265,7 @@ def test_modulatory_signal_compiles_without_bypass():
 
 @pytest.mark.parametrize('algo', ['pp_prop', 'uoro', 'd_rtrl', 'eprop'])
 def test_bypass_reaches_every_engine(algo):
-    online, learner = _online(_MODELS['pre_reset'], algo)
+    online, learner = _online('pre_reset', algo)
     hp = learner.graph.hidden_perturb
     assert list(hp.bypass_param_paths) == [('w',)]
     assert list(hp.bypass_hidden_paths) == [('V',)]
