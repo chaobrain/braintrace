@@ -1,6 +1,89 @@
 # Release Notes
 
 
+## Version 0.2.7
+
+A correctness release for online gradients under the default
+`vjp_method='single-step'`. Four issues are fixed, each reported by
+brainpy.state with a workaround on its side (#184–#187). The largest, #185,
+was a silent wrong gradient: a step output that does not read a *new* hidden
+value got no online credit along that path. Each of these models now
+compiles, and the exact algorithms (D-RTRL, and EProp on element-wise cells)
+match BPTT on them.
+
+Python 3.12 and JAX 0.9 are now the minimum versions.
+
+### Fixes
+
+- **Outputs that bypass new hidden values get their exact same-step credit
+  (#185).** Under the single-step VJP a parameter's gradient was assembled
+  only from the eligibility trace, `dL/dh^t · e^t`. An output computed from
+  anything else was silently ignored along that path. Examples: a spike read
+  from the pre-reset membrane potential, a readout weight applied inside the
+  step, or the stacked ys of a descended scan. The compiler now finds these
+  *bypass* paths. It duplicates their forward cone on differentiable copies
+  and adds two terms:
+  - the parameters' own same-step gradient;
+  - the learning signal `dL^t/dh^{t-1}` of a previous hidden value read
+    along the bypass, paired with the previous trace `e^{t-1}`. A new pure
+    per-engine hook, `_solve_previous_trace_gradients`, does this for the
+    param-dim, IO-dim and random-projection engines.
+
+  Forward values are unchanged, and a model without a bypass compiles
+  exactly as before. On the issue's LIF model the D-RTRL gradient goes from
+  `0.0` to `1.079097`, which is the BPTT value. A bypass that crosses a
+  `while_loop` or an equation with effects cannot be reverse-differentiated.
+  It is dropped with a WARNING (`OUTPUT_BYPASS_DROPPED`), and the bypasses
+  that are found get an INFO (`OUTPUT_BYPASSES_HIDDEN`).
+  `learning_signal='modulatory'` replaces `dL/dh` and compiles without the
+  rewrite. Multi-step mode is unchanged; it already included both terms.
+- **Input-only hidden states in a merged group no longer raise `KeyError`
+  (#184).** A group member written without reading any group state (a latch
+  `h^t = x @ w`) is bound from the forward pass, which gives a zero Jacobian
+  row. A pure copy `h2^t = h1^{t-1}` (a shift register or delay line) used to
+  lose the edge `dh2^t/dh1^{t-1} = 1`. It is now merged into its source's
+  group, and the `new + 0 * old` workaround is no longer needed. Reading the
+  copy in the same step is exact too, through the #185 hidden bypass.
+- **A weight-free `while` whose result reaches a hidden state indirectly is
+  detached (#186).** Before, only a loop whose own output *was* a hidden
+  state was detached. A loop feeding one through other equations
+  (`V <- while(V) + I`) made the perturbed step untransposable. Every
+  `while` that reaches a hidden state is now detached, with the existing
+  `CONTROL_FLOW_OPAQUE_FWD` warning. A loop that feeds only the model output
+  is left in place and still raises.
+- **The `ParamState`-write error is actionable (#187).** It names every
+  written parameter by path. It explains that parameters must be constant
+  within a step, and gives the two supported patterns: update trained
+  weights outside the step from `etrace_grad`, or hold a locally-updated
+  weight in a non-param state such as `brainstate.LongTermState`.
+- **`IODimVjpAlgorithm.get_etrace_of` on an element-wise weight** no longer
+  raises `KeyError`. An element-wise relation has no x trace.
+- **CI type check** is clean again: `mypy braintrace` reports no issues.
+  These were type-only fixes for the newer JAX stubs.
+
+### Behavior changes
+
+- Under single-step, a plain (non-ETP) parameter that reaches the output
+  without crossing a hidden state is now trained exactly (F-33 is narrowed).
+  A plain parameter that only feeds a hidden state is still zero.
+- New diagnostics `OUTPUT_BYPASSES_HIDDEN` (INFO) and
+  `OUTPUT_BYPASS_DROPPED` (WARNING). `compile_etrace_graph` gains
+  `include_output_bypass=True`. `HiddenPerturbation` gains
+  `bypass_param_paths`, `bypass_vars`, `bypass_hidden_paths` and
+  `bypass_hidden_vars`.
+- Requires Python >= 3.12 and `jax >= 0.9.0`. The Python 3.15 classifier is
+  added.
+
+### Documentation
+
+- `docs/advanced/limitations.ipynb`:
+  - a rewritten control-flow table;
+  - new sections "Outputs That Bypass New Hidden States" and "Parameters
+    Are Constant Within a Step";
+  - an updated summary.
+- Specs under `docs/specs/2026-10-24-*`.
+
+
 ## Version 0.2.6
 
 A compatibility release: `braintrace` now works with **JAX / jaxlib 0.11**,
