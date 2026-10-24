@@ -67,6 +67,10 @@ is fixed here too.
   `HIDDEN_COPY_SAME_STEP_READ` that names both states and suggests reading the
   copy on the next step or computing the output from a new hidden value.
 
+  *Superseded by #185:* the output-bypass rewrite credits such a read as the
+  hidden bypass of `h1^{t-1}` (the same value, with the same trace
+  `e2^t = e1^{t-1}`), so the read is exact and the warning was removed.
+
 ## Edge cases
 
 - `latch <- x` (no weight): the outvar is a top-level jaxpr invar.

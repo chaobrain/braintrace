@@ -1106,6 +1106,35 @@ class IODimVjpAlgorithm(ETraceVjpAlgorithm):
 
         return hist_etrace_vals
 
+    def _solve_previous_trace_gradients(
+        self,
+        running_index: int,
+        etrace_h2w_at_t_minus_1: Tuple[
+            Dict[ETraceX_Key, jax.Array],
+            Dict[ETraceDF_Key, jax.Array]
+        ],
+        dl_to_hidden_groups: Sequence[jax.Array],
+        weight_vals: Dict[Path, PyTree],
+    ) -> Dict[Path, PyTree]:
+        """Contract the previous trace with the hidden output-bypass signal.
+
+        See :meth:`ETraceVjpAlgorithm._solve_previous_trace_gradients`. The
+        previous trace is one update younger, so its warm-up bias correction
+        is indexed by ``running_index - 1``.
+        """
+        dG_weights: Dict[Path, Any] = {path: None for path in self.param_states.keys()}
+        _solve_IO_dim_weight_gradients(
+            etrace_h2w_at_t_minus_1,
+            dG_weights,
+            dl_to_hidden_groups,
+            self.graph.hidden_param_op_relations,
+            weight_vals,
+            running_index - 1,
+            self.decay_f,
+            fast_solve=self.fast_solve,
+        )
+        return dG_weights
+
     def _solve_weight_gradients(
         self,
         running_index: int,

@@ -14,10 +14,11 @@
 # ==============================================================================
 
 
-from typing import Dict, FrozenSet, Set, Sequence, NamedTuple, Any
+from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, cast
 
 import brainstate
 import jax.core
+import jax.numpy as jnp
 import brainunit as u
 
 from braintrace._compatible_imports import (
@@ -51,6 +52,7 @@ from .module_info import (
     extract_module_info,
     ModuleInfo,
 )
+from .output_bypass import OutputBypass, add_output_bypass
 
 __all__ = [
     'HiddenPerturbation',
@@ -116,11 +118,21 @@ class HiddenPerturbation(NamedTuple):
     perturb_hidden_paths: Sequence[Path]  # the hidden state paths that are perturbed
     perturb_hidden_states: Sequence[brainstate.HiddenState]  # the hidden states that are perturbed
     perturb_jaxpr: ClosedJaxpr  # the perturbed jaxpr
+    # parameters whose path to an output bypasses every new hidden value
+    # (see ``_compiler/output_bypass.py``), and the copies of their leaves
+    bypass_param_paths: Sequence[Path] = ()
+    bypass_vars: Sequence[Var] = ()
+    # hidden states whose previous value reaches an output that way, and the
+    # copies of their previous values
+    bypass_hidden_paths: Sequence[Path] = ()
+    bypass_hidden_vars: Sequence[Var] = ()
 
     def eval_jaxpr(
         self,
         inputs: Sequence[jax.Array],
-        perturb_data: Sequence[jax.Array]
+        perturb_data: Sequence[jax.Array],
+        bypass_data: Sequence[jax.Array] = (),
+        bypass_hidden_data: Sequence[jax.Array] = (),
     ) -> Sequence[jax.Array]:
         """Evaluate the perturbed jaxpr.
 
@@ -130,16 +142,38 @@ class HiddenPerturbation(NamedTuple):
             The flat input values of the original jaxpr.
         perturb_data : sequence of jax.Array
             The perturbation values, one per entry of ``perturb_vars``.
+        bypass_data : sequence of jax.Array, optional
+            The values of the bypass parameter copies, one per entry of
+            ``bypass_vars`` (the leaves of each ``bypass_param_paths`` value).
+            Differentiating the outputs with respect to them gives exactly the
+            parameters' same-step bypass gradient. Defaults to none.
+        bypass_hidden_data : sequence of jax.Array, optional
+            The previous values of the ``bypass_hidden_paths`` hidden states,
+            one per entry of ``bypass_hidden_vars``. Differentiating the
+            outputs with respect to them gives exactly the bypass learning
+            signal ``dL^t/dh^{t-1}``. Defaults to none.
 
         Returns
         -------
         sequence of jax.Array
             The outputs of the perturbed jaxpr.
         """
+        if len(bypass_data) != len(self.bypass_vars):
+            raise ValueError(
+                f'Expected {len(self.bypass_vars)} bypass value(s) for the '
+                f'parameters {list(self.bypass_param_paths)}, got {len(bypass_data)}.'
+            )
+        if len(bypass_hidden_data) != len(self.bypass_hidden_vars):
+            raise ValueError(
+                f'Expected {len(self.bypass_hidden_vars)} bypass value(s) for the '
+                f'hidden states {list(self.bypass_hidden_paths)}, '
+                f'got {len(bypass_hidden_data)}.'
+            )
         return jax.core.eval_jaxpr(
             self.perturb_jaxpr.jaxpr,
             self.perturb_jaxpr.consts,
-            *(tuple(inputs) + tuple(perturb_data))
+            *(tuple(inputs) + tuple(perturb_data) + tuple(bypass_data)
+              + tuple(bypass_hidden_data))
         )
 
     def init_perturb_data(self) -> Sequence[jax.Array]:
@@ -152,6 +186,48 @@ class HiddenPerturbation(NamedTuple):
             dtype.
         """
         return [jax.numpy.zeros(v.aval.shape, dtype=v.aval.dtype) for v in self.perturb_vars]
+
+    def bypass_hidden_data_to_hidden_group_data(
+        self,
+        bypass_hidden_data: Sequence[jax.Array],
+        hidden_groups: Sequence[HiddenGroup],
+    ) -> Sequence[jax.Array]:
+        """Assemble per-group arrays from per-hidden bypass data.
+
+        Parameters
+        ----------
+        bypass_hidden_data : sequence of jax.Array
+            One array per entry of ``bypass_hidden_vars`` (typically the
+            cotangents ``dL^t/dh^{t-1}`` along the bypass paths).
+        hidden_groups : sequence of HiddenGroup
+            The hidden groups to assemble, as in
+            :meth:`perturb_data_to_hidden_group_data`.
+
+        Returns
+        -------
+        sequence of jax.Array
+            One concatenated array per hidden group; a perturbed hidden state
+            without a bypass contributes zeros.
+
+        Raises
+        ------
+        ValueError
+            If ``bypass_hidden_data`` does not have the same length as
+            ``bypass_hidden_vars``.
+        """
+        bypass_hidden_data = list(bypass_hidden_data)
+        if len(bypass_hidden_data) != len(self.bypass_hidden_vars):
+            raise ValueError(
+                f'Expected {len(self.bypass_hidden_vars)} bypass value(s) for the '
+                f'hidden states {list(self.bypass_hidden_paths)}, '
+                f'got {len(bypass_hidden_data)}.'
+            )
+        by_path = dict(zip(self.bypass_hidden_paths, bypass_hidden_data))
+        per_perturb = []
+        for path, v in zip(self.perturb_hidden_paths, self.perturb_vars):
+            aval = cast(jax.core.ShapedArray, v.aval)
+            per_perturb.append(by_path[path] if path in by_path else jnp.zeros(aval.shape, aval.dtype))
+        return self.perturb_data_to_hidden_group_data(per_perturb, hidden_groups)
 
     def perturb_data_to_hidden_group_data(
         self,
@@ -296,9 +372,17 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         path_to_state: Dict[Path, brainstate.HiddenState],
         control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
         descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+        weight_path_to_invars: Optional[Mapping[Path, Sequence[Var]]] = None,
+        bypass_merge_positions: Sequence[int] = (),
     ):
         # necessary data structures
         self.closed_jaxpr = closed_jaxpr
+
+        # Same-step bypass gradients (issue #185): the parameter leaves, and
+        # the outvar positions (model outputs, non-hidden state outputs) where
+        # a bypass is attached. ``None`` disables the rewrite.
+        self.weight_path_to_invars = weight_path_to_invars
+        self.bypass_merge_positions = tuple(bypass_merge_positions)
 
         # Structured scan descent (Phase 4): scan equations rewritten by
         # ``scan_descent.apply_scan_descent`` (keyed by ``id(eqn)``) bypass
@@ -323,6 +407,7 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         )
         # Keep an ordered version for deterministic iteration in compile()
         self._hidden_outvars_ordered = hidden_outvars_ordered
+        self._hidden_outvar_to_invar = hidden_outvar_to_invar
 
         self.path_to_state = path_to_state
 
@@ -393,11 +478,25 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             outvar_subst.get(v, v) if isinstance(v, Var) else v
             for v in self.closed_jaxpr.jaxpr.outvars
         ]
+
+        # [same-step bypass gradients]
+        bypass = self._add_output_bypass(
+            new_outvars,
+            cut_vars={outvar_subst.get(v, v) for v in self._hidden_outvars_ordered},
+        )
+        param_bypass_keys = [k for k in bypass.bypass_keys if k[0] == 'param']
+        hidden_bypass_keys = [k for k in bypass.bypass_keys if k[0] == 'hidden']
+        # one copy per hidden bypass (a hidden invar is a single leaf)
+        n_param_leaves = len(bypass.bypass_vars) - len(hidden_bypass_keys)
         jaxpr = Jaxpr(
             constvars=list(self.closed_jaxpr.jaxpr.constvars),
-            invars=list(self.closed_jaxpr.jaxpr.invars) + list(self.perturb_invars.values()),
-            outvars=new_outvars,
-            eqns=self.revised_eqns,
+            invars=(
+                list(self.closed_jaxpr.jaxpr.invars)
+                + list(self.perturb_invars.values())
+                + list(bypass.bypass_vars)
+            ),
+            outvars=bypass.outvars,
+            eqns=bypass.eqns,
             effects=self.closed_jaxpr.jaxpr.effects,
             debug_info=self.closed_jaxpr.jaxpr.debug_info,
         )
@@ -411,7 +510,11 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             perturb_vars=brainstate.util.PrettyList(self.perturb_invars.values()),
             perturb_hidden_paths=brainstate.util.PrettyList(perturb_hidden_paths),
             perturb_hidden_states=brainstate.util.PrettyList(perturb_hidden_states),
-            perturb_jaxpr=revised_closed_jaxpr
+            perturb_jaxpr=revised_closed_jaxpr,
+            bypass_param_paths=brainstate.util.PrettyList([k[1] for k in param_bypass_keys]),
+            bypass_vars=brainstate.util.PrettyList(bypass.bypass_vars[:n_param_leaves]),
+            bypass_hidden_paths=brainstate.util.PrettyList([k[1] for k in hidden_bypass_keys]),
+            bypass_hidden_vars=brainstate.util.PrettyList(bypass.bypass_vars[n_param_leaves:]),
         )
 
         # remove the temporal data
@@ -419,6 +522,57 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         self.revised_eqns = []
         self.hidden_jaxvars_to_remove = set()
         return info
+
+    def _add_output_bypass(self, outvars: List, cut_vars: Set[Var]) -> OutputBypass:
+        """Rewrite the perturbed step to also yield the same-step bypass
+        gradients of the parameters and of the previous hidden values (see
+        ``_compiler/output_bypass.py``).
+
+        The sources are keyed ``('param', path)`` (parameters first, so their
+        copies come first in ``bypass_vars``) and ``('hidden', path)``.
+        """
+        if self.weight_path_to_invars is None:
+            return OutputBypass(self.revised_eqns, outvars, [], [], [])
+        sources: Dict = {('param', p): invars for p, invars in self.weight_path_to_invars.items()}
+        for ov in self._hidden_outvars_ordered:
+            sources[('hidden', self.outvar_to_hidden_path[ov])] = [self._hidden_outvar_to_invar[ov]]
+        bypass = add_output_bypass(
+            self.revised_eqns,
+            outvars,
+            sources=sources,
+            cut_vars=cut_vars,
+            merge_positions=self.bypass_merge_positions,
+        )
+        bypass_params = [k[1] for k in bypass.bypass_keys if k[0] == 'param']
+        bypass_hidden = [k[1] for k in bypass.bypass_keys if k[0] == 'hidden']
+        dropped = [k[1] for k in bypass.dropped_keys]
+        if bypass_params or bypass_hidden:
+            emit(
+                kind=DiagnosticKind.OUTPUT_BYPASSES_HIDDEN,
+                level=DiagnosticLevel.INFO,
+                message=(
+                    f'Parameters {bypass_params} and previous hidden values '
+                    f'{bypass_hidden} reach the step output through a value that '
+                    f'is not a new hidden state; their exact same-step gradient '
+                    f'along that path is added to the eligibility-trace gradient.'
+                ),
+                context={'params': tuple(bypass_params), 'hidden': tuple(bypass_hidden)},
+            )
+        if dropped:
+            emit(
+                kind=DiagnosticKind.OUTPUT_BYPASS_DROPPED,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'Parameters or previous hidden values {dropped} reach the '
+                    f'step output, bypassing every new hidden state, through a '
+                    f'while loop or an equation with effects. That part of their '
+                    f'same-step gradient cannot be computed and is zero. Read the '
+                    f'output from a new hidden state, or move the loop out of the '
+                    f'output path.'
+                ),
+                context={'sources': tuple(dropped)},
+            )
+        return bypass
 
     def _eval_pjit(self, eqn: JaxprEqn) -> None:
         """
@@ -570,6 +724,8 @@ def add_hidden_perturbation_in_jaxpr(
     path_to_state: Dict[Path, brainstate.HiddenState],
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    weight_path_to_invars: Optional[Mapping[Path, Sequence[Var]]] = None,
+    bypass_merge_positions: Sequence[int] = (),
 ) -> HiddenPerturbation:
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
@@ -596,6 +752,14 @@ def add_hidden_perturbation_in_jaxpr(
     descended_scan_eqn_ids : frozenset of int, optional
         ``id()`` values of scan equations rewritten by structured scan descent
         (Phase 4); exempt from the unsupported-op checks.
+    weight_path_to_invars : dict, optional
+        Parameter path to its leaf invars. When given, parameters whose path
+        to an output at ``bypass_merge_positions`` bypasses every new hidden
+        value get differentiable copies in the perturbed jaxpr (see
+        :attr:`HiddenPerturbation.bypass_vars`). ``None`` (default) disables
+        this.
+    bypass_merge_positions : sequence of int, optional
+        Positions of the jaxpr outvars where a bypass is attached.
 
     Returns
     -------
@@ -611,12 +775,15 @@ def add_hidden_perturbation_in_jaxpr(
         path_to_state=path_to_state,
         control_flow=control_flow,
         descended_scan_eqn_ids=descended_scan_eqn_ids,
+        weight_path_to_invars=weight_path_to_invars,
+        bypass_merge_positions=bypass_merge_positions,
     ).compile()
 
 
 def add_hidden_perturbation_from_minfo(
     minfo: ModuleInfo,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    include_output_bypass: bool = True,
 ) -> HiddenPerturbation:
     """Add hidden-state perturbations from a ``ModuleInfo``.
 
@@ -630,6 +797,11 @@ def add_hidden_perturbation_from_minfo(
     descended_scan_eqn_ids : frozenset of int, default ``frozenset()``
         ``id()`` values of scan equations rewritten by structured scan
         descent (Phase 4); exempt from the unsupported-op checks.
+    include_output_bypass : bool, default ``True``
+        Whether to add the same-step bypass gradients of the parameters and
+        of the previous hidden values (see
+        :attr:`HiddenPerturbation.bypass_param_paths`). Disable it for a
+        learning signal that replaces ``dL/dh`` (``'modulatory'``).
 
     Returns
     -------
@@ -649,7 +821,24 @@ def add_hidden_perturbation_from_minfo(
         path_to_state=minfo.retrieved_model_states,
         control_flow=minfo.control_flow,
         descended_scan_eqn_ids=descended_scan_eqn_ids,
+        weight_path_to_invars=minfo.weight_path_to_invars if include_output_bypass else None,
+        bypass_merge_positions=_bypass_merge_positions(minfo),
     )
+
+
+def _bypass_merge_positions(minfo: ModuleInfo) -> List[int]:
+    """Outvar positions where a parameter's bypass is attached: the model
+    outputs and the leaves of non-hidden, non-param states (whose incoming
+    cotangent the backward pass honours). Hidden-state slots and the extra
+    Jacobian temporaries are excluded."""
+    positions = list(range(minfo.num_var_out))
+    k = minfo.num_var_out
+    for st, outvar in zip(minfo.compiled_model_states, minfo.state_tree_outvars):
+        n = len(jax.tree.leaves(outvar))
+        if not isinstance(st, (brainstate.HiddenState, brainstate.ParamState)):
+            positions.extend(range(k, k + n))
+        k += n
+    return positions
 
 
 def add_hidden_perturbation_in_module(

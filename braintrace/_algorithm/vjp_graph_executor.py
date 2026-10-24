@@ -183,6 +183,11 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         estimator of an already-block-diagonal recursion would be strictly worse
         than the recursion itself, so UORO rolls the whole transition. Default
         ``False``.
+    include_output_bypass : bool, optional
+        Under ``vjp_method='single-step'``, add the exact same-step gradient
+        along paths to the output that bypass every new hidden value: of the
+        parameters directly, and of the previous hidden values paired with
+        the previous eligibility trace. Default ``True``.
     """
     __module__ = 'braintrace'
 
@@ -195,6 +200,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         snap_max_jacobian_elements: int = DEFAULT_MAX_JACOBIAN_ELEMENTS,
         control_flow: Optional[ControlFlowPolicy] = None,
         full_jacobian: bool = False,
+        include_output_bypass: bool = True,
     ):
         super().__init__(
             model,
@@ -213,6 +219,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         # Whether ``_compute_hid2hid_jacobian`` keeps the full transition
         # Jacobian rather than extracting per-position blocks.
         self.full_jacobian = full_jacobian
+        # Whether the single-step graph adds the same-step bypass gradients.
+        self.include_output_bypass = include_output_bypass
 
     @property
     def is_single_step_vjp(self) -> bool:
@@ -263,6 +271,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             sparse_n=self.sparse_n,
             snap_max_jacobian_elements=self.snap_max_jacobian_elements,
             control_flow=self.control_flow,
+            include_output_bypass=self.include_output_bypass,
         )
 
     def _compute_hid2weight_jacobian(
@@ -729,15 +738,28 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
         ) = split_dict_states_v2(self.states)
 
         if self.is_single_step_vjp:
-            etrace_param_vals = dict()
             assert self.graph.hidden_perturb is not None
+            # The parameters stay constants of the step: their through-hidden
+            # credit comes from the eligibility trace. Only the parameters
+            # whose path to an output bypasses every new hidden value are
+            # differentiated, and only through their bypass copies (#185).
+            bypass_paths = tuple(self.graph.hidden_perturb.bypass_param_paths)
+            etrace_param_vals = {path: etrace_param_states[path].value for path in bypass_paths}
             hidden_perturbs = self.graph.hidden_perturb.init_perturb_data()
             etrace_weight_vals_restore = {path: st.value for path, st in etrace_param_states.items()}
+            # Likewise the previous hidden values whose path to an output
+            # bypasses every new hidden value: their cotangent is the bypass
+            # learning signal ``dL^t/dh^{t-1}`` paired with ``e^{t-1}``.
+            hidden_bypass_vals = {
+                path: etrace_hidden_states[path].value
+                for path in self.graph.hidden_perturb.bypass_hidden_paths
+            }
 
         else:
             etrace_param_vals = {path: st.value for path, st in etrace_param_states.items()}
             etrace_weight_vals_restore = {k: v for k, v in etrace_param_vals.items()}
             hidden_perturbs = []
+            hidden_bypass_vals = {}
 
         non_etrace_param_vals = {path: st.value for path, st in non_etrace_param_states.items()}
         etrace_state_vals = {path: st.value for path, st in etrace_hidden_states.items()}
@@ -749,10 +771,12 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             non_etrace_param_vals_: Any,  # non-etrace weights
             etrace_param_vals_: Any,  # etrace weights
             oth_state_vals_: Any,  # other states
-            perturb_vals_: Any  # hidden perturbations, useful when computing \partial L / \partial h
+            perturb_vals_: Any,  # hidden perturbations, useful when computing \partial L / \partial h
+            hidden_bypass_vals_: Any,  # copies of the bypass hidden states' previous values
         ) -> Any:
-            # assign state values
-            if len(etrace_param_vals_) > 0:
+            # assign state values (single-step: the parameter values are fed
+            # to the bypass copies only, see ``call_hidden_perturb`` below)
+            if len(etrace_param_vals_) > 0 and not self.is_single_step_vjp:
                 assign_dict_state_values(etrace_param_states, etrace_param_vals_, write=False)
             assign_dict_state_values(etrace_hidden_states, etrace_hidden_vals_, write=False)
             assign_dict_state_values(non_etrace_param_states, non_etrace_param_vals_, write=False)
@@ -774,6 +798,16 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     inputs,
                     perturb_vals_,
                     old_state_vals,
+                    [
+                        leaf
+                        for path in self.graph.hidden_perturb.bypass_param_paths
+                        for leaf in jax.tree.leaves(etrace_param_vals_[path])
+                    ],
+                    [
+                        leaf
+                        for path in self.graph.hidden_perturb.bypass_hidden_paths
+                        for leaf in jax.tree.leaves(hidden_bypass_vals_[path])
+                    ],
                 )
 
             else:
@@ -807,7 +841,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             non_etrace_weight_vals_ss: Any,  # the non-etrace weights
             etrace_weight_vals_ss: Any,  # the etrace weights
             other_vals_ss: Any,  # the initial other states
-            hidden_perturbs_ss: Any  # the hidden perturbations, only used when is_single_step_vjp is True
+            hidden_perturbs_ss: Any,  # the hidden perturbations, only used when is_single_step_vjp is True
+            hidden_bypass_vals_ss: Any,  # the bypass hidden copies, only used when is_single_step_vjp is True
         ) -> Any:
 
             # processing the inputs information
@@ -837,6 +872,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     etrace_weight_vals_ss,
                     other_vals_iter,
                     hidden_perturbs_ss,
+                    hidden_bypass_vals_ss,
                 )
 
                 if etrace_stepper is None:
@@ -885,7 +921,8 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             non_etrace_weight_vals_ss: Any,  # the non-etrace weights
             etrace_weight_vals_ss: Any,  # the etrace weights
             other_vals_ss: Any,  # the initial other states
-            hidden_perturbs_ss: Any  # the hidden perturbations, only used when is_single_step_vjp is True
+            hidden_perturbs_ss: Any,  # the hidden perturbations, only used when is_single_step_vjp is True
+            hidden_bypass_vals_ss: Any,  # the bypass hidden copies, only used when is_single_step_vjp is True
         ) -> Any:
             (
                 out,
@@ -900,6 +937,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                 etrace_weight_vals_ss,
                 other_vals_ss,
                 hidden_perturbs_ss,
+                hidden_bypass_vals_ss,
             )
             return (
                 (out, hidden_vals_iter, other_vals_iter),
@@ -929,6 +967,7 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             etrace_param_vals,  # the inputs (single time)
             other_state_vals,  # the inputs (single time)
             hidden_perturbs,  # the inputs (single time)
+            hidden_bypass_vals,  # the inputs (single time)
             has_aux=True
         )
 

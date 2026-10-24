@@ -283,20 +283,23 @@ class TestPlainAndEtpRnn:
         assert spec.etp_param_keys == (('w',),)
         assert spec.plain_param_keys == (('win',), ('wout',))
 
-    def test_single_step_zeroes_every_plain_key(self):
-        # F-33. Not a truncation -- an absence. Pinned on the fixture that makes
-        # it visible, so a single-step rule's silence about plain parameters is a
-        # recorded property rather than a surprise.
+    def test_single_step_zeroes_plain_keys_that_feed_hidden_state(self):
+        # F-33. Not a truncation -- an absence. A plain parameter whose only
+        # path to the loss crosses a hidden state (``win``) has no trace, so a
+        # single-step rule is silent about it. A plain readout (``wout``)
+        # bypasses every new hidden value and gets its exact same-step
+        # gradient (#185), which is all of its credit.
         from braintrace._testing.oracle_models import plain_and_etp_rnn
         spec = plain_and_etp_rnn(n_in=3, n_rec=4, n_out=2)
         inputs = _inputs(4, 3)
         got = online_param_gradients_singlestep_naive(
             spec.factory, inputs,
             algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='single-step'))
+        ref = bptt_param_gradients(spec.factory, inputs)
         assert float(jnp.abs(got[('win',)]).max()) == 0.0
-        assert float(jnp.abs(got[('wout',)]).max()) == 0.0
+        np.testing.assert_allclose(
+            np.asarray(got[('wout',)]), np.asarray(ref[('wout',)]), atol=1e-5)
         assert float(jnp.abs(got[('w',)]).max()) > 1e-6
-
 
 class TestDelayedRewardRnn:
     """``delayed_reward_rnn`` -- credit that actually spans windows."""

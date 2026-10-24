@@ -37,15 +37,12 @@ produced here face outward through the scan's carry variables, so
 perturbation, seam checks, and learning signals are untouched; only the
 Jacobian extraction and the trace update see the substep axis.
 
-.. note:: Single-step (perturbation) limitation — the per-step hidden
-   perturbation is added to the descended scan's *carry* outvar. A loss
-   that reads the hidden state through the scan's stacked ys instead
-   (e.g. ``for_loop(...)[-1]``) bypasses the perturbation, so its
-   same-step reverse credit is dropped from the learning signal (the
-   one-step ETP gradient is zero). Read the state after the loop
-   (``self.h.value``) to route the output through the perturbed carry.
-   Multi-step VJP is unaffected. This parallels the Phase-3 while-hidden
-   same-step limitation.
+.. note:: Single-step (perturbation) — the per-step hidden perturbation is
+   added to the descended scan's *carry* outvar. A loss that reads the
+   hidden state through the scan's stacked ys instead (e.g.
+   ``for_loop(...)[-1]``) bypasses the perturbation; its same-step credit
+   is recovered by the output-bypass rewrite (``output_bypass.py``,
+   issue #185), so both readouts give the same gradient.
 
 .. note:: Body analysis always runs in the default "without recurrence"
    grouping mode (``include_recurrent_mixing=False``), independent of the

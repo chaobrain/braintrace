@@ -137,15 +137,16 @@ class DiagnosticKind(str, Enum):
     CONTROL_FLOW_OPAQUE_FWD = 'control_flow_opaque_fwd'
     CONTROL_FLOW_RECURRENT_MIXING = 'control_flow_recurrent_mixing'
 
-    # Hidden-state copies (see _compiler/hidden_group.py)
+    # Same-step bypass gradients (see _compiler/output_bypass.py)
     #
-    # ``HIDDEN_COPY_SAME_STEP_READ``: a hidden state is written as a pure copy
-    # of another hidden state's previous value (``h2^t = h1^{t-1}``, a shift
-    # register), and that value also reaches a model output or a non-hidden
-    # state in the same step. In the jaxpr ``h2^t`` and ``h1^{t-1}`` are one
-    # variable, so such a read cannot be attributed to ``h2^t``; it carries no
-    # online learning signal (WARNING). Reads on the *next* step are exact.
-    HIDDEN_COPY_SAME_STEP_READ = 'hidden_copy_same_step_read'
+    # ``OUTPUT_BYPASSES_HIDDEN``: parameters reach a step output through a
+    # value that is not a new hidden state; under the single-step VJP their
+    # exact same-step gradient along that path is added (INFO).
+    # ``OUTPUT_BYPASS_DROPPED``: part of such a path crosses a ``while`` or an
+    # equation with effects, which cannot be duplicated; that part of the
+    # gradient is zero (WARNING).
+    OUTPUT_BYPASSES_HIDDEN = 'output_bypasses_hidden'
+    OUTPUT_BYPASS_DROPPED = 'output_bypass_dropped'
 
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'

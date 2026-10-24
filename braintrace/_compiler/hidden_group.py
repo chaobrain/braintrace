@@ -1665,40 +1665,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             )
         return group._replace(snap=pattern)
 
-    def _warn_copy_read_in_same_step(self, copy_var: Var) -> None:
-        """Warn when a pure hidden copy is also read towards an output this step.
-
-        ``copy_var`` is both ``h2^t`` (a pure copy) and ``h1^{t-1}``. A read of
-        it that reaches a model output or a non-hidden state, without first
-        passing through a new hidden value, cannot be told apart from a read
-        of ``h1^{t-1}``. It therefore gets no online learning signal.
-        """
-        reached = {copy_var}
-        for eqn in self.jaxpr.eqns:
-            if any(isinstance(v, Var) and v in reached for v in eqn.invars):
-                # stop at new hidden values: their own perturbation carries the signal
-                reached.update(ov for ov in eqn.outvars if ov not in self.hidden_outvar_to_invar)
-        # ``copy_var`` occupies its own hidden-state slot once; any further
-        # occurrence among the jaxpr outvars is a same-step read.
-        hits = [v for v in self.jaxpr.outvars if isinstance(v, Var) and v in reached]
-        if len(hits) <= 1:
-            return
-        copy_path = self.outvar_to_hidden_path[copy_var]
-        source_path = self.invar_to_hidden_path[copy_var]
-        emit(
-            kind=DiagnosticKind.HIDDEN_COPY_SAME_STEP_READ,
-            level=DiagnosticLevel.WARNING,
-            message=(
-                f'Hidden state {copy_path} is written as a pure copy of the '
-                f'previous value of {source_path}, and that value also reaches '
-                f'an output in the same step. In the traced program the two are '
-                f'one variable, so this read gets no online learning signal. '
-                f'Read {copy_path} on the next step, or compute the output from '
-                f'a new hidden value.'
-            ),
-            hidden_paths=(copy_path, source_path),
-        )
-
     def _post_check(self) -> Tuple[
         Sequence[HiddenGroup],
         Dict[Path, HiddenGroup],
@@ -1751,7 +1717,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             if self.outvar_to_hidden_path[outvar] in self.descended_hidden_paths:
                 continue
             outvar_groups.append([self.hidden_invar_to_outvar[outvar], outvar])
-            self._warn_copy_read_in_same_step(outvar)
         outvar_groups = _merge_groups_ordered(outvar_groups)
         outvar_order = {ov: i for i, ov in enumerate(self.hidden_outvar_to_invar)}
         outvar_groups = [
