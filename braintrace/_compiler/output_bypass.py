@@ -56,7 +56,7 @@ reverse-mode rule) or an equation with effects (duplicating it would repeat
 the effect).
 """
 
-from typing import Any, Dict, FrozenSet, Hashable, List, NamedTuple, Sequence, Set, Tuple, cast
+from typing import Any, Dict, FrozenSet, Hashable, List, NamedTuple, Sequence, Set, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -69,6 +69,7 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     new_jaxpr_eqn,
     new_var,
+    shaped_aval,
     stop_gradient_p,
 )
 from .hidden_group import _transition_contains_while
@@ -117,8 +118,8 @@ def _is_blocking(eqn: JaxprEqn) -> bool:
 
 
 def _shaped(v: Var) -> jax.core.ShapedArray:
-    # every variable of a traced step is array-valued
-    aval = cast(jax.core.ShapedArray, v.aval)
+    # a fresh aval of the same shape and dtype (no weak type)
+    aval = shaped_aval(v)
     return jax.core.ShapedArray(aval.shape, aval.dtype)
 
 
