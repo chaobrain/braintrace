@@ -59,13 +59,24 @@ def _model_that_not_allow_param_assign(
     with brainstate.StateTraceStack() as trace:
         out = model(*args_, **kwargs_)
 
-    for st, write in zip(trace.states, trace.been_writen):
-        if isinstance(st, brainstate.ParamState) and write:
-            raise NotSupportedError(
-                f'The parameter state "{st}" is rewritten in the model. Currently, the '
-                f'online learning method we provided does not support the dynamical '
-                f'weight parameters. '
-            )
+    written = [
+        st for st, write in zip(trace.states, trace.been_writen)
+        if isinstance(st, brainstate.ParamState) and write
+    ]
+    if written:
+        # Name each state by its path in the model; a state not reachable from
+        # the model (e.g. a module-level global) falls back to its repr.
+        id_to_path = {id(st): path for path, st in brainstate.graph.states(model).items()}
+        names = list(dict.fromkeys(str(id_to_path.get(id(st), st)) for st in written))
+        raise NotSupportedError(
+            f'ParamState {", ".join(names)} is written inside the online step. '
+            f'braintrace requires parameters to be constant within a step (the '
+            f'eligibility-trace recursion assumes it), whether or not they are '
+            f'trained online. Update trained weights outside the step, from the '
+            f'gradients returned by `etrace_grad` (e.g. with an optimizer), or hold '
+            f'a locally-updated weight (e.g. a plasticity rule) in a non-param state '
+            f'such as `brainstate.LongTermState`; it is then not trained online.'
+        )
     return out
 
 
