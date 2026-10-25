@@ -1,6 +1,12 @@
 # Release Notes
 
 
+## Version 0.2.8
+
+A packaging release. braintrace now depends on `brainpy>=2.9.0`, which ships
+`brainpy.state` in-tree, instead of the retired `brainpy-state` distribution.
+There are no code changes.
+
 ## Version 0.2.7
 
 A correctness release for online gradients under the default
