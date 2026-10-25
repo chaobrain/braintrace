@@ -42,7 +42,7 @@ description = "Enabling Scalable Online Learning for Brain Dynamics."
 readme = "README.md"
 license = { text = "Apache-2.0 license" }
 requires-python = ">=3.12"
-authors = [{ name = "BrainTrace Developers", email = "chao.brain@qq.com" }]
+authors = [{ name = "BrainTrace Developers", email = "chaobrain@outlook.com" }]
 keywords = [
     "computational neuroscience",
     "brain-inspired computing",
