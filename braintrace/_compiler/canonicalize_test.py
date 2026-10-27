@@ -18,6 +18,7 @@ import warnings
 import brainstate
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import braintrace
@@ -1695,6 +1696,249 @@ class TestSkipWarningDedup:
             eqn.primitive.name == 'scan' for eqn in conv.jaxpr.eqns
         )
         assert n_opaque == len(recs)
+
+
+# ---------------------------------------------------------------------------
+# Issue #201: hidden-only substep scans (no weight, no ETP primitive inside)
+# ---------------------------------------------------------------------------
+
+def _rolled(**kwargs):
+    """A policy that keeps every hidden-only scan of length >= 2 rolled."""
+    return ControlFlowPolicy(hidden_scan_unroll_limit=1, **kwargs)
+
+
+def _hidden_scan_jaxpr(length, *, body_mixing=False, body_etp=False):
+    """A two-state neuron integrated in ``length`` substeps of one scan.
+
+    invars ``(w, v0, a0, x)``; the ETP input projection ``x @ w`` is computed
+    outside the scan, so the scan is hidden-only unless ``body_etp`` (an ETP
+    op on the carry inside the body) is set. ``body_mixing`` adds a plain
+    ``dot_general`` with a constant matrix on the carry.
+    """
+    r = jnp.eye(3) * 0.1
+
+    def f(w, v0, a0, x):
+        drive = braintrace.matmul(x, w)
+
+        def body(carry, _):
+            v, a = carry
+            d = drive
+            if body_mixing:
+                d = d + v @ r
+            if body_etp:
+                d = d + braintrace.matmul(v, w)
+            return (v + 0.25 * (-v + jnp.tanh(d) - a), a + 0.25 * (v - a)), None
+
+        (v, a), _ = jax.lax.scan(body, (v0, a0), None, length=length)
+        return v, a
+
+    w = jnp.eye(3) * 0.5
+    v0, a0 = jnp.zeros(3), jnp.ones(3) * 0.1
+    x = jnp.arange(3.) * 0.3
+    closed = jax.make_jaxpr(f)(w, v0, a0, x)
+    return f, closed, (w, v0, a0, x)
+
+
+def _unroll_hidden(closed, policy=None):
+    inv, outv = closed.jaxpr.invars, closed.jaxpr.outvars
+    return _unroll(closed, weights=[inv[0]], hiddens_in=inv[1:3],
+                   hiddens_out=outv[:2], policy=policy)
+
+
+class TestHiddenScanUnrollLimit:
+    """``ControlFlowPolicy.hidden_scan_unroll_limit`` (issue #201)."""
+
+    def test_default_equals_scan_unroll_limit(self):
+        assert DEFAULT_CONTROL_FLOW_POLICY.hidden_scan_unroll_limit == 16
+        assert ControlFlowPolicy(hidden_scan_unroll_limit=0).hidden_scan_unroll_limit == 0
+
+    @pytest.mark.parametrize('bad', [True, 2.0, '4', None])
+    def test_rejects_non_integer(self, bad):
+        with pytest.raises(ValueError, match='hidden_scan_unroll_limit'):
+            ControlFlowPolicy(hidden_scan_unroll_limit=bad)
+
+    def test_default_unrolls_hidden_only_scan(self):
+        _, closed, _ = _hidden_scan_jaxpr(4)
+        with diagnostic_context() as reporter:
+            conv = _unroll_hidden(closed)
+        assert 'scan' not in _primitive_names(conv)
+        assert len(_records_of(reporter, DiagnosticKind.SCAN_UNROLLED)) == 1
+
+    def test_tight_limit_keeps_hidden_only_scan_rolled(self):
+        f, closed, args = _hidden_scan_jaxpr(4)
+        with diagnostic_context() as reporter:
+            conv = _unroll_hidden(closed, _rolled())
+        assert conv is closed
+        assert _primitive_names(conv).count('scan') == 1
+        assert not _records_of(reporter, DiagnosticKind.SCAN_UNROLLED)
+        recs = _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        assert len(recs) == 1
+        assert recs[0].level is DiagnosticLevel.INFO
+        assert recs[0].context['rolled'] is True
+        assert 'hidden_scan_unroll_limit=1' in recs[0].context['reason']
+        assert 'kept rolled' in recs[0].message
+
+    def test_length_one_is_inlined_at_limit_one(self):
+        _, closed, _ = _hidden_scan_jaxpr(1)
+        assert 'scan' not in _primitive_names(_unroll_hidden(closed, _rolled()))
+
+    def test_limit_zero_keeps_even_length_one_rolled(self):
+        _, closed, _ = _hidden_scan_jaxpr(1)
+        with diagnostic_context() as reporter:
+            conv = _unroll_hidden(
+                closed, ControlFlowPolicy(hidden_scan_unroll_limit=0))
+        assert _primitive_names(conv).count('scan') == 1
+        recs = _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        assert 'hidden_scan_unroll_limit <= 0' in recs[0].context['reason']
+
+    def test_mixing_body_keeps_the_full_limit(self):
+        # Rolled, the whole scan would become one recurrent-mixing boundary;
+        # unrolled, only the dot_general is cut. Keep today's rule.
+        _, closed, _ = _hidden_scan_jaxpr(4, body_mixing=True)
+        assert 'scan' not in _primitive_names(_unroll_hidden(closed, _rolled()))
+
+    def test_etp_body_is_not_hidden_only(self):
+        _, closed, _ = _hidden_scan_jaxpr(4, body_etp=True)
+        conv = _unroll_hidden(closed, _rolled())
+        names = _primitive_names(conv)
+        assert 'scan' not in names
+        assert names.count('etp_mv') == 1 + 4
+
+    def test_over_limit_hidden_only_scan_is_reported_rolled(self):
+        # Descent ignores hidden-only scans, so the record must not promise it.
+        _, closed, _ = _hidden_scan_jaxpr(17)
+        with diagnostic_context() as reporter:
+            conv = _unroll_hidden(closed)
+        assert _primitive_names(conv).count('scan') == 1
+        rec, = _records_of(reporter, DiagnosticKind.SCAN_UNROLL_SKIPPED)
+        assert rec.level is DiagnosticLevel.INFO
+        assert rec.context['rolled'] is True
+        assert 'scan_unroll_limit=16' in rec.context['reason']
+        assert 'descent' not in rec.message
+
+
+class _SubstepTwoState(brainstate.nn.Module):
+    """The issue #201 model: two hidden states integrated in ``k`` Euler
+    substeps of one weight-free ``lax.scan``, driven by an ETP projection.
+
+    The recurrence is position-diagonal, so D-RTRL is exact on it.
+    """
+
+    def __init__(self, k, n_in=3, n=4, seed=0):
+        super().__init__()
+        self.k = k
+        self.W = brainstate.ParamState(
+            jax.random.normal(jax.random.key(seed), (n_in, n)) * 0.5)
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        self.w = brainstate.HiddenState(jnp.zeros(n))
+
+    def update(self, x):
+        drive, h = braintrace.matmul(x, self.W.value), 1.0 / self.k
+
+        def sub(c, _):
+            V, w = c
+            return (V + h * (-V + jnp.tanh(2 * V) - w + drive),
+                    w + h * (0.5 * V - w)), None
+
+        (self.V.value, self.w.value), _ = jax.lax.scan(
+            sub, (self.V.value, self.w.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value)
+
+
+def _substep_inputs(T=6, n_in=3):
+    return jax.random.uniform(jax.random.key(1), (T, n_in))
+
+
+def _etrace_grad_stablehlo_ops(k, policy):
+    model = _SubstepTwoState(k)
+    brainstate.nn.init_all_states(model)
+    learner = braintrace.compile(model, 'eprop', jnp.zeros(3), control_flow=policy)
+    xs = _substep_inputs(20)
+    f = brainstate.transform.jit(lambda xs: learner.etrace_grad(
+        xs, jnp.zeros((20, 4)),
+        step_fn=lambda a, b: jnp.mean((learner(a) - b) ** 2)))
+    text = f.lower(xs).as_text()
+    return sum(1 for ln in text.splitlines() if ' = ' in ln and 'stablehlo.' in ln)
+
+
+class TestSubstepScanModel:
+    """End to end on the issue #201 model."""
+
+    @pytest.mark.parametrize('k', [17, 32])
+    def test_long_substep_scan_compiles_at_default(self, k):
+        # Before #201: "only support one hidden state in a single equation".
+        model = _SubstepTwoState(k)
+        brainstate.nn.init_all_states(model)
+        graph = braintrace.compile_etrace_graph(model, jnp.zeros(3))
+        assert _primitive_names(graph.module_info.closed_jaxpr).count('scan') == 1
+        group, = graph.hidden_groups
+        assert sorted(group.hidden_paths) == [('V',), ('w',)]
+        assert 'scan' in [e.primitive.name for e in group.transition_jaxpr.eqns]
+        assert len(graph.hidden_param_op_relations) == 1
+        kinds = [r.kind for r in graph.diagnostics]
+        assert DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD in kinds
+
+    def test_default_still_unrolls_short_substep_scan(self):
+        model = _SubstepTwoState(4)
+        brainstate.nn.init_all_states(model)
+        graph = braintrace.compile_etrace_graph(model, jnp.zeros(3))
+        assert 'scan' not in _primitive_names(graph.module_info.closed_jaxpr)
+
+    def test_rolled_program_size_is_flat_in_k(self):
+        ops = {k: _etrace_grad_stablehlo_ops(k, _rolled())
+               for k in (1, 2, 4, 8, 16, 17, 32)}
+        assert len({ops[k] for k in (2, 4, 8, 16, 17, 32)}) == 1, ops
+        # length 1 is inlined: never larger than the rolled program
+        assert ops[1] <= ops[2], ops
+        # the default keeps unrolling up to 16 substeps (program grows)
+        assert _etrace_grad_stablehlo_ops(8, DEFAULT_CONTROL_FLOW_POLICY) > ops[8]
+
+    @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop', 'ostl_recurrent'])
+    @pytest.mark.parametrize('k', [2, 5])
+    def test_rolled_gradients_match_unrolled_f64(self, algo, k):
+        """Same function, Jacobians taken through the rolled loop: equal to
+        the unrolled path up to floating-point evaluation order."""
+        from braintrace._testing.oracle import online_param_gradients_singlestep_naive
+        algo_cls = {'d_rtrl': braintrace.D_RTRL, 'eprop': braintrace.EProp,
+                    'ostl_recurrent': braintrace.OSTLRecurrent}[algo]
+        with brainstate.environ.context(precision=64):
+            xs = _substep_inputs()
+            grads = [
+                online_param_gradients_singlestep_naive(
+                    lambda: _SubstepTwoState(k), xs,
+                    algo_factory=lambda m: algo_cls(m, control_flow=policy))
+                for policy in (_rolled(), DEFAULT_CONTROL_FLOW_POLICY)
+            ]
+        g_rolled, g_unrolled = (np.asarray(g[('W',)]) for g in grads)
+        assert g_rolled.dtype == np.float64
+        assert np.abs(g_unrolled).max() > 1e-3
+        np.testing.assert_allclose(g_rolled, g_unrolled, rtol=1e-12, atol=0)
+
+    @pytest.mark.parametrize('k, policy', [(17, DEFAULT_CONTROL_FLOW_POLICY),
+                                           (4, _rolled())])
+    def test_rolled_d_rtrl_matches_bptt(self, k, policy):
+        """D-RTRL is exact on this position-diagonal model, rolled or not.
+        The single-step online path is not vacuous here: pp_prop, which
+        factorizes the trace, differs from BPTT on the same inputs."""
+        from braintrace._testing.oracle import (
+            assert_gradients_differ,
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        with brainstate.environ.context(precision=64):
+            xs = _substep_inputs()
+            factory = lambda: _SubstepTwoState(k)
+            g_bptt = bptt_param_gradients(factory, xs)
+            g_drtrl = online_param_gradients_singlestep_naive(
+                factory, xs,
+                algo_factory=lambda m: braintrace.D_RTRL(m, control_flow=policy))
+            g_pp = online_param_gradients_singlestep_naive(
+                factory, xs,
+                algo_factory=lambda m: braintrace.pp_prop(
+                    m, decay_or_rank=0.9, control_flow=policy))
+            assert_param_gradients_close(g_drtrl, g_bptt, atol=0, rtol=1e-10)
+            assert_gradients_differ(g_pp, g_bptt, min_rel=1e-4)
 
 
 if __name__ == '__main__':

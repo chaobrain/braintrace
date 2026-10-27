@@ -2131,3 +2131,144 @@ class TestInputOnlyHiddenInMergedGroup:
         i1, i2 = group.hidden_paths.index(('h1',)), group.hidden_paths.index(('h2',))
         np.testing.assert_allclose(jac[..., i2, i1], 1.0)
         np.testing.assert_allclose(jac[..., i1, i1], 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Issue #201: one equation reading several hidden states directly
+# ---------------------------------------------------------------------------
+
+_SUBSTEPS = 4
+
+
+def _two_state_substep(V, w, drive, h=1.0 / _SUBSTEPS):
+    return V + h * (-V + jnp.tanh(2 * V) - w + drive), w + h * (0.5 * V - w)
+
+
+def _two_state_reference_jacobian(fn, V, w, drive):
+    """Per-position ``[out, in]`` Jacobian of an element-wise two-state map."""
+
+    def pos(hv, d):
+        return jnp.stack(fn(hv[0], hv[1], d))
+
+    return jax.vmap(jax.jacfwd(pos))(jnp.stack([V, w], axis=-1), drive)
+
+
+class _DiffCell(brainstate.nn.Module):
+    """``V - w`` reads both hidden invars in one equation."""
+
+    def __init__(self, n_in=3, n=4):
+        super().__init__()
+        self.W = brainstate.ParamState(
+            jax.random.normal(jax.random.key(0), (n_in, n)) * 0.5)
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        self.w = brainstate.HiddenState(jnp.zeros(n))
+
+    @staticmethod
+    def step(V, w, drive):
+        d = V - w
+        return V + 0.2 * (jnp.tanh(d) + drive), w + 0.2 * d
+
+    def update(self, x):
+        drive = braintrace.matmul(x, self.W.value)
+        self.V.value, self.w.value = self.step(self.V.value, self.w.value, drive)
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _SubstepScanCell(_DiffCell):
+    """Both states integrated in a weight-free substep ``lax.scan``."""
+
+    @staticmethod
+    def step(V, w, drive):
+        def sub(c, _):
+            return _two_state_substep(*c, drive), None
+
+        return jax.lax.scan(sub, (V, w), None, length=_SUBSTEPS)[0]
+
+
+class _SubstepWhileCell(_DiffCell):
+    """Both states integrated in a weight-free fixed-trip ``while_loop``."""
+
+    @staticmethod
+    def step(V, w, drive):
+        def body(s):
+            i, V_, w_ = s
+            return (i + 1, *_two_state_substep(V_, w_, drive))
+
+        _, V, w = jax.lax.while_loop(lambda s: s[0] < _SUBSTEPS, body, (0, V, w))
+        return V, w
+
+
+class _SubstepTwinCell(_DiffCell):
+    """Hand-composed twin of the scan/while cells (reverse-mode oracles)."""
+
+    @staticmethod
+    def step(V, w, drive):
+        for _ in range(_SUBSTEPS):  # static composition of the substep map
+            V, w = _two_state_substep(V, w, drive)
+        return V, w
+
+
+_ROLLED = braintrace.ControlFlowPolicy(hidden_scan_unroll_limit=1)
+
+
+class TestMultiHiddenEquation:
+    """An equation reading several hidden invars joins all their tracers
+    (before #201: "only support one hidden state in a single equation")."""
+
+    def _group(self, cell_cls, primitive):
+        cell = cell_cls()
+        brainstate.nn.init_all_states(cell)
+        x = jnp.ones(3)
+        minfo = braintrace.extract_module_info(cell, x, control_flow=_ROLLED)
+        with diagnostic_context() as reporter:
+            groups, path_to_group = find_hidden_groups_from_minfo(minfo)
+        group, = groups
+        assert group.hidden_paths == [('V',), ('w',)]
+        assert path_to_group[('V',)] is path_to_group[('w',)] is group
+        names = [e.primitive.name for e in group.transition_jaxpr.eqns]
+        assert primitive in names
+        return cell, group, reporter
+
+    @pytest.mark.parametrize('cell_cls, primitive', [
+        (_DiffCell, 'sub'),
+        (_SubstepScanCell, 'scan'),
+        (_SubstepWhileCell, 'while'),
+    ])
+    def test_one_group_and_exact_diagonal_jacobian(self, cell_cls, primitive):
+        cell, group, _ = self._group(cell_cls, primitive)
+        V, w = (jax.random.uniform(jax.random.key(i), (4,)) for i in (2, 3))
+        drive = jax.random.uniform(jax.random.key(4), (4,))
+        input_vals = _constvals_for(group, drive)
+        jac = group.diagonal_jacobian([V, w], input_vals)
+        ref_fn = _SubstepTwinCell.step if cell_cls is not _DiffCell else _DiffCell.step
+        expect = _two_state_reference_jacobian(ref_fn, V, w, drive)
+        assert jac.shape == (4, 2, 2)
+        np.testing.assert_allclose(np.asarray(jac), np.asarray(expect), rtol=1e-5, atol=1e-6)
+        new_V, new_w = group.transition([V, w], input_vals)
+        ref_V, ref_w = ref_fn(V, w, drive)
+        np.testing.assert_allclose(np.asarray(new_V), np.asarray(ref_V), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(new_w), np.asarray(ref_w), rtol=1e-6)
+
+    def test_opaque_while_is_recorded(self):
+        _, _, reporter = self._group(_SubstepWhileCell, 'while')
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD in kinds
+
+    @pytest.mark.parametrize('cell_cls', [_DiffCell, _SubstepScanCell, _SubstepWhileCell])
+    def test_d_rtrl_matches_twin_or_bptt_f64(self, cell_cls):
+        """D-RTRL is exact on these position-diagonal cells. The while cell
+        has no reverse-mode BPTT, so it is held to its hand-composed twin,
+        which is held to BPTT."""
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        algo = lambda m: braintrace.D_RTRL(m, control_flow=_ROLLED)
+        with brainstate.environ.context(precision=64):
+            xs = jax.random.uniform(jax.random.key(1), (6, 3))
+            g = online_param_gradients_singlestep_naive(cell_cls, xs, algo_factory=algo)
+            ref_cls = _DiffCell if cell_cls is _DiffCell else _SubstepTwinCell
+            g_ref = bptt_param_gradients(ref_cls, xs)
+            assert float(jnp.abs(g_ref[('W',)]).max()) > 1e-3
+            assert_param_gradients_close(g, g_ref, atol=0, rtol=1e-10)

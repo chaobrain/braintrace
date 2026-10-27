@@ -1504,38 +1504,38 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             else:
                 other_invars.append(invar)
         if len(hidden_invars) > 0:
-            # A hidden invar may be used in multiple places.
-            # All places share a common tracer.
-            if len(hidden_invars) != 1:
-                paths = [str(self.invar_to_hidden_path[var]) for var in hidden_invars]
-                hidden_paths = "\n".join(paths)
-                raise ValueError(
-                    f'Currently, we only support one hidden state in a single equation. \n'
-                    f'{eqn}\n'
-                    f'The hidden states consumed by this equation are: \n'
-                    f'{hidden_paths}\n'
-                    f'If these states form one multi-component neuron, stack '
-                    f'them into a single array held by a '
-                    f'brainstate.HiddenGroupState (or HiddenTreeState) so the '
-                    f'equation consumes one hidden variable.'
-                )
-            hidden_var = hidden_invars[0]
+            # A hidden invar may be used in multiple places; all places share
+            # a common tracer. An equation that reads several hidden invars
+            # directly (``V - w``, or an opaque scan/while carrying a
+            # multi-state neuron, issue #201) joins the tracer of each of
+            # them, exactly as an equation reading values *derived* from
+            # several hidden states already does (see the loop below). Each
+            # tracer then reaches the equation's hidden outvars, so the states
+            # merge into one group whose transition has all of them as
+            # invars; a reader whose states land in different groups (shape
+            # or layer filter) sees the others as constants, as for derived
+            # values. The connection is per equation, hence conservative for
+            # a multi-output equation: carries of one opaque loop that do not
+            # depend on each other still merge (their cross Jacobian blocks
+            # are zero).
             hidden_outvars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar in self.hidden_outvars)
             needed_invars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar not in self.hidden_outvars)
-            if hidden_var in self.active_tracers:
-                self.active_tracers[hidden_var].trace.append(eqn.replace())
-                self.active_tracers[hidden_var].other_invars.update(dict.fromkeys(other_invars))
-                self.active_tracers[hidden_var].invar_needed_in_oth_eqns.update(needed_invars)
-                self.active_tracers[hidden_var].connected_hidden_outvars.update(hidden_outvars)
-            else:
-                tracer = HiddenToHiddenGroupTracer(
-                    hidden_invar=hidden_var,
-                    connected_hidden_outvars=hidden_outvars,
-                    other_invars=dict.fromkeys(other_invars),
-                    invar_needed_in_oth_eqns=needed_invars,
-                    trace=[eqn.replace()]
-                )
-                self.active_tracers[hidden_var] = tracer
+            for hidden_var in dict.fromkeys(hidden_invars):
+                if hidden_var in self.active_tracers:
+                    tracer = self.active_tracers[hidden_var]
+                    tracer.trace.append(eqn.replace())
+                    tracer.other_invars.update(dict.fromkeys(other_invars))
+                    tracer.invar_needed_in_oth_eqns.update(needed_invars)
+                    tracer.connected_hidden_outvars.update(hidden_outvars)
+                else:
+                    # fresh containers per tracer: they are mutated in place
+                    self.active_tracers[hidden_var] = HiddenToHiddenGroupTracer(
+                        hidden_invar=hidden_var,
+                        connected_hidden_outvars=dict(hidden_outvars),
+                        other_invars=dict.fromkeys(other_invars),
+                        invar_needed_in_oth_eqns=dict(needed_invars),
+                        trace=[eqn.replace()]
+                    )
 
         # check whether this equation is used in other tracers
         for tracer in tuple(self.active_tracers.values()):

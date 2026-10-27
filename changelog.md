@@ -1,6 +1,57 @@
 # Release Notes
 
 
+## Unreleased
+
+### Fixes
+
+- **A neuron with several hidden states integrated in a substep loop compiles
+  at any number of substeps (#201).** A weight-free `lax.scan` (or
+  `while_loop`) that reads and writes several `HiddenState`s, such as a
+  two-state neuron integrated in `k` Euler or RK4 substeps, raised
+  `ValueError: Currently, we only support one hidden state in a single
+  equation` once `k` exceeded `scan_unroll_limit` (16). Such a scan holds no
+  relation, so structured descent ignores it and it stays one opaque
+  equation. The hidden-group pass now lets an equation that reads several
+  hidden states join each of their tracers, as it already did for values
+  derived from several hidden states. The states then form one group whose
+  transition contains the loop, and its Jacobians are taken through the
+  rolled loop (forward mode if it contains a `while`). The same rule makes
+  `V - w`, an equation reading two hidden states directly, compile. The
+  connection is per equation, so independent carries of one loop merge into
+  one group; their cross Jacobian blocks are zero, and the gradients are
+  unchanged. Per-carry reachability inside the loop would keep them apart;
+  it is a possible follow-up.
+
+### Features
+
+- **`ControlFlowPolicy.hidden_scan_unroll_limit` (#201).** A *hidden-only*
+  scan reads or writes hidden states but consumes no weight, and its body
+  has no ETP primitive and no `dot_general`/`conv_general_dilated`. Such a
+  scan is unrolled only up to `min(scan_unroll_limit,
+  hidden_scan_unroll_limit)` substeps. A longer one stays rolled, and its
+  program size no longer depends on the number of substeps. explain()
+  reports it as `SCAN_UNROLL_SKIPPED` (INFO, `context['rolled']`) followed by
+  `CONTROL_FLOW_OPAQUE_FWD`, instead of `SCAN_UNROLLED`. The default, `16`,
+  keeps today's behaviour. On an adaptive-exponential neuron with 8 hidden
+  states and 15 RK4 substeps under e-prop (6 neurons, 60 steps per call),
+  `1` gives 2,959 StableHLO ops against 19,745 for `16`. Which one runs
+  faster depends on the backend:
+  - on a GPU, the first call takes 3.5 s instead of 28 s, but a call runs
+    in 55-72 ms instead of 6 ms (about +1 ms per step);
+  - on a CPU, the first call takes 1.5-3 s instead of 40-55 s, and a call
+    runs in 4-8 ms instead of 18-35 s.
+
+  For CPU workloads, `hidden_scan_unroll_limit=1` is recommended. Passing
+  `unroll=3` to the model's own `lax.scan` interpolates on a GPU (5,413
+  ops, 6 s, 42 ms). Rolled and
+  unrolled gradients agree to within 4e-16 relative in float64. One case
+  differs by design: a step output that reads the scan's stacked
+  per-substep `ys`. A rolled scan sends every `y` through the #185 output
+  bypass, as descended scans already do. Exact algorithms are unaffected;
+  `pp_prop`/ES-D-RTRL and `OSTLFeedforward` move by a few percent, within
+  their approximation error.
+
 ## Version 0.2.8
 
 A packaging release. braintrace now depends on `brainpy>=2.9.0`, which ships

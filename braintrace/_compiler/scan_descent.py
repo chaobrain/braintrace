@@ -160,9 +160,12 @@ def _body_has_etp(jaxpr: Jaxpr) -> bool:
 def _is_etp_relevant(body_jaxpr: Jaxpr, eqn: JaxprEqn, weight_invars: Set[Var]) -> bool:
     """Whether a scan matters to descent at all.
 
-    Mirrors the unroller's relevance rule (:mod:`.canonicalize`): a scan is
-    ETP-relevant iff it consumes a trainable weight invar or its body holds
-    an ETP primitive.
+    The parameter half of the unroller's relevance rule
+    (:mod:`.canonicalize`): a scan is ETP-relevant iff it consumes a
+    trainable weight invar or its body holds an ETP primitive. A scan that
+    only reads or writes hidden states holds no relation; the unroller keeps
+    it rolled beyond ``hidden_scan_unroll_limit`` and the hidden-group pass
+    embeds it whole as an opaque transition node.
 
     Parameters
     ----------
