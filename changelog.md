@@ -5,6 +5,21 @@
 
 ### Fixes
 
+- **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
+  hidden-to-hidden transition (#213).** In the default ("without recurrence")
+  grouping mode, every `dot_general` that read a hidden-derived value was
+  excluded from the transition as a recurrent weight. So `I @ c`, which only
+  sums the K channels of an `(n, K)` group state, split the hidden group, and
+  e-prop and D-RTRL returned different gradients than the same model written
+  with `jnp.sum(I, axis=-1)`, with no diagnostic. The compiler now proves
+  which axes of a hidden-derived operand hold its positions, following
+  elementwise equations, `concatenate`, `transpose` and `broadcast_in_dim`.
+  It keeps a `dot_general` that provably contracts no position axis,
+  including `einsum('nk,nk->n', I, I)`. A dot that contracts an axis holding
+  positions (`h @ W_rec`, `concatenate([x, h]) @ W`) is excluded quietly, as
+  before. A dot that cannot be decided (after a `reshape`, `slice`, `gather`,
+  ...) is also excluded as before, and now emits the new
+  `RECURRENT_MIXING_ASSUMED` warning.
 - **Float32 hidden states work under `jax_enable_x64` (#202).** With x64
   enabled, a model whose `HiddenState`s are float32 failed in its first
   online step. The hidden-to-hidden Jacobian was extracted against a one-hot

@@ -79,7 +79,11 @@ from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
 from .jaxpr_graph import _RECURRENT_WEIGHT_MIXING_PRIMITIVES
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
-from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS, build_snap_pattern
+from .position_graph import (
+    _POSITION_PRESERVING_PRIMITIVES,
+    DEFAULT_MAX_JACOBIAN_ELEMENTS,
+    build_snap_pattern,
+)
 
 __all__ = [
     'HiddenGroup',
@@ -1322,6 +1326,22 @@ def _simplify_hid2hid_tracer(
     )
 
 
+class _PositionLayout(NamedTuple):
+    """Where a hidden-derived value keeps the positions of its hidden state (#213).
+
+    Attributes
+    ----------
+    varshape : tuple of int or None
+        The positions' varshape when they are exactly the value's leading
+        axes, else ``None``.
+    carriers : frozenset of int
+        Axes that certainly carry the index of a position axis longer than
+        one: a sum over one of them couples positions.
+    """
+    varshape: Optional[Tuple[int, ...]]
+    carriers: FrozenSet[int]
+
+
 class JaxprEvalForHiddenGroup(JaxprEvaluation):
     """
     Evaluating the jaxpr for extracting the hidden state ``hidden-to-hidden`` relationships.
@@ -1411,6 +1431,9 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # the data structures for the tracing hidden-hidden relationships
         self.active_tracers: Dict[Var, HiddenToHiddenGroupTracer] = dict()
 
+        # where hidden-derived values keep their positions (``_position_layout``)
+        self.position_layout: Dict[Var, _PositionLayout] = dict()
+
         super().__init__(
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
@@ -1430,6 +1453,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
 
         # the data structures for the tracing hidden-hidden relationships
         self.active_tracers = dict()
+        self.position_layout = dict()
 
         # evaluating the jaxpr
         self._eval_jaxpr(self.jaxpr)
@@ -1487,13 +1511,25 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # reductions/gathers over the ``num_state`` axis -- e.g. the ``gather`` that
         # splits a stacked ``HiddenGroupState`` (ALIF ``V``/``a``) -- are NOT
         # cross-position coupling and must remain in the transition (``jacrev_last_dim``
-        # already handles the resulting per-position block correctly).
+        # already handles the resulting per-position block correctly). The same
+        # holds for a ``dot_general`` that provably contracts only such axes
+        # (``I @ c`` over the state axis of an ``(n, K)`` group state, #213); one
+        # whose layout cannot be proven stays a boundary and is reported.
         if (
             not self.include_recurrent_mixing
             and eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES
-            and self._eqn_consumes_hidden(eqn)
         ):
-            return
+            hidden_positions = self._hidden_derived_invar_positions(eqn)
+            if hidden_positions:
+                couples = (
+                    self._dot_couples_positions(eqn, hidden_positions)
+                    if eqn.primitive.name == 'dot_general' else True
+                )
+                if couples is None:
+                    self._report_assumed_mixing(eqn, hidden_positions)
+                if couples is not False:
+                    return
+        self._track_position_layout(eqn)
 
         # An opaque control-flow equation (while, or a scan/cond the
         # canonicalizer left opaque) whose *body* applies a recurrent
@@ -1622,22 +1658,163 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             if outvar in self.hidden_outvars:
                 tracer.connected_hidden_outvars[outvar] = None
 
-    def _eqn_consumes_hidden(self, eqn: JaxprEqn) -> bool:
-        """Whether ``eqn`` reads a hidden-derived value.
+    def _position_layout(self, var: Any) -> Optional[_PositionLayout]:
+        """Where the positions of a hidden-derived *var* are, as far as proven (#213).
 
-        Returns ``True`` when any input variable is a previous hidden state
-        (:attr:`hidden_invars`) or a value transitively derived from one (tracked
-        by an active tracer's ``invar_needed_in_oth_eqns``). Used to decide
-        whether a recurrent-mixing primitive couples the hidden state and must be
-        excluded from the transition in the default grouping mode.
+        A hidden state has its own layout: its ``varshape`` first, then the
+        ``num_state`` axis of a ``HiddenGroupState``. A value derived from it
+        has a layout only through the equations :meth:`_track_position_layout`
+        follows. ``None`` means unknown.
         """
-        for invar in eqn.invars:
-            if isinstance(invar, Var) and invar in self.hidden_invars:
+        if not isinstance(var, Var):
+            return None
+        if var in self.position_layout:
+            return self.position_layout[var]
+        if var in self.hidden_invars:
+            varshape = tuple(self.path_to_state[self.invar_to_hidden_path[var]].varshape)
+            if tuple(var.aval.shape[:len(varshape)]) == varshape:
+                return _PositionLayout(
+                    varshape, frozenset(a for a, d in enumerate(varshape) if d > 1))
+        return None
+
+    @staticmethod
+    def _dot_output_axis(eqn: JaxprEqn, operand: int, axis: int) -> int:
+        """The output axis of ``axis`` of a non-contracted ``dot_general`` operand.
+
+        The output holds the batch dims (in the lhs order), then the lhs free
+        dims, then the rhs free dims.
+        """
+        (contract, batch) = eqn.params['dimension_numbers']
+        if axis in batch[operand]:
+            return list(batch[operand]).index(axis)
+        free = [
+            [d for d in range(len(v.aval.shape)) if d not in contract[i] and d not in batch[i]]
+            for i, v in enumerate(eqn.invars)
+        ]
+        return len(batch[0]) + (0 if operand == 0 else len(free[0])) + free[operand].index(axis)
+
+    def _dot_couples_positions(self, eqn: JaxprEqn, hidden_positions: Sequence[int]) -> Optional[bool]:
+        """Whether a ``dot_general`` that reads hidden-derived values couples positions.
+
+        ``True`` when it contracts an axis that carries positions of a hidden
+        operand (a recurrent weight: ``h @ W_rec``, ``concatenate([x, h]) @ W``).
+        ``False`` when provably not: every hidden operand has its positions as
+        the leading axes of one common varshape, and two hidden operands pair
+        them as batch dims (``einsum('nk,nk->n', I, I)``). Every output element
+        then depends on one position only. ``None`` when it cannot be decided
+        (#213).
+        """
+        (contract, batch) = eqn.params['dimension_numbers']
+        layouts = [self._position_layout(eqn.invars[j]) for j in hidden_positions]
+        for j, layout in zip(hidden_positions, layouts):
+            if layout is not None and layout.carriers & set(contract[j]):
                 return True
-        for tracer in self.active_tracers.values():
-            if find_matched_vars(eqn.invars, tracer.invar_needed_in_oth_eqns):
-                return True
+        if any(layout is None or layout.varshape is None for layout in layouts):
+            return None
+        if len({layout.varshape for layout in layouts}) != 1:
+            return None
+        if len(hidden_positions) == 2:
+            pairs = dict(zip(batch[0], batch[1]))
+            if any(pairs.get(a) != a for a in layouts[0].carriers):
+                return None
         return False
+
+    def _track_position_layout(self, eqn: JaxprEqn) -> None:
+        """Record where ``eqn``'s outputs keep the positions of its hidden operands (#213).
+
+        Followed: elementwise, shape-preserving primitives
+        (``position_graph._POSITION_PRESERVING_PRIMITIVES``), ``concatenate``,
+        ``transpose``, ``broadcast_in_dim`` and a ``dot_general`` that couples no
+        positions. The positions stay the leading axes only when the equation
+        keeps them there. Any other equation (``reshape``, ``slice``,
+        ``gather``, ...) loses the layout, so a later ``dot_general`` on its
+        output stays a boundary and is reported.
+        """
+        if self.include_recurrent_mixing or not any(
+            isinstance(v, Var) and (v in self.position_layout or v in self.hidden_invars)
+            for v in eqn.invars
+        ):
+            return  # every dot is traced, or no input has a layout to carry
+        hidden_positions = self._hidden_derived_invar_positions(eqn)
+        layouts = [self._position_layout(eqn.invars[j]) for j in hidden_positions]
+        if not layouts or any(layout is None for layout in layouts):
+            return
+        varshapes = {layout.varshape for layout in layouts}
+        varshape = varshapes.pop() if len(varshapes) == 1 else None
+        carriers = frozenset().union(*(layout.carriers for layout in layouts))
+        r = 0 if varshape is None else len(varshape)
+        name = eqn.primitive.name
+        outvar = eqn.outvars[0]
+        if name in _POSITION_PRESERVING_PRIMITIVES:
+            shape = tuple(eqn.invars[hidden_positions[0]].aval.shape)
+            if any(tuple(eqn.invars[j].aval.shape) != shape for j in hidden_positions):
+                return
+            for out in eqn.outvars:
+                if tuple(out.aval.shape) == shape:
+                    self.position_layout[out] = _PositionLayout(varshape, carriers)
+            return
+        if name == 'concatenate':
+            if eqn.params['dimension'] < r:
+                varshape = None
+        elif name == 'transpose':
+            perm = tuple(eqn.params['permutation'])
+            carriers = frozenset(i for i, a in enumerate(perm) if a in carriers)
+            if perm[:r] != tuple(range(r)):
+                varshape = None
+        elif name == 'broadcast_in_dim':
+            dims = tuple(eqn.params['broadcast_dimensions'])
+            carriers = frozenset(dims[a] for a in carriers)
+            if dims[:r] != tuple(range(r)):
+                varshape = None
+        elif name == 'dot_general':
+            if self._dot_couples_positions(eqn, hidden_positions) is not False:
+                return
+            carriers = frozenset(
+                self._dot_output_axis(eqn, j, a)
+                for j, layout in zip(hidden_positions, layouts) for a in layout.carriers
+            )
+            if any(self._dot_output_axis(eqn, j, a) != a
+                   for j in hidden_positions for a in range(r)):
+                varshape = None
+        else:
+            return
+        if varshape is not None and tuple(outvar.aval.shape[:r]) != varshape:
+            varshape = None
+        self.position_layout[outvar] = _PositionLayout(varshape, carriers)
+
+    def _report_assumed_mixing(self, eqn: JaxprEqn, hidden_positions: Sequence[int]) -> None:
+        """Report a ``dot_general`` excluded because its layout is not proven (#213)."""
+        paths = []
+        for j in hidden_positions:
+            invar = eqn.invars[j]
+            if invar in self.hidden_invars:
+                paths.append(self.invar_to_hidden_path[invar])
+            for tracer in self.active_tracers.values():
+                if invar in tracer.invar_needed_in_oth_eqns:
+                    paths.append(self.invar_to_hidden_path[tracer.hidden_invar])
+        paths = list(dict.fromkeys(paths))
+        shapes = [tuple(eqn.invars[j].aval.shape) for j in hidden_positions]
+        emit(
+            kind=DiagnosticKind.RECURRENT_MIXING_ASSUMED,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'A dot_general reads a value derived from hidden state(s) '
+                f'{paths} (operand shape(s) {shapes}) whose position layout '
+                f'could not be proven, so it may couple positions. It was '
+                f'excluded from the hidden-to-hidden transition (default '
+                f'"without recurrence" mode), like a recurrent weight: its '
+                f'temporal credit falls back to the zero-recurrence (e-prop) '
+                f'approximation, and the states on either side of it may fall '
+                f'into different hidden groups. If it only contracts the state '
+                f'axis of a HiddenGroupState, write it as jnp.sum(x * c, axis=-1).'
+            ),
+            hidden_paths=tuple(paths),
+            context={
+                'op_name': eqn.primitive.name,
+                'dimension_numbers': eqn.params['dimension_numbers'],
+                'operand_shapes': shapes,
+            },
+        )
 
     def _hidden_derived_invar_positions(self, eqn: JaxprEqn) -> List[int]:
         """Positions of ``eqn.invars`` carrying a hidden-derived value.

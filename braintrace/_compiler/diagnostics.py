@@ -145,9 +145,17 @@ class DiagnosticKind(str, Enum):
     # recurrent weight-mixing primitive to the carried hidden state, so the
     # equation is excluded from the hidden-to-hidden transition in the default
     # ("without recurrence") grouping mode (WARNING).
+    # ``RECURRENT_MIXING_ASSUMED``: a ``dot_general`` reads a hidden-derived
+    # value whose position layout could not be proven, so it may couple
+    # positions; it is excluded from the hidden-to-hidden transition in the
+    # default ("without recurrence") grouping mode, like a recurrent weight
+    # (WARNING; #213). A dot that provably contracts only non-position axes
+    # stays in the transition, and one that provably contracts a position axis
+    # (``h @ W_rec``) is excluded without a record.
     WEIGHT_IN_WHILE = 'weight_in_while'
     CONTROL_FLOW_OPAQUE_FWD = 'control_flow_opaque_fwd'
     CONTROL_FLOW_RECURRENT_MIXING = 'control_flow_recurrent_mixing'
+    RECURRENT_MIXING_ASSUMED = 'recurrent_mixing_assumed'
 
     # Same-step bypass gradients (see _compiler/output_bypass.py)
     #
