@@ -14,6 +14,7 @@
 # ==============================================================================
 
 
+import functools
 import unittest
 import warnings
 from pprint import pprint
@@ -2263,3 +2264,294 @@ class TestInputOnlyHiddenInMergedGroup:
         i1, i2 = group.hidden_paths.index(('h1',)), group.hidden_paths.index(('h2',))
         np.testing.assert_allclose(jac[..., i2, i1], 1.0)
         np.testing.assert_allclose(jac[..., i1, i1], 0.5)
+
+
+# ---------------------------------------------------------------------------
+# Issue #201: one equation reading several hidden states directly
+# ---------------------------------------------------------------------------
+
+_SUBSTEPS = 4
+
+
+def _two_state_substep(V, w, drive, h=1.0 / _SUBSTEPS):
+    return V + h * (-V + jnp.tanh(2 * V) - w + drive), w + h * (0.5 * V - w)
+
+
+def _two_state_reference_jacobian(fn, V, w, drive):
+    """Per-position ``[out, in]`` Jacobian of an element-wise two-state map."""
+
+    def pos(hv, d):
+        return jnp.stack(fn(hv[0], hv[1], d))
+
+    return jax.vmap(jax.jacfwd(pos))(jnp.stack([V, w], axis=-1), drive)
+
+
+class _DiffCell(brainstate.nn.Module):
+    """``V - w`` reads both hidden invars in one equation."""
+
+    def __init__(self, n_in=3, n=4):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        self.w = brainstate.HiddenState(jnp.zeros(n))
+
+    @staticmethod
+    def step(V, w, drive):
+        d = V - w
+        return V + 0.2 * (jnp.tanh(d) + drive), w + 0.2 * d
+
+    def update(self, x):
+        drive = braintrace.matmul(x, self.W.value)
+        self.V.value, self.w.value = self.step(self.V.value, self.w.value, drive)
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _SubstepScanCell(_DiffCell):
+    """Both states integrated in a weight-free substep ``lax.scan``."""
+
+    @staticmethod
+    def step(V, w, drive):
+        def sub(c, _):
+            return _two_state_substep(*c, drive), None
+
+        return jax.lax.scan(sub, (V, w), None, length=_SUBSTEPS)[0]
+
+
+class _SubstepWhileCell(_DiffCell):
+    """Both states integrated in a weight-free fixed-trip ``while_loop``."""
+
+    @staticmethod
+    def step(V, w, drive):
+        def body(s):
+            i, V_, w_ = s
+            return (i + 1, *_two_state_substep(V_, w_, drive))
+
+        _, V, w = jax.lax.while_loop(lambda s: s[0] < _SUBSTEPS, body, (0, V, w))
+        return V, w
+
+
+class _SubstepTwinCell(_DiffCell):
+    """Hand-composed twin of the scan/while cells (reverse-mode oracles)."""
+
+    @staticmethod
+    def step(V, w, drive):
+        for _ in range(_SUBSTEPS):  # static composition of the substep map
+            V, w = _two_state_substep(V, w, drive)
+        return V, w
+
+
+_ROLLED = braintrace.ControlFlowPolicy(hidden_scan_unroll_limit=1)
+
+
+class TestMultiHiddenEquation:
+    """An equation reading several hidden invars joins all their tracers
+    (before #201: "only support one hidden state in a single equation")."""
+
+    def _group(self, cell_cls, primitive):
+        cell = cell_cls()
+        brainstate.nn.init_all_states(cell)
+        x = jnp.ones(3)
+        minfo = braintrace.extract_module_info(cell, x, control_flow=_ROLLED)
+        with diagnostic_context() as reporter:
+            groups, path_to_group = find_hidden_groups_from_minfo(minfo)
+        group, = groups
+        assert group.hidden_paths == [('V',), ('w',)]
+        assert path_to_group[('V',)] is path_to_group[('w',)] is group
+        names = [e.primitive.name for e in group.transition_jaxpr.eqns]
+        assert primitive in names
+        return cell, group, reporter
+
+    @pytest.mark.parametrize('cell_cls, primitive', [
+        (_DiffCell, 'sub'),
+        (_SubstepScanCell, 'scan'),
+        (_SubstepWhileCell, 'while'),
+    ])
+    def test_one_group_and_exact_diagonal_jacobian(self, cell_cls, primitive):
+        cell, group, _ = self._group(cell_cls, primitive)
+        with brainstate.random.seed_context(2):
+            V, w, drive = [brainstate.random.rand(4) for _ in range(3)]
+        input_vals = _constvals_for(group, drive)
+        jac = group.diagonal_jacobian([V, w], input_vals)
+        ref_fn = _SubstepTwinCell.step if cell_cls is not _DiffCell else _DiffCell.step
+        expect = _two_state_reference_jacobian(ref_fn, V, w, drive)
+        assert jac.shape == (4, 2, 2)
+        np.testing.assert_allclose(np.asarray(jac), np.asarray(expect), rtol=1e-5, atol=1e-6)
+        new_V, new_w = group.transition([V, w], input_vals)
+        ref_V, ref_w = ref_fn(V, w, drive)
+        np.testing.assert_allclose(np.asarray(new_V), np.asarray(ref_V), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(new_w), np.asarray(ref_w), rtol=1e-6)
+
+    def test_opaque_while_is_recorded(self):
+        _, _, reporter = self._group(_SubstepWhileCell, 'while')
+        kinds = [r.kind for r in reporter.records()]
+        assert DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD in kinds
+
+    @pytest.mark.parametrize('cell_cls', [_DiffCell, _SubstepScanCell, _SubstepWhileCell])
+    def test_d_rtrl_matches_twin_or_bptt_f64(self, cell_cls):
+        """D-RTRL is exact on these position-diagonal cells. The while cell
+        has no reverse-mode BPTT, so it is held to its hand-composed twin,
+        which is held to BPTT."""
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        algo = lambda m: braintrace.D_RTRL(m, control_flow=_ROLLED)
+        with brainstate.environ.context(precision=64):
+            with brainstate.random.seed_context(1):
+                xs = brainstate.random.rand(6, 3)
+            g = online_param_gradients_singlestep_naive(cell_cls, xs, algo_factory=algo)
+            ref_cls = _DiffCell if cell_cls is _DiffCell else _SubstepTwinCell
+            g_ref = bptt_param_gradients(ref_cls, xs)
+            assert float(jnp.abs(g_ref[('W',)]).max()) > 1e-3
+            assert_param_gradients_close(g, g_ref, atol=0, rtol=1e-10)
+
+
+class _SharedScalarCell(brainstate.nn.Module):
+    """``V`` (4,) and a shared ``g`` (1,) coupled through ``V - g``: the two
+    states cannot form one group (different varshape). With ``n_g=n``, ``g``
+    is per neuron and follows ``V`` element-wise; the states then form one
+    group."""
+
+    def __init__(self, k=None, derived=False, n_in=3, n=4, n_g=1):
+        super().__init__()
+        self.k, self.derived = k, derived
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        self.g = brainstate.HiddenState(jnp.zeros(n_g))
+
+    @staticmethod
+    def _sub(V, g, drive, h):
+        V = V + h * (-(V - g) + jnp.tanh(2 * (V - g)) + drive)
+        target = jnp.mean(V, keepdims=True) if g.shape != V.shape else V
+        return V, g + h * (-g + target)
+
+    def update(self, x):
+        drive = braintrace.matmul(x, self.W.value)
+        V, g = self.V.value, self.g.value
+        if self.derived:
+            V = V * 1.0  # V reaches `V - g` as a derived value (pre-#201 path)
+        if self.k is None:
+            V, g = self._sub(V, g, drive, 0.3)
+        else:
+            def sub(c, _):
+                return self._sub(*c, drive, 1.0 / self.k), None
+
+            (V, g), _ = jax.lax.scan(sub, (V, g), None, length=self.k)
+        self.V.value, self.g.value = V, g
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _LayerV(brainstate.nn.Module):
+    def __init__(self, n=4):
+        super().__init__()
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+
+
+class _TwoLayerDirectRead(brainstate.nn.Module):
+    """``layers.0.V - layers.1.V`` in one equation: same varshape, different
+    recurrence layers."""
+
+    def __init__(self, n_in=3, n=4):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+        self.layers = [_LayerV(n), _LayerV(n)]
+
+    def update(self, x):
+        V0, V1 = self.layers[0].V.value, self.layers[1].V.value
+        d = V0 - V1
+        self.layers[0].V.value = V0 + 0.2 * (jnp.tanh(V0) + braintrace.matmul(x, self.W.value))
+        self.layers[1].V.value = V1 + 0.2 * d
+        return jax.nn.sigmoid(self.layers[1].V.value)
+
+
+class TestHiddenCouplingDropped:
+    """Two hidden states that cannot share a group (review of #203, S2): a
+    direct read of both in one equation raises, as before #201; a coupling
+    through a derived value is reported, where it used to be silent."""
+
+    @pytest.mark.parametrize('kwargs', [dict(), dict(k=17)], ids=['direct', 'scan17'])
+    def test_direct_read_raises(self, kwargs):
+        cell = _SharedScalarCell(**kwargs)
+        brainstate.nn.init_all_states(cell)
+        with pytest.raises(ValueError, match='cannot share one hidden group') as info:
+            braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        msg = str(info.value)
+        for part in ("('V',) (varshape (4,))", "('g',) (varshape (1,))",
+                     'online gradient would be wrong', 'same varshape',
+                     'HiddenGroupState'):
+            assert part in msg
+
+    def test_direct_read_across_layers_raises(self):
+        cell = _TwoLayerDirectRead()
+        brainstate.nn.init_all_states(cell)
+        with pytest.raises(ValueError, match='different recurrence layers') as info:
+            braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        msg = str(info.value)
+        assert "('layers', 0, 'V')" in msg and "('layers', 1, 'V')" in msg
+        assert 'one recurrence layer' in msg
+
+    def test_derived_read_warns(self):
+        cell = _SharedScalarCell(derived=True)
+        brainstate.nn.init_all_states(cell)
+        with pytest.warns(UserWarning, match='cannot share its hidden group'):
+            graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        recs = [r for r in graph.diagnostics if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]
+        assert {r.context['hidden_path'] for r in recs} == {('V',), ('g',)}
+        assert all(r.level is DiagnosticLevel.WARNING for r in recs)
+        by_path = {r.context['hidden_path']: r.context['dropped'] for r in recs}
+        assert list(by_path[('V',)]) == [('g',)]
+        assert 'varshape' in by_path[('V',)][('g',)]
+        assert sorted(gr.hidden_paths for gr in graph.hidden_groups) == [[('V',)], [('g',)]]
+
+    def test_the_dropped_term_moves_d_rtrl_off_bptt(self):
+        # The warning is not noise: without the cross-group term the exact
+        # algorithm no longer matches BPTT on this model.
+        from braintrace._testing.oracle import (
+            assert_gradients_differ,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        make = functools.partial(_SharedScalarCell, derived=True)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                with brainstate.random.seed_context(1):
+                    xs = brainstate.random.rand(6, 3)
+                g = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+                g_bptt = bptt_param_gradients(make, xs)
+                assert_gradients_differ(g, g_bptt, min_rel=1e-3)
+
+    def test_same_shape_multi_state_scan_compiles_and_matches_bptt(self):
+        # The #201 case: a same-shape multi-state substep scan beyond the
+        # unroll limit forms one group and stays exact.
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        make = functools.partial(_SharedScalarCell, k=17, n_g=4)
+        cell = make()
+        brainstate.nn.init_all_states(cell)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        assert [gr.hidden_paths for gr in graph.hidden_groups] == [[('V',), ('g',)]]
+        assert not [r for r in graph.diagnostics
+                    if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]
+        with brainstate.environ.context(precision=64):
+            with brainstate.random.seed_context(1):
+                xs = brainstate.random.rand(6, 3)
+            g = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+            g_bptt = bptt_param_gradients(make, xs)
+            assert_param_gradients_close(g, g_bptt, atol=0, rtol=1e-10)
+
+    def test_same_shape_coupling_is_not_reported(self):
+        cell = _DiffCell()
+        brainstate.nn.init_all_states(cell)
+        graph = braintrace.compile_etrace_graph(cell, jnp.ones(3))
+        assert not [r for r in graph.diagnostics
+                    if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]

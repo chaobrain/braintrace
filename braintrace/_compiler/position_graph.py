@@ -80,6 +80,7 @@ from braintrace._op import (
     is_etp_enable_gradient_primitive,
     is_etp_primitive,
 )
+from .jaxpr_graph import _RECURRENT_WEIGHT_MIXING_PRIMITIVES
 
 __all__ = [
     'AxisAdjacency',
@@ -225,8 +226,6 @@ def _is_mixing(eqn: JaxprEqn) -> bool:
     ...) plus the raw mixing primitives. ``etp_elemwise`` is gradient-enabled
     and elementwise, so it is *not* mixing.
     """
-    from .hidden_group import _RECURRENT_WEIGHT_MIXING_PRIMITIVES
-
     if eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES:
         return True
     return (

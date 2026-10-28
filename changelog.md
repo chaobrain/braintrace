@@ -26,6 +26,73 @@
   gradients of such a model equal those of the same model written with one
   `HiddenState` per component. D-RTRL also matches BPTT on these
   position-diagonal cells.
+- **A neuron with several hidden states integrated in a substep loop compiles
+  at any number of substeps (#201).** A weight-free `lax.scan` (or a
+  top-level `while_loop`) that reads and writes several `HiddenState`s, such
+  as a two-state neuron integrated in `k` Euler or RK4 substeps, raised
+  `ValueError: Currently, we only support one hidden state in a single
+  equation` once `k` exceeded `scan_unroll_limit` (16). Such a scan holds no
+  relation, so structured descent ignores it and it stays one opaque
+  equation. The hidden-group pass now lets an equation that reads several
+  hidden states join each of their tracers, as it already did for values
+  derived from several hidden states. The states then form one group whose
+  transition contains the loop, and its Jacobians are taken through the
+  rolled loop (reverse mode, or forward mode if it contains a `while`). The
+  same rule makes `V - w`, an equation reading two hidden states directly,
+  compile. Two states that cannot share a group (a different varshape or
+  recurrence layer) still raise when one equation reads both, now with a
+  message that names them and the fix, since the gradient would otherwise be
+  wrong. The connection is per equation, so independent carries of one
+  loop merge into one group; their cross Jacobian blocks are zero, and the
+  gradients are unchanged. Per-carry reachability inside the loop would keep
+  them apart; it is a possible follow-up.
+- **A hidden-state coupling that the grouping drops is reported (#201).**
+  When a hidden state's update reads a value derived from another hidden
+  state that cannot share its group, the hidden-to-hidden Jacobian term
+  between them is dropped and online gradients deviate from BPTT. Examples
+  are a different shape (a shared `g` of shape `(1,)` whose update reads
+  `mean(V)` of a `V` of shape `(n,)`) or a different recurrence layer. On the
+  test model, D-RTRL is 2.9 % off. This used to happen silently; it now
+  compiles with a `HIDDEN_COUPLING_DROPPED` warning.
+
+### Features
+
+- **`ControlFlowPolicy.hidden_scan_unroll_limit` (#201).** A *hidden-only*
+  scan reads or writes hidden states but consumes no weight, and its body
+  has no ETP primitive and no `dot_general`/`conv_general_dilated`. With the
+  default, `None`, it is unrolled up to `scan_unroll_limit`, as before. An
+  integer tightens its limit to `min(scan_unroll_limit,
+  hidden_scan_unroll_limit)`. A hidden-only scan beyond its limit stays
+  rolled, and its program size no longer depends on the number of
+  substeps. explain() reports it as `SCAN_UNROLL_SKIPPED` (INFO,
+  `context['rolled']`) followed by `CONTROL_FLOW_OPAQUE_FWD`, instead of
+  `SCAN_UNROLLED`. The option has no effect under `while_hidden='error'`.
+
+  On an adaptive-exponential neuron with 8 hidden states and 15 RK4
+  substeps under e-prop (6 neurons, 60 steps per call), `1` gives 2,959
+  StableHLO ops against 19,745 unrolled. Which one runs faster depends on
+  the backend:
+  - on a GPU (RTX 3090), the first call takes 3.5 s instead of 28 s, but a
+    call runs in 55-72 ms instead of 6 ms (about +1 ms per step);
+  - on a CPU (i7-14700KF), the first call takes 1.5-3 s instead of 40-55 s,
+    and a call runs in 4-8 ms instead of 18-35 s.
+
+  For CPU workloads, `hidden_scan_unroll_limit=1` is recommended. Passing
+  `unroll=3` to the model's own `lax.scan` interpolates on a GPU (5,413 ops,
+  6 s first call, 42 ms per call).
+
+  Rolled and unrolled gradients agree to rounding (~1e-15 in float64),
+  with one exception: a step output that reads a scan output that is not a
+  hidden state (the stacked per-substep `ys`, or a non-hidden carry such as
+  the last substep's `tanh(V)`). A rolled scan credits every such output
+  through the #185 output bypass, where unrolling aliases the last one to
+  the hidden state. D-RTRL is unaffected, and so are EProp and
+  OSTLRecurrent on cells where they are exact.
+  `pp_prop`/ES-D-RTRL and `OSTLFeedforward` move: by 9 % and 74 % on a carry
+  readout of the test model, and by 2 % and 14 % on a `ys` readout. Neither
+  path is closer to BPTT in general. explain() reports such a scan with a
+  `SCAN_ROLLED_OUTPUT_READ` INFO. SnAp-n position analysis cannot yet see
+  through a rolled scan, so its pattern widens to all positions (#210).
 
 ## Version 0.2.8
 

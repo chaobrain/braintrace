@@ -39,6 +39,10 @@ every ETP-relevant ``scan`` equation with static length at most
 iteration ``xs`` slices materialized as ``slice``/``squeeze`` equations and
 consumed stacked ``ys`` rebuilt with ``broadcast_in_dim``/``concatenate``.
 Unrolling is semantically identical — values and all derivatives are exact.
+A *hidden-only* scan (one that touches hidden states but holds no weight and
+no ETP primitive) follows the same limit unless
+``policy.hidden_scan_unroll_limit`` sets a tighter one; beyond its limit, it
+stays rolled as one opaque node of the hidden-to-hidden transition.
 
 :func:`canonicalize_control_flow` runs both passes to a joint fixpoint, so
 a ``cond`` inside a ``scan`` body (and vice versa) canonicalizes fully.
@@ -48,6 +52,7 @@ it raises a :class:`~braintrace.CompilationError` naming the offending
 equations rather than spinning forever.
 """
 
+import numbers
 from dataclasses import dataclass
 from typing import Any, Callable, Container, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
@@ -69,7 +74,13 @@ from braintrace._compatible_imports import (
 from braintrace._misc import CompilationError
 from braintrace._op import is_etp_primitive
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
-from .jaxpr_graph import Atom, build_producer_map, inline_jit_calls
+from .jaxpr_graph import (
+    _RECURRENT_WEIGHT_MIXING_PRIMITIVES,
+    Atom,
+    _is_etp_relevant,
+    build_producer_map,
+    inline_jit_calls,
+)
 
 __all__ = [
     'ControlFlowPolicy',
@@ -97,9 +108,11 @@ class ControlFlowPolicy:
         Maximum static length of an ETP-relevant inner ``scan`` that
         ``unroll_inner_scans`` unrolls into flat equations. Longer (or
         effectful, or ``while``-containing) scans stay opaque with a
-        ``DiagnosticKind.SCAN_UNROLL_SKIPPED`` warning, and
-        the existing control-flow restrictions apply. ``0`` (or negative)
-        disables unrolling entirely. Default ``16``.
+        ``DiagnosticKind.SCAN_UNROLL_SKIPPED`` record, and the existing
+        control-flow restrictions apply (the record is a warning when the
+        scan consumes a weight or holds an ETP primitive, see also
+        ``scan_descent`` and ``hidden_scan_unroll_limit``). ``0`` (or
+        negative) disables unrolling entirely. Default ``16``.
     while_hidden : str, optional
         How an *opaque* control-flow equation (``while``, or a ``scan``/
         ``cond`` the canonicalizer left opaque) that produces a hidden-state
@@ -143,6 +156,51 @@ class ControlFlowPolicy:
         "unbounded" setting: without a cap, a jaxpr that regenerates
         convertible control flow as fast as the sweeps consume it hangs the
         compiler with no diagnostic at all. Must be a positive integer.
+    hidden_scan_unroll_limit : int or None, optional
+        Unroll limit for a *hidden-only* inner ``scan``: one that reads or
+        writes hidden states but consumes no weight invar, and whose body
+        holds no ETP primitive and no ``dot_general``/
+        ``conv_general_dilated`` (the shape of a neuron integrated in ``k``
+        substeps). ``None`` (default) follows ``scan_unroll_limit``, so such
+        a scan is unrolled exactly as any other ETP-relevant scan. An integer
+        tightens its limit to ``min(scan_unroll_limit,
+        hidden_scan_unroll_limit)``; ``0`` (or negative) keeps every
+        hidden-only scan rolled. Under ``while_hidden='error'`` the option
+        has no effect, since the rolled scan would raise.
+
+        A hidden-only scan longer than its limit stays rolled. It holds no
+        relation, so the hidden-group pass embeds it whole as an opaque node
+        of the hidden-to-hidden transition and takes its Jacobians through
+        the rolled loop, in reverse mode (forward mode if its body contains a
+        ``while``). explain() records a ``DiagnosticKind.SCAN_UNROLL_SKIPPED``
+        INFO followed by ``DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD``, instead
+        of ``DiagnosticKind.SCAN_UNROLLED``.
+
+        Unrolled, the program grows linearly with the scan length; rolled,
+        its size does not depend on it, but every loop iteration has a fixed
+        cost at run time. On a GPU the unrolled program usually runs faster
+        once compiled; on a CPU the rolled loop is usually faster both to
+        compile and to run, so for CPU workloads
+        ``hidden_scan_unroll_limit=1`` is recommended (the release notes give
+        measurements). A rolled scan has two further effects:
+
+        - SnAp-n position analysis cannot see through the scan, so its
+          pattern widens to all positions
+          (``DiagnosticKind.SNAP_PATTERN_CONSERVATIVE``) and SnAp-n costs as
+          much as within-group RTRL. Keep such scans unrolled for SnAp-n.
+        - Gradients equal the unrolled ones to rounding (~1e-15 in float64),
+          except when a step output reads a scan output that is not a hidden
+          state (the stacked per-iteration ``ys``, or a non-hidden carry)
+          computed from a new hidden value. Rolled, every such output is
+          credited through the same-step output bypass (issue #185);
+          unrolled, the last one is aliased to the hidden state. Exact
+          algorithms such as D-RTRL give the same gradient either way;
+          trace-factorized ones (``pp_prop``/ES-D-RTRL, ``OSTLFeedforward``)
+          can move by tens of percent on such readouts. explain() records a
+          ``DiagnosticKind.SCAN_ROLLED_OUTPUT_READ`` INFO when a rolled scan
+          has such outputs.
+
+        Must be ``None`` or an integer.
 
     Notes
     -----
@@ -186,6 +244,7 @@ class ControlFlowPolicy:
     etp_in_control_flow: str = 'error'
     scan_descent: str = 'auto'
     fixpoint_iteration_limit: int = 64
+    hidden_scan_unroll_limit: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.scan_descent not in ('auto', 'off'):
@@ -202,6 +261,15 @@ class ControlFlowPolicy:
                 f"setting: the cap exists so a non-converging jaxpr fails "
                 f"with a diagnostic instead of hanging the compiler."
             )
+        hidden_limit = self.hidden_scan_unroll_limit
+        if hidden_limit is not None:
+            if isinstance(hidden_limit, bool) or not isinstance(hidden_limit, numbers.Integral):
+                raise ValueError(
+                    f'ControlFlowPolicy.hidden_scan_unroll_limit must be None '
+                    f'or an integer, got {hidden_limit!r}.'
+                )
+            # A NumPy integer is stored as ``int``, so equal policies hash equal.
+            object.__setattr__(self, 'hidden_scan_unroll_limit', int(hidden_limit))
 
 
 DEFAULT_CONTROL_FLOW_POLICY = ControlFlowPolicy()
@@ -667,6 +735,8 @@ def _convert_conds_once(
 def _scan_static_ineligibility(
     eqn: JaxprEqn,
     policy: ControlFlowPolicy,
+    limit: Optional[int] = None,
+    limit_name: str = 'scan_unroll_limit',
 ) -> Optional[str]:
     """Identity-free reasons a ``scan`` equation cannot be unrolled.
 
@@ -675,17 +745,20 @@ def _scan_static_ineligibility(
     knob, the static length, effects, and inner ``while`` loops. The
     weights-as-xs gate needs real outer identities and lives in
     :func:`_unroll_scans_once`. Returns ``None`` when unrollable.
+
+    ``limit`` overrides ``policy.scan_unroll_limit`` (named ``limit_name`` in
+    the returned reason); :func:`_unroll_scans_once` passes the tighter
+    hidden-only limit for scans that may stay rolled.
     """
-    if policy.scan_unroll_limit <= 0:
-        return 'scan unrolling is disabled (scan_unroll_limit <= 0)'
+    if limit is None:
+        limit = policy.scan_unroll_limit
+    if limit <= 0:
+        return f'scan unrolling is disabled ({limit_name} <= 0)'
     length = eqn.params['length']
     if length == 0:
         return 'its length is 0'
-    if length > policy.scan_unroll_limit:
-        return (
-            f'its length {length} exceeds '
-            f'scan_unroll_limit={policy.scan_unroll_limit}'
-        )
+    if length > limit:
+        return f'its length {length} exceeds {limit_name}={limit}'
     body = eqn.params['jaxpr'].jaxpr
     if eqn.effects or body.effects:
         return 'the scan (or its body) has effects'
@@ -763,6 +836,19 @@ def unroll_inner_scans(
     the existing control-flow restrictions then apply unchanged. Irrelevant
     scans always stay opaque, at zero cost — in particular the outer
     time-step loop of a training harness is never touched.
+
+    A *hidden-only* scan — relevant only because it reads or writes hidden
+    states, with no weight invar and no ETP primitive in its body — has the
+    limit ``min(policy.scan_unroll_limit, policy.hidden_scan_unroll_limit)``
+    when the latter is set (a body that applies a ``dot_general``/
+    ``conv_general_dilated`` keeps the full limit). Beyond its limit it is
+    kept rolled with an INFO
+    :attr:`~braintrace.DiagnosticKind.SCAN_UNROLL_SKIPPED`: it holds no
+    relation, so the hidden-group pass handles it as one opaque
+    control-flow node (``ControlFlowPolicy.while_hidden``). When outputs of
+    such a scan that are not hidden states are read downstream, an INFO
+    :attr:`~braintrace.DiagnosticKind.SCAN_ROLLED_OUTPUT_READ` follows. See
+    :class:`ControlFlowPolicy` for the trade-offs.
     """
     if policy.scan_unroll_limit <= 0:
         return closed_jaxpr
@@ -873,6 +959,95 @@ def _unroll_scans_once(
         if _jaxpr_contains(eqn.params['jaxpr'].jaxpr, _is_etp_eqn):
             return 'its body contains an ETP primitive'
         return None
+
+    def is_weight_free(eqn: JaxprEqn) -> bool:
+        """Whether *eqn* is relevant only through hidden states.
+
+        Such a scan holds no relation (``jaxpr_graph._is_etp_relevant`` is
+        false), so neither unrolling nor structured descent is needed to find
+        one: left opaque, the hidden-group pass handles it as one control-flow
+        node (``ControlFlowPolicy.while_hidden``).
+        """
+        return not _is_etp_relevant(eqn.params['jaxpr'].jaxpr, eqn, weight_invars)
+
+    def has_mixing(eqn: JaxprEqn) -> bool:
+        return _jaxpr_contains(
+            eqn.params['jaxpr'].jaxpr,
+            lambda e: e.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES,
+        )
+
+    def unroll_limit(eqn: JaxprEqn, rollable: bool) -> Tuple[int, str]:
+        """The unroll limit for *eqn* and the policy field it comes from."""
+        limit = policy.scan_unroll_limit
+        hidden_limit = policy.hidden_scan_unroll_limit
+        if not rollable or hidden_limit is None or hidden_limit >= limit:
+            return limit, 'scan_unroll_limit'
+        # A body that applies a recurrent weight-mixing primitive keeps the
+        # full limit: rolled, the whole scan would become one
+        # recurrent-mixing boundary of the hidden-to-hidden transition
+        # (``JaxprEvalForHiddenGroup._eval_eqn``), while unrolled only the
+        # mixing equations are cut.
+        if has_mixing(eqn):
+            return limit, 'scan_unroll_limit'
+        return hidden_limit, 'hidden_scan_unroll_limit'
+
+    def rolled_record(eqn: JaxprEqn, reason: str, bad: str) -> _PendingDiagnostic:
+        if has_mixing(eqn):
+            fate = (
+                'Its body applies a recurrent weight-mixing primitive, so in '
+                'the default grouping mode the hidden-group pass excludes it '
+                'from the hidden-to-hidden transition (see '
+                'CONTROL_FLOW_RECURRENT_MIXING).'
+            )
+        else:
+            mode = ('forward mode, since its body contains a while loop'
+                    if _jaxpr_contains(eqn.params['jaxpr'].jaxpr, is_while_primitive)
+                    else 'reverse mode')
+            fate = (
+                f'The hidden-group pass embeds it whole as one opaque node of '
+                f'the hidden-to-hidden transition and takes its Jacobians '
+                f'through the rolled loop, in {mode}.'
+            )
+        return dict(
+            kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'An ETP-relevant scan ({reason}) was kept rolled because '
+                f'{bad}. It consumes no weight and its body has no ETP '
+                f'primitive, so it holds no relation and structured descent '
+                f'does not apply. {fate} (See '
+                f'ControlFlowPolicy.hidden_scan_unroll_limit.)'
+            ),
+            context={'reason': bad, 'relevance': reason, 'rolled': True},
+        )
+
+    def rolled_outputs_record(eqn: JaxprEqn) -> Optional[_PendingDiagnostic]:
+        """INFO when outputs of a rolled scan that are not hidden states
+        (stacked ys or non-hidden carries) are read downstream."""
+        _, num_carry = scan_num_consts_carry(eqn)
+        read = [i for i, v in enumerate(eqn.outvars)
+                if v in consumed and v not in hidden_outvars]
+        if not read:
+            return None
+        n_carry = sum(1 for i in read if i < num_carry)
+        n_ys = len(read) - n_carry
+        return dict(
+            kind=DiagnosticKind.SCAN_ROLLED_OUTPUT_READ,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'A rolled hidden-only scan has {len(read)} output(s) that '
+                f'are not hidden states and are read downstream ({n_ys} '
+                f'stacked ys, {n_carry} non-hidden carries). A step output '
+                f'computed from them gets its same-step credit through the '
+                f'output bypass (issue #185), where an unrolled scan would '
+                f'alias the last value to the hidden state. Exact algorithms '
+                f'(D-RTRL) give the same gradient either way; trace-factorized '
+                f'ones (pp_prop/ES-D-RTRL, OSTLFeedforward) can differ from '
+                f'the unrolled scan (see '
+                f'ControlFlowPolicy.hidden_scan_unroll_limit).'
+            ),
+            context={'n_ys_read': n_ys, 'n_carry_read': n_carry},
+        )
 
     extra_constvars: List[Var] = []
     extra_consts: List[Any] = []
@@ -1061,14 +1236,46 @@ def _unroll_scans_once(
         if reason is None:
             new_eqns.append(eqn)
             continue
-        bad = _scan_static_ineligibility(eqn, policy)
+        weight_free = is_weight_free(eqn)
+        # Under ``while_hidden='error'`` an opaque hidden-producing scan
+        # raises, so a hidden-only scan is then unrolled like any other.
+        rollable = weight_free and policy.while_hidden == 'opaque-fwd'
+        limit, limit_name = unroll_limit(eqn, rollable)
+        bad = _scan_static_ineligibility(eqn, policy, limit, limit_name)
         if bad is not None:
             # Matches the descent-eligibility rule in
             # ``scan_descent._descent_blockers``: any positive-length
             # scan beyond the limit descends, including when unrolling
             # is disabled entirely (limit <= 0).
-            over_limit = eqn.params['length'] > policy.scan_unroll_limit
-            if over_limit and policy.scan_descent == 'auto':
+            over_limit = eqn.params['length'] > limit
+            if over_limit and rollable:
+                # Descent ignores a scan without weights or ETP primitives;
+                # it stays rolled and the hidden-group pass handles it
+                # (issue #201).
+                pending.append(rolled_record(eqn, reason, bad))
+                outputs = rolled_outputs_record(eqn)
+                if outputs is not None:
+                    pending.append(outputs)
+            elif weight_free:
+                # No relation can be lost, so the weight advice of the
+                # generic warning below does not apply.
+                raises = policy.while_hidden != 'opaque-fwd'
+                pending.append(dict(
+                    kind=DiagnosticKind.SCAN_UNROLL_SKIPPED,
+                    level=DiagnosticLevel.WARNING if raises else DiagnosticLevel.INFO,
+                    message=(
+                        f'An ETP-relevant scan ({reason}) was NOT unrolled '
+                        f'because {bad}. It consumes no weight and its body '
+                        f'has no ETP primitive, so it holds no relation; it '
+                        f'stays opaque and the hidden-group pass handles it '
+                        f'as one control-flow node under '
+                        f'ControlFlowPolicy.while_hidden={policy.while_hidden!r}'
+                        + (', which raises if it produces a hidden state.'
+                           if raises else '.')
+                    ),
+                    context={'reason': bad, 'relevance': reason},
+                ))
+            elif over_limit and policy.scan_descent == 'auto':
                 # An over-limit scan is no longer a dead end: the
                 # scan-descent pass (Phase 4) picks it up downstream.
                 pending.append(dict(

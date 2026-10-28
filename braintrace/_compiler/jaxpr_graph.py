@@ -29,7 +29,7 @@ memory-address hashes for jaxpr ``Var`` objects).
 """
 
 from collections import deque
-from typing import Any, Dict, Iterator, List, Optional, Sequence, TypeAlias, Union
+from typing import Any, Container, Dict, Iterator, List, Optional, Sequence, TypeAlias, Union
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
@@ -40,12 +40,33 @@ from braintrace._compatible_imports import (
     is_jit_primitive,
     new_var,
 )
+from braintrace._op import is_etp_primitive
 
 # A jaxpr equation input: either a variable or an inlined constant. JAX spells
 # this ``Atom``, but that name is private and has moved between releases, so the
 # union is written out here (mirroring ``_compatible_imports``' policy of not
 # depending on private JAX paths).
 Atom: TypeAlias = Union[Var, Literal]
+
+# Recurrent-weight mixing primitives -- dense / convolutional weights -- whose
+# consumption of a hidden state is a genuine *cross-position* coupling, i.e. that
+# can make ``h_i^t`` depend on ``h_j^{t-1}`` for ``i != j`` through a learned or
+# fixed recurrent weight. The default ("without recurrence") grouping mode
+# excludes these (when they read the hidden state) from the hidden-to-hidden
+# transition so it stays position-diagonal.
+#
+# This set is deliberately narrow: it does NOT list within-position
+# reductions/gathers (e.g. the ``gather`` that splits a stacked
+# ``HiddenGroupState`` such as an ALIF ``('neu', 'st')`` into its ``V``/``a``
+# components over the ``num_state`` axis). Those operate *within* a position and
+# must stay in the transition -- excluding them would drop a real, diagonal
+# ``D^t`` term and corrupt the grouped-state transition. The ETP mixing
+# primitives (``etp_mv``/``etp_mm``/``etp_conv``) are handled separately by the
+# ETP-boundary skip in ``hidden_group.JaxprEvalForHiddenGroup._eval_eqn``.
+# It lives in this leaf module so every pass can import it at module level.
+_RECURRENT_WEIGHT_MIXING_PRIMITIVES = frozenset({
+    'dot_general', 'conv_general_dilated',
+})
 
 __all__ = [
     'build_producer_map',
@@ -150,6 +171,47 @@ def _sub_closed_jaxprs(eqn: JaxprEqn) -> Iterator[ClosedJaxpr]:
     for b in eqn.params.get('branches', ()) or ():
         if isinstance(b, ClosedJaxpr):
             yield b
+
+
+def _body_has_etp(jaxpr: Jaxpr) -> bool:
+    """``True`` when an ETP primitive appears in ``jaxpr`` or any nested
+    control-flow body inside it."""
+    for eqn in jaxpr.eqns:
+        if is_etp_primitive(eqn.primitive):
+            return True
+        for sub in _sub_closed_jaxprs(eqn):
+            if _body_has_etp(sub.jaxpr):
+                return True
+    return False
+
+
+def _is_etp_relevant(body_jaxpr: Jaxpr, eqn: JaxprEqn, weight_invars: Container[Var]) -> bool:
+    """Whether a ``scan`` can hold an ETP relation.
+
+    A scan is ETP-relevant iff it consumes a trainable weight invar or its
+    body holds an ETP primitive. Scan descent (:mod:`.scan_descent`) only
+    considers such scans. The unroller (:mod:`.canonicalize`) may keep any
+    other scan rolled, since one that only reads or writes hidden states
+    holds no relation, and the hidden-group pass embeds it whole as an opaque
+    transition node.
+
+    Parameters
+    ----------
+    body_jaxpr : Jaxpr
+        The scan's body jaxpr (``eqn.params['jaxpr'].jaxpr``).
+    eqn : JaxprEqn
+        The scan equation.
+    weight_invars : container of Var
+        Top-level weight invars of the enclosing module jaxpr.
+
+    Returns
+    -------
+    bool
+        ``True`` when descent (or unrolling) must consider this scan.
+    """
+    if any(isinstance(v, Var) and v in weight_invars for v in eqn.invars):
+        return True
+    return _body_has_etp(body_jaxpr)
 
 
 def _contains_jit(jaxpr: Jaxpr) -> bool:

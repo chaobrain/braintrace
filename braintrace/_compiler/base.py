@@ -30,7 +30,7 @@ from braintrace._op import (
     is_etp_enable_gradient_primitive,
 )
 from braintrace._typing import Path
-from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
+from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY, _jaxpr_contains, _subjaxprs
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 
 __all__ = [
@@ -191,16 +191,27 @@ def check_unsupported_op(
             if policy.while_hidden == 'opaque-fwd':
                 # Weight-free control flow producing a hidden state is kept
                 # as an opaque forward node: the transition embeds the whole
-                # equation and its Jacobian is extracted in forward mode.
+                # equation. Its Jacobian is extracted in forward mode when it
+                # contains a ``while`` (no reverse-mode rule), else in
+                # reverse mode.
+                has_while = op_name == 'while' or any(
+                    _jaxpr_contains(sub, is_while_primitive) for sub in _subjaxprs(eqn)
+                )
+                how = (
+                    'forward-mode Jacobians; reverse-mode signals through the '
+                    'while are detached in the perturbed jaxpr'
+                    if has_while else
+                    'reverse-mode Jacobians through the rolled loop'
+                    if op_name == 'scan' else
+                    'reverse-mode Jacobians'
+                )
                 emit(
                     kind=DiagnosticKind.CONTROL_FLOW_OPAQUE_FWD,
                     level=DiagnosticLevel.INFO,
                     message=(
                         f'Hidden state {self.outvar_to_hidden_path[outvar]} is '
                         f'produced by an opaque {op_name} with no weight inside; '
-                        f'treating it as an opaque forward node (forward-mode '
-                        f'Jacobians; reverse-mode signals through it are detached '
-                        f'in the perturbed jaxpr for while).'
+                        f'treating it as an opaque forward node ({how}).'
                     ),
                     context={
                         'op_name': op_name,
