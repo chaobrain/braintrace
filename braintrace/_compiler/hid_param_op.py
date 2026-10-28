@@ -542,6 +542,33 @@ def _bfs_forward(
     return reachable, tuple(blocking_eqns)
 
 
+def _broadcastable(a: Tuple[int, ...], b: Tuple[int, ...]) -> bool:
+    """Whether the shapes ``a`` and ``b`` broadcast together."""
+    try:
+        jax.numpy.broadcast_shapes(a, b)
+    except ValueError:
+        return False
+    return True
+
+
+def _relatable_hidden_shapes(
+    hvar: Var,
+    state: Optional[brainstate.State],
+) -> Tuple[Tuple[int, ...], ...]:
+    """Shapes an ETP output may broadcast with to relate to the hidden var ``hvar``.
+
+    A hidden var's own value shape always qualifies. A ``HiddenGroupState``
+    holds ``(*varshape, num_state)``: its trailing axis indexes the components
+    that share one position, so an ETP output of the ``varshape``, which drives
+    one component (e.g. the input current into ``V`` of an ALIF ``(V, a)``
+    group, or receptor ``k`` into channel ``k``), relates to it as well.
+    """
+    shape = tuple(shaped_aval(hvar).shape)
+    if isinstance(state, brainstate.HiddenGroupState) and len(shape) >= 1:
+        return shape, shape[:-1]
+    return (shape,)
+
+
 def _classify_path(
     y_var: Var,
     hidden_outvar: Var,
@@ -947,30 +974,31 @@ def find_hidden_param_op_relations_from_jaxpr(
         y_forward = forward_closure(y_var, consumers)
         connected_paths: List[Path] = []
         path_class: Dict[Path, str] = {}
+        y_shape = tuple(shaped_aval(y_var).shape)
         for hvar in list(reachable_hvars):
-            try:
-                jax.numpy.broadcast_shapes(shaped_aval(y_var).shape, shaped_aval(hvar).shape)
-            except ValueError:
+            hpath = outvar_to_hidden_path[hvar]
+            hidden_shapes = _relatable_hidden_shapes(hvar, path_to_state.get(hpath))
+            if not any(_broadcastable(y_shape, shape) for shape in hidden_shapes):
                 emit(
                     kind=DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH,
                     level=DiagnosticLevel.WARNING,
                     message=(
                         f'ETP op {primitive.name}: weight={weight_path}, '
-                        f'y shape={shaped_aval(y_var).shape} not broadcastable with '
-                        f'hidden shape={shaped_aval(hvar).shape} at '
-                        f'{outvar_to_hidden_path[hvar]}. Removing connection.'
+                        f'y shape={y_shape} not broadcastable with '
+                        f'hidden shape={" or ".join(map(str, hidden_shapes))} at '
+                        f'{hpath}. Removing connection.'
                     ),
                     primitive=primitive,
                     weight_path=weight_path,
-                    hidden_paths=(outvar_to_hidden_path[hvar],),
+                    hidden_paths=(hpath,),
                     context={
-                        'y_shape': tuple(shaped_aval(y_var).shape),
-                        'hidden_shape': tuple(shaped_aval(hvar).shape),
+                        'y_shape': y_shape,
+                        'hidden_shape': hidden_shapes[0],
+                        'hidden_shapes': hidden_shapes,
                     },
                 )
                 reachable_hvars.pop(hvar, None)
                 continue
-            hpath = outvar_to_hidden_path[hvar]
             connected_paths.append(hpath)
             cls = _classify_path(
                 y_var, hvar, consumers, producers, self_eqn=eqn,
