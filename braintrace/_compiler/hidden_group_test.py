@@ -1435,6 +1435,133 @@ class TestJacfwdLastDim:
         assert not _transition_contains_while(jaxpr_plain)
 
 
+def _two_state_map(hid):
+    """Position-diagonal map on ``(*varshape, 2)``: both states mix."""
+    a, b = hid[..., 0], hid[..., 1]
+    return jnp.stack([jnp.tanh(a) * b, a + 0.5 * jnp.sin(b)], axis=-1)
+
+
+class _F32AdaptCell(brainstate.nn.Module):
+    """Two float32 hidden states that meet only through derived values, so
+    they form one position-diagonal group with ``num_state = 2``."""
+
+    def __init__(self, n_in=3, n=4):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            w = 0.5 * brainstate.random.randn(n_in, n)
+        self.W = brainstate.ParamState(jnp.asarray(w, jnp.float32))
+        self.V = brainstate.HiddenState(jnp.zeros(n, jnp.float32))
+        self.a = brainstate.HiddenState(jnp.zeros(n, jnp.float32))
+
+    def update(self, x):
+        V, a = self.V.value, self.a.value
+        thr = 1.0 + 0.5 * a
+        self.V.value = 0.8 * V + braintrace.matmul(x, self.W.value) - 0.3 * jnp.tanh(V - thr)
+        self.a.value = 0.9 * a + 0.1 * V
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _F32WhileSettleCell(brainstate.nn.Module):
+    """Float32 leaky drive followed by a weight-free ``while`` settle (an
+    opaque forward node, so its Jacobian is taken in forward mode).
+    ``twin=True`` hand-composes the loop, for the reverse-mode oracle."""
+
+    def __init__(self, n_in=3, n=4, twin=False):
+        super().__init__()
+        self.twin = twin
+        with brainstate.random.seed_context(0):
+            w = 0.5 * brainstate.random.randn(n_in, n)
+        self.win = brainstate.ParamState(jnp.asarray(w, jnp.float32))
+        self.h = brainstate.HiddenState(jnp.zeros(n, jnp.float32))
+
+    def update(self, x):
+        h_prev = self.h.value
+        pre = braintrace.matmul(x, self.win.value) + 0.8 * h_prev
+        if self.twin:
+            h = h_prev
+            for _ in range(_WHILE_K):  # static composition of the settle step
+                h = _settle_step(h, pre)
+        else:
+            def body(s):
+                i, hh = s
+                return i + 1, _settle_step(hh, pre)
+
+            _, h = jax.lax.while_loop(lambda s: s[0] < _WHILE_K, body, (0, h_prev))
+        self.h.value = h
+        return h
+
+
+class TestFloat32HiddenUnderX64:
+    """Float32 hidden states under ``jax_enable_x64`` (#202): the one-hot
+    basis of the last-dimension Jacobian follows the hidden dtype instead of
+    the default float dtype, so the VJP/JVP sees matching dtypes."""
+
+    @pytest.fixture(autouse=True)
+    def _x64(self):
+        prev = jax.config.read('jax_enable_x64')
+        jax.config.update('jax_enable_x64', True)
+        try:
+            yield
+        finally:
+            jax.config.update('jax_enable_x64', prev)
+
+    @staticmethod
+    def _inputs(n_in=3, steps=6):
+        with brainstate.random.seed_context(1):
+            return jnp.asarray(brainstate.random.rand(steps, n_in), jnp.float32)
+
+    @pytest.mark.parametrize('extract', [jacrev_last_dim, jacfwd_last_dim])
+    @pytest.mark.parametrize('dtype, rtol', [(jnp.float32, 1e-6), (jnp.float64, 1e-12)])
+    def test_helpers_follow_hidden_dtype(self, extract, dtype, rtol):
+        with brainstate.random.seed_context(2):
+            h = jnp.asarray(brainstate.random.rand(5, 2), dtype)
+        assert h.dtype == dtype
+        jac = extract(_two_state_map, h)
+        expect = jax.vmap(jax.jacfwd(_two_state_map))(h)  # [p, out, in]
+        assert jac.dtype == dtype
+        assert jac.shape == (5, 2, 2)
+        np.testing.assert_allclose(np.asarray(jac), np.asarray(expect), rtol=rtol, atol=0)
+
+    def _check_d_rtrl(self, cell_cls, ref_cls, path):
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        xs = self._inputs()
+        g = online_param_gradients_singlestep_naive(cell_cls, xs, algo_factory=braintrace.D_RTRL)
+        assert g[path].dtype == jnp.float32
+        # D-RTRL is exact on position-diagonal cells: BPTT (on the
+        # hand-composed twin for the while cell) is the oracle.
+        g_ref = bptt_param_gradients(ref_cls, xs)
+        assert float(jnp.abs(g_ref[path]).max()) > 1e-3
+        assert_param_gradients_close(g, g_ref, atol=1e-6, rtol=1e-5)
+        # The same float32 model without x64 gives the same gradient.
+        with jax.enable_x64(False):
+            g32 = online_param_gradients_singlestep_naive(
+                cell_cls, xs, algo_factory=braintrace.D_RTRL)
+        np.testing.assert_allclose(
+            np.asarray(g[path]), np.asarray(g32[path]), rtol=1e-6, atol=1e-8)
+
+    def test_d_rtrl_float32_states(self):
+        cell = _F32AdaptCell()
+        brainstate.nn.init_all_states(cell)
+        _, path_to_group = find_hidden_groups_from_module(cell, self._inputs()[0])
+        group = path_to_group[('V',)]
+        assert path_to_group[('a',)] is group
+        assert group.num_state == 2
+        assert not _transition_contains_while(group.transition_jaxpr)
+        self._check_d_rtrl(_F32AdaptCell, _F32AdaptCell, ('W',))
+
+    def test_d_rtrl_float32_opaque_while(self):
+        cell = _F32WhileSettleCell()
+        brainstate.nn.init_all_states(cell)
+        _, path_to_group = find_hidden_groups_from_module(cell, self._inputs()[0])
+        # The while stays in the transition, so its Jacobian is forward mode.
+        assert _transition_contains_while(path_to_group[('h',)].transition_jaxpr)
+        self._check_d_rtrl(_F32WhileSettleCell, lambda: _F32WhileSettleCell(twin=True), ('win',))
+
+
 class TestWhileOpaqueForwardGroups:
     """A weight-free while reading/updating the hidden state becomes an
     opaque forward node in the hidden-to-hidden transition."""

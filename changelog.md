@@ -5,6 +5,15 @@
 
 ### Fixes
 
+- **Float32 hidden states work under `jax_enable_x64` (#202).** With x64
+  enabled, a model whose `HiddenState`s are float32 failed in its first
+  online step. The hidden-to-hidden Jacobian was extracted against a one-hot
+  basis built in the default float dtype, float64 under x64. The reverse-mode
+  path then raised `ValueError: unexpected JAX type ... for argument to VJP
+  function`, and the forward-mode path (a transition with an opaque `while`)
+  raised a `jax.jvp` dtype mismatch. `jacrev_last_dim` and `jacfwd_last_dim`
+  now build the basis in the hidden state's dtype. D-RTRL on float32 states
+  under x64 matches BPTT and gives the same gradient as without x64.
 - **A neuron with several hidden states integrated in a substep loop compiles
   at any number of substeps (#201).** A weight-free `lax.scan` (or
   `while_loop`) that reads and writes several `HiddenState`s, such as a
