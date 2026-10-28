@@ -585,7 +585,11 @@ def jacrev_last_dim(
     num_state = new_hid_vals.shape[-1]
     varshape = new_hid_vals.shape[:-1]
     assert num_state == hid_vals.shape[-1], 'Error: the number of input/output states should be the same.'
-    g_primals = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
+    # The cotangent basis takes the output's dtype, not the default float
+    # dtype: under ``jax_enable_x64`` a float32 state would otherwise get
+    # float64 cotangents, which ``vjp`` rejects (#202).
+    eye = u.math.eye(num_state, dtype=new_hid_vals.dtype)
+    g_primals = u.math.broadcast_to(eye, (*varshape, num_state, num_state))
     jac = jax.vmap(f_vjp, in_axes=-2, out_axes=-2)(g_primals)
     return jac[0]
 
@@ -623,7 +627,9 @@ def jacfwd_last_dim(
     """
     num_state = hid_vals.shape[-1]
     varshape = hid_vals.shape[:-1]
-    basis = u.math.broadcast_to(u.math.eye(num_state), (*varshape, num_state, num_state))
+    # Tangents must match the primal dtype (see ``jacrev_last_dim``, #202).
+    eye = u.math.eye(num_state, dtype=hid_vals.dtype)
+    basis = u.math.broadcast_to(eye, (*varshape, num_state, num_state))
 
     def _push(tangent: jax.Array) -> jax.Array:
         out, tang = jax.jvp(fn, (hid_vals,), (tangent,))
