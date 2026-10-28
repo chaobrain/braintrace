@@ -2156,5 +2156,192 @@ class TestRolledScanVariants:
         assert_gradients_differ({'W': g_rolled}, {'W': g_unrolled}, min_rel=1e-3)
 
 
+
+# ---------------------------------------------------------------------------
+# Issue #209: a plain (non-ETP) weight read inside an ETP-free substep scan
+# ---------------------------------------------------------------------------
+
+class _PlainTau(_SubstepTwoState):
+    """The issue #209 model: a trainable ``tau`` read by plain ops inside the
+    substep scan, whose body holds no ETP primitive.
+
+    ``tau`` is a plain parameter, so it gets no online credit through the
+    hidden states, the same as at top level. With ``plain_w``, the scan also
+    reads the ETP weight ``W`` through a plain op.
+    """
+
+    def __init__(self, k, n_in=3, n=4, seed=0, plain_w=False):
+        super().__init__(k, n_in=n_in, n=n, seed=seed)
+        self.plain_w = plain_w
+        self.tau = brainstate.ParamState(jnp.full(n, 2.0))
+
+    def update(self, x):
+        drive, h = braintrace.matmul(x, self.W.value), 1.0 / self.k
+        tau, W = self.tau.value, self.W.value
+
+        def sub(c, _):
+            V, w = c
+            bias = 0.1 * jnp.sum(W, axis=0) if self.plain_w else 0.0
+            return (V + h / tau * (-V + jnp.tanh(2 * V) - w + drive + bias),
+                    w + h * (0.5 * V - w)), None
+
+        (self.V.value, self.w.value), _ = jax.lax.scan(
+            sub, (self.V.value, self.w.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _TauOutsideScan(_SubstepTwoState):
+    """``tau`` routed through ``braintrace.element_wise`` outside the scan,
+    which reads its output: the route by which ``tau`` learns online."""
+
+    def __init__(self, k, n_in=3, n=4, seed=0):
+        super().__init__(k, n_in=n_in, n=n, seed=seed)
+        self.tau = brainstate.ParamState(jnp.full(n, 2.0))
+
+    def update(self, x):
+        drive, h = braintrace.matmul(x, self.W.value), 1.0 / self.k
+        tau = braintrace.element_wise(self.tau.value)
+
+        def sub(c, _):
+            V, w = c
+            return (V + h / tau * (-V + jnp.tanh(2 * V) - w + drive),
+                    w + h * (0.5 * V - w)), None
+
+        (self.V.value, self.w.value), _ = jax.lax.scan(
+            sub, (self.V.value, self.w.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _TauInBody(_SubstepTwoState):
+    """``element_wise(tau)`` inside the body, ``braintrace.matmul`` outside:
+    descent v1 does not support it beyond the unroll limit (issue #211)."""
+
+    def __init__(self, k, n_in=3, n=4, seed=0):
+        super().__init__(k, n_in=n_in, n=n, seed=seed)
+        self.tau = brainstate.ParamState(jnp.full(n, 2.0))
+
+    def update(self, x):
+        drive, h = braintrace.matmul(x, self.W.value), 1.0 / self.k
+
+        def sub(c, _):
+            V, w = c
+            tau = braintrace.element_wise(self.tau.value)
+            return (V + h / tau * (-V + jnp.tanh(2 * V) - w + drive),
+                    w + h * (0.5 * V - w)), None
+
+        (self.V.value, self.w.value), _ = jax.lax.scan(
+            sub, (self.V.value, self.w.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value)
+
+
+def _param_grads(make, algo, policy, xs):
+    from braintrace._testing.oracle import online_param_gradients_singlestep_naive
+    g = online_param_gradients_singlestep_naive(
+        make, xs, algo_factory=lambda m: _ALGOS[algo](m, policy))
+    return {p[0]: np.asarray(v) for p, v in g.items()}
+
+
+def _bptt_grads(make, xs):
+    from braintrace._testing.oracle import bptt_param_gradients
+    return {p[0]: np.asarray(v) for p, v in bptt_param_gradients(make, xs).items()}
+
+
+def _plain_weight_records(graph):
+    return [r for r in graph.diagnostics if r.kind is DiagnosticKind.SCAN_PLAIN_WEIGHT]
+
+
+class TestPlainWeightInScan:
+    """A weight read only by plain ops inside a scan whose body holds no ETP
+    primitive is a plain use, as at top level: the scan holds no relation,
+    and beyond its limit it stays rolled like a hidden-only scan."""
+
+    @pytest.mark.parametrize('descent', ['auto', 'off'])
+    @pytest.mark.parametrize('k', [17, 32])
+    def test_compiles_beyond_the_unroll_limit(self, k, descent):
+        # Before #209: descent raised "An ETP relation outside a descended
+        # scan targets hidden state(s)" ('auto'), and the opaque scan raised
+        # "weight states are used within a scan function" ('off').
+        model = _PlainTau(k)
+        brainstate.nn.init_all_states(model)
+        with pytest.warns(UserWarning, match='plain ops'):
+            graph = braintrace.compile_etrace_graph(
+                model, jnp.zeros(3), control_flow=ControlFlowPolicy(scan_descent=descent))
+        assert _primitive_names(graph.module_info.closed_jaxpr).count('scan') == 1
+        group, = graph.hidden_groups
+        assert sorted(group.hidden_paths) == [('V',), ('w',)]
+        assert group.descent is None
+        assert len(graph.hidden_param_op_relations) == 1
+
+    def test_the_knob_keeps_it_rolled(self):
+        model = _PlainTau(4)
+        brainstate.nn.init_all_states(model)
+        with pytest.warns(UserWarning, match='plain ops'):
+            graph = braintrace.compile_etrace_graph(model, jnp.zeros(3), control_flow=_rolled())
+        assert _primitive_names(graph.module_info.closed_jaxpr).count('scan') == 1
+
+    def test_warning_names_the_plain_weights(self):
+        for plain_w, paths in ((False, [('tau',)]), (True, [('W',), ('tau',)])):
+            model = _PlainTau(17, plain_w=plain_w)
+            brainstate.nn.init_all_states(model)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                graph = braintrace.compile_etrace_graph(model, jnp.zeros(3))
+            rec, = _plain_weight_records(graph)
+            assert rec.level is DiagnosticLevel.WARNING
+            assert sorted(rec.context['weight_paths']) == paths
+            assert 'outside the scan' in rec.message
+            assert 'after the scan' in rec.message
+
+    def test_no_warning_when_unrolled_or_weight_free(self):
+        for model in (_PlainTau(4), _SubstepTwoState(17), _TauOutsideScan(17)):
+            brainstate.nn.init_all_states(model)
+            graph = braintrace.compile_etrace_graph(model, jnp.zeros(3))
+            assert not _plain_weight_records(graph)
+
+    @pytest.mark.parametrize('plain_w', [False, True], ids=['tau', 'tau_and_W'])
+    @pytest.mark.parametrize('algo', list(_ALGOS))
+    def test_rolled_gradients_match_unrolled(self, algo, plain_w):
+        make = lambda: _PlainTau(4, plain_w=plain_w)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                xs = _substep_inputs()
+                g_rolled = _param_grads(make, algo, _rolled(), xs)
+                g_unrolled = _param_grads(make, algo, DEFAULT_CONTROL_FLOW_POLICY, xs)
+        assert np.abs(g_unrolled['W']).max() > 1e-3
+        np.testing.assert_allclose(g_rolled['W'], g_unrolled['W'], rtol=1e-12, atol=0)
+        # A plain parameter gets no online credit through the hidden state,
+        # rolled or not (as at top level).
+        np.testing.assert_array_equal(g_rolled['tau'], 0.0)
+        np.testing.assert_array_equal(g_unrolled['tau'], 0.0)
+
+    def test_d_rtrl_w_matches_bptt_beyond_the_limit(self):
+        make = lambda: _PlainTau(17)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                xs = _substep_inputs()
+                g = _param_grads(make, 'd_rtrl', DEFAULT_CONTROL_FLOW_POLICY, xs)
+                g_bptt = _bptt_grads(make, xs)
+        np.testing.assert_allclose(g['W'], g_bptt['W'], rtol=1e-10, atol=0)
+        assert np.abs(g_bptt['tau']).max() > 1e-3   # tau's credit is the plain-parameter gap
+
+    def test_element_wise_outside_the_scan_learns_tau(self):
+        make = lambda: _TauOutsideScan(17)
+        with brainstate.environ.context(precision=64):
+            xs = _substep_inputs()
+            g = _param_grads(make, 'd_rtrl', DEFAULT_CONTROL_FLOW_POLICY, xs)
+            g_bptt = _bptt_grads(make, xs)
+        for p in ('W', 'tau'):
+            np.testing.assert_allclose(g[p], g_bptt[p], rtol=1e-10, atol=0)
+
+    def test_etp_primitive_in_the_body_still_needs_descent(self):
+        # Unchanged by #209: the body holds an ETP primitive, so the scan is
+        # descended, and descent v1 rejects the outer relation (issue #211).
+        model = _TauInBody(17)
+        brainstate.nn.init_all_states(model)
+        with pytest.raises(NotImplementedError, match='outside a descended scan'):
+            braintrace.compile_etrace_graph(model, jnp.zeros(3))
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

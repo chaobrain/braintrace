@@ -32,6 +32,7 @@ from braintrace._op import (
 from braintrace._typing import Path
 from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY, _jaxpr_contains, _subjaxprs
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
+from .jaxpr_graph import _is_etp_relevant
 
 __all__ = [
     'JaxprEvaluation',
@@ -138,6 +139,12 @@ def check_unsupported_op(
     # (see ``jaxpr_graph.inline_jit_calls``), so reaching this check means
     # a weight is used inside a genuinely opaque region (scan/while/cond).
     invar = find_element_exist_in_the_set(eqn.invars, self.weight_invars)
+    if invar is not None and op_name == 'scan' and not _is_etp_relevant(eqn):
+        # A scan whose body holds no ETP primitive reads its weights through
+        # plain ops only, exactly like plain uses at top level: it holds no
+        # relation, and the weights are constants of the opaque node (issue
+        # #209). ``compile_etrace_graph`` reports them (SCAN_PLAIN_WEIGHT).
+        invar = None
     if invar is not None:
         if op_name == 'while':
             # A while body has no fixed trip count, so there is no
@@ -189,8 +196,9 @@ def check_unsupported_op(
     if outvar is not None:
         if op_name in ('scan', 'while', 'cond'):
             if policy.while_hidden == 'opaque-fwd':
-                # Weight-free control flow producing a hidden state is kept
-                # as an opaque forward node: the transition embeds the whole
+                # Control flow producing a hidden state with no weight (or,
+                # for a scan, no ETP primitive) inside is kept as an opaque
+                # forward node: the transition embeds the whole
                 # equation. Its Jacobian is extracted in forward mode when it
                 # contains a ``while`` (no reverse-mode rule), else in
                 # reverse mode.
@@ -210,7 +218,8 @@ def check_unsupported_op(
                     level=DiagnosticLevel.INFO,
                     message=(
                         f'Hidden state {self.outvar_to_hidden_path[outvar]} is '
-                        f'produced by an opaque {op_name} with no weight inside; '
+                        f'produced by an opaque {op_name} with no ETP '
+                        f'primitive inside; '
                         f'treating it as an opaque forward node ({how}).'
                     ),
                     context={

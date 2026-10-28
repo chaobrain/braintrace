@@ -2223,8 +2223,9 @@ def find_hidden_groups_from_jaxpr(
     control_flow : ControlFlowPolicy, optional
         The :class:`~braintrace.ControlFlowPolicy` governing how opaque
         control-flow equations touching hidden states are handled
-        (``'opaque-fwd'`` keeps a weight-free while/scan/cond as an opaque
-        forward node; ``'error'`` raises as before Phase 3).
+        (``'opaque-fwd'`` keeps a weight-free while/cond, or a scan without
+        an ETP primitive, as an opaque forward node; ``'error'`` raises as
+        before Phase 3).
     descended_scan_eqn_ids : frozenset of int, optional
         ``id()`` values of scan equations rewritten by structured scan descent
         (Phase 4); skipped by this walker.

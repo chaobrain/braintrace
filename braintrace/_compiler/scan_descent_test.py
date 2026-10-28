@@ -59,8 +59,7 @@ class TestDescendabilityPredicate:
     def test_descendable_scan_has_no_blockers(self):
         eqn, minfo = _scan_model_jaxpr(loops=8)
         policy = ControlFlowPolicy(scan_unroll_limit=4, scan_descent='auto')
-        assert _is_etp_relevant(
-            eqn.params['jaxpr'].jaxpr, eqn, set(minfo.weight_invars))
+        assert _is_etp_relevant(eqn)
         assert _descent_blockers(eqn, policy, set(minfo.weight_invars)) is None
 
     def test_policy_off_blocks_descent(self):
@@ -117,7 +116,7 @@ class TestDescendabilityPredicate:
 
         closed = jax.make_jaxpr(f)(jnp.arange(8.0))
         eqn = next(e for e in closed.jaxpr.eqns if is_scan_primitive(e))
-        assert not _is_etp_relevant(eqn.params['jaxpr'].jaxpr, eqn, set())
+        assert not _is_etp_relevant(eqn)
 
 
 class TestAddScanYs:
@@ -468,6 +467,78 @@ class TestApplyScanDescentPipeline:
             def __init__(self):
                 super().__init__()
                 self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.p = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def substep(_):
+                    # ``w`` through an ETP primitive (so the scan descends),
+                    # ``p`` through a plain matmul: deliberately NOT ETP
+                    self.h.value = 0.9 * self.h.value + jnp.tanh(
+                        braintrace.matmul(x_row, self.w.value) + x_row @ self.p.value)
+                    return self.h.value
+
+                return brainstate.transform.for_loop(
+                    substep, jnp.arange(40))[-1]
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        with pytest.warns(UserWarning, match='no ETP relation'):
+            graph = compile_etrace_graph(
+                net, jnp.ones((4,), dtype='float32'),
+                control_flow=DESCENT_POLICY)
+        rec, = [d for d in graph.diagnostics
+                if d.kind is DiagnosticKind.SCAN_DESCENT_NO_RELATIONS]
+        assert rec.context['weight_paths'] == (('p',),)
+        assert len(graph.hidden_param_op_relations) == 1
+        assert sum(1 for g in graph.hidden_groups
+                   if g.descent is not None) == 1
+
+    def test_blocked_etp_scan_beyond_the_limit_warns(self):
+        """An ETP-relevant scan beyond the unroll limit that descent cannot
+        take (here ``reverse=True``) is reported, and the weight inside the
+        opaque scan then raises."""
+        from braintrace._compiler.graph import compile_etrace_graph
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                x_row = x.reshape(1, -1)
+
+                def body(h, _):
+                    h = 0.9 * h + jnp.tanh(braintrace.matmul(x_row, self.w.value))
+                    return h, h
+
+                self.h.value, _ = jax.lax.scan(
+                    body, self.h.value, None, length=8, reverse=True)
+                return self.h.value
+
+        net = Net()
+        brainstate.nn.init_all_states(net, batch_size=1)
+        with pytest.warns(UserWarning, match='cannot be descended: .*reverse'):
+            with pytest.raises(NotImplementedError, match='weight'):
+                compile_etrace_graph(
+                    net, jnp.ones((4,), dtype='float32'),
+                    control_flow=DESCENT_POLICY)
+
+    def test_plain_op_only_scan_is_not_descended(self):
+        """A scan whose body holds no ETP primitive holds no relation, so it
+        is not descended (issue #209). A weight it reads through plain ops is
+        a plain use, as at top level; the scan stays one opaque node, and the
+        change from the old hard error is reported (SCAN_PLAIN_WEIGHT)."""
+        from braintrace._compiler.graph import compile_etrace_graph
+        from braintrace._compiler.diagnostics import DiagnosticKind
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
                 self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
 
             def update(self, x):
@@ -484,12 +555,15 @@ class TestApplyScanDescentPipeline:
 
         net = Net()
         brainstate.nn.init_all_states(net, batch_size=1)
-        with pytest.warns(UserWarning, match='no ETP relation'):
+        with pytest.warns(UserWarning, match='plain ops'):
             graph = compile_etrace_graph(
                 net, jnp.ones((4,), dtype='float32'),
                 control_flow=DESCENT_POLICY)
-        assert any(d.kind is DiagnosticKind.SCAN_DESCENT_NO_RELATIONS
-                   for d in graph.diagnostics)
+        rec, = [d for d in graph.diagnostics
+                if d.kind is DiagnosticKind.SCAN_PLAIN_WEIGHT]
+        assert rec.context['weight_paths'] == (('w',),)
+        assert rec.context['hidden_paths'] == (('h',),)
+        assert not any(d.kind is DiagnosticKind.SCAN_DESCENT_NO_RELATIONS
+                       for d in graph.diagnostics)
         assert len(graph.hidden_param_op_relations) == 0
-        assert sum(1 for g in graph.hidden_groups
-                   if g.descent is not None) == 1
+        assert all(g.descent is None for g in graph.hidden_groups)
