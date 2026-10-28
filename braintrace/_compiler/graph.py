@@ -16,13 +16,13 @@
 
 import threading
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Sequence, Set, Tuple, Optional, NamedTuple
+from typing import Dict, Iterator, List, Sequence, Tuple, Optional, NamedTuple
 
 import brainstate
 import jax
 import numpy as np
 
-from braintrace._compatible_imports import Jaxpr, is_scan_primitive, jaxpr_all_invars, Var
+from braintrace._compatible_imports import is_scan_primitive, jaxpr_all_invars, Var
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     ETraceVals,
@@ -324,91 +324,6 @@ def _report_plain_weight_scans(minfo: ModuleInfo, descended_eqn_ids: frozenset) 
         )
 
 
-def _forward_reach(jaxpr: Jaxpr, seeds: Set[Var]) -> Set[Var]:
-    """Variables of *jaxpr* that may depend on *seeds* (any input to every output).
-
-    An over-approximation: an equation with a reachable input makes all its
-    outputs reachable, including through nested bodies.
-    """
-    reached = set(seeds)
-    for eqn in jaxpr.eqns:
-        if any(isinstance(v, Var) and v in reached for v in eqn.invars):
-            reached.update(v for v in eqn.outvars if isinstance(v, Var))
-    return reached
-
-
-def _report_buffer_only_weights(minfo: ModuleInfo, relations: Sequence[HiddenParamOpRelation]) -> None:
-    """Report weights whose online credit can only cross a non-hidden state (#199).
-
-    Online algorithms carry credit across steps through the eligibility traces
-    of hidden states only. A value written into any other state (a delay line
-    held in a ``ShortTermState``) is read by the next step as a given input.
-    So when nothing a weight influences in a step -- its ETP outputs, its plain
-    reads, and the old and new values of the hidden states of its groups --
-    reaches a model output in that step, while some of it reaches such a
-    write, the weight's online gradient is zero (within a multi-step VJP
-    chunk, reverse mode still credits that path). A weight with any path to
-    the outputs is not reported, and nor is a weight with a relation inside a
-    descended scan (its values live in the scan body).
-    """
-    jaxpr = minfo.jaxpr
-    outputs = {v for v in jaxpr.outvars[:minfo.num_var_out] if isinstance(v, Var)}
-    if not outputs:
-        return
-    buffers: Dict[Var, Path] = {}
-    for outvar_tree, state in zip(minfo.state_tree_outvars, minfo.compiled_model_states):
-        if isinstance(state, (brainstate.HiddenState, brainstate.ParamState)):
-            continue
-        for v in jax.tree.leaves(outvar_tree):
-            if isinstance(v, Var):
-                buffers[v] = minfo.state_id_to_path[id(state)]
-    if not buffers:
-        return
-    by_weight: Dict[Path, List[HiddenParamOpRelation]] = {}
-    for relation in relations:
-        for path in dict.fromkeys(relation.trainable_paths.values()):
-            by_weight.setdefault(path, []).append(relation)
-    for weight_path, rels in by_weight.items():
-        if any(r.control_flow_context is not None for r in rels):
-            continue
-        hidden_paths = list(dict.fromkeys(
-            p for r in rels for g in r.hidden_groups for p in g.hidden_paths))
-        seeds = {r.y_var for r in rels}
-        seeds.update(v for v in minfo.weight_path_to_invars.get(weight_path, ()) if isinstance(v, Var))
-        for p in hidden_paths:
-            seeds.add(minfo.hidden_path_to_invar[p])
-            seeds.add(minfo.hidden_path_to_outvar[p])
-        reached = _forward_reach(jaxpr, seeds)
-        if reached & outputs:
-            continue
-        through = tuple(dict.fromkeys(buffers[v] for v in jaxpr.outvars if v in reached and v in buffers))
-        if not through:
-            continue
-        kinds = sorted({type(s).__name__ for s in minfo.compiled_model_states
-                        if minfo.state_id_to_path[id(s)] in through})
-        emit(
-            kind=DiagnosticKind.ONLINE_GRADIENT_ZERO,
-            level=DiagnosticLevel.WARNING,
-            message=(
-                f'The online gradient of weight {weight_path} is zero: nothing it '
-                f'influences in a step (its ETP output, the hidden states '
-                f'{hidden_paths} of its group(s)) reaches the model outputs in '
-                f'that step. It reaches only the non-hidden state(s) '
-                f'{list(through)} ({", ".join(kinds)}), which the next step '
-                f'reads as a given input, so no eligibility trace carries the '
-                f'credit across the step (a delay line held in a ShortTermState, '
-                f'for example). To learn this weight online, hold such a line in '
-                f'a brainstate.HiddenState (it then joins the hidden group and '
-                f'gets approximate credit) or give the weight a path to the '
-                f'outputs within the step; or train with BPTT. A multi-step VJP '
-                f'credits the path only within each chunk.'
-            ),
-            weight_path=weight_path,
-            hidden_paths=tuple(hidden_paths),
-            context={'through': through},
-        )
-
-
 @contextmanager
 def compiler_context(name: str) -> Iterator[None]:
     """
@@ -703,7 +618,6 @@ def compile_etrace_graph(
                     f"or set ControlFlowPolicy(scan_descent='off')."
                 )
         hidden_param_op_relations += descended_relations
-        _report_buffer_only_weights(minfo, hidden_param_op_relations)
 
         # ---      Rewrite the jaxpr for computing the needed variables      --- #
 

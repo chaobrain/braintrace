@@ -85,23 +85,55 @@ Controlling Parameter Participation
 Delay Lines and Other Non-Hidden State
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Online algorithms carry credit from one step to the next only through the
-eligibility traces of ``brainstate.HiddenState``\ s. A value kept in any other
-state, such as a delay line or ring buffer held in a
-``brainstate.ShortTermState``, is read by the next step as a given input. So a
-weight whose influence reaches the model outputs *only* through such a state
-gets an online gradient of exactly zero. The compiler reports this as
-``DiagnosticKind.ONLINE_GRADIENT_ZERO`` (a warning). Two ways out:
+An online algorithm credits a weight in two ways. The eligibility trace of each
+hidden group the weight feeds carries its influence across steps *within that
+group*. The learning signal then reads, in the same step, how the loss depends
+on the group's new hidden values. A multi-step VJP (``vjp_method='multi-step'``)
+given one step per call also reads the group's old values. Nothing else crosses
+a step. A value kept in any other state, such as a delay line or ring buffer
+held in a ``brainstate.ShortTermState``, is a given input to the next step. For
+a single-step algorithm, a hidden state of *another* group that only a later
+step reads is too.
 
-- hold the delay line in a ``brainstate.HiddenState``. It then joins the
-  hidden group of the states it connects, and the weight gets approximate
-  credit, like any multi-layer path;
-- give the weight a path to the outputs within the step, or train it with
-  BPTT.
+So a weight whose influence reaches the loss only through the old value of such
+a state has an online gradient of exactly zero, while its BPTT gradient is not
+zero. Each VJP algorithm reports this as ``DiagnosticKind.ONLINE_GRADIENT_ZERO``:
 
-A weight that also reaches the outputs within the step is not reported: only
-the part of its credit that crosses the non-hidden state is dropped, which is
-the usual approximation of these algorithms.
+- at compile time, as an INFO record that assumes the loss reads only the model
+  outputs (the loss is not known yet);
+- at the first gradient computation, as a warning, if the zero holds for the
+  outputs and states the loss actually reads. A loss that reads a state after
+  the step (a firing-rate regulariser, say) gives that state's new value a
+  same-step path, and then nothing is reported.
+
+The record names the weight and the states its credit crosses (``through``) and
+lists the fixes that work for the algorithm in use:
+
+- a ``ShortTermState`` line: hold it in a ``brainstate.HiddenState``. Under a
+  multi-step VJP, and under ``OSTLRecurrent`` or ``SnAp``, which couple the
+  states of a group, the weight then gets credit. Under ``D_RTRL``, ``EProp``
+  and ``pp_prop`` it does not: their trace stays in the weight's own group, and
+  the line joins that group only, so they need one of the other algorithms too;
+- a hidden line under a single-step algorithm: use
+  ``D_RTRL(vjp_method='multi-step')``, ``OSTLRecurrent`` or ``SnAp``;
+- in every case: train the weight with BPTT.
+
+Given ``MultiStepData`` of two or more steps per call, a multi-step VJP credits
+the line within each call and drops it across calls. The gradient is then not
+zero, and the gradient-time check skips such calls.
+
+When the weight also reaches the loss within the step, its online gradient is
+not zero but omits the credit through the line, and it can be strongly biased.
+On a two-layer net with a one-step line plus a same-step readout of layer 1, it
+pointed away from BPTT's gradient (cosine -0.92). This is an INFO record,
+``DiagnosticKind.ONLINE_GRADIENT_PARTIAL``, which emits no warning.
+
+Not checked: ``learning_signal='random_feedback'`` and ``'modulatory'``, and
+random-projection traces (``UORO``), which credit weights differently. Not
+detected (#216): a ring that is written and then read back in the same step,
+such as ``brainstate.nn.Delay`` used as ``update(y)`` and then
+``retrieve_at_step(d)``. The analysis treats the buffer as one array, so the
+old slot it reads looks like this step's write.
 
 
 Input Data

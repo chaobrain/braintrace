@@ -5,17 +5,23 @@
 
 ### Fixes
 
-- **A weight whose credit can only cross a delay line is reported (#199).**
-  Online algorithms carry credit across steps only through the eligibility
-  traces of hidden states. When a weight's influence reaches the model outputs
-  only through a write into a non-hidden state (a delay line held in a
-  `ShortTermState`, read at the next step), its online gradient is exactly
-  zero, and nothing said so. The compiler now emits the new
-  `ONLINE_GRADIENT_ZERO` warning. It names the weight, its hidden states and
-  the states its influence ends in. A weight that also reaches the outputs
-  within the step is not reported. `docs/apis/concepts.rst` now explains how
-  delay lines behave: a line held in a `HiddenState` joins the hidden group
-  and gets approximate credit.
+- **A weight whose online gradient is zero is reported (#199).** When the loss
+  depends on a weight only in later steps, through the old value of a state the
+  online algorithm does not trace, the online gradient is exactly zero while
+  BPTT's is not, and nothing said so. Such a state is a delay line in a
+  `ShortTermState` (every algorithm), or, for a single-step VJP without
+  coupling, a hidden state that leaves the weight's hidden group. Each VJP
+  algorithm now records the new `ONLINE_GRADIENT_ZERO` at compile time (INFO,
+  assuming the loss reads only the model outputs). At the first gradient
+  computation it re-checks the record against the outputs and states the loss
+  reads, and warns if the zero holds; it knows these from symbolic-zero
+  cotangents. The record names the weight and the states (`through`), and lists
+  only fixes that give the algorithm in use a non-zero gradient. A weight that
+  also reaches the loss within the step gets `ONLINE_GRADIENT_PARTIAL` (INFO):
+  its gradient omits that credit and can be strongly biased. The analysis is
+  linear in the step's equations. `docs/apis/concepts.rst` explains the credit
+  model. Known gap: a ring written and then read back in the same step is not
+  detected (#216).
 - **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
   hidden-to-hidden transition (#213).** In the default ("without recurrence")
   grouping mode, every `dot_general` that read a hidden-derived value was

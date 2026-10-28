@@ -165,15 +165,26 @@ class DiagnosticKind(str, Enum):
     # ``OUTPUT_BYPASS_DROPPED``: part of such a path crosses a ``while`` or an
     # equation with effects, which cannot be duplicated; that part of the
     # gradient is zero (WARNING).
-    # ``ONLINE_GRADIENT_ZERO``: nothing a weight influences in a step (its ETP
-    # outputs, its plain reads, the old and new values of its groups' hidden
-    # states) reaches the model outputs in that step; it reaches only writes
-    # into non-hidden states (a delay line in a ``ShortTermState``), which the
-    # next step reads as a given input. No eligibility trace carries the credit
-    # across the step, so the weight's online gradient is zero (WARNING; #199).
     OUTPUT_BYPASSES_HIDDEN = 'output_bypasses_hidden'
     OUTPUT_BYPASS_DROPPED = 'output_bypass_dropped'
+
+    # Credit an online algorithm cannot carry (see _compiler/online_credit.py;
+    # emitted by the VJP algorithms, which know their credit model; #199)
+    #
+    # ``ONLINE_GRADIENT_ZERO``: the loss depends on a weight only in later
+    # steps, through the old value of a state the algorithm does not trace (a
+    # delay line in a ``ShortTermState``; for a single-step VJP, also a hidden
+    # state that leaves the weight's hidden group), so the online gradient is
+    # exactly zero while BPTT's is not. At compile time the record is INFO and
+    # assumes the loss reads only the model outputs; the first gradient
+    # computation re-checks it against the outputs and states the loss reads
+    # and emits a WARNING if it holds. Context: ``through`` (the states, a tuple
+    # of paths), ``stage`` (``'compile'`` or ``'gradient'``).
+    # ``ONLINE_GRADIENT_PARTIAL``: the online gradient of a weight is non-zero
+    # but omits the credit through the old value of a non-hidden state, which
+    # can bias it strongly (INFO). Context: ``through``.
     ONLINE_GRADIENT_ZERO = 'online_gradient_zero'
+    ONLINE_GRADIENT_PARTIAL = 'online_gradient_partial'
 
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
