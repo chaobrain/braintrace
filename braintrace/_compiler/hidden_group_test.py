@@ -1792,8 +1792,11 @@ class TestFullPositionJacobian:
 
     def test_forward_mode_matches_reverse(self):
         fn, h = self._fn_and_point()
-        fwd = full_position_jacobian(fn, h, use_forward_mode=True)
-        rev = full_position_jacobian(fn, h)
+        # The two modes agree to atol=1e-6 in full float32; in the TF32 an
+        # Ampere GPU uses for matmuls by default they round differently (#205).
+        with jax.default_matmul_precision('highest'):
+            fwd = full_position_jacobian(fn, h, use_forward_mode=True)
+            rev = full_position_jacobian(fn, h)
         assert u.math.allclose(fwd, rev, atol=1e-6)
 
     def test_multi_axis_varshape_is_preserved(self):
@@ -1901,8 +1904,10 @@ class TestWidenedBlockJacobian:
     def test_forward_mode_agrees_with_reverse_mode(self):
         fn, h = self._fn_and_point()
         nbr, valid = _saturated_snap(h.shape[0])
-        rev = np.asarray(widened_block_jacobian(fn, h, nbr, valid))
-        fwd = np.asarray(widened_block_jacobian(fn, h, nbr, valid, use_forward_mode=True))
+        # Full float32, not TF32: see test_forward_mode_matches_reverse (#205).
+        with jax.default_matmul_precision('highest'):
+            rev = np.asarray(widened_block_jacobian(fn, h, nbr, valid))
+            fwd = np.asarray(widened_block_jacobian(fn, h, nbr, valid, use_forward_mode=True))
         np.testing.assert_allclose(rev, fwd, rtol=1e-6, atol=1e-6)
 
     def test_varshape_with_several_axes_is_preserved(self):
