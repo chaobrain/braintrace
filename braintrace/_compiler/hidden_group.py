@@ -1326,6 +1326,11 @@ def _simplify_hid2hid_tracer(
     )
 
 
+def _shape_of(var: Any) -> Tuple[int, ...]:
+    """The shape of a jaxpr variable's abstract value (``()`` if it has none)."""
+    return tuple(getattr(getattr(var, 'aval', None), 'shape', ()))
+
+
 class _PositionLayout(NamedTuple):
     """Where a hidden-derived value keeps the positions of its hidden state (#213).
 
@@ -1672,7 +1677,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             return self.position_layout[var]
         if var in self.hidden_invars:
             varshape = tuple(self.path_to_state[self.invar_to_hidden_path[var]].varshape)
-            if tuple(var.aval.shape[:len(varshape)]) == varshape:
+            if _shape_of(var)[:len(varshape)] == varshape:
                 return _PositionLayout(
                     varshape, frozenset(a for a, d in enumerate(varshape) if d > 1))
         return None
@@ -1688,7 +1693,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         if axis in batch[operand]:
             return list(batch[operand]).index(axis)
         free = [
-            [d for d in range(len(v.aval.shape)) if d not in contract[i] and d not in batch[i]]
+            [d for d in range(len(_shape_of(v))) if d not in contract[i] and d not in batch[i]]
             for i, v in enumerate(eqn.invars)
         ]
         return len(batch[0]) + (0 if operand == 0 else len(free[0])) + free[operand].index(axis)
@@ -1750,11 +1755,11 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         name = eqn.primitive.name
         outvar = eqn.outvars[0]
         if name in _POSITION_PRESERVING_PRIMITIVES:
-            shape = tuple(eqn.invars[hidden_positions[0]].aval.shape)
-            if any(tuple(eqn.invars[j].aval.shape) != shape for j in hidden_positions):
+            shape = _shape_of(eqn.invars[hidden_positions[0]])
+            if any(_shape_of(eqn.invars[j]) != shape for j in hidden_positions):
                 return
             for out in eqn.outvars:
-                if tuple(out.aval.shape) == shape:
+                if _shape_of(out) == shape:
                     self.position_layout[out] = _PositionLayout(varshape, carriers)
             return
         if name == 'concatenate':
@@ -1782,7 +1787,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 varshape = None
         else:
             return
-        if varshape is not None and tuple(outvar.aval.shape[:r]) != varshape:
+        if varshape is not None and _shape_of(outvar)[:r] != varshape:
             varshape = None
         self.position_layout[outvar] = _PositionLayout(varshape, carriers)
 
@@ -1797,7 +1802,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 if invar in tracer.invar_needed_in_oth_eqns:
                     paths.append(self.invar_to_hidden_path[tracer.hidden_invar])
         paths = list(dict.fromkeys(paths))
-        shapes = [tuple(eqn.invars[j].aval.shape) for j in hidden_positions]
+        shapes = [_shape_of(eqn.invars[j]) for j in hidden_positions]
         emit(
             kind=DiagnosticKind.RECURRENT_MIXING_ASSUMED,
             level=DiagnosticLevel.WARNING,
