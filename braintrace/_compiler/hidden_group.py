@@ -1709,13 +1709,14 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         for j, layout in zip(hidden_positions, layouts):
             if layout is not None and layout.carriers & set(contract[j]):
                 return True
-        if any(layout is None or layout.varshape is None for layout in layouts):
+        known = [layout for layout in layouts if layout is not None]
+        if len(known) != len(layouts) or len({layout.varshape for layout in known}) != 1:
             return None
-        if len({layout.varshape for layout in layouts}) != 1:
+        if known[0].varshape is None:
             return None
         if len(hidden_positions) == 2:
             pairs = dict(zip(batch[0], batch[1]))
-            if any(pairs.get(a) != a for a in layouts[0].carriers):
+            if any(pairs.get(a) != a for a in known[0].carriers):
                 return None
         return False
 
@@ -1736,8 +1737,11 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         ):
             return  # every dot is traced, or no input has a layout to carry
         hidden_positions = self._hidden_derived_invar_positions(eqn)
-        layouts = [self._position_layout(eqn.invars[j]) for j in hidden_positions]
-        if not layouts or any(layout is None for layout in layouts):
+        layouts = [
+            layout for layout in (self._position_layout(eqn.invars[j]) for j in hidden_positions)
+            if layout is not None
+        ]
+        if not layouts or len(layouts) != len(hidden_positions):
             return
         varshapes = {layout.varshape for layout in layouts}
         varshape = varshapes.pop() if len(varshapes) == 1 else None
