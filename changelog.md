@@ -88,8 +88,8 @@
   the hidden state. D-RTRL is unaffected, and so are EProp and
   OSTLRecurrent on cells where they are exact.
   `pp_prop`/ES-D-RTRL and `OSTLFeedforward` move: by 9 % and 74 % on a carry
-  readout, and by 2 % and 14 % on a `ys` readout. On both readouts the rolled
-  gradient is the closer one to BPTT. explain() reports such a scan with a
+  readout of the test model, and by 2 % and 14 % on a `ys` readout. Neither
+  path is closer to BPTT in general. explain() reports such a scan with a
   `SCAN_ROLLED_OUTPUT_READ` INFO. SnAp-n position analysis cannot yet see
   through a rolled scan, so its pattern widens to all positions (#210).
 
