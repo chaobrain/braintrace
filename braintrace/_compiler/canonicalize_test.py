@@ -1827,8 +1827,8 @@ class _SubstepTwoState(brainstate.nn.Module):
     def __init__(self, k, n_in=3, n=4, seed=0):
         super().__init__()
         self.k = k
-        self.W = brainstate.ParamState(
-            jax.random.normal(jax.random.key(seed), (n_in, n)) * 0.5)
+        with brainstate.random.seed_context(seed):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
         self.V = brainstate.HiddenState(jnp.zeros(n))
         self.w = brainstate.HiddenState(jnp.zeros(n))
 
@@ -1846,7 +1846,8 @@ class _SubstepTwoState(brainstate.nn.Module):
 
 
 def _substep_inputs(T=6, n_in=3):
-    return jax.random.uniform(jax.random.key(1), (T, n_in))
+    with brainstate.random.seed_context(1):
+        return brainstate.random.rand(T, n_in)
 
 
 def _etrace_grad_stablehlo_ops(k, policy):

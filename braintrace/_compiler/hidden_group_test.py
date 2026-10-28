@@ -2158,8 +2158,8 @@ class _DiffCell(brainstate.nn.Module):
 
     def __init__(self, n_in=3, n=4):
         super().__init__()
-        self.W = brainstate.ParamState(
-            jax.random.normal(jax.random.key(0), (n_in, n)) * 0.5)
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
         self.V = brainstate.HiddenState(jnp.zeros(n))
         self.w = brainstate.HiddenState(jnp.zeros(n))
 
@@ -2236,8 +2236,8 @@ class TestMultiHiddenEquation:
     ])
     def test_one_group_and_exact_diagonal_jacobian(self, cell_cls, primitive):
         cell, group, _ = self._group(cell_cls, primitive)
-        V, w = (jax.random.uniform(jax.random.key(i), (4,)) for i in (2, 3))
-        drive = jax.random.uniform(jax.random.key(4), (4,))
+        with brainstate.random.seed_context(2):
+            V, w, drive = [brainstate.random.rand(4) for _ in range(3)]
         input_vals = _constvals_for(group, drive)
         jac = group.diagonal_jacobian([V, w], input_vals)
         ref_fn = _SubstepTwinCell.step if cell_cls is not _DiffCell else _DiffCell.step
@@ -2266,7 +2266,8 @@ class TestMultiHiddenEquation:
         )
         algo = lambda m: braintrace.D_RTRL(m, control_flow=_ROLLED)
         with brainstate.environ.context(precision=64):
-            xs = jax.random.uniform(jax.random.key(1), (6, 3))
+            with brainstate.random.seed_context(1):
+                xs = brainstate.random.rand(6, 3)
             g = online_param_gradients_singlestep_naive(cell_cls, xs, algo_factory=algo)
             ref_cls = _DiffCell if cell_cls is _DiffCell else _SubstepTwinCell
             g_ref = bptt_param_gradients(ref_cls, xs)
