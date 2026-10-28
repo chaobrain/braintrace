@@ -14,6 +14,18 @@
   raised a `jax.jvp` dtype mismatch. `jacrev_last_dim` and `jacfwd_last_dim`
   now build the basis in the hidden state's dtype. D-RTRL on float32 states
   under x64 matches BPTT and gives the same gradient as without x64.
+- **An ETP op can drive one component of a `HiddenGroupState` (#206).** A
+  `HiddenGroupState` holds `(*varshape, num_state)`. Examples are an ALIF
+  `(V, a)` per neuron, or K receptor channels in one `(n, K)` array. An ETP
+  output of the `varshape` that drives one component, such as the input
+  current into `V`, lost its relation: the compiler's shape filter compared
+  it with the full value shape. For `num_state >= 2` the model then failed
+  to compile with "No trainable weights are routed through ETP ops". The
+  filter now also accepts the `varshape` for a `HiddenGroupState`, and a true
+  mismatch is still removed with the same warning. D-RTRL and e-prop
+  gradients of such a model equal those of the same model written with one
+  `HiddenState` per component. D-RTRL also matches BPTT on these
+  position-diagonal cells.
 - **A neuron with several hidden states integrated in a substep loop compiles
   at any number of substeps (#201).** A weight-free `lax.scan` (or
   `while_loop`) that reads and writes several `HiddenState`s, such as a
