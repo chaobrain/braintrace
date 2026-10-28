@@ -82,6 +82,27 @@ Controlling Parameter Participation
        ``brainstate.ParamState`` is eligible; participation depends solely on
        whether an ETP primitive consumed it.
 
+Delay Lines and Other Non-Hidden State
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Online algorithms carry credit from one step to the next only through the
+eligibility traces of ``brainstate.HiddenState``\ s. A value kept in any other
+state, such as a delay line or ring buffer held in a
+``brainstate.ShortTermState``, is read by the next step as a given input. So a
+weight whose influence reaches the model outputs *only* through such a state
+gets an online gradient of exactly zero. The compiler reports this as
+``DiagnosticKind.ONLINE_GRADIENT_ZERO`` (a warning). Two ways out:
+
+- hold the delay line in a ``brainstate.HiddenState``. It then joins the
+  hidden group of the states it connects, and the weight gets approximate
+  credit, like any multi-layer path;
+- give the weight a path to the outputs within the step, or train it with
+  BPTT.
+
+A weight that also reaches the outputs within the step is not reported: only
+the part of its credit that crosses the non-hidden state is dropped, which is
+the usual approximation of these algorithms.
+
 
 Input Data
 ----------

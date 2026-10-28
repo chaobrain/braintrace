@@ -165,8 +165,15 @@ class DiagnosticKind(str, Enum):
     # ``OUTPUT_BYPASS_DROPPED``: part of such a path crosses a ``while`` or an
     # equation with effects, which cannot be duplicated; that part of the
     # gradient is zero (WARNING).
+    # ``ONLINE_GRADIENT_ZERO``: nothing a weight influences in a step (its ETP
+    # outputs, its plain reads, the old and new values of its groups' hidden
+    # states) reaches the model outputs in that step; it reaches only writes
+    # into non-hidden states (a delay line in a ``ShortTermState``), which the
+    # next step reads as a given input. No eligibility trace carries the credit
+    # across the step, so the weight's online gradient is zero (WARNING; #199).
     OUTPUT_BYPASSES_HIDDEN = 'output_bypasses_hidden'
     OUTPUT_BYPASS_DROPPED = 'output_bypass_dropped'
+    ONLINE_GRADIENT_ZERO = 'online_gradient_zero'
 
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'

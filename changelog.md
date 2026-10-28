@@ -5,6 +5,17 @@
 
 ### Fixes
 
+- **A weight whose credit can only cross a delay line is reported (#199).**
+  Online algorithms carry credit across steps only through the eligibility
+  traces of hidden states. When a weight's influence reaches the model outputs
+  only through a write into a non-hidden state (a delay line held in a
+  `ShortTermState`, read at the next step), its online gradient is exactly
+  zero, and nothing said so. The compiler now emits the new
+  `ONLINE_GRADIENT_ZERO` warning. It names the weight, its hidden states and
+  the states its influence ends in. A weight that also reaches the outputs
+  within the step is not reported. `docs/apis/concepts.rst` now explains how
+  delay lines behave: a line held in a `HiddenState` joins the hidden group
+  and gets approximate credit.
 - **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
   hidden-to-hidden transition (#213).** In the default ("without recurrence")
   grouping mode, every `dot_general` that read a hidden-derived value was
