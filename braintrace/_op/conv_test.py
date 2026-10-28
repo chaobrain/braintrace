@@ -706,6 +706,17 @@ class TestConvPatchExtraction:
     layout, a strided conv, VALID padding and a channel-last layout.
     """
 
+    @pytest.fixture(autouse=True)
+    def _full_float32_matmul(self):
+        # Each test pins an exact identity (conv == einsum over patches) at
+        # atol=1e-5. On an Ampere GPU, XLA runs float32 convs and einsums in
+        # TF32 by default (~1e-3 relative), and the two sides round
+        # differently, so the tolerance would measure the accelerator, not the
+        # patch layout (#205). Scoped to this class, as in
+        # _algorithm/tests/conv_vmap_correctness_test.py.
+        with jax.default_matmul_precision('highest'):
+            yield
+
     def _patches(self, x, kernel_shape, **params):
         from braintrace._op.conv import _conv_extract_patches
         return _conv_extract_patches(x, kernel_shape, params)

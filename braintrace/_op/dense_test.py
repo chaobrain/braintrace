@@ -813,6 +813,15 @@ class TestDtToTFirstPrinciplesFromJacobian:
     against the rule's actual output.
     """
 
+    @pytest.fixture(autouse=True)
+    def _full_float32_matmul(self):
+        # Both tests hold the rule to atol=1e-10 against references built
+        # with jax.jacobian and jnp.einsum. On an Ampere GPU, XLA may run
+        # those float32 dots in TF32 (~1e-3 relative), which would measure
+        # the accelerator, not the rule (#205). Scoped to this class.
+        with jax.default_matmul_precision('highest'):
+            yield
+
     def test_mm_dt_to_t_weight_and_bias_match_jacobian_contraction(self):
         from braintrace._op.dense import _mm_dt_to_t
         brainstate.random.seed(301)
