@@ -2555,3 +2555,207 @@ class TestHiddenCouplingDropped:
         graph = braintrace.compile_etrace_graph(cell, jnp.ones(3))
         assert not [r for r in graph.diagnostics
                     if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]
+
+
+# ---------------------------------------------------------------------------
+# #213: a dot_general over a HiddenGroupState's state axis is not recurrent mixing
+# ---------------------------------------------------------------------------
+
+class _ChannelCell(brainstate.nn.Module):
+    """A membrane ``V`` (n,) driven by the total of K channels ``I`` (one (n, K)
+    ``HiddenGroupState``, or K (n,) ``HiddenState``\\ s for ``'separate'``).
+
+    Channel 0 gets ``x @ W_in`` and channel 1 gets ``r @ W_rec`` (both
+    ``braintrace.matmul``), with ``r = sigmoid(V)`` of the previous step, or a
+    feed-forward input. ``total`` names how ``V`` reads the channels (#213).
+    """
+
+    def __init__(self, total='sum', recurrent=True, n_in=3, n=4, k=2):
+        super().__init__()
+        self.total, self.recurrent, self.n, self.k = total, recurrent, n, k
+        rng = np.random.default_rng(0)
+        self.W_in = brainstate.ParamState(jnp.asarray(rng.normal(0., 1., (n_in, n))))
+        self.W_rec = brainstate.ParamState(jnp.asarray(rng.normal(0., 1., (n, n))))
+        self.decay = jnp.asarray(rng.uniform(.5, .9, (n, k)))
+        self.C = jnp.asarray(rng.uniform(.5, 1.5, (k, n)))
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        if total == 'separate':
+            self.I = [brainstate.HiddenState(jnp.zeros(n)) for _ in range(k)]
+        else:
+            self.I = brainstate.HiddenGroupState(jnp.zeros((n, k)))
+
+    def _total(self, I):
+        t, k, n = self.total, self.k, self.n
+        if t == 'sum':
+            return jnp.sum(I, axis=-1)
+        if t == 'dot':  # contracts the state axis only
+            return I @ jnp.ones(k)
+        if t == 'sq_sum':
+            return jnp.sum(I * I, axis=-1)
+        if t == 'sq_einsum':  # both operands hidden; positions are paired batch dims
+            return jnp.einsum('nk,nk->n', I, I)
+        if t == 'cw_sum':
+            return jnp.sum(I * self.C.T, axis=-1)
+        # the position axis of I is the second batch dim: out[k, i] = I[i, k] * C[k, i]
+        out = jax.lax.dot_general(I, self.C, (((), ()), ((1, 0), (0, 1))))
+        if t == 'cw_batch':
+            return jnp.sum(out, axis=0)
+        if t == 'cw_batch_dot':  # contracts out's axis 1, its position axis (needs k == n)
+            return jnp.ones(k) * (out @ jnp.ones(n))
+        if t == 'transposed':  # I.T @ c contracts the position axis (needs k == n)
+            return I.T @ jnp.ones(n)
+        if t == 'sliced':  # a slice: the layout is not proven
+            return I[:, :1] @ jnp.ones(1)
+        if t == 'outer':  # out[i, m] = I_prev[i] . I_prev[m]: positions are not paired
+            return jax.lax.dot_general(self.I_prev, self.I_prev, (((1,), (1,)), ((), ()))).sum(-1)
+        raise ValueError(t)
+
+    def update(self, x):
+        n, k = self.n, self.k
+        self.I_prev = None if self.total == 'separate' else self.I.value
+        r = jax.nn.sigmoid(self.V.value) if self.recurrent else jnp.tile(x, n)[:n]
+        E = [braintrace.matmul(x, self.W_in.value), braintrace.matmul(r, self.W_rec.value)]
+        if self.total == 'separate':
+            for j in range(k):
+                self.I[j].value = self.I[j].value * self.decay[:, j] + E[j % 2]
+            tot = sum(self.I[j].value for j in range(k))
+        else:
+            I = self.I.value * self.decay + jnp.stack([E[j % 2] for j in range(k)], axis=-1)
+            self.I.value = I
+            tot = self._total(I)
+        self.V.value = 0.8 * self.V.value + tot
+        return jax.nn.sigmoid(self.V.value)
+
+
+def _channel_graph(**kwargs):
+    cell = _ChannelCell(**kwargs)
+    brainstate.nn.init_all_states(cell)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+    groups = sorted(sorted(g.hidden_paths) for g in graph.hidden_groups)
+    assumed = [r for r in graph.diagnostics if r.kind is DiagnosticKind.RECURRENT_MIXING_ASSUMED]
+    return groups, assumed
+
+
+def _channel_grads(algorithm, steps=30, **kwargs):
+    with brainstate.environ.context(precision=64):
+        cell = _ChannelCell(**kwargs)
+        brainstate.nn.init_all_states(cell)
+        rng = np.random.default_rng(1)
+        xs = jnp.asarray(rng.uniform(0, 1, (steps, 3)))
+        ys = jnp.asarray(rng.uniform(0, 1, (steps, cell.n)))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(cell, algorithm, xs[0])
+            g = learner.etrace_grad(
+                xs, ys, step_fn=lambda x, y: jnp.mean((learner(x) - y) ** 2),
+                weights={'W_in': cell.W_in, 'W_rec': cell.W_rec}, reduction='sum')
+        return {key: np.asarray(v) for key, v in g.items()}
+
+
+def _assert_grads_equal(a, b):
+    for key in a:
+        np.testing.assert_allclose(a[key], b[key], rtol=1e-12, atol=1e-14, err_msg=key)
+
+
+_ONE_GROUP = [[('I',), ('V',)]]
+_SPLIT = [[('I',)], [('V',)]]
+
+
+class TestStateAxisContraction:
+    """#213: a ``dot_general`` that contracts only a ``HiddenGroupState``'s state
+    axis couples no positions, so it stays in the hidden-to-hidden transition,
+    like ``jnp.sum(..., axis=-1)``. A dot whose position layout is not proven
+    stays a boundary, as before, and is reported (``RECURRENT_MIXING_ASSUMED``)."""
+
+    @pytest.mark.parametrize('recurrent', [True, False], ids=['recurrent', 'feedforward'])
+    @pytest.mark.parametrize('algorithm', ['eprop', 'd_rtrl'])
+    def test_state_axis_dot_equals_the_sum(self, algorithm, recurrent):
+        groups, assumed = _channel_graph(total='dot', recurrent=recurrent)
+        assert groups == _ONE_GROUP and not assumed
+        g_dot = _channel_grads(algorithm, total='dot', recurrent=recurrent)
+        _assert_grads_equal(g_dot, _channel_grads(algorithm, total='sum', recurrent=recurrent))
+        _assert_grads_equal(g_dot, _channel_grads(algorithm, total='separate', recurrent=recurrent))
+
+    def test_paired_position_batch_dims_stay_in_the_group(self):
+        groups, assumed = _channel_graph(total='sq_einsum')
+        assert groups == _ONE_GROUP and not assumed
+        _assert_grads_equal(_channel_grads('d_rtrl', total='sq_einsum'),
+                            _channel_grads('d_rtrl', total='sq_sum'))
+
+    def test_position_axis_as_a_non_leading_batch_dim(self):
+        # In the dot it couples no positions, so it stays in the transition ...
+        groups, assumed = _channel_graph(total='cw_batch')
+        assert groups == _ONE_GROUP and not assumed
+        _assert_grads_equal(_channel_grads('d_rtrl', total='cw_batch'),
+                            _channel_grads('d_rtrl', total='cw_sum'))
+        # ... and its output (k, n) has the positions on axis 1, not leading: with
+        # k == n, a dot over that axis couples them and stays a boundary.
+        groups, assumed = _channel_graph(total='cw_batch_dot', k=4)
+        assert groups == _SPLIT and not assumed
+
+    def test_contraction_over_positions_stays_excluded(self):
+        # I.T @ c with k == n: shape alone cannot tell the axes apart; the
+        # transpose moves the positions to axis 1, which the dot contracts.
+        groups, assumed = _channel_graph(total='transposed', k=4)
+        assert groups == _SPLIT and not assumed
+
+    def test_unproven_layout_is_reported(self):
+        groups, assumed = _channel_graph(total='sliced')
+        assert groups == _SPLIT
+        (rec,) = assumed
+        assert rec.level is DiagnosticLevel.WARNING
+        assert rec.hidden_paths == (('I',),)
+        assert rec.context['op_name'] == 'dot_general'
+        assert rec.context['operand_shapes'] == [(4, 1)]
+        assert 'jnp.sum' in rec.message
+        with pytest.warns(UserWarning, match='could not be proven'):
+            cell = _ChannelCell(total='sliced')
+            brainstate.nn.init_all_states(cell)
+            braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+
+    def test_unpaired_hidden_operands_stay_excluded(self):
+        # Both operands are the state itself, but position i meets every
+        # position m: an outer product over positions is not within-position.
+        groups, assumed = _channel_graph(total='outer')
+        assert groups == _SPLIT
+        (rec,) = assumed
+        assert rec.hidden_paths == (('I',),) and rec.context['operand_shapes'] == [(4, 2), (4, 2)]
+
+    def test_recurrent_weight_dot_is_excluded_quietly(self):
+        class _Reservoir(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                with brainstate.random.seed_context(0):
+                    self.w_in = brainstate.ParamState(brainstate.random.randn(3, 4))
+                    self.w_rec = brainstate.random.randn(4, 4)
+                self.h = brainstate.HiddenState(jnp.zeros(4))
+
+            def update(self, x):
+                self.h.value = jnp.tanh(self.h.value @ self.w_rec
+                                        + braintrace.matmul(x, self.w_in.value))
+                return self.h.value
+
+        class _ConcatCell(_Reservoir):
+            def update(self, x):  # the LoRA / GRU form: [x, h] @ W
+                xh = jnp.concatenate([x, self.h.value])
+                self.h.value = jnp.tanh(xh @ jnp.ones((7, 4))
+                                        + braintrace.matmul(x, self.w_in.value))
+                return self.h.value
+
+        for cls in (_Reservoir, _ConcatCell):
+            cell = cls()
+            brainstate.nn.init_all_states(cell)
+            graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+            (group,) = graph.hidden_groups
+            assert 'dot_general' not in {e.primitive.name for e in group.transition_jaxpr.eqns}
+            assert not [r for r in graph.diagnostics
+                        if r.kind is DiagnosticKind.RECURRENT_MIXING_ASSUMED]
+
+    def test_include_recurrent_mixing_traces_every_dot(self):
+        for total in ('dot', 'transposed'):
+            cell = _ChannelCell(total=total, k=4)
+            brainstate.nn.init_all_states(cell)
+            groups, _ = find_hidden_groups_from_module(cell, jnp.zeros(3), include_recurrent_mixing=True)
+            assert sorted(sorted(g.hidden_paths) for g in groups) == _ONE_GROUP

@@ -63,6 +63,9 @@ Atom: TypeAlias = Union[Var, Literal]
 # ``D^t`` term and corrupt the grouped-state transition. The ETP mixing
 # primitives (``etp_mv``/``etp_mm``/``etp_conv``) are handled separately by the
 # ETP-boundary skip in ``hidden_group.JaxprEvalForHiddenGroup._eval_eqn``.
+# Membership makes an equation a *candidate*: the hidden-group pass keeps a
+# ``dot_general`` that provably contracts no position axis (#213), while the
+# other passes still treat every member as mixing (conservative).
 # It lives in this leaf module so every pass can import it at module level.
 _RECURRENT_WEIGHT_MIXING_PRIMITIVES = frozenset({
     'dot_general', 'conv_general_dilated',
