@@ -173,10 +173,11 @@ class DiagnosticKind(str, Enum):
 
     TRANSITION_TAIL_BOUNDED = 'transition_tail_bounded'
     HIDDEN_GROUP_MERGED = 'hidden_group_merged'
-    # ``HIDDEN_COUPLING_DROPPED``: a hidden state's update reads another
-    # hidden state that cannot join its group (different shape or recurrence
-    # layer), so that cross-group term of the hidden-to-hidden Jacobian is
-    # dropped and online gradients deviate from BPTT (WARNING).
+    # ``HIDDEN_COUPLING_DROPPED``: a hidden state's update reads a value
+    # derived from another hidden state that cannot join its group (different
+    # shape or recurrence layer), so that cross-group term of the
+    # hidden-to-hidden Jacobian is dropped and online gradients deviate from
+    # BPTT (WARNING). An equation reading two such states directly raises.
     HIDDEN_COUPLING_DROPPED = 'hidden_coupling_dropped'
     STATE_MISMATCH = 'state_mismatch'
     WEIGHT_IN_CONTROL_FLOW = 'weight_in_control_flow'

@@ -1170,6 +1170,26 @@ def _same_recurrence_layer(path1: Path, path2: Path) -> bool:
     return True
 
 
+def _group_split_reason(
+    path1: Path,
+    path2: Path,
+    path_to_state: Dict[Path, brainstate.HiddenState],
+) -> Optional[str]:
+    """Why two hidden states cannot share one hidden group, or ``None``.
+
+    The two filters of :func:`_simplify_hid2hid_tracer`: a group holds states
+    of one ``varshape`` and of one recurrence layer
+    (:func:`_same_recurrence_layer`).
+    """
+    shape1 = path_to_state[path1].varshape
+    shape2 = path_to_state[path2].varshape
+    if shape1 != shape2:
+        return f'varshape {shape2} != {shape1}'
+    if not _same_recurrence_layer(path1, path2):
+        return 'a different recurrence layer'
+    return None
+
+
 def _simplify_hid2hid_tracer(
     tracer: HiddenToHiddenGroupTracer,
     hidden_invar_to_path: Dict[HiddenInVar, Path],
@@ -1212,24 +1232,23 @@ def _simplify_hid2hid_tracer(
     #      path at a numeric index (e.g., layers.0 vs layers.1) are in
     #      different sequential layers and are excluded.
     invar_path = hidden_invar_to_path[tracer.hidden_invar]
-    invar_state = path_to_state[invar_path]
     # Ordered dict-as-set: preserves the tracer's encounter order so the
     # resulting transition outvars/constvars are deterministic.
     compatible_outvars: Dict[HiddenOutVar, None] = {}
     dropped: Dict[Path, str] = {}
     for hv in tracer.connected_hidden_outvars:
         out_path = hidden_outvar_to_path[hv]
-        out_shape = path_to_state[out_path].varshape
-        if out_shape != invar_state.varshape:
-            dropped[out_path] = f'varshape {out_shape} != {invar_state.varshape}'
-        elif not _same_recurrence_layer(invar_path, out_path):
-            dropped[out_path] = 'a different recurrence layer'
-        else:
+        why = _group_split_reason(invar_path, out_path, path_to_state)
+        if why is None:
             compatible_outvars[hv] = None
+        else:
+            dropped[out_path] = why
     if dropped:
         # The new value of every dropped state depends on this hidden state,
         # but the two cannot share a group, so the transition keeps no term
         # for that dependence: online gradients through it deviate from BPTT.
+        # Only a coupling through a *derived* value gets here; an equation
+        # reading two such states directly raises in ``_eval_eqn`` instead.
         emit(
             kind=DiagnosticKind.HIDDEN_COUPLING_DROPPED,
             level=DiagnosticLevel.WARNING,
@@ -1522,12 +1541,13 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             # several hidden states already does (see the loop below). Each
             # tracer then reaches the equation's hidden outvars, so the states
             # merge into one group whose transition has all of them as
-            # invars; a reader whose states land in different groups (shape
-            # or layer filter) sees the others as constants, as for derived
-            # values. The connection is per equation, hence conservative for
+            # invars. The connection is per equation, hence conservative for
             # a multi-output equation: carries of one opaque loop that do not
             # depend on each other still merge (their cross Jacobian blocks
-            # are zero).
+            # are zero). States that cannot share a group (shape or layer
+            # filter) are rejected here, as before #201: the group pass
+            # would drop the term between them (see ``_simplify_hid2hid_tracer``).
+            self._check_direct_hidden_reads(eqn, hidden_invars)
             hidden_outvars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar in self.hidden_outvars)
             needed_invars = dict.fromkeys(outvar for outvar in eqn.outvars if outvar not in self.hidden_outvars)
             for hidden_var in dict.fromkeys(hidden_invars):
@@ -1555,6 +1575,38 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             # if not matched, skip
             if len(matched):
                 self._add_eqn_in_a_tracer(eqn, tracer)
+
+    def _check_direct_hidden_reads(self, eqn: JaxprEqn, hidden_invars: List[Var]) -> None:
+        """Raise if ``eqn`` reads two hidden states that cannot share a group.
+
+        Their hidden-to-hidden Jacobian term would be dropped, and the online
+        gradient would silently deviate from BPTT. A coupling through a
+        derived value is only reported (``HIDDEN_COUPLING_DROPPED``).
+        """
+        paths = list(dict.fromkeys(self.invar_to_hidden_path[v] for v in hidden_invars))
+        for i, path1 in enumerate(paths):
+            for path2 in paths[i + 1:]:
+                if _group_split_reason(path1, path2, self.path_to_state) is None:
+                    continue
+                shape1 = self.path_to_state[path1].varshape
+                shape2 = self.path_to_state[path2].varshape
+                if shape1 != shape2:
+                    why = 'their varshapes differ'
+                    fix = ('give them the same varshape (broadcast the smaller '
+                           'state to the shape of the larger one), for example '
+                           'as components of one brainstate.HiddenGroupState')
+                else:
+                    why = 'they belong to different recurrence layers'
+                    fix = ('hold them in one recurrence layer, for example as '
+                           'components of one brainstate.HiddenGroupState')
+                raise ValueError(
+                    f'Equation {eqn.primitive.name!r} reads hidden states '
+                    f'{path1} (varshape {shape1}) and {path2} (varshape '
+                    f'{shape2}) directly, but they cannot share one hidden '
+                    f'group: {why}. The hidden-to-hidden Jacobian term '
+                    f'between them would be dropped, so the online gradient '
+                    f'would be wrong. To keep the coupling, {fix}.\n{eqn}'
+                )
 
     def _add_eqn_in_a_tracer(
         self,

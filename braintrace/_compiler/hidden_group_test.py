@@ -14,6 +14,7 @@
 # ==============================================================================
 
 
+import functools
 import unittest
 import warnings
 from pprint import pprint
@@ -2409,20 +2410,23 @@ class TestMultiHiddenEquation:
 
 class _SharedScalarCell(brainstate.nn.Module):
     """``V`` (4,) and a shared ``g`` (1,) coupled through ``V - g``: the two
-    states cannot form one group (different varshape)."""
+    states cannot form one group (different varshape). With ``n_g=n``, ``g``
+    is per neuron and follows ``V`` element-wise; the states then form one
+    group."""
 
-    def __init__(self, k=None, derived=False, n_in=3, n=4):
+    def __init__(self, k=None, derived=False, n_in=3, n=4, n_g=1):
         super().__init__()
         self.k, self.derived = k, derived
         with brainstate.random.seed_context(0):
             self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
         self.V = brainstate.HiddenState(jnp.zeros(n))
-        self.g = brainstate.HiddenState(jnp.zeros(1))
+        self.g = brainstate.HiddenState(jnp.zeros(n_g))
 
     @staticmethod
     def _sub(V, g, drive, h):
         V = V + h * (-(V - g) + jnp.tanh(2 * (V - g)) + drive)
-        return V, g + h * (-g + jnp.mean(V, keepdims=True))
+        target = jnp.mean(V, keepdims=True) if g.shape != V.shape else V
+        return V, g + h * (-g + target)
 
     def update(self, x):
         drive = braintrace.matmul(x, self.W.value)
@@ -2440,14 +2444,58 @@ class _SharedScalarCell(brainstate.nn.Module):
         return jax.nn.sigmoid(self.V.value)
 
 
-class TestHiddenCouplingDropped:
-    """A coupling the shape or layer filter drops is reported, not silent
-    (review of #203, S2)."""
+class _LayerV(brainstate.nn.Module):
+    def __init__(self, n=4):
+        super().__init__()
+        self.V = brainstate.HiddenState(jnp.zeros(n))
 
-    @pytest.mark.parametrize('kwargs', [dict(), dict(derived=True), dict(k=17)],
-                             ids=['direct', 'derived', 'scan17'])
-    def test_dropped_coupling_warns(self, kwargs):
+
+class _TwoLayerDirectRead(brainstate.nn.Module):
+    """``layers.0.V - layers.1.V`` in one equation: same varshape, different
+    recurrence layers."""
+
+    def __init__(self, n_in=3, n=4):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+        self.layers = [_LayerV(n), _LayerV(n)]
+
+    def update(self, x):
+        V0, V1 = self.layers[0].V.value, self.layers[1].V.value
+        d = V0 - V1
+        self.layers[0].V.value = V0 + 0.2 * (jnp.tanh(V0) + braintrace.matmul(x, self.W.value))
+        self.layers[1].V.value = V1 + 0.2 * d
+        return jax.nn.sigmoid(self.layers[1].V.value)
+
+
+class TestHiddenCouplingDropped:
+    """Two hidden states that cannot share a group (review of #203, S2): a
+    direct read of both in one equation raises, as before #201; a coupling
+    through a derived value is reported, where it used to be silent."""
+
+    @pytest.mark.parametrize('kwargs', [dict(), dict(k=17)], ids=['direct', 'scan17'])
+    def test_direct_read_raises(self, kwargs):
         cell = _SharedScalarCell(**kwargs)
+        brainstate.nn.init_all_states(cell)
+        with pytest.raises(ValueError, match='cannot share one hidden group') as info:
+            braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        msg = str(info.value)
+        for part in ("('V',) (varshape (4,))", "('g',) (varshape (1,))",
+                     'online gradient would be wrong', 'same varshape',
+                     'HiddenGroupState'):
+            assert part in msg
+
+    def test_direct_read_across_layers_raises(self):
+        cell = _TwoLayerDirectRead()
+        brainstate.nn.init_all_states(cell)
+        with pytest.raises(ValueError, match='different recurrence layers') as info:
+            braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        msg = str(info.value)
+        assert "('layers', 0, 'V')" in msg and "('layers', 1, 'V')" in msg
+        assert 'one recurrence layer' in msg
+
+    def test_derived_read_warns(self):
+        cell = _SharedScalarCell(derived=True)
         brainstate.nn.init_all_states(cell)
         with pytest.warns(UserWarning, match='cannot share its hidden group'):
             graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
@@ -2467,15 +2515,39 @@ class TestHiddenCouplingDropped:
             bptt_param_gradients,
             online_param_gradients_singlestep_naive,
         )
+        make = functools.partial(_SharedScalarCell, derived=True)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             with brainstate.environ.context(precision=64):
                 with brainstate.random.seed_context(1):
                     xs = brainstate.random.rand(6, 3)
-                g = online_param_gradients_singlestep_naive(
-                    _SharedScalarCell, xs, algo_factory=braintrace.D_RTRL)
-                g_bptt = bptt_param_gradients(_SharedScalarCell, xs)
+                g = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+                g_bptt = bptt_param_gradients(make, xs)
                 assert_gradients_differ(g, g_bptt, min_rel=1e-3)
+
+    def test_same_shape_multi_state_scan_compiles_and_matches_bptt(self):
+        # The #201 case: a same-shape multi-state substep scan beyond the
+        # unroll limit forms one group and stays exact.
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        make = functools.partial(_SharedScalarCell, k=17, n_g=4)
+        cell = make()
+        brainstate.nn.init_all_states(cell)
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UserWarning)
+            graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        assert [gr.hidden_paths for gr in graph.hidden_groups] == [[('V',), ('g',)]]
+        assert not [r for r in graph.diagnostics
+                    if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]
+        with brainstate.environ.context(precision=64):
+            with brainstate.random.seed_context(1):
+                xs = brainstate.random.rand(6, 3)
+            g = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+            g_bptt = bptt_param_gradients(make, xs)
+            assert_param_gradients_close(g, g_bptt, atol=0, rtol=1e-10)
 
     def test_same_shape_coupling_is_not_reported(self):
         cell = _DiffCell()

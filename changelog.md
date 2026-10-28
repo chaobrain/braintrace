@@ -39,20 +39,21 @@
   transition contains the loop, and its Jacobians are taken through the
   rolled loop (reverse mode, or forward mode if it contains a `while`). The
   same rule makes `V - w`, an equation reading two hidden states directly,
-  compile. The connection is per equation, so independent carries of one
+  compile. Two states that cannot share a group (a different varshape or
+  recurrence layer) still raise when one equation reads both, now with a
+  message that names them and the fix, since the gradient would otherwise be
+  wrong. The connection is per equation, so independent carries of one
   loop merge into one group; their cross Jacobian blocks are zero, and the
   gradients are unchanged. Per-carry reachability inside the loop would keep
   them apart; it is a possible follow-up.
 - **A hidden-state coupling that the grouping drops is reported (#201).**
-  When a hidden state feeds the update of another one that cannot share its
-  group (a different shape, such as `V` of shape `(n,)` and a shared `g` of
-  shape `(1,)` coupled by `V - g`, or a different recurrence layer), the
-  hidden-to-hidden Jacobian term between them is dropped and online
-  gradients deviate from BPTT. On the test model, D-RTRL is 2.9 % off with
-  the coupling in the step, and 56 % off with it inside a 17-substep scan.
-  This used to happen silently when the coupling went through a derived
-  value; a direct one raised the error above. Both now compile with a
-  `HIDDEN_COUPLING_DROPPED` warning.
+  When a hidden state's update reads a value derived from another hidden
+  state that cannot share its group, the hidden-to-hidden Jacobian term
+  between them is dropped and online gradients deviate from BPTT. Examples
+  are a different shape (a shared `g` of shape `(1,)` whose update reads
+  `mean(V)` of a `V` of shape `(n,)`) or a different recurrence layer. On the
+  test model, D-RTRL is 2.9 % off. This used to happen silently; it now
+  compiles with a `HIDDEN_COUPLING_DROPPED` warning.
 
 ### Features
 
