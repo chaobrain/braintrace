@@ -71,7 +71,7 @@ from braintrace._op import is_etp_primitive
 from braintrace._typing import Path
 from .canonicalize import ControlFlowPolicy
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
-from .jaxpr_graph import _sub_closed_jaxprs
+from .jaxpr_graph import _body_has_etp, _is_etp_relevant, _sub_closed_jaxprs  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
     from .hid_param_op import HiddenParamOpRelation
@@ -143,47 +143,6 @@ class RelationDescent(NamedTuple):
     """
 
     scan: ScanDescentInfo
-
-
-def _body_has_etp(jaxpr: Jaxpr) -> bool:
-    """``True`` when an ETP primitive appears in ``jaxpr`` or any nested
-    control-flow body inside it."""
-    for eqn in jaxpr.eqns:
-        if is_etp_primitive(eqn.primitive):
-            return True
-        for sub in _sub_closed_jaxprs(eqn):
-            if _body_has_etp(sub.jaxpr):
-                return True
-    return False
-
-
-def _is_etp_relevant(body_jaxpr: Jaxpr, eqn: JaxprEqn, weight_invars: Set[Var]) -> bool:
-    """Whether a scan matters to descent at all.
-
-    The parameter half of the unroller's relevance rule
-    (:mod:`.canonicalize`): a scan is ETP-relevant iff it consumes a
-    trainable weight invar or its body holds an ETP primitive. A scan that
-    only reads or writes hidden states holds no relation; the unroller keeps
-    it rolled beyond ``hidden_scan_unroll_limit`` and the hidden-group pass
-    embeds it whole as an opaque transition node.
-
-    Parameters
-    ----------
-    body_jaxpr : Jaxpr
-        The scan's body jaxpr (``eqn.params['jaxpr'].jaxpr``).
-    eqn : JaxprEqn
-        The scan equation.
-    weight_invars : set of Var
-        Top-level weight invars of the enclosing module jaxpr.
-
-    Returns
-    -------
-    bool
-        ``True`` when descent (or unrolling) should consider this scan.
-    """
-    if any(isinstance(v, Var) and v in weight_invars for v in eqn.invars):
-        return True
-    return _body_has_etp(body_jaxpr)
 
 
 def _descent_blockers(

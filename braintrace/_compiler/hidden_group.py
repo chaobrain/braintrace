@@ -76,6 +76,7 @@ from braintrace._typing import (
 )
 from .base import JaxprEvaluation, find_matched_vars
 from .canonicalize import ControlFlowPolicy, DEFAULT_CONTROL_FLOW_POLICY
+from .jaxpr_graph import _RECURRENT_WEIGHT_MIXING_PRIMITIVES
 from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
 from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS, build_snap_pattern
@@ -93,25 +94,6 @@ __all__ = [
 if TYPE_CHECKING:
     from .scan_descent import GroupDescent  # noqa: F401
     from .position_graph import SnapPattern  # noqa: F401
-
-# Recurrent-weight mixing primitives -- dense / convolutional weights -- whose
-# consumption of a hidden state is a genuine *cross-position* coupling, i.e. that
-# can make ``h_i^t`` depend on ``h_j^{t-1}`` for ``i != j`` through a learned or
-# fixed recurrent weight. The default ("without recurrence") grouping mode
-# excludes these (when they read the hidden state) from the hidden-to-hidden
-# transition so it stays position-diagonal.
-#
-# This set is deliberately narrow: it does NOT list within-position
-# reductions/gathers (e.g. the ``gather`` that splits a stacked
-# ``HiddenGroupState`` such as an ALIF ``('neu', 'st')`` into its ``V``/``a``
-# components over the ``num_state`` axis). Those operate *within* a position and
-# must stay in the transition -- excluding them would drop a real, diagonal
-# ``D^t`` term and corrupt the grouped-state transition. The ETP mixing
-# primitives (``etp_mv``/``etp_mm``/``etp_conv``) are handled separately by the
-# ETP-boundary skip in ``_eval_eqn``.
-_RECURRENT_WEIGHT_MIXING_PRIMITIVES = frozenset({
-    'dot_general', 'conv_general_dilated',
-})
 
 
 class HiddenGroup(NamedTuple):
@@ -1233,11 +1215,33 @@ def _simplify_hid2hid_tracer(
     invar_state = path_to_state[invar_path]
     # Ordered dict-as-set: preserves the tracer's encounter order so the
     # resulting transition outvars/constvars are deterministic.
-    compatible_outvars = dict.fromkeys(
-        hv for hv in tracer.connected_hidden_outvars
-        if (path_to_state[hidden_outvar_to_path[hv]].varshape == invar_state.varshape
-            and _same_recurrence_layer(invar_path, hidden_outvar_to_path[hv]))
-    )
+    compatible_outvars: Dict[HiddenOutVar, None] = {}
+    dropped: Dict[Path, str] = {}
+    for hv in tracer.connected_hidden_outvars:
+        out_path = hidden_outvar_to_path[hv]
+        out_shape = path_to_state[out_path].varshape
+        if out_shape != invar_state.varshape:
+            dropped[out_path] = f'varshape {out_shape} != {invar_state.varshape}'
+        elif not _same_recurrence_layer(invar_path, out_path):
+            dropped[out_path] = 'a different recurrence layer'
+        else:
+            compatible_outvars[hv] = None
+    if dropped:
+        # The new value of every dropped state depends on this hidden state,
+        # but the two cannot share a group, so the transition keeps no term
+        # for that dependence: online gradients through it deviate from BPTT.
+        emit(
+            kind=DiagnosticKind.HIDDEN_COUPLING_DROPPED,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'Hidden state {invar_path} feeds the update of '
+                + ', '.join(f'{p} ({why})' for p, why in dropped.items())
+                + ', which cannot share its hidden group. The hidden-to-hidden '
+                  'Jacobian term between them is dropped, so online '
+                  'gradients through this coupling deviate from BPTT.'
+            ),
+            context={'hidden_path': invar_path, 'dropped': dict(dropped)},
+        )
     if not compatible_outvars:
         return None
 

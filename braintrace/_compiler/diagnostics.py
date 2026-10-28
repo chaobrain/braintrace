@@ -103,6 +103,12 @@ class DiagnosticKind(str, Enum):
     SCAN_UNROLLED = 'scan_unrolled'
     SCAN_UNROLL_SKIPPED = 'scan_unroll_skipped'
     RELATION_EXCLUDED_SLICED_WEIGHT = 'relation_excluded_sliced_weight'
+    # ``SCAN_ROLLED_OUTPUT_READ``: a hidden-only scan kept rolled (see
+    # ``ControlFlowPolicy.hidden_scan_unroll_limit``) has outputs that are not
+    # hidden states (stacked ys, non-hidden carries) and are read downstream;
+    # trace-factorized algorithms can then differ from the unrolled scan
+    # (INFO).
+    SCAN_ROLLED_OUTPUT_READ = 'scan_rolled_output_read'
 
     # Structured scan descent (Phase 4; see _compiler/scan_descent.py)
     #
@@ -167,6 +173,11 @@ class DiagnosticKind(str, Enum):
 
     TRANSITION_TAIL_BOUNDED = 'transition_tail_bounded'
     HIDDEN_GROUP_MERGED = 'hidden_group_merged'
+    # ``HIDDEN_COUPLING_DROPPED``: a hidden state's update reads another
+    # hidden state that cannot join its group (different shape or recurrence
+    # layer), so that cross-group term of the hidden-to-hidden Jacobian is
+    # dropped and online gradients deviate from BPTT (WARNING).
+    HIDDEN_COUPLING_DROPPED = 'hidden_coupling_dropped'
     STATE_MISMATCH = 'state_mismatch'
     WEIGHT_IN_CONTROL_FLOW = 'weight_in_control_flow'
 

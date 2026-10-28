@@ -2405,3 +2405,81 @@ class TestMultiHiddenEquation:
             g_ref = bptt_param_gradients(ref_cls, xs)
             assert float(jnp.abs(g_ref[('W',)]).max()) > 1e-3
             assert_param_gradients_close(g, g_ref, atol=0, rtol=1e-10)
+
+
+class _SharedScalarCell(brainstate.nn.Module):
+    """``V`` (4,) and a shared ``g`` (1,) coupled through ``V - g``: the two
+    states cannot form one group (different varshape)."""
+
+    def __init__(self, k=None, derived=False, n_in=3, n=4):
+        super().__init__()
+        self.k, self.derived = k, derived
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        self.g = brainstate.HiddenState(jnp.zeros(1))
+
+    @staticmethod
+    def _sub(V, g, drive, h):
+        V = V + h * (-(V - g) + jnp.tanh(2 * (V - g)) + drive)
+        return V, g + h * (-g + jnp.mean(V, keepdims=True))
+
+    def update(self, x):
+        drive = braintrace.matmul(x, self.W.value)
+        V, g = self.V.value, self.g.value
+        if self.derived:
+            V = V * 1.0  # V reaches `V - g` as a derived value (pre-#201 path)
+        if self.k is None:
+            V, g = self._sub(V, g, drive, 0.3)
+        else:
+            def sub(c, _):
+                return self._sub(*c, drive, 1.0 / self.k), None
+
+            (V, g), _ = jax.lax.scan(sub, (V, g), None, length=self.k)
+        self.V.value, self.g.value = V, g
+        return jax.nn.sigmoid(self.V.value)
+
+
+class TestHiddenCouplingDropped:
+    """A coupling the shape or layer filter drops is reported, not silent
+    (review of #203, S2)."""
+
+    @pytest.mark.parametrize('kwargs', [dict(), dict(derived=True), dict(k=17)],
+                             ids=['direct', 'derived', 'scan17'])
+    def test_dropped_coupling_warns(self, kwargs):
+        cell = _SharedScalarCell(**kwargs)
+        brainstate.nn.init_all_states(cell)
+        with pytest.warns(UserWarning, match='cannot share its hidden group'):
+            graph = braintrace.compile_etrace_graph(cell, jnp.zeros(3))
+        recs = [r for r in graph.diagnostics if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]
+        assert {r.context['hidden_path'] for r in recs} == {('V',), ('g',)}
+        assert all(r.level is DiagnosticLevel.WARNING for r in recs)
+        by_path = {r.context['hidden_path']: r.context['dropped'] for r in recs}
+        assert list(by_path[('V',)]) == [('g',)]
+        assert 'varshape' in by_path[('V',)][('g',)]
+        assert sorted(gr.hidden_paths for gr in graph.hidden_groups) == [[('V',)], [('g',)]]
+
+    def test_the_dropped_term_moves_d_rtrl_off_bptt(self):
+        # The warning is not noise: without the cross-group term the exact
+        # algorithm no longer matches BPTT on this model.
+        from braintrace._testing.oracle import (
+            assert_gradients_differ,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                with brainstate.random.seed_context(1):
+                    xs = brainstate.random.rand(6, 3)
+                g = online_param_gradients_singlestep_naive(
+                    _SharedScalarCell, xs, algo_factory=braintrace.D_RTRL)
+                g_bptt = bptt_param_gradients(_SharedScalarCell, xs)
+                assert_gradients_differ(g, g_bptt, min_rel=1e-3)
+
+    def test_same_shape_coupling_is_not_reported(self):
+        cell = _DiffCell()
+        brainstate.nn.init_all_states(cell)
+        graph = braintrace.compile_etrace_graph(cell, jnp.ones(3))
+        assert not [r for r in graph.diagnostics
+                    if r.kind is DiagnosticKind.HIDDEN_COUPLING_DROPPED]
