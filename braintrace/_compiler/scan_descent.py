@@ -496,7 +496,7 @@ def apply_scan_descent(minfo: 'ModuleInfo') -> Tuple['ModuleInfo', List[ScanDesc
     for eqn in minfo.jaxpr.eqns:
         if not (
             is_scan_primitive(eqn)
-            and _is_etp_relevant(eqn.params['jaxpr'].jaxpr, eqn, weight_invars)
+            and _is_etp_relevant(eqn)
         ):
             new_eqns.append(eqn)
             continue

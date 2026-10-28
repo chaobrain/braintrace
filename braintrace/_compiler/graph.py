@@ -22,7 +22,7 @@ import brainstate
 import jax
 import numpy as np
 
-from braintrace._compatible_imports import jaxpr_all_invars
+from braintrace._compatible_imports import is_scan_primitive, jaxpr_all_invars, Var
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     ETraceVals,
@@ -36,7 +36,9 @@ from .canonicalize import ControlFlowPolicy
 from .diagnostics import (
     CompilationRecord,
     DiagnosticKind,
+    DiagnosticLevel,
     diagnostic_context,
+    emit,
 )
 from .hid_param_op import (
     find_hidden_param_op_relations_from_minfo,
@@ -273,6 +275,55 @@ class CONTEXT(threading.local):
 context = CONTEXT()
 
 
+def _report_plain_weight_scans(minfo: ModuleInfo, descended_eqn_ids: frozenset) -> None:
+    """Warn about weights read only through plain ops inside an opaque scan.
+
+    A scan left opaque whose body holds no ETP primitive may consume weight
+    states (``base.check_unsupported_op``, issue #209); they are plain uses,
+    as at top level. When the scan's outputs reach a hidden state, those
+    weights get no online credit through it, which was a hard error before
+    #209, so the change is reported (``SCAN_PLAIN_WEIGHT``).
+    """
+    invar_to_weight_path = {
+        v: path for path, vs in minfo.weight_path_to_invars.items() for v in vs
+    }
+    outvar_to_hidden_path = {v: p for p, v in minfo.hidden_path_to_outvar.items()}
+    eqns = minfo.jaxpr.eqns
+    for i, eqn in enumerate(eqns):
+        if not is_scan_primitive(eqn) or id(eqn) in descended_eqn_ids:
+            continue
+        weight_paths = list(dict.fromkeys(
+            invar_to_weight_path[v] for v in eqn.invars
+            if isinstance(v, Var) and v in invar_to_weight_path
+        ))
+        if not weight_paths:
+            continue
+        # forward reachability from the scan's outputs to hidden outvars
+        reached = set(eqn.outvars)
+        for later in eqns[i + 1:]:
+            if any(isinstance(v, Var) and v in reached for v in later.invars):
+                reached.update(later.outvars)
+        hidden_paths = [p for v, p in outvar_to_hidden_path.items() if v in reached]
+        if not hidden_paths:
+            continue
+        emit(
+            kind=DiagnosticKind.SCAN_PLAIN_WEIGHT,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'Weight state(s) {weight_paths} are read only through plain '
+                f'ops inside a scan whose body holds no ETP primitive, and '
+                f'the scan updates hidden state(s) {hidden_paths}. Like any '
+                f'plain parameter, they get no online credit through those '
+                f'hidden states. To train them online, apply an ETP op such '
+                f'as braintrace.element_wise to them outside the scan and let '
+                f'the scan read its result; an ETP op applied to them after '
+                f'the scan credits only that later use.'
+            ),
+            context={'weight_paths': tuple(weight_paths),
+                     'hidden_paths': tuple(hidden_paths)},
+        )
+
+
 @contextmanager
 def compiler_context(name: str) -> Iterator[None]:
     """
@@ -431,7 +482,10 @@ def compile_etrace_graph(
         - unrolls every ETP-relevant ``scan`` of static length at most
           ``scan_unroll_limit`` (default 16);
         - applies **structured scan descent** (``scan_descent='auto'``) to
-          ETP-relevant scans *above* the unroll limit: relations and hidden
+          scans *above* the unroll limit whose body holds an ETP primitive
+          (a scan without one holds no relation and stays one opaque node;
+          a weight it reads is a plain use, reported as
+          ``SCAN_PLAIN_WEIGHT``): relations and hidden
           groups are discovered inside the scan body, the equation is
           rewritten to emit stacked per-substep values as extra ys, and the
           eligibility trace is folded over the substep axis at runtime —
@@ -509,6 +563,7 @@ def compile_etrace_graph(
         descended_paths = frozenset(
             p for b in descent_bundles for g in b.groups for p in g.hidden_paths
         )
+        _report_plain_weight_scans(minfo, descended_eqn_ids)
 
         # ---       evaluating the relationship for hidden-to-hidden        --- #
         hidden_groups, hid_path_to_group = find_hidden_groups_from_minfo(

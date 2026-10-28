@@ -109,6 +109,11 @@ class DiagnosticKind(str, Enum):
     # trace-factorized algorithms can then differ from the unrolled scan
     # (INFO).
     SCAN_ROLLED_OUTPUT_READ = 'scan_rolled_output_read'
+    # ``SCAN_PLAIN_WEIGHT``: a scan kept opaque reads weight states through
+    # plain ops only (its body holds no ETP primitive) and updates hidden
+    # states; like any plain parameter, the weights get no online credit
+    # through those hidden states (WARNING, issue #209).
+    SCAN_PLAIN_WEIGHT = 'scan_plain_weight'
 
     # Structured scan descent (Phase 4; see _compiler/scan_descent.py)
     #
@@ -132,9 +137,10 @@ class DiagnosticKind(str, Enum):
     # equation — always an ERROR (a data-dependent trip count admits no fixed
     # per-iteration hoisting, so the weight cannot participate in online
     # learning).
-    # ``CONTROL_FLOW_OPAQUE_FWD``: a weight-free opaque ``scan``/``while``/
-    # ``cond`` produces a hidden state and is kept as an opaque forward node
-    # (INFO; see ``ControlFlowPolicy.while_hidden``).
+    # ``CONTROL_FLOW_OPAQUE_FWD``: an opaque weight-free ``while``/``cond``,
+    # or a ``scan`` without an ETP primitive, produces a hidden state and is
+    # kept as an opaque forward node (INFO; see
+    # ``ControlFlowPolicy.while_hidden``).
     # ``CONTROL_FLOW_RECURRENT_MIXING``: an opaque control-flow body applies a
     # recurrent weight-mixing primitive to the carried hidden state, so the
     # equation is excluded from the hidden-to-hidden transition in the default

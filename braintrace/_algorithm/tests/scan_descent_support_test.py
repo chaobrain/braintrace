@@ -140,25 +140,29 @@ class TestSubstepFold:
             algo.compile_graph(jnp.ones((4,), dtype='float32'))
 
     def test_orphan_descended_group_still_gated(self):
-        """A body whose only weight is used through plain ops descends with
-        a hidden group but ZERO relations; the group's Jacobians still carry
-        the substep axis, so non-supporting algorithms must be gated on
-        groups too, not just relations."""
+        """A body whose ETP primitive feeds only the stacked ys (its hidden
+        state follows a plain matmul) descends with a hidden group but ZERO
+        relations; the group's Jacobians still carry the substep axis, so
+        non-supporting algorithms must be gated on groups too, not just
+        relations. (A body with plain-op weights only holds no ETP primitive
+        and is not descended at all, issue #209.)"""
 
         class Net(brainstate.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.p = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
                 self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
 
             def update(self, x):
                 x_row = x.reshape(1, -1)
 
                 def substep(_):
-                    # plain matmul: no ETP relation is produced
+                    # plain matmul into the hidden state, and an ETP op that
+                    # feeds only the ys: no ETP relation is produced
                     self.h.value = 0.9 * self.h.value + jnp.tanh(
-                        x_row @ self.w.value)
-                    return self.h.value
+                        x_row @ self.p.value)
+                    return self.h.value + braintrace.matmul(x_row, self.w.value)
 
                 return brainstate.transform.for_loop(
                     substep, jnp.arange(40))[-1]
@@ -173,24 +177,27 @@ class TestSubstepFold:
                 algo.compile_graph(jnp.ones((4,), dtype='float32'))
 
     def test_orphan_descended_group_runs_under_d_rtrl(self):
-        """Same plain-op-weight body under a supporting algorithm: compiles
+        """Same relation-free body under a supporting algorithm: compiles
         (with the exclusion warning), holds no traces for the excluded
-        weight, and a forward update executes despite the substep axis on
+        weights, and a forward update executes despite the substep axis on
         the orphan group's Jacobians."""
 
         class Net(brainstate.nn.Module):
             def __init__(self):
                 super().__init__()
                 self.w = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.p = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
                 self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
 
             def update(self, x):
                 x_row = x.reshape(1, -1)
 
                 def substep(_):
+                    # plain matmul into the hidden state, and an ETP op that
+                    # feeds only the ys: no ETP relation is produced
                     self.h.value = 0.9 * self.h.value + jnp.tanh(
-                        x_row @ self.w.value)
-                    return self.h.value
+                        x_row @ self.p.value)
+                    return self.h.value + braintrace.matmul(x_row, self.w.value)
 
                 return brainstate.transform.for_loop(
                     substep, jnp.arange(40))[-1]

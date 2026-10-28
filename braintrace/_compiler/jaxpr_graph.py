@@ -29,7 +29,7 @@ memory-address hashes for jaxpr ``Var`` objects).
 """
 
 from collections import deque
-from typing import Any, Container, Dict, Iterator, List, Optional, Sequence, TypeAlias, Union
+from typing import Any, Dict, Iterator, List, Optional, Sequence, TypeAlias, Union
 
 from braintrace._compatible_imports import (
     ClosedJaxpr,
@@ -185,33 +185,33 @@ def _body_has_etp(jaxpr: Jaxpr) -> bool:
     return False
 
 
-def _is_etp_relevant(body_jaxpr: Jaxpr, eqn: JaxprEqn, weight_invars: Container[Var]) -> bool:
+def _is_etp_relevant(eqn: JaxprEqn) -> bool:
     """Whether a ``scan`` can hold an ETP relation.
 
-    A scan is ETP-relevant iff it consumes a trainable weight invar or its
-    body holds an ETP primitive. Scan descent (:mod:`.scan_descent`) only
-    considers such scans. The unroller (:mod:`.canonicalize`) may keep any
-    other scan rolled, since one that only reads or writes hidden states
-    holds no relation, and the hidden-group pass embeds it whole as an opaque
-    transition node.
+    A scan is ETP-relevant iff its body (recursively) holds an ETP primitive.
+    A weight that any other scan consumes is read through plain ops only,
+    exactly like a plain use at top level, so the scan holds no relation
+    (issue #209). Scan descent (:mod:`.scan_descent`) only considers
+    ETP-relevant scans. The unroller (:mod:`.canonicalize`) may keep any
+    other scan rolled, and the hidden-group pass embeds it whole as an opaque
+    transition node, its weights being constants of that node
+    (``base.check_unsupported_op``).
 
     Parameters
     ----------
-    body_jaxpr : Jaxpr
-        The scan's body jaxpr (``eqn.params['jaxpr'].jaxpr``).
     eqn : JaxprEqn
         The scan equation.
-    weight_invars : container of Var
-        Top-level weight invars of the enclosing module jaxpr.
 
     Returns
     -------
     bool
-        ``True`` when descent (or unrolling) must consider this scan.
+        ``True`` when descent (or unrolling) must consider this scan; also
+        when the equation carries no body to inspect.
     """
-    if any(isinstance(v, Var) and v in weight_invars for v in eqn.invars):
+    body = eqn.params.get('jaxpr')
+    if body is None:
         return True
-    return _body_has_etp(body_jaxpr)
+    return _body_has_etp(body.jaxpr)
 
 
 def _contains_jit(jaxpr: Jaxpr) -> bool:

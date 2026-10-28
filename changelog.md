@@ -54,13 +54,32 @@
   `mean(V)` of a `V` of shape `(n,)`) or a different recurrence layer. On the
   test model, D-RTRL is 2.9 % off. This used to happen silently; it now
   compiles with a `HIDDEN_COUPLING_DROPPED` warning.
+- **A plain parameter read inside a substep loop compiles at any number of
+  substeps (#209).** A trainable `ParamState` that is not an ETP weight, such
+  as a time constant `tau` read by plain ops inside a weight-free substep
+  `lax.scan`, compiled for `k <= 16` substeps and raised for `k >= 17`.
+  Structured descent tried the scan because it consumed a weight, and
+  rejected the ETP relation outside it; with `scan_descent='off'` the opaque
+  scan rejected the weight. A scan is now ETP-relevant only if its body
+  holds an ETP primitive. A weight that any other scan reads is a plain use,
+  as at top level, and the scan follows the hidden-only rule (unrolled up to
+  its limit, rolled beyond it). Gradients equal the unrolled ones: like any
+  plain parameter, `tau` gets no online credit through the hidden states.
+  Where such a scan stays opaque, a `SCAN_PLAIN_WEIGHT` warning names the
+  weights. To train them online, apply an ETP op such as
+  `braintrace.element_wise` outside the scan and let the scan read its
+  result; D-RTRL then matches BPTT for `tau` at any `k`. An ETP op applied
+  after the scan credits only that later use, and one inside the body still
+  needs structured descent, which rejects an ETP relation outside the scan
+  beyond 16 substeps (#211).
 
 ### Features
 
 - **`ControlFlowPolicy.hidden_scan_unroll_limit` (#201).** A *hidden-only*
-  scan reads or writes hidden states but consumes no weight, and its body
-  has no ETP primitive and no `dot_general`/`conv_general_dilated`. With the
-  default, `None`, it is unrolled up to `scan_unroll_limit`, as before. An
+  scan reads or writes hidden states, and its body has no ETP primitive (a
+  weight it reads is a plain use, #209) and no
+  `dot_general`/`conv_general_dilated`. With the default, `None`, it is
+  unrolled up to `scan_unroll_limit`, as before. An
   integer tightens its limit to `min(scan_unroll_limit,
   hidden_scan_unroll_limit)`. A hidden-only scan beyond its limit stays
   rolled, and its program size no longer depends on the number of

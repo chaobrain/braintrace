@@ -92,6 +92,23 @@ def _make_cond_eqn(invars, outvars) -> JaxprEqn:
     return _make_eqn(invars, outvars, prim_name='cond')
 
 
+def _real_scan_eqn(body_etp: bool):
+    """A real ``scan`` equation reading a weight ``w``, through an ETP
+    primitive (``body_etp``) or a plain matmul; returns ``(eqn, w)``."""
+    import braintrace
+
+    def f(w, h):
+        def body(c, _):
+            y = braintrace.matmul(c, w) if body_etp else c @ w
+            return jnp.tanh(y), None
+
+        return jax.lax.scan(body, h, None, length=3)[0]
+
+    closed = jax.make_jaxpr(f)(jnp.ones((3, 3)), jnp.ones(3))
+    eqn = next(e for e in closed.jaxpr.eqns if e.primitive.name == 'scan')
+    return eqn, closed.jaxpr.invars[0]
+
+
 def _make_evaluator(**overrides) -> JaxprEvaluation:
     """Create a JaxprEvaluation with empty defaults, overridable via kwargs."""
     defaults = dict(
@@ -349,6 +366,22 @@ class TestCheckUnsupportedOpPhase3(unittest.TestCase):
         self.assertNotIn(DiagnosticKind.WEIGHT_IN_CONTROL_FLOW, kinds)
         record = reporter.records()[0]
         self.assertIs(record.level, DiagnosticLevel.ERROR)
+
+    def test_weight_in_etp_free_scan_is_a_plain_use(self):
+        """A scan whose body holds no ETP primitive may consume a weight: it
+        is a plain use, a constant of the opaque node (issue #209). A body
+        with an ETP primitive still raises the generic kind."""
+        for body_etp in (False, True):
+            eqn, w = _real_scan_eqn(body_etp)
+            obj = _make_evaluator(weight_invars={w})
+            with diagnostic_context() as reporter:
+                if body_etp:
+                    with self.assertRaises(NotImplementedError):
+                        check_unsupported_op(obj, eqn, 'scan')
+                else:
+                    check_unsupported_op(obj, eqn, 'scan')
+            kinds = [r.kind for r in reporter.records()]
+            self.assertEqual(DiagnosticKind.WEIGHT_IN_CONTROL_FLOW in kinds, body_etp)
 
     def test_weight_in_scan_keeps_generic_kind(self):
         """Weight-in-scan/cond keeps the pre-existing generic diagnostic."""
@@ -842,7 +875,9 @@ class TestJaxprEvaluationIntegration(unittest.TestCase):
         self.assertGreaterEqual(len(evaluator.evaluated_eqns), 1)
 
     def test_eval_jaxpr_with_scan_and_weight_conflict(self):
-        """Verify that a real scan jaxpr raises when weight vars are involved."""
+        """A real scan whose body holds no ETP primitive evaluates with a
+        weight var among its invars: a plain use (issue #209). The ETP case
+        is ``test_weight_in_etp_free_scan_is_a_plain_use``."""
         from jax import make_jaxpr, lax
 
         def scan_fn(carry, x):
@@ -875,8 +910,7 @@ class TestJaxprEvaluationIntegration(unittest.TestCase):
             invar_to_hidden_path={weight_var: ('test_weight',)},
         )
 
-        with self.assertRaises(NotImplementedError):
-            evaluator._eval_jaxpr(jaxpr)
+        evaluator._eval_jaxpr(jaxpr)
 
 
 if __name__ == '__main__':
