@@ -1403,7 +1403,9 @@ def _compile_or_none(spec, dims, n, policy):
 class TestRolledLoopsKeepThePattern:
     """A rolled weight-free substep scan used to widen SnAp-n to all positions
     (#210): the position analysis did not look inside it. It now walks the
-    body with the same per-equation rule, so the pattern is the unrolled one."""
+    body with the same per-equation rule, so the pattern is the unrolled one,
+    or a superset of it where what is reached or live differs between
+    iterations (on the models here, the unrolled one)."""
 
     def test_issue_210_substep_neuron_keeps_k_1_when_rolled(self):
         # the #201 two-state neuron, 6 positions, element-wise substeps
@@ -1428,14 +1430,15 @@ class TestRolledLoopsKeepThePattern:
             assert g.snap.num_neighbour == min(n, _SUBSTEP_N)
 
     def test_rolled_k_equals_unrolled_k_on_every_model(self):
-        compared, with_loops = [], []
-        for name, (spec, dims) in _zoo().items():
+        zoo = _zoo()
+        compared, rolled_only, rolled_both = [], set(), set()
+        for name, (spec, dims) in zoo.items():
             for n in (2, 3):
                 rolled = _compile_or_none(spec, dims, n, _ROLLED)
                 unrolled = _compile_or_none(spec, dims, n, _UNROLLED)
-                if rolled is None or unrolled is None:
-                    assert rolled is None and unrolled is None, name
-                    continue
+                # every model compiles under both policies: none drops out of
+                # the comparison unnoticed
+                assert rolled is not None and unrolled is not None, (name, n)
                 k_rolled, k_unrolled = _k_by_path(rolled), _k_by_path(unrolled)
                 assert set(k_rolled) == set(k_unrolled), name
                 for p in k_rolled:
@@ -1444,11 +1447,14 @@ class TestRolledLoopsKeepThePattern:
                     assert k_rolled[p] == k_unrolled[p], (name, n, p, k_rolled[p], k_unrolled[p])
                 compared.append((name, n))
                 if _rolled_scans(rolled) > _rolled_scans(unrolled):
-                    with_loops.append((name, n))
-        assert len(compared) >= 40, compared
-        # the sweep is not vacuous: models where the rolled policy kept a loop
-        assert {name for name, _ in with_loops} >= {
-            'substep_k2_input', 'substep_k4_ring', 'substep_k17_ring'}, with_loops
+                    rolled_only.add(name)
+                elif _rolled_scans(rolled):
+                    rolled_both.add(name)
+        assert len(compared) == 2 * len(zoo) == 70, len(compared)
+        # the comparisons that hold a rolled loop: the substep neurons, rolled
+        # only under the rolled policy, and a 'while', rolled under both
+        assert rolled_only == {name for name in zoo if name.startswith('substep_')}, rolled_only
+        assert rolled_both == {'while_settle_rnn'}, rolled_both
 
     def test_snap_gradients_rolled_equal_unrolled_f64(self):
         with brainstate.environ.context(precision=64):

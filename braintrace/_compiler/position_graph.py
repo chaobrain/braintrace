@@ -60,14 +60,19 @@ which condition failed otherwise:
    is held to the same two rules wherever the hidden path runs through it
    (issue #210): a loop whose body passes this check composes a
    position-diagonal step any number of times, so it is position-diagonal as
-   a whole, exactly as the same loop unrolled. A mixing equation inside a loop
+   a whole, as the same loop unrolled. The rolled pattern is the unrolled
+   one, or a superset of it where what is reached or live differs between
+   iterations: the body is held to the rules for every iteration at once, so
+   an equation reached only in the last iteration (or live only in the
+   first) counts as on the hidden path in all of them. A mixing equation inside a loop
    that runs more than once applies once per iteration and transfers a power
    of its pattern (a single ``dot`` inside a length-``L`` scan transfers
    :math:`A^L`, not :math:`A`), so it is refused, as two mixing equations are
    in the unrolled loop. So are hidden-derived values scanned over as ``xs``
    or stacked as ``ys`` on the hidden path (their leading axis counts
    iterations, not positions), and a ``while`` whose trip count reads the
-   hidden state.
+   hidden state (the number of iterations the pattern is taken over is then
+   not fixed).
 3. That equation's primitive registered a ``snap_adjacency`` rule, and the rule
    accepted the equation (see :data:`~braintrace._op.ETP_RULES_SNAP_ADJACENCY`).
 4. Its ``x`` and ``y`` both have exactly the group's ``varshape``, so the
@@ -394,7 +399,8 @@ class _Walk:
     def __init__(self, varshape: Tuple[int, ...], loop: Optional[str] = None):
         self.varshape = varshape
         #: the loop whose body this walk covers, when that body runs more than
-        #: once: a mixing equation there is refused
+        #: once: a mixing equation there is refused, naming this loop even
+        #: when it sits in a body nested inside it that runs once
         self.loop = loop
         self.mixing: List[JaxprEqn] = []
         self.last: Optional[np.ndarray] = None
@@ -426,7 +432,8 @@ class _Walk:
                 outcome = self._while(eqn, hits, used)
             elif _is_mixing(eqn) and self.loop is not None:
                 return (
-                    f"the position-mixing equation '{eqn.primitive.name}' sits{where}"
+                    f"the position-mixing equation '{eqn.primitive.name}' sits inside a "
+                    f"'{self.loop}' body"
                     f"{'' if self.loop == 'while' else ' that runs more than once'}: it "
                     f"applies once per iteration, so the loop transfers a power of its "
                     f"pattern, not the pattern."
@@ -536,10 +543,10 @@ class _Walk:
         body = eqn.params['body_jaxpr'].jaxpr
         cond = eqn.params['cond_jaxpr'].jaxpr
         num_carry = len(eqn.outvars)
-        carry_start = cond_nconsts + body_nconsts
         trip = (
-            "the trip count of a 'while' reads the hidden state, so every position "
-            "may depend on every other through it."
+            "the trip count of a 'while' reads the hidden state, so the number of "
+            "iterations the pattern is taken over is not fixed: the analysis keeps "
+            "every position."
         )
         if any(j < cond_nconsts for j in hits):
             return trip
@@ -551,15 +558,15 @@ class _Walk:
                  and isinstance(body.outvars[c], Var)}
         feedback = [(body.outvars[c], body.invars[body_nconsts + c]) for c in range(num_carry)]
         live, needed = _live_eqns(body, _closed_roots(body, roots, feedback))
-        seeds = {body.invars[j - cond_nconsts] for j in hits}
+        seeds = {body.invars[j - cond_nconsts] for j in hits if j >= cond_nconsts}
         reached = self._body(live, needed, seeds, feedback, False, 'while')
         if isinstance(reached, str):
             return reached
         # a carry reached in any iteration, or at the start, reaches the cond
+        # (a hit carry init is a seed, so its body invar is reached)
         carry_reached = {c for c in range(num_carry)
                          if body.invars[body_nconsts + c] in reached
-                         or _in(body.outvars[c], reached)
-                         or carry_start + c in hits}
+                         or _in(body.outvars[c], reached)}
         if carry_reached & set(cond_carry):
             return trip
         # the loop may not run at all: a reached init is a reached output

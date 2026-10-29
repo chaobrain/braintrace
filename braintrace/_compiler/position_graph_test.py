@@ -283,6 +283,18 @@ class TestConservativeFallbacks:
                 braintrace.sparse_matmul(h, data, sparse_mat=csr)), 3), (6,), False, 'exact'),
             ('scan-mixing-inside', lambda h: _scan(lambda c: jnp.tanh(
                 braintrace.sparse_matmul(c, data, sparse_mat=csr)), h, 2), (6,), True, 'lossy'),
+            # the iteration closures: a reordering reached only in a later
+            # iteration, or live only through a carry read in a later one
+            ('reach-closure-scan', lambda h: _scan(
+                _reach_later, (h, jnp.zeros_like(h), jnp.zeros_like(h)), 3)[0], (6,), True, 'lossy'),
+            ('reach-closure-while', lambda h: _while(
+                _reach_later, (h, jnp.zeros_like(h), jnp.zeros_like(h)), 3)[0], (6,), True, 'lossy'),
+            ('live-closure-scan', lambda h: _scan(
+                _live_later, (h, jnp.zeros_like(h)), 2)[0], (6,), True, 'lossy'),
+            ('live-closure-while', lambda h: _while(
+                _live_later, (h, jnp.zeros_like(h)), 2)[0], (6,), True, 'lossy'),
+            ('live-closure-nested', lambda h: _scan(lambda c: _scan(
+                _live_later, (c, jnp.zeros_like(c)), 2)[0], h, 2), (6,), True, 'lossy'),
         ]
         for label, fn, varshape, conservative, tightness in cases:
             adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros(varshape)), varshape)
@@ -290,9 +302,10 @@ class TestConservativeFallbacks:
             assert adj.conservative == conservative, (
                 f'{label}: expected conservative={conservative}, got {adj.reason!r}')
             # differentiate at a generic point so no entry vanishes by accident
+            # (forward mode: a ``while`` has no reverse-mode rule)
             with brainstate.random.seed_context(3):
                 h0 = brainstate.random.randn(*varshape)
-            jac = jax.jacobian(lambda h: jnp.ravel(fn(h)))(h0)
+            jac = jax.jacfwd(lambda h: jnp.ravel(fn(h)))(h0)
             true_dep = np.abs(np.asarray(jac).reshape(got.shape)) > 1e-6
             assert np.any(true_dep), f'{label}: the reference Jacobian is empty'
             assert np.all(got >= true_dep), f'{label}: analysis lost a dependency'
@@ -320,6 +333,20 @@ def _mix(h):
 
 def _decay(c):
     return 0.9 * c + 0.1 * jnp.tanh(c)
+
+
+def _reach_later(s):
+    """``h`` reaches ``a`` in the first iteration, ``a`` is reordered into
+    ``b`` in the second and ``b`` reaches ``h`` in the third."""
+    c, a, b = s
+    return c * 0.9 + b, c, jnp.roll(a, 1)
+
+
+def _live_later(s):
+    """Only ``h`` is used after the loop; the reordering feeds it through
+    ``a`` one iteration later."""
+    c, a = s
+    return c * 0.9 + a, jnp.roll(c, 1)
 
 
 def _scan(body, carry, k):
@@ -379,7 +406,8 @@ _LOOP_CASES = {
 class TestLoopsOnTheHiddenPath:
     """A ``scan`` or ``while`` on the hidden path is followed into its body,
     which the same per-equation rule classifies, so a rolled loop gets the
-    pattern of the same loop unrolled (issue #210)."""
+    pattern of the same loop unrolled, or a superset of it where what is
+    reached or live differs between iterations (issue #210)."""
 
     @pytest.mark.parametrize('label', list(_LOOP_CASES))
     def test_a_rolled_loop_gets_the_unrolled_pattern(self, label):
@@ -442,6 +470,16 @@ class TestLoopsOnTheHiddenPath:
             lambda h: jax.lax.while_loop(lambda c: jnp.max(c) < 1.0, lambda c: c * 1.1 + 0.1, h),
             'trip count')
 
+    def test_a_while_trip_count_reading_a_carry_the_loop_does_not_return(self):
+        # the cond reads a hidden-derived carry that is not used after the
+        # loop: what the trip count reads is live in every iteration
+        self._assert_conservative(
+            lambda h: jax.lax.while_loop(
+                lambda s: jnp.logical_and(s[0] < 5, jnp.all(s[2] < 3.0)),
+                lambda s: (s[0] + 1, _decay(s[1]), s[2] + jnp.abs(s[1])),
+                (0, h, jnp.zeros_like(h)))[1],
+            'trip count')
+
     def test_a_while_trip_count_reading_a_hidden_constant(self):
         self._assert_conservative(
             lambda h: h + jax.lax.while_loop(lambda c: c < jnp.sum(h), lambda c: c + 1.0, 0.0),
@@ -459,6 +497,32 @@ class TestLoopsOnTheHiddenPath:
         adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros((6,))), (6,))
         assert not adj.conservative, adj.reason
         np.testing.assert_array_equal(adj.axes[0], _RING.T > 0)
+
+    def test_a_mixing_equation_reached_only_in_the_last_iteration_widens(self):
+        # unrolled, the mixing equation is reached only in the second copy of
+        # the body, so the loop holds one; rolled, the body is held to the
+        # rules for every iteration: a sound superset
+        def body(s):
+            c, a, b = s
+            return c * 0.9, c, _mix(a)
+
+        def out(loop):
+            return lambda h: (lambda s: s[0] + s[2])(loop(body, (h, jnp.zeros_like(h), jnp.zeros_like(h)), 2))
+
+        rolled = analyze_position_adjacency(_jaxpr(out(_scan), jnp.zeros((6,))), (6,))
+        unrolled = analyze_position_adjacency(_jaxpr(out(_times), jnp.zeros((6,))), (6,))
+        assert rolled.conservative and "runs more than once" in rolled.reason
+        assert not unrolled.conservative, unrolled.reason
+        assert np.all(flat_adjacency(rolled.axes) >= flat_adjacency(unrolled.axes))
+
+    @pytest.mark.parametrize('fn, loop', [
+        (lambda h: _scan(lambda c: _scan(_mix, c, 1), h, 3), "'scan' body that runs more than once"),
+        (lambda h: _while(lambda c: _scan(_mix, c, 1), h, 2), "'while' body:"),
+        (lambda h: _scan(lambda c: _scan(lambda d: _scan(_mix, d, 1), c, 1), h, 3),
+         "'scan' body that runs more than once"),
+    ], ids=['in-scan', 'in-while', 'two-deep'])
+    def test_a_mixing_equation_in_a_length_1_scan_names_the_loop_that_repeats(self, fn, loop):
+        self._assert_conservative(fn, f"'etp_sp_mv' sits inside a {loop}")
 
     def test_a_mixing_equation_inside_and_outside_a_length_1_scan(self):
         # the unrolled loop holds two mixing equations, so does the rolled one

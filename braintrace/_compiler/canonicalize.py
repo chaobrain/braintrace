@@ -187,7 +187,8 @@ class ControlFlowPolicy:
 
         - SnAp-n position analysis follows the hidden path into the scan
           body with the same rule as for top-level equations, so the pattern
-          is the unrolled one (issue #210); a body that couples positions
+          is the unrolled one, or a superset of it where what is reached or
+          live differs between iterations (issue #210); a body that couples positions
           (a mixing equation, ``xs``/``ys`` on the hidden path) widens it to
           all positions (``DiagnosticKind.SNAP_PATTERN_CONSERVATIVE``), as
           it does unrolled.

@@ -127,9 +127,10 @@ class SnAp(ParamDimVjpAlgorithm):
     mixing primitive it finds. Two primitive families yield a *precise* pattern:
     dense (``etp_mm`` / ``etp_mv``, all-to-all) and sparse (``etp_sp_mm`` /
     ``etp_sp_mv``, the structural pattern of ``sparse_mat``, transposed). For
-    **every other** primitive, more than one mixing equation, any control flow
-    around it, or a non-position-preserving tail, the analysis falls back to the
-    all-to-all pattern and emits a
+    **every other** primitive, more than one mixing equation, a mixing equation
+    inside a loop that runs more than once, a ``cond`` or call-like equation on
+    the hidden path, or a non-position-preserving tail, the analysis falls back
+    to the all-to-all pattern and emits a
     ``DiagnosticKind.SNAP_PATTERN_CONSERVATIVE`` diagnostic. A conservative
     pattern is always *correct* — it retains a superset of the true influence —
     but it costs saturated memory, so the diagnostic is worth reading.
