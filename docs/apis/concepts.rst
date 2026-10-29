@@ -82,6 +82,76 @@ Controlling Parameter Participation
        ``brainstate.ParamState`` is eligible; participation depends solely on
        whether an ETP primitive consumed it.
 
+Delay Lines and Other Non-Hidden State
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+An online algorithm credits a weight in two ways. The eligibility trace of each
+hidden group the weight feeds carries its influence across steps *within that
+group*. The learning signal then reads, in the same step, how the loss depends
+on the group's hidden values:
+
+- on the new values, under every algorithm;
+- on the old values along a path to the outputs that crosses no new hidden
+  value, under a single-step algorithm (the output bypass: a readout taken
+  before the state is updated is credited exactly);
+- on the old values along every path, under a multi-step VJP
+  (``vjp_method='multi-step'``) given one step per call.
+
+Nothing else crosses a step. A value kept in any other state, such as a delay
+line or ring buffer held in a ``brainstate.ShortTermState``, is a given input to
+the next step. For a single-step algorithm, a hidden state of *another* group
+that only a later step reads is too.
+
+So a weight whose influence reaches the loss only through the old value of such
+a state has an online gradient of exactly zero, while its BPTT gradient is not
+zero. Each VJP algorithm reports this as ``DiagnosticKind.ONLINE_GRADIENT_ZERO``:
+
+- at compile time, as an INFO record that assumes the loss reads only the model
+  outputs (the loss is not known yet);
+- at the first gradient computation, as a warning, if the zero holds for the
+  outputs and states the loss actually reads. A loss that reads a state after
+  the step (a firing-rate regulariser, say) gives that state's new value a
+  same-step path, and then nothing is reported.
+
+The record names the weight and the states its credit crosses (``through``) and
+lists the fixes that work for the algorithm in use:
+
+- a ``ShortTermState`` line: hold it in a ``brainstate.HiddenState``. Under a
+  multi-step VJP, and under ``OSTLRecurrent`` or ``SnAp``, which couple the
+  states of a group, the weight then gets credit. Under ``D_RTRL``, ``EProp``
+  and ``pp_prop`` it does not: their trace stays in the weight's own group, and
+  the line joins that group only, so they need one of the other algorithms too;
+- a hidden line under a single-step algorithm: use
+  ``D_RTRL(vjp_method='multi-step')``, ``OSTLRecurrent`` or ``SnAp``;
+- in every case: train the weight with BPTT.
+
+Given ``MultiStepData`` of two or more steps per call, a multi-step VJP credits
+the line within each call and drops it across calls. The gradient is then not
+zero, and the gradient-time check skips such calls. A call of one step (the
+remainder of a sequence, say) has a zero gradient, but the run's need not, so
+under a multi-step VJP the gradient-time record is INFO ("zero within this
+call") and emits no warning.
+
+When the weight's own influence also reaches the loss along a credited path, its
+online gradient is not known to be zero but omits the credit through the line,
+which can bias it, even reverse its direction. This is an INFO record,
+``DiagnosticKind.ONLINE_GRADIENT_PARTIAL``, made at compile time, which emits no
+warning.
+
+The check is structural. No derivative flows through ``stop_gradient``, through
+primitives whose derivative is zero (``round``, ``floor``, ``ceil``, ``sign``)
+or through integer and boolean values, and calls (``jit``, ``remat``) are
+followed into their bodies; any other equation is assumed to pass a derivative
+from each input to each output. A derivative that vanishes only for the values
+taken (``jnp.heaviside``, a ReLU that is never active) is not told apart, so
+such a weight can be reported although its BPTT gradient is zero too.
+
+Not checked: ``learning_signal='random_feedback'`` and ``'modulatory'``, and
+random-projection traces (``UORO``), which credit weights differently. Not
+detected (#216): a ring that is written and then read back in the same step,
+such as ``brainstate.nn.Delay`` used as ``update(y)`` and then
+``retrieve_at_step(d)``. The analysis treats the buffer as one array, so the
+old slot it reads looks like this step's write.
 
 Input Data
 ----------

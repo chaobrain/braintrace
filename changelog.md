@@ -5,6 +5,28 @@
 
 ### Fixes
 
+- **A weight whose online gradient is zero is reported (#199).** When the loss
+  depends on a weight only in later steps, through the old value of a state the
+  online algorithm does not trace, the online gradient is exactly zero while
+  BPTT's is not, and nothing said so. Such a state is a delay line in a
+  `ShortTermState` (every algorithm), or, for a single-step VJP without
+  coupling, a hidden state that leaves the weight's hidden group. Each VJP
+  algorithm now records the new `ONLINE_GRADIENT_ZERO` at compile time (INFO,
+  assuming the loss reads only the model outputs). At the first gradient
+  computation it re-checks the record against the outputs and states the loss
+  reads, and warns if the zero holds; it knows these from symbolic-zero
+  cotangents. Under a multi-step VJP given one step, that record is INFO (zero
+  within that call only). The record names the weight and the states
+  (`through`), and lists only fixes that give the algorithm in use a non-zero
+  gradient. A single-step algorithm's credit of an old hidden value along the
+  output bypass (a readout taken before the update) counts; `stop_gradient`,
+  zero-derivative primitives and integer or boolean values carry no credit, and
+  `jit`/`remat` calls are followed. A weight whose own influence also reaches
+  the loss along a credited path gets `ONLINE_GRADIENT_PARTIAL` (INFO): its
+  gradient omits the line's credit, which can bias it. The analysis is linear
+  in the step's equations. `docs/apis/concepts.rst` explains the credit model.
+  Known gap: a ring written and then read back in the same step is not
+  detected (#216).
 - **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
   hidden-to-hidden transition (#213).** In the default ("without recurrence")
   grouping mode, every `dot_general` that read a hidden-derived value was

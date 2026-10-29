@@ -16,14 +16,17 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Callable, Dict, Tuple, Any, List, Optional, Sequence
 
 import brainstate
 import jax
 import jax.numpy as jnp
+import numpy as np
 import brainunit as u
+from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 
-from braintrace._input_data import has_multistep_data
+from braintrace._input_data import MultiStepData, has_multistep_data, is_input
 from braintrace._state_management import assign_state_values_v2
 from braintrace._typing import (
     Path,
@@ -41,11 +44,16 @@ from braintrace._typing import (
     dG_State,
 )
 from braintrace._compiler import ControlFlowPolicy, DEFAULT_MAX_JACOBIAN_ELEMENTS
+from braintrace._compiler.diagnostics import DiagnosticKind, DiagnosticLevel, emit
+from braintrace._compiler.online_credit import OnlineCreditGraph, credit_message
 from braintrace._op import is_snap_anchored
 from ._common import FixedRandomFeedback, _update_dict
 from .axes import ETraceConfig
 from .base import ETraceAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
+
+# guards the once-per-weight online-credit records (#199) when threads trace at once
+_ONLINE_CREDIT_LOCK = threading.RLock()
 
 __all__ = [
     'ETraceVjpAlgorithm',  # the base class for the eligibility trace algorithm with the VJP gradient computation
@@ -522,12 +530,16 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # super initialization
         super().__init__(model=model, name=name, graph_executor=graph_executor)
 
-        # the update rule
+        # the update rule. Symbolic zeros tell the backward rule which outputs and
+        # states the loss reads, which the online-credit check needs (#199).
         self._true_update_fun = jax.custom_vjp(self._update_fn)
         self._true_update_fun.defvjp(
-            fwd=self._update_fn_fwd,
-            bwd=self._update_fn_bwd
+            fwd=self._update_fn_fwd_primal,
+            bwd=self._update_fn_bwd_cotangent,
+            symbolic_zeros=True,
         )
+        self._online_credit: Optional[OnlineCreditGraph] = None
+        self._online_credit_reported: set = set()
 
     def _assert_compiled(self) -> None:
         if not self.is_compiled:
@@ -542,6 +554,139 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         if self.is_compiled:
             self._assert_recurrence_scope_is_honoured()
             self._assert_relations_are_snap_anchored()
+            self._report_online_credit()
+
+    # ------------------------------------------------------------------------
+    # online credit (#199)
+    # ------------------------------------------------------------------------
+
+    def _online_credit_model(self) -> Optional[bool]:
+        """Whether the learning signal credits old hidden values; ``None`` if
+        the check does not apply.
+
+        The check models a learning signal that is the true ``dL/dh`` of a step
+        (``'symmetric'``; ``'bootstrapped'`` only adds credit to plain
+        parameters) and traces that follow hidden groups. A random feedback
+        projection, a modulatory signal and a random-projection trace credit
+        weights differently, so they are not checked.
+        """
+        if self.config.learning_signal not in ('symmetric', 'bootstrapped'):
+            return None
+        if self.config.trace_factorization == 'random_projection':
+            return None
+        return self.graph_executor.is_multi_step_vjp
+
+    def _algorithm_name(self) -> str:
+        name = type(self).__name__
+        return f"{name}(vjp_method='multi-step')" if self.graph_executor.is_multi_step_vjp else name
+
+    def _add_records(self, records: Sequence[Any]) -> None:
+        graph = self.graph_executor._compiled_graph
+        if records and graph is not None:
+            self.graph_executor._compiled_graph = graph._replace(
+                diagnostics=tuple(graph.diagnostics) + tuple(records))
+
+    def _credit_record(self, finding: Any, level: DiagnosticLevel, stage: str) -> Any:
+        assert self._online_credit is not None
+        old = bool(self.graph_executor.is_multi_step_vjp)
+        return emit(
+            kind=(DiagnosticKind.ONLINE_GRADIENT_ZERO if finding.zero
+                  else DiagnosticKind.ONLINE_GRADIENT_PARTIAL),
+            level=level,
+            message=credit_message(
+                finding, self._online_credit, self._algorithm_name(), old,
+                self.config.recurrence_scope in ('coupled', 'sparse_n'), stage),
+            weight_path=finding.weight_path,
+            hidden_paths=finding.hidden_paths,
+            context={'through': finding.through, 'stage': stage},
+            stacklevel=4,
+        )
+
+    def _report_online_credit(self) -> None:
+        """Record, at compile time, the weights an online gradient misses.
+
+        The loss is not known yet, so a zero is recorded at INFO level under the
+        assumption that the loss reads only the model outputs; the backward rule
+        re-checks it with the outputs and states the loss does read.
+        """
+        old = self._online_credit_model()
+        with _ONLINE_CREDIT_LOCK:
+            if old is None:
+                self._online_credit = None
+                return
+            if (self._online_credit is not None
+                    and self._online_credit.graph.module_info is self.graph.module_info):
+                return  # this graph is reported already
+            self._online_credit = OnlineCreditGraph(self.graph)
+            self._online_credit_reported = set()
+            self._add_records([
+                self._credit_record(f, DiagnosticLevel.INFO, 'compile')
+                for f in self._online_credit.find(old)])
+
+    def _check_online_credit(self, args: Any, grads: Any) -> None:
+        """Record once per weight whose online gradient is zero for this loss.
+
+        Runs in the backward rule, where the cotangents show which step outputs
+        and new state values the loss reads: a symbolic zero is not read. The
+        record is a WARNING, except under a multi-step VJP: given one step, it
+        is zero within this call only, and a later call of two or more steps
+        credits the path, so it is an INFO record.
+        """
+        credit = self._online_credit
+        old = self._online_credit_model()
+        if credit is None or old is None:
+            return
+        if old and has_multistep_data(*args):
+            chunks = [x for x in jax.tree.leaves(args, is_leaf=is_input)
+                      if isinstance(x, MultiStepData)]
+            steps = {int(jnp.shape(leaf)[0]) for x in chunks for leaf in jax.tree.leaves(x.data)}
+            if steps != {1}:
+                return  # a multi-step VJP credits every path within the call
+        dg_out, dg_hiddens, dg_others = grads[:3]
+
+        def read(tree: Any) -> bool:
+            leaves = jax.tree.leaves(tree, is_leaf=lambda x: isinstance(x, SymbolicZero))
+            return any(not isinstance(leaf, SymbolicZero) for leaf in leaves)
+
+        out_leaves = jax.tree.leaves(dg_out, is_leaf=lambda x: isinstance(x, SymbolicZero))
+        if len(out_leaves) != len(credit.model_outputs):
+            return  # cannot match the outputs: do not guess
+        used = [v for v, ct in zip(credit.model_outputs, out_leaves)
+                if not isinstance(ct, SymbolicZero)]
+        for vals in (dg_hiddens, dg_others):
+            for path, ct in vals.items():
+                if not read(ct):
+                    continue
+                if path not in credit.state_outvars:
+                    return  # an unknown state is read: do not guess
+                used.extend(credit.state_outvars[path])
+        level = DiagnosticLevel.INFO if old else DiagnosticLevel.WARNING
+        findings = credit.find(old, used, partial=False)
+        with _ONLINE_CREDIT_LOCK:  # once per weight, also when threads trace at once
+            if credit is not self._online_credit:
+                return  # compiled again meanwhile
+            records = []
+            try:
+                for finding in findings:
+                    if finding.weight_path in self._online_credit_reported:
+                        continue
+                    records.append(self._credit_record(finding, level, 'gradient'))
+                    self._online_credit_reported.add(finding.weight_path)
+            finally:
+                self._add_records(records)
+
+    def _update_fn_fwd_primal(self, *primals: Any) -> Any:
+        # symbolic zeros wrap every primal leaf; the forward rule needs the values
+        values = jax.tree.map(
+            lambda p: p.value if isinstance(p, CustomVJPPrimal) else p, primals,
+            is_leaf=lambda x: isinstance(x, CustomVJPPrimal))
+        return self._update_fn_fwd(*values)
+
+    def _update_fn_bwd_cotangent(self, fwd_res: Any, grads: Any) -> Any:
+        self._check_online_credit(fwd_res[4], grads)
+        grads = jax.tree.map(_instantiate_zero, grads,
+                             is_leaf=lambda x: isinstance(x, SymbolicZero))
+        return self._update_fn_bwd(fwd_res, grads)
 
     def _assert_recurrence_scope_is_honoured(self) -> None:
         """Raise if a non-diagonal ``recurrence_scope`` cannot be delivered.
@@ -2007,3 +2152,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             The eligibility trace data.
         """
         raise NotImplementedError
+
+
+def _instantiate_zero(ct: Any) -> Any:
+    """A concrete zero in place of a symbolic one (the cotangent's own type)."""
+    if not isinstance(ct, SymbolicZero):
+        return ct
+    shape, dtype = getattr(ct.aval, 'shape'), getattr(ct.aval, 'dtype')
+    if dtype == jax.dtypes.float0:
+        return np.zeros(shape, dtype=jax.dtypes.float0)
+    return jnp.zeros(shape, dtype)
