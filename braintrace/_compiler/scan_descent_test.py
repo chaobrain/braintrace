@@ -458,7 +458,7 @@ class TestApplyScanDescentPipeline:
 
         net = Net()
         brainstate.nn.init_all_states(net, batch_size=1)
-        with pytest.warns(UserWarning, match='no ETP relation'):
+        with pytest.warns(UserWarning, match='only through plain ops'):
             graph = compile_etrace_graph(
                 net, jnp.ones((4,), dtype='float32'),
                 control_flow=DESCENT_POLICY)
@@ -804,6 +804,246 @@ class _DriveThroughBodyWeight(brainstate.nn.Module):
         return self.h.value
 
 
+class _MixedPaths(_TwoState):
+    """The constant reaches ``V`` directly and through a trainable ETP
+    primitive in the body (a partial path)."""
+
+    def __init__(self, k, n_in=3, n=4):
+        super().__init__(k, n_in=n_in, n=n)
+        self.W2 = brainstate.ParamState(0.3 * jnp.eye(n) + 0.05)
+
+    def update(self, x):
+        I = self.drive(x)
+        return self.scan(lambda c, _: self.substep(c, I + jnp.tanh(braintrace.matmul(I, self.W2.value))))
+
+
+class _MixedPathsInBody(_MixedPaths):
+    """:class:`_MixedPaths` with the projection inside the body."""
+
+    def update(self, x):
+        def body(c, _):
+            I = self.drive(x)
+            return self.substep(c, I + jnp.tanh(braintrace.matmul(I, self.W2.value)))
+
+        return self.scan(body)
+
+
+class _UnreachedWideState(_WideState):
+    """A carried state of another shape that the constant does not reach."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), z = c
+            return (self.substep((V, w), I)[0], 0.9 * z + 0.1), None
+
+        ((self.V.value, self.w.value), self.z.value), _ = jax.lax.scan(
+            body, ((self.V.value, self.w.value), self.z.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value) + jnp.mean(self.z.value)
+
+
+class _PlainUseInBody(_TwoState):
+    """``W`` drives the scan through the outer projection and is also read
+    by a plain op in the body."""
+
+    def update(self, x):
+        I = self.drive(x)
+        return self.scan(lambda c, _: self.substep(c, I + 0.01 * jnp.sum(self.W.value)))
+
+
+def _carry_scan(model, body, extra_init, xs=None):
+    """Run ``body`` over ``((V, w), extra)`` and store the hidden carries."""
+    ((model.V.value, model.w.value), extra), _ = jax.lax.scan(
+        body, ((model.V.value, model.w.value), extra_init), xs,
+        length=None if xs is not None else model.k)
+    return extra
+
+
+class _AccumulatedDrive(_TwoState):
+    """A non-hidden carry accumulates the loop constant and drives ``V``."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), z = c
+            z = z + I
+            return (self.substep((V, w), 0.3 * z)[0], z), None
+
+        _carry_scan(self, body, jnp.zeros(4))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _AccumulatedDriveInBody(_TwoState):
+    """:class:`_AccumulatedDrive` with the projection inside the body."""
+
+    def update(self, x):
+        def body(c, _):
+            (V, w), z = c
+            z = z + self.drive(x)
+            return (self.substep((V, w), 0.3 * z)[0], z), None
+
+        _carry_scan(self, body, jnp.zeros(4))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _FedBackState(_TwoState):
+    """A non-hidden carry filters ``V`` and feeds it back."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), z = c
+            z = 0.9 * z + 0.5 * V
+            return (self.substep((V, w), I + z)[0], z), None
+
+        _carry_scan(self, body, jnp.zeros(4))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _FedBackStateInBody(_TwoState):
+    """:class:`_FedBackState` with the projection inside the body."""
+
+    def update(self, x):
+        def body(c, _):
+            (V, w), z = c
+            z = 0.9 * z + 0.5 * V
+            return (self.substep((V, w), self.drive(x) + z)[0], z), None
+
+        _carry_scan(self, body, jnp.zeros(4))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _DelayedFeedback(_TwoState):
+    """``V`` comes back two substeps later through two non-hidden carries:
+    neither carry reaches a hidden carry and is reached in one iteration."""
+
+    def update(self, x):
+        def body(c, _):
+            (V, w), (z1, z2) = c
+            return (self.substep((V, w), self.drive(x) + z2)[0], (0.5 * V, z1)), None
+
+        _carry_scan(self, body, (jnp.zeros(4), jnp.zeros(4)))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _ClippedState(_TwoState):
+    """``V`` is clipped after the scan, so its carry is not the hidden state."""
+
+    def update(self, x):
+        I = self.drive(x)
+        (V, self.w.value), _ = jax.lax.scan(
+            lambda c, _: self.substep(c, I), (self.V.value, self.w.value), None, length=self.k)
+        self.V.value = jnp.clip(V, -10.0, 10.0)
+        return jax.nn.sigmoid(self.V.value) + self.w.value
+
+
+class _ClippedStateInBody(_TwoState):
+    """:class:`_ClippedState` with the projection inside the body."""
+
+    def update(self, x):
+        (V, self.w.value), _ = jax.lax.scan(
+            lambda c, _: self.substep(c, self.drive(x)), (self.V.value, self.w.value), None,
+            length=self.k)
+        self.V.value = jnp.clip(V, -10.0, 10.0)
+        return jax.nn.sigmoid(self.V.value) + self.w.value
+
+
+class _StepStartConst(_TwoState):
+    """The body reads a value computed from ``w`` before the scan."""
+
+    def update(self, x):
+        g = jnp.tanh(self.w.value)
+        return self.scan(lambda c, _: self.substep(c, self.drive(x) + g))
+
+
+class _StepStartXs(_TwoState):
+    """:class:`_StepStartConst` with the value scanned as ``xs``."""
+
+    def update(self, x):
+        gs = jnp.broadcast_to(jnp.tanh(self.w.value), (self.k, 4))
+        (self.V.value, self.w.value), _ = jax.lax.scan(
+            lambda c, g: self.substep(c, self.drive(x) + g), (self.V.value, self.w.value), gs)
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _ChainedScans(_TwoState):
+    """A second scan reads the state the first scan carries out, in the
+    same step."""
+
+    def __init__(self, k, n_in=3, n=4):
+        super().__init__(k, n_in=n_in, n=n)
+        self.beta = brainstate.ParamState(jnp.full(n, 0.7))
+        self.u = brainstate.HiddenState(jnp.zeros(n))
+
+    def update(self, x):
+        out = self.scan(lambda c, _: self.substep(c, self.drive(x)))
+        V = self.V.value
+
+        def leak(u, _):
+            return braintrace.element_wise(self.beta.value) * u + 0.5 * V, None
+
+        self.u.value, _ = jax.lax.scan(leak, self.u.value, None, length=self.k)
+        return out + self.u.value
+
+
+class _SubstepClock(_TwoState):
+    """A non-hidden carry that counts substeps scales the drive: it depends
+    on no hidden state and no ETP output."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), t = c
+            return (self.substep((V, w), I * (1.0 + t))[0], t + 1.0 / self.k), None
+
+        _carry_scan(self, body, jnp.zeros(()))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _SpikeCount(_TwoState):
+    """An integer carry counts threshold crossings of ``V`` and gates it:
+    no derivative flows through an integer."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), n = c
+            (V, w), _ = self.substep((V, w), I)
+            n = n + (V > 0.05).astype(jnp.int32)
+            return ((jnp.where(n > 3, 0.9 * V, V), w), n), None
+
+        _carry_scan(self, body, jnp.zeros(4, dtype=jnp.int32))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _RecurrentOutside(_TwoState):
+    """A recurrent ETP projection of ``V`` outside the scan: the constant
+    depends on the hidden state only through the ETP primitive."""
+
+    def __init__(self, k, n_in=3, n=4):
+        super().__init__(k, n_in=n_in, n=n)
+        with brainstate.random.seed_context(5):
+            self.Wrec = brainstate.ParamState(0.6 * brainstate.random.randn(n, n))
+
+    def update(self, x):
+        I = self.drive(x)
+        R = braintrace.matmul(self.V.value, self.Wrec.value)
+        return self.scan(lambda c, _: self.substep(c, I + jnp.tanh(R)))
+
+
+class _DetachedStepStartConst(_TwoState):
+    """:class:`_StepStartConst` behind a ``stop_gradient``."""
+
+    def update(self, x):
+        g = jax.lax.stop_gradient(jnp.tanh(self.w.value))
+        return self.scan(lambda c, _: self.substep(c, self.drive(x) + g))
+
+
 _LIFT_ALGOS = {
     'd_rtrl': lambda m, p: braintrace.D_RTRL(m, control_flow=p),
     'eprop': lambda m, p: braintrace.EProp(m, control_flow=p),
@@ -884,18 +1124,22 @@ class TestOuterRelationLift:
         assert bundle.lift_templates == {}
         assert _lifted(graph) == []
 
-    def test_d_rtrl_matches_bptt(self):
-        from braintrace._testing.oracle import bptt_param_gradients, online_param_gradients
+    def test_chunked_d_rtrl_matches_bptt(self):
+        # chunks of 2 steps: the total gradient goes through the lifted
+        # eligibility trace at every chunk boundary (one whole-sequence
+        # multi-step call would not use the trace at all)
+        from braintrace._testing.oracle import bptt_param_gradients, chunked_online_param_gradients
         make = lambda: _TauInBody(17)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             with brainstate.environ.context(precision=64):
                 bptt = bptt_param_gradients(make, _lift_inputs())
-                multi = online_param_gradients(
-                    make, _lift_inputs(),
+                chunked = chunked_online_param_gradients(
+                    make, _lift_inputs(), chunk_size=2,
                     algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
-        for p in bptt:  # the multi-step VJP over the whole sequence is exact
-            _close(np.asarray(multi[p]), np.asarray(bptt[p]), tol=1e-10)
+        for p in bptt:
+            assert np.abs(np.asarray(bptt[p])).max() > 1e-3
+            _close(np.asarray(chunked[p]), np.asarray(bptt[p]))
 
     def test_a_relation_that_also_drives_a_flat_state_is_split(self):
         with warnings.catch_warnings():
@@ -948,11 +1192,14 @@ class TestOuterRelationLift:
             _, (bundle,) = apply_scan_descent(minfo)
         assert bundle.lift_templates == {}
 
-    @pytest.mark.parametrize('model', [_MixedDrive, _TwoProjectionDrive, _TwiceReadDrive,
-                                       _ScannedDrive, _ConstAndCarriedDrive],
-                             ids=['mixed', 'two-projections', 'twice', 'scanned',
-                                  'const-and-carried'])
-    def test_other_routes_into_the_scan_still_raise_without_the_off_hint(self, model):
+    @pytest.mark.parametrize('model, route', [
+        (_MixedDrive, 'the loop constant at position 1 (computed from it, combined with another outer value)'),
+        (_TwoProjectionDrive, 'the loop constant at position 1 (computed from it, combined with another outer value)'),
+        (_TwiceReadDrive, 'the loop constant at position 0 (computed from it) and the loop constant at position 1 (computed from it)'),
+        (_ScannedDrive, 'the scanned input at position 0 (computed from it)'),
+        (_ConstAndCarriedDrive, 'the loop constant at position 1 (computed from it) and the carry init at position 2 (computed from it)'),
+    ], ids=['mixed', 'two-projections', 'twice', 'scanned', 'const-and-carried'])
+    def test_other_routes_into_the_scan_still_raise_without_the_off_hint(self, model, route):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             with pytest.raises(NotImplementedError, match='loop constant') as err:
@@ -960,6 +1207,47 @@ class TestOuterRelationLift:
         assert "scan_descent='off'" not in str(err.value)
         assert 'inside the scan body' in str(err.value)
         assert "('V',)" in str(err.value)
+        assert f'it reads {route}.' in str(err.value)
+
+    def test_a_lifted_relation_reports_its_partial_path(self):
+        from braintrace._compiler.diagnostics import DiagnosticKind
+
+        def partial(model, policy=DEFAULT_CONTROL_FLOW_POLICY):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                graph = _compiled_graph(model, policy)
+            return sorted((d.weight_path, d.hidden_paths) for d in graph.diagnostics
+                          if d.kind is DiagnosticKind.RELATION_PARTIAL_PATH)
+
+        # as with the projection in the body: per substep the constant
+        # reaches V both ways (unrolled, the whole step also reaches w so)
+        expected = [(('W',), (('V',),))]
+        assert partial(_MixedPaths(17)) == expected
+        assert partial(_MixedPathsInBody(17)) == expected
+        assert set(expected) <= set(partial(_MixedPaths(17), UNROLL_POLICY))
+
+    @pytest.mark.parametrize('model, reported', [(_UnreachedWideState, False), (_WideState, True)],
+                             ids=['unreached', 'reached'])
+    def test_a_carry_of_another_shape_is_reported_only_when_the_constant_reaches_it(
+            self, model, reported):
+        from braintrace._compiler.diagnostics import DiagnosticKind
+        for policy in (DEFAULT_CONTROL_FLOW_POLICY, UNROLL_POLICY):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                graph = _compiled_graph(model(17), policy)
+            got = [d.hidden_paths for d in graph.diagnostics
+                   if d.kind is DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH]
+            assert got == ([(('z',),)] if reported else []), policy
+
+    def test_a_plain_use_in_the_body_does_not_deny_the_lifted_weight(self):
+        from braintrace._compiler.diagnostics import DiagnosticKind
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            graph = _compiled_graph(_PlainUseInBody(17))
+        assert [r.path for r in _lifted(graph)] == [('W',)]
+        (rec,) = [d for d in graph.diagnostics if d.kind is DiagnosticKind.SCAN_DESCENT_NO_RELATIONS]
+        assert 'only through plain ops' in rec.message and 'still learns' in rec.message
+        assert 'NOT' not in rec.message
 
     def test_a_projection_through_a_body_weight_is_excluded_as_when_unrolled(self):
         with pytest.warns(UserWarning, match='only through another trainable ETP primitive'):
@@ -974,3 +1262,66 @@ class TestOuterRelationLift:
         for p in ('w', 'w_in'):
             _close(descended[p], unrolled[p])
         np.testing.assert_array_equal(descended['w_in'], 0.0)
+
+
+class TestUntrackedCredit:
+    """Descent folds the trace over the hidden carries only. A scan input or
+    carried value other than a hidden carry that depends on the hidden state
+    or carries an ETP output across substeps, and feeds a hidden carry, would
+    be missed silently; such a scan is refused (review of #217, HIGH-1)."""
+
+    @pytest.mark.parametrize('model, what', [
+        (_AccumulatedDrive, 'carried value at carry position 2'),
+        (_AccumulatedDriveInBody, 'carried value at carry position 2'),
+        (_FedBackState, 'carried value at carry position 2'),
+        (_FedBackStateInBody, 'carried value at carry position 2'),
+        (_DelayedFeedback, 'carried value at carry position 3'),
+        (_ClippedState, 'carried value at carry position 0'),
+        (_ClippedStateInBody, 'carried value at carry position 0'),
+        (_StepStartConst, 'scan constant'),
+        (_StepStartXs, 'scanned input'),
+        (_ChainedScans, 'scan constant'),
+    ], ids=['accumulated-constant', 'accumulated-projection', 'fed-back', 'fed-back-in-body',
+            'delayed-two-carries', 'clipped-after-the-scan', 'clipped-in-body',
+            'step-start-constant', 'step-start-xs', 'chained-scans'])
+    def test_a_scan_with_untracked_credit_is_refused(self, model, what):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(NotImplementedError, match='not a hidden state carried') as err:
+                _compiled_graph(model(17))
+        message = str(err.value)
+        assert what in message
+        assert 'scan_unroll_limit=17' in message
+        assert "scan_descent='off'" not in message
+
+    def test_the_unrolling_the_message_suggests_is_exact(self):
+        # the unrolled path equals BPTT through the eligibility trace
+        # (chunked multi-step D-RTRL)
+        from braintrace._testing.oracle import bptt_param_gradients, chunked_online_param_gradients
+        model = _AccumulatedDrive
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                bptt = bptt_param_gradients(lambda: model(17), _lift_inputs(T=4))
+                chunked = chunked_online_param_gradients(
+                    lambda: model(17), _lift_inputs(T=4), chunk_size=2,
+                    algo_factory=lambda m: braintrace.D_RTRL(
+                        m, control_flow=UNROLL_POLICY, vjp_method='multi-step'))
+        for p in bptt:
+            assert np.abs(np.asarray(bptt[p])).max() > 1e-3
+            _close(np.asarray(chunked[p]), np.asarray(bptt[p]))
+
+    @pytest.mark.parametrize('model', [_SubstepClock, _SpikeCount, _RecurrentOutside,
+                                       _DetachedStepStartConst, _TauInBody],
+                             ids=['substep-clock', 'integer-carry', 'recurrent-projection-outside',
+                                  'detached-step-start-constant', 'plain'])
+    def test_inputs_without_untracked_credit_are_accepted(self, model):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                descended = _online(lambda: model(17), 'd_rtrl')
+                unrolled = _online(lambda: model(17), 'd_rtrl', UNROLL_POLICY)
+        assert set(descended) == set(unrolled)
+        for p in descended:
+            _close(descended[p], unrolled[p])
+        assert np.abs(unrolled['W']).max() > 1e-3

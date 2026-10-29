@@ -121,15 +121,39 @@
   relations in each substep, with `x` read once per step. The scan gets no
   new input. D-RTRL and e-prop gradients for `W` and `tau` equal the
   unrolled path's and those of the same model with the projection inside
-  the body (f64, 1e-12), and multi-step D-RTRL matches BPTT. A
-  `SCAN_DESCENT_RELATION_LIFTED` record (INFO) names the weight and the
-  states. A relation that also drives states outside the scan keeps that
-  part flat. The issue model compiles in 74–83 ms at `k = 17…256`
+  the body (f64, 1e-12). Multi-step D-RTRL in chunks of two steps, which
+  goes through the trace at every chunk boundary, matches BPTT (f64,
+  1e-12). A `SCAN_DESCENT_RELATION_LIFTED` record (INFO) names the weight
+  and the states, and a lifted relation reports a partial path as one in
+  the body does. A relation that also drives states outside the scan keeps
+  that part flat. The issue model compiles in 74–83 ms at `k = 17…256`
   (graph and first call, CPU), the same as with the projection in the
-  body; unrolled at `k = 16` it takes 669 ms. The scan reading the output combined with another outer value,
-  in several operands, or as a scanned or carried value still raises, now
-  with a message that names the supported forms and drops the
-  `scan_descent='off'` hint.
+  body; unrolled at `k = 16` it takes 669 ms. The scan reading the output
+  combined with another outer value, in several operands, or as a scanned
+  or carried value still raises, now with a message that names how the
+  scan reads it and drops the `scan_descent='off'` hint.
+- **Structured scan descent refuses a scan whose credit its fold cannot
+  follow.** Descent folds the eligibility trace over the scan's hidden
+  carries only. Credit that reaches a hidden carry another way was dropped
+  silently, with gradients up to 90 % off the unrolled path:
+  - a carried value that is not a hidden state, such as a local
+    accumulator, a filtered copy of a state, or a state clipped after the
+    scan, when it depends on a hidden carry, an ETP output or the loop
+    constant of a lifted relation;
+  - a constant or scanned input computed from the step's hidden state
+    before the scan, including a state that an earlier scan carries out
+    in the same step (chained scans).
+
+  Such a scan now raises `NotImplementedError` naming the value, its
+  position and the hidden states it reaches, with the remedies: carry the
+  value as a hidden state of the scan, or unroll the scan. No derivative
+  flows through an integer, a `stop_gradient` or a recurrent ETP
+  projection, so a value reached only through them is accepted, as is a
+  carried value that depends on neither (a substep clock). The
+  `SCAN_DESCENT_NO_RELATIONS` warning no longer says a weight "will NOT
+  participate" when only its plain use inside the scan gets no credit, and
+  a carried state of another shape that the lifted constant does not reach
+  is no longer reported as a shape mismatch.
 
 ### Features
 

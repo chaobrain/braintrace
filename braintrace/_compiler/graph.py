@@ -16,13 +16,13 @@
 
 import threading
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Sequence, Tuple, Optional, NamedTuple
+from typing import Dict, Iterator, List, Sequence, Set, Tuple, Optional, NamedTuple
 
 import brainstate
 import jax
 import numpy as np
 
-from braintrace._compatible_imports import is_scan_primitive, jaxpr_all_invars, Var
+from braintrace._compatible_imports import JaxprEqn, is_scan_primitive, jaxpr_all_invars, Var
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     ETraceVals,
@@ -42,6 +42,7 @@ from .diagnostics import (
 )
 from .hid_param_op import (
     _emit_no_relation_diag,
+    _emit_partial_paths,
     find_hidden_param_op_relations_from_minfo,
     HiddenParamOpRelation,
 )
@@ -55,7 +56,7 @@ from .hidden_pertubation import (
     HiddenPerturbation,
 )
 from .scan_descent import RelationDescent, ScanDescentBundle, apply_scan_descent
-from .jaxpr_graph import build_consumer_map, forward_closure
+from .jaxpr_graph import build_consumer_map, build_producer_map, forward_closure
 from .module_info import (
     extract_module_info,
     ModuleInfo,
@@ -326,6 +327,55 @@ def _report_plain_weight_scans(minfo: ModuleInfo, descended_eqn_ids: frozenset) 
         )
 
 
+def _route_into_scan(
+    y: Var,
+    bundle: ScanDescentBundle,
+    operands: Set[Var],
+    reached: Dict[Var, None],
+    producers: Dict[Var, JaxprEqn],
+) -> str:
+    """How a descended scan reads values computed from the ETP output *y*:
+    each operand's role, and whether it also reads another outer value or
+    is computed by another scan."""
+    num_consts, num_carry = bundle.info.num_consts, bundle.info.num_carry
+    parts = []
+    for j, v in enumerate(bundle.new_eqn.invars):
+        if not (isinstance(v, Var) and v in operands):
+            continue
+        if j < num_consts:
+            role = f'the loop constant at position {j}'
+        elif j < num_consts + num_carry:
+            role = f'the carry init at position {j - num_consts}'
+        else:
+            role = f'the scanned input at position {j - num_consts - num_carry}'
+        through_scan = other = False
+        seen: Set[Var] = set()
+        stack = [v]
+        while stack:  # the equations between ``y`` and the operand
+            u = stack.pop()
+            if u in seen or u is y:
+                continue
+            seen.add(u)
+            eqn = producers.get(u)
+            if eqn is None:
+                continue
+            through_scan = through_scan or is_scan_primitive(eqn)
+            for iv in eqn.invars:
+                if isinstance(iv, Var):
+                    if iv is y or iv in reached:
+                        stack.append(iv)
+                    else:
+                        other = True
+        if v is y:
+            how = ['the output itself']
+        else:
+            how = ['computed from it by another scan' if through_scan else 'computed from it']
+            if other:
+                how.append('combined with another outer value')
+        parts.append(f'{role} ({", ".join(how)})')
+    return ' and '.join(parts)
+
+
 def _lift_outer_relations(
     relations: Sequence[HiddenParamOpRelation],
     bundles: Sequence[ScanDescentBundle],
@@ -347,6 +397,7 @@ def _lift_outer_relations(
     if not bundles:
         return list(relations)
     consumers = build_consumer_map(minfo.jaxpr)
+    producers = build_producer_map(minfo.jaxpr)
     out: List[HiddenParamOpRelation] = []
     for relation in relations:
         blocked = [g for g in relation.hidden_groups if g.descent is not None]
@@ -356,29 +407,28 @@ def _lift_outer_relations(
         weight_path = relation.path
         lifted: List[HiddenParamOpRelation] = []
         excluded = []
+        reached = forward_closure(relation.y_var, consumers)
         for bundle, remap in zip(bundles, group_remaps):
             own = {id(remap[id(g)]) for g in bundle.groups}
             mine = [g for g in blocked if id(g) in own]
             if not mine:
                 continue
             template = bundle.lift_templates.get(relation.y_var)
-            reached = forward_closure(relation.y_var, consumers)
             operands = {v for v in bundle.new_eqn.invars
                         if isinstance(v, Var) and (v is relation.y_var or v in reached)}
             if template is None or operands != {template.const_var}:
                 paths = [p for g in mine for p in g.hidden_paths]
+                route = _route_into_scan(relation.y_var, bundle, operands, reached, producers)
                 raise NotImplementedError(
                     f'An ETP relation outside a descended scan (weight '
                     f'{weight_path}) reaches hidden state(s) {paths} carried by '
                     f'that scan, but the scan does not read the primitive\'s '
                     f'output through a single loop constant computed from that '
-                    f'output alone (it reads it in several operands, as a scanned '
-                    f'or carried value, or combined with another outer value). '
-                    f'Structured scan descent lifts an outer relation into the '
-                    f'scan only through such a constant. Pass the primitive\'s '
-                    f'output to the scan and combine it with the other values '
-                    f'inside the scan body, or move the ETP operation inside the '
-                    f'scan body.'
+                    f'output alone: it reads {route}. Structured scan descent '
+                    f'lifts an outer relation into the scan only through such a '
+                    f'constant. Pass the primitive\'s output to the scan and '
+                    f'combine it with the other values inside the scan body, or '
+                    f'move the ETP operation inside the scan body.'
                 )
             if not template.hidden_groups:
                 excluded.append(template)
@@ -391,6 +441,7 @@ def _lift_outer_relations(
                 path_classification=dict(template.path_classification),
                 control_flow_context=RelationDescent(scan=bundle.info, lifted=True),
             ))
+            _emit_partial_paths(relation.primitive, weight_path or (), template.path_classification)
             emit(
                 kind=DiagnosticKind.SCAN_DESCENT_RELATION_LIFTED,
                 level=DiagnosticLevel.INFO,
