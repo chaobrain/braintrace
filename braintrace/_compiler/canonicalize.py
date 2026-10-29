@@ -185,10 +185,12 @@ class ControlFlowPolicy:
         ``hidden_scan_unroll_limit=1`` is recommended (the release notes give
         measurements). A rolled scan has two further effects:
 
-        - SnAp-n position analysis cannot see through the scan, so its
-          pattern widens to all positions
-          (``DiagnosticKind.SNAP_PATTERN_CONSERVATIVE``) and SnAp-n costs as
-          much as within-group RTRL. Keep such scans unrolled for SnAp-n.
+        - SnAp-n position analysis follows the hidden path into the scan
+          body with the same rule as for top-level equations, so the pattern
+          is the unrolled one (issue #210); a body that couples positions
+          (a mixing equation, ``xs``/``ys`` on the hidden path) widens it to
+          all positions (``DiagnosticKind.SNAP_PATTERN_CONSERVATIVE``), as
+          it does unrolled.
         - Gradients equal the unrolled ones to rounding (~1e-15 in float64),
           except when a step output reads a scan output that is not a hidden
           state (the stacked per-iteration ``ys``, or a non-hidden carry)

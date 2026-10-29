@@ -52,12 +52,22 @@ which condition failed otherwise:
 
 1. Exactly one position-mixing equation is reachable from the hidden invars.
 2. Every *other* equation reachable from the hidden invars is elementwise and
-   position-preserving -- no reshape, transpose, reduction, gather, control
-   flow or call-like equation. A single ``dot`` inside a length-``L`` scan
-   transfers :math:`A^L`, not :math:`A`; a reshape between the mixing equation
-   and the hidden state relabels the axes an axis-indexed pattern is attached
-   to; a reduction couples every position without being a mixing primitive at
-   all.
+   position-preserving -- no reshape, transpose, reduction, gather, ``cond``
+   or call-like equation. A reshape between the mixing equation and the
+   hidden state relabels the axes an axis-indexed pattern is attached to; a
+   reduction couples every position without being a mixing primitive at all.
+   A ``scan`` or ``while`` on the hidden path is followed into its body, which
+   is held to the same two rules wherever the hidden path runs through it
+   (issue #210): a loop whose body passes this check composes a
+   position-diagonal step any number of times, so it is position-diagonal as
+   a whole, exactly as the same loop unrolled. A mixing equation inside a loop
+   that runs more than once applies once per iteration and transfers a power
+   of its pattern (a single ``dot`` inside a length-``L`` scan transfers
+   :math:`A^L`, not :math:`A`), so it is refused, as two mixing equations are
+   in the unrolled loop. So are hidden-derived values scanned over as ``xs``
+   or stacked as ``ys`` on the hidden path (their leading axis counts
+   iterations, not positions), and a ``while`` whose trip count reads the
+   hidden state.
 3. That equation's primitive registered a ``snap_adjacency`` rule, and the rule
    accepted the equation (see :data:`~braintrace._op.ETP_RULES_SNAP_ADJACENCY`).
 4. Its ``x`` and ``y`` both have exactly the group's ``varshape``, so the
@@ -71,7 +81,15 @@ from typing import List, NamedTuple, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 
-from braintrace._compatible_imports import Jaxpr, JaxprEqn, Literal, Var
+from braintrace._compatible_imports import (
+    Jaxpr,
+    JaxprEqn,
+    Literal,
+    Var,
+    is_scan_primitive,
+    is_while_primitive,
+    scan_num_consts_carry,
+)
 from braintrace._misc import NotSupportedError
 from braintrace._op import (
     get_snap_adjacency_rule,
@@ -331,49 +349,238 @@ def analyze_position_adjacency(
 
     seeds = list(transition_jaxpr.invars if hidden_invars is None else hidden_invars)
     reachable: Set[Var] = {v for v in seeds if isinstance(v, Var)}
-    mixing: List[JaxprEqn] = []
-    last: Optional[np.ndarray] = None
-
-    def _conservative(reason: str) -> AxisAdjacency:
+    used = _read_vars(transition_jaxpr.eqns, transition_jaxpr.outvars)
+    walk = _Walk(varshape)
+    reason = walk.run(transition_jaxpr.eqns, reachable, used)
+    if reason is not None:
         return AxisAdjacency(axes=_all_full(varshape), conservative=True, reason=reason)
-
-    for eqn in transition_jaxpr.eqns:
-        hits = [
-            j for j, v in enumerate(eqn.invars)
-            if isinstance(v, Var) and v in reachable
-        ]
-        if not hits:
-            continue
-        if _is_mixing(eqn):
-            mixing.append(eqn)
-            if len(mixing) > 1:
-                return _conservative(
-                    f"the transition applies more than one position-mixing equation "
-                    f"reachable from the hidden state "
-                    f"({', '.join(e.primitive.name for e in mixing)}); their composed "
-                    f"transfer is not the pattern of either one."
-                )
-            # Validate the mixing equation where it is found, so the reason names
-            # it rather than whatever incidental downstream equation trips next.
-            outcome = _mixing_axis_pattern(eqn, varshape, set(hits))
-            if isinstance(outcome, str):
-                return _conservative(outcome)
-            last = outcome
-        elif not _is_position_preserving(eqn, varshape):
-            return _conservative(
-                f"equation '{eqn.primitive.name}' on the hidden path is not an "
-                f"elementwise position-preserving operation, so it may relabel or "
-                f"couple positions in a way an axis-indexed pattern cannot express."
-            )
-        reachable.update(v for v in eqn.outvars if isinstance(v, Var))
-
-    if last is None:
+    if walk.last is None:
         # No cross-position coupling exists at all: every position evolves on its
         # own. Legitimate, and exactly what two_state_rnn-style models produce.
         return AxisAdjacency(axes=_all_identity(varshape), conservative=False, reason='')
     return AxisAdjacency(
-        axes=_axis_patterns(varshape, last), conservative=False, reason=''
+        axes=_axis_patterns(varshape, walk.last), conservative=False, reason=''
     )
+
+
+def _read_vars(eqns: Sequence[JaxprEqn], outvars: Sequence[Union[Var, Literal]]) -> Set[Var]:
+    """Every variable *eqns* read, plus the variables in *outvars*."""
+    read = {v for e in eqns for v in e.invars if isinstance(v, Var)}
+    read.update(v for v in outvars if isinstance(v, Var))
+    return read
+
+
+def _live_eqns(body: Jaxpr, roots: Set[Var]) -> Tuple[List[JaxprEqn], Set[Var]]:
+    """The body equations that contribute to *roots*, in order, and every
+    variable they read (with *roots*)."""
+    needed = set(roots)
+    live: List[JaxprEqn] = []
+    for eqn in reversed(body.eqns):
+        if any(isinstance(o, Var) and o in needed for o in eqn.outvars):
+            live.append(eqn)
+            needed.update(v for v in eqn.invars if isinstance(v, Var))
+    live.reverse()
+    return live, needed
+
+
+class _Walk:
+    """Forward walk of the hidden path through a transition, with one rule
+    for every equation it reaches, at top level or inside a loop body.
+
+    ``mixing`` lists the position-mixing equations reached, of which at most
+    one is allowed; ``last`` is its last-axis pattern.
+    """
+
+    def __init__(self, varshape: Tuple[int, ...], loop: Optional[str] = None):
+        self.varshape = varshape
+        #: the loop whose body this walk covers, when that body runs more than
+        #: once: a mixing equation there is refused
+        self.loop = loop
+        self.mixing: List[JaxprEqn] = []
+        self.last: Optional[np.ndarray] = None
+
+    def run(
+        self,
+        eqns: Sequence[JaxprEqn],
+        reachable: Set[Var],
+        used: Set[Var],
+        where: str = '',
+    ) -> Optional[str]:
+        """Walk *eqns* in order, growing *reachable*; a reason string when the
+        pattern cannot be derived, else ``None``.
+
+        *used* holds the variables read downstream of *eqns* (a loop's outputs
+        outside it are only on the hidden path when they are used); *where*
+        names the enclosing loop body in the reasons.
+        """
+        for eqn in eqns:
+            hits = [
+                j for j, v in enumerate(eqn.invars)
+                if isinstance(v, Var) and v in reachable
+            ]
+            if not hits:
+                continue
+            if is_scan_primitive(eqn):
+                outcome = self._scan(eqn, hits, used)
+            elif is_while_primitive(eqn):
+                outcome = self._while(eqn, hits, used)
+            elif _is_mixing(eqn) and self.loop is not None:
+                return (
+                    f"the position-mixing equation '{eqn.primitive.name}' sits{where}"
+                    f"{'' if self.loop == 'while' else ' that runs more than once'}: it "
+                    f"applies once per iteration, so the loop transfers a power of its "
+                    f"pattern, not the pattern."
+                )
+            elif _is_mixing(eqn):
+                self.mixing.append(eqn)
+                if len(self.mixing) > 1:
+                    return (
+                        f"the transition applies more than one position-mixing equation "
+                        f"reachable from the hidden state "
+                        f"({', '.join(e.primitive.name for e in self.mixing)}); their "
+                        f"composed transfer is not the pattern of either one."
+                    )
+                # Validate the mixing equation where it is found, so the reason
+                # names it rather than whatever incidental downstream equation
+                # trips next.
+                pattern = _mixing_axis_pattern(eqn, self.varshape, set(hits))
+                if isinstance(pattern, str):
+                    return pattern
+                self.last = pattern
+                outcome = [v for v in eqn.outvars if isinstance(v, Var)]
+            elif not _is_position_preserving(eqn, self.varshape):
+                return (
+                    f"equation '{eqn.primitive.name}' on the hidden path{where} is not "
+                    f"an elementwise position-preserving operation, so it may relabel or "
+                    f"couple positions in a way an axis-indexed pattern cannot express."
+                )
+            else:
+                outcome = [v for v in eqn.outvars if isinstance(v, Var)]
+            if isinstance(outcome, str):
+                return outcome
+            reachable.update(outcome)
+        return None
+
+    def _body(
+        self,
+        live: List[JaxprEqn],
+        needed: Set[Var],
+        seeds: Set[Var],
+        feedback: List[Tuple[Var, Var]],
+        once: bool,
+        loop: str,
+    ) -> Union[str, Set[Var]]:
+        """Walk the *live* equations of a loop body from *seeds*; the body
+        variables reached, or a reason string.
+
+        *feedback* pairs each carried output with the carried input it becomes
+        in the next iteration. A body that runs once (*once*) is walked as
+        straight-line code, sharing this walk's mixing count, as the unrolled
+        loop would be. Otherwise reachability is closed over the iterations (a
+        carried output reached in one iteration is a reached carried input in
+        the next), and a mixing equation reached is refused: it applies once
+        per iteration.
+        """
+        where = f" inside a '{loop}' body"
+        if once:
+            reached = set(seeds)
+            reason = self.run(live, reached, needed, where)
+            return reason if reason is not None else reached
+        while True:
+            reached = set(seeds)
+            reason = _Walk(self.varshape, loop).run(live, reached, needed, where)
+            if reason is not None:
+                return reason
+            fed = {inp for out, inp in feedback if isinstance(out, Var) and out in reached}
+            if fed <= seeds:
+                return reached
+            seeds = seeds | fed
+
+    def _scan(self, eqn: JaxprEqn, hits: Sequence[int], used: Set[Var]) -> Union[str, List[Var]]:
+        """The scan outputs on the hidden path, or a reason string."""
+        num_consts, num_carry = scan_num_consts_carry(eqn)
+        length = int(eqn.params['length'])
+        body = eqn.params['jaxpr'].jaxpr
+        n_in = num_consts + num_carry
+        carried = range(num_carry)
+        if length == 0:
+            # the body never runs: the carried outputs are the inits
+            return [eqn.outvars[c] for c in carried if num_consts + c in hits]
+        ys_used = [i for i in range(len(eqn.outvars) - num_carry)
+                   if eqn.outvars[num_carry + i] in used]
+        roots = {v for v in [body.outvars[c] for c in carried if eqn.outvars[c] in used]
+                 + [body.outvars[num_carry + i] for i in ys_used] if isinstance(v, Var)}
+        feedback = [(body.outvars[c], body.invars[num_consts + c]) for c in carried]
+        once = length == 1
+        live, needed = _live_eqns(body, roots if once else _closed_roots(body, roots, feedback))
+        if any(body.invars[j] in needed for j in hits if j >= n_in):
+            return (
+                "a 'scan' iterates over hidden-derived values as xs on the hidden "
+                "path: their leading axis counts iterations, not positions."
+            )
+        seeds = {body.invars[j] for j in hits if j < n_in}
+        reached = self._body(live, needed, seeds, feedback, once, 'scan')
+        if isinstance(reached, str):
+            return reached
+        if any(_in(body.outvars[num_carry + i], reached) for i in ys_used):
+            return (
+                "a 'scan' stacks hidden-derived values over its iterations as ys on "
+                "the hidden path: their leading axis counts iterations, not positions."
+            )
+        return [eqn.outvars[c] for c in carried if _in(body.outvars[c], reached)]
+
+    def _while(self, eqn: JaxprEqn, hits: Sequence[int], used: Set[Var]) -> Union[str, List[Var]]:
+        """The while outputs on the hidden path, or a reason string."""
+        cond_nconsts = eqn.params['cond_nconsts']
+        body_nconsts = eqn.params['body_nconsts']
+        body = eqn.params['body_jaxpr'].jaxpr
+        cond = eqn.params['cond_jaxpr'].jaxpr
+        num_carry = len(eqn.outvars)
+        carry_start = cond_nconsts + body_nconsts
+        trip = (
+            "the trip count of a 'while' reads the hidden state, so every position "
+            "may depend on every other through it."
+        )
+        if any(j < cond_nconsts for j in hits):
+            return trip
+        cond_reads = _read_vars(cond.eqns, cond.outvars)
+        cond_carry = [c for c in range(num_carry) if cond.invars[cond_nconsts + c] in cond_reads]
+        # the trip count is computed every iteration: what it reads is live
+        roots = {body.outvars[c] for c in range(num_carry)
+                 if (eqn.outvars[c] in used or c in cond_carry)
+                 and isinstance(body.outvars[c], Var)}
+        feedback = [(body.outvars[c], body.invars[body_nconsts + c]) for c in range(num_carry)]
+        live, needed = _live_eqns(body, _closed_roots(body, roots, feedback))
+        seeds = {body.invars[j - cond_nconsts] for j in hits}
+        reached = self._body(live, needed, seeds, feedback, False, 'while')
+        if isinstance(reached, str):
+            return reached
+        # a carry reached in any iteration, or at the start, reaches the cond
+        carry_reached = {c for c in range(num_carry)
+                         if body.invars[body_nconsts + c] in reached
+                         or _in(body.outvars[c], reached)
+                         or carry_start + c in hits}
+        if carry_reached & set(cond_carry):
+            return trip
+        # the loop may not run at all: a reached init is a reached output
+        return [eqn.outvars[c] for c in sorted(carry_reached)]
+
+
+def _in(atom: Union[Var, Literal], variables: Set[Var]) -> bool:
+    """Whether *atom* is one of *variables* (a literal never is)."""
+    return isinstance(atom, Var) and atom in variables
+
+
+def _closed_roots(body: Jaxpr, roots: Set[Var], feedback: List[Tuple[Var, Var]]) -> Set[Var]:
+    """The body outputs used in any iteration of a loop, given the *roots*
+    used after it: a carried input the body reads makes the carried output
+    feeding it used in the previous iteration."""
+    while True:
+        _, needed = _live_eqns(body, roots)
+        grown = {out for out, inp in feedback if inp in needed and isinstance(out, Var)}
+        if grown <= roots:
+            return roots
+        roots = roots | grown
 
 
 def _mixing_axis_pattern(

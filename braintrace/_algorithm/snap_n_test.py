@@ -1287,3 +1287,200 @@ class TestDiagonalRegression(unittest.TestCase):
             spec, lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'), xs, 3)
         g_snap = _grads(spec, _snap(3), xs, 3)
         assert_gradients_differ(g_diag, g_snap, min_rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# loops on the hidden path: a rolled scan gets the unrolled pattern (#210)
+# ---------------------------------------------------------------------------
+
+#: Every hidden-only scan rolled (the L11 default brainspike's ``Online`` uses
+#: is ``hidden_scan_unroll_limit=1``; ``0`` also rolls length-1 scans), and
+#: every ETP-relevant scan unrolled, since SnAp-n refuses a descended one.
+_ROLLED = braintrace.ControlFlowPolicy(scan_unroll_limit=64, hidden_scan_unroll_limit=0)
+_UNROLLED = braintrace.ControlFlowPolicy(scan_unroll_limit=64)
+_SUBSTEP_N = 6
+
+
+class _SubstepNeuron(brainstate.nn.Module):
+    """A two-state neuron integrated in ``k`` element-wise Euler substeps of
+    one ``lax.scan`` (the #201 shape). An input projection drives it and, with
+    ``ring``, a sparse ring recurrence (offsets 0 and 1) computed before the
+    scan, which the scan reads as a constant."""
+
+    def __init__(self, k, ring=False, n_in=N_IN, n=_SUBSTEP_N, seed=0):
+        super().__init__()
+        self.k, self.ring = k, ring
+        mask = np.eye(n) + np.roll(np.eye(n), 1, axis=1)  # q -> q, q + 1
+        self.csr = brainevent.CSR.fromdense(jnp.asarray(mask, dtype=brainstate.environ.dftype()))
+        nnz = int(mask.sum())
+        with brainstate.random.seed_context(seed):
+            self.win = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, n))
+            if ring:
+                self.w = brainstate.ParamState(0.6 * brainstate.random.randn(nnz))
+        self.V = brainstate.HiddenState(jnp.zeros(n))
+        self.a = brainstate.HiddenState(jnp.zeros(n))
+
+    def update(self, x):
+        drive = braintrace.matmul(x, self.win.value)
+        if self.ring:
+            drive = drive + braintrace.sparse_matmul(
+                jnp.tanh(self.V.value), self.w.value, sparse_mat=self.csr)
+        h = 1.0 / self.k
+
+        def substep(c, _):
+            V, a = c
+            return (V + h * (-V + jnp.tanh(2 * V) - a + drive), a + h * (0.5 * V - a)), None
+
+        (self.V.value, self.a.value), _ = jax.lax.scan(
+            substep, (self.V.value, self.a.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value)
+
+
+def _substep_spec(k, ring):
+    keys = (('win',), ('w',)) if ring else (('win',),)
+    return om.ModelSpec(factory=lambda: _SubstepNeuron(k, ring=ring), etp_param_keys=keys,
+                        plain_param_keys=())
+
+
+def _snap_at(n, policy):
+    return lambda m: braintrace.SnAp(m, n=n, vjp_method='multi-step', control_flow=policy)
+
+
+def _k_by_path(algo):
+    """``hidden path -> (K, conservative)`` of a compiled SnAp-n algorithm."""
+    out = {}
+    for g in algo.graph.hidden_groups:
+        k = 1 if g.snap is None else g.snap.num_neighbour
+        conservative = False if g.snap is None else g.snap.conservative
+        for p in g.hidden_paths:
+            out[p] = (k, conservative)
+    return out
+
+
+def _rolled_scans(algo):
+    """Top-level loops left rolled in the compiled transition."""
+    return sum(e.primitive.name in ('scan', 'while')
+               for e in algo.graph.module_info.jaxpr.eqns)
+
+
+def _zoo():
+    """Every oracle model whose constructor takes defaults, plus the substep
+    neuron at the SnAp-relevant shapes."""
+    import inspect
+    specs = {}
+    for name, fn in inspect.getmembers(om, inspect.isfunction):
+        if name.startswith('_') or fn.__module__ != om.__name__:
+            continue
+        sig = inspect.signature(fn)
+        if any(p.default is inspect.Parameter.empty for p in sig.parameters.values()):
+            continue
+        spec = fn()
+        if isinstance(spec, om.ModelSpec):
+            n_in = sig.parameters.get('n_in')
+            n_rec = sig.parameters.get('n_rec')
+            dims = [p.default for p in (n_in, n_rec) if p is not None] + [N_IN, 4, 5]
+            specs[name] = (spec, dims)
+    for k in (2, 4, 17):
+        for ring in (False, True):
+            specs[f'substep_k{k}_{"ring" if ring else "input"}'] = (_substep_spec(k, ring), [N_IN])
+    return specs
+
+
+def _compile_or_none(spec, dims, n, policy):
+    """The compiled algorithm, trying each candidate input width; ``None``
+    when SnAp-n does not compile on the model at any."""
+    import brainunit as u
+    for d in dims:
+        xs = spec.make_inputs(2, d, seed=0)
+        try:
+            with brainstate.environ.context(dt=0.1 * u.ms):  # the SNN layers read dt
+                return _compiled(spec, _snap_at(n, policy), xs)
+        except Exception:  # noqa: BLE001 -- a model SnAp-n refuses is skipped
+            continue
+    return None
+
+
+class TestRolledLoopsKeepThePattern:
+    """A rolled weight-free substep scan used to widen SnAp-n to all positions
+    (#210): the position analysis did not look inside it. It now walks the
+    body with the same per-equation rule, so the pattern is the unrolled one."""
+
+    def test_issue_210_substep_neuron_keeps_k_1_when_rolled(self):
+        # the #201 two-state neuron, 6 positions, element-wise substeps
+        for k, policy in [(4, _ROLLED), (17, braintrace.ControlFlowPolicy())]:
+            spec = _substep_spec(k, ring=False)
+            algo = _compiled(spec, _snap_at(2, policy), spec.make_inputs(2, N_IN))
+            assert _rolled_scans(algo) == 1
+            (g,) = algo.graph.hidden_groups
+            assert g.hidden_paths == [('V',), ('a',)]
+            assert g.snap.num_neighbour == 1 and not g.snap.conservative, g.snap.reason
+            kinds = [r.kind for r in algo.graph.diagnostics]
+            assert DiagnosticKind.SNAP_PATTERN_CONSERVATIVE not in kinds
+
+    def test_a_ring_before_a_rolled_scan_keeps_its_k_of_n(self):
+        for n in (2, 3, 4):
+            spec = _substep_spec(17, ring=True)
+            algo = _compiled(spec, _snap_at(n, braintrace.ControlFlowPolicy()),
+                             spec.make_inputs(2, N_IN))
+            assert _rolled_scans(algo) == 1
+            (g,) = algo.graph.hidden_groups
+            assert not g.snap.conservative, g.snap.reason
+            assert g.snap.num_neighbour == min(n, _SUBSTEP_N)
+
+    def test_rolled_k_equals_unrolled_k_on_every_model(self):
+        compared, with_loops = [], []
+        for name, (spec, dims) in _zoo().items():
+            for n in (2, 3):
+                rolled = _compile_or_none(spec, dims, n, _ROLLED)
+                unrolled = _compile_or_none(spec, dims, n, _UNROLLED)
+                if rolled is None or unrolled is None:
+                    assert rolled is None and unrolled is None, name
+                    continue
+                k_rolled, k_unrolled = _k_by_path(rolled), _k_by_path(unrolled)
+                assert set(k_rolled) == set(k_unrolled), name
+                for p in k_rolled:
+                    # soundness first: never smaller than the unrolled pattern
+                    assert k_rolled[p][0] >= k_unrolled[p][0], (name, n, p)
+                    assert k_rolled[p] == k_unrolled[p], (name, n, p, k_rolled[p], k_unrolled[p])
+                compared.append((name, n))
+                if _rolled_scans(rolled) > _rolled_scans(unrolled):
+                    with_loops.append((name, n))
+        assert len(compared) >= 40, compared
+        # the sweep is not vacuous: models where the rolled policy kept a loop
+        assert {name for name, _ in with_loops} >= {
+            'substep_k2_input', 'substep_k4_ring', 'substep_k17_ring'}, with_loops
+
+    def test_snap_gradients_rolled_equal_unrolled_f64(self):
+        with brainstate.environ.context(precision=64):
+            for ring, n in [(False, 2), (True, 2), (True, 3)]:
+                spec = _substep_spec(4, ring)
+                xs = spec.make_inputs(T, N_IN, seed=1)
+                g_rolled = _grads(spec, _snap_at(n, _ROLLED), xs, 3)
+                g_unrolled = _grads(spec, _snap_at(n, _UNROLLED), xs, 3)
+                assert set(g_rolled) == set(g_unrolled)
+                for key in g_rolled:
+                    a, b = np.asarray(g_rolled[key]), np.asarray(g_unrolled[key])
+                    np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12 * np.abs(b).max())
+                assert np.abs(np.asarray(g_unrolled[('win',)])).max() > 1e-4
+
+    def test_a_mixing_equation_inside_a_rolled_loop_stays_conservative(self):
+        # a weight-free scan applying a constant ring matrix every substep
+        ring = jnp.asarray(np.roll(np.eye(_SUBSTEP_N), 1, axis=1) + np.eye(_SUBSTEP_N))
+
+        class Net(_SubstepNeuron):
+            def update(self, x):
+                drive = braintrace.matmul(x, self.win.value)
+
+                def substep(V, _):
+                    return 0.5 * V + 0.1 * jnp.tanh(V @ ring) + drive, None
+
+                self.V.value, _ = jax.lax.scan(substep, self.V.value, None, length=17)
+                return self.V.value
+
+        spec = om.ModelSpec(factory=lambda: Net(17), etp_param_keys=(('win',),),
+                            plain_param_keys=())
+        algo = _compiled(spec, _snap_at(2, braintrace.ControlFlowPolicy()),
+                         spec.make_inputs(2, N_IN))
+        g = next(g for g in algo.graph.hidden_groups if ('V',) in g.hidden_paths)
+        assert g.snap.conservative
+        assert "inside a 'scan' body" in g.snap.reason, g.snap.reason

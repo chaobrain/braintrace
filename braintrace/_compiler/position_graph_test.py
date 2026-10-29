@@ -277,6 +277,12 @@ class TestConservativeFallbacks:
                 braintrace.sparse_matmul(h, data, sparse_mat=csr)), (6,), False, 'exact'),
             ('dense', lambda h: jnp.tanh(
                 braintrace.matmul(h, w_full)), (1, 4), False, 'exact'),
+            # loops on the hidden path (#210)
+            ('scan-elementwise', lambda h: _scan(_decay, h, 5), (6,), False, 'exact'),
+            ('scan-after-mixing', lambda h: _scan(_decay, jnp.tanh(
+                braintrace.sparse_matmul(h, data, sparse_mat=csr)), 3), (6,), False, 'exact'),
+            ('scan-mixing-inside', lambda h: _scan(lambda c: jnp.tanh(
+                braintrace.sparse_matmul(c, data, sparse_mat=csr)), h, 2), (6,), True, 'lossy'),
         ]
         for label, fn, varshape, conservative, tightness in cases:
             adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros(varshape)), varshape)
@@ -296,6 +302,167 @@ class TestConservativeFallbacks:
                     f'exact — the fixture no longer exercises the widening')
             elif tightness == 'exact':
                 np.testing.assert_array_equal(got, true_dep, err_msg=label)
+
+
+# -----------------------------------------------------------------------------
+# loops on the hidden path (issue #210)
+# -----------------------------------------------------------------------------
+
+_RING = _sparse_pattern(6)
+_RING_CSR = brainevent.CSR.fromdense(jnp.asarray(_RING))
+_RING_DATA = jnp.asarray(_RING_CSR.data)
+
+
+def _mix(h):
+    """The registered mixing equation of the loop fixtures: a sparse ring."""
+    return braintrace.sparse_matmul(h, _RING_DATA, sparse_mat=_RING_CSR)
+
+
+def _decay(c):
+    return 0.9 * c + 0.1 * jnp.tanh(c)
+
+
+def _scan(body, carry, k):
+    return jax.lax.scan(lambda c, _: (body(c), None), carry, None, length=k)[0]
+
+
+def _times(body, carry, k):
+    for _ in range(k):  # the same loop, unrolled
+        carry = body(carry)
+    return carry
+
+
+def _while(body, carry, k):
+    return jax.lax.while_loop(
+        lambda s: s[0] < k, lambda s: (s[0] + 1, body(s[1])), (0, carry))[1]
+
+
+def _two_state(loop, k):
+    """``(h, a)`` carried, ``a`` starting at zero: ``h`` reaches ``a`` in the
+    first iteration and ``a`` reaches ``h`` back in the second."""
+    def fn(h):
+        out, _ = loop(lambda c: (c[0] + 0.1 * c[1], 0.5 * c[0]), (h, jnp.zeros_like(h)), k)
+        return out
+    return fn
+
+
+# label -> (rolled fn, unrolled fn) of the hidden state, varshape (6,)
+_LOOP_CASES = {
+    'elementwise-scan': (lambda h: _scan(_decay, h, 5), lambda h: _times(_decay, h, 5)),
+    'mixing-then-scan': (lambda h: _scan(_decay, _mix(h), 5), lambda h: _times(_decay, _mix(h), 5)),
+    'scan-then-mixing': (lambda h: _mix(_scan(_decay, h, 5)), lambda h: _mix(_times(_decay, h, 5))),
+    'constant-drive-scan': (
+        lambda h: (lambda I: _scan(lambda c: c + 0.1 * (I - c), h, 5))(_mix(h)),
+        lambda h: (lambda I: _times(lambda c: c + 0.1 * (I - c), h, 5))(_mix(h))),
+    'carry-feedback': (_two_state(_scan, 4), _two_state(_times, 4)),
+    'mixing-inside-scan': (lambda h: _scan(_mix, h, 3), lambda h: _times(_mix, h, 3)),
+    'mixing-inside-length-1-scan': (lambda h: _scan(_mix, h, 1), lambda h: _times(_mix, h, 1)),
+    'elementwise-while': (lambda h: _while(_decay, h, 5), lambda h: _times(_decay, h, 5)),
+    'mixing-then-while': (lambda h: _while(_decay, _mix(h), 5), lambda h: _times(_decay, _mix(h), 5)),
+    'nested-loops': (
+        lambda h: _scan(lambda c: _while(_decay, c, 2), h, 3),
+        lambda h: _times(lambda c: _times(_decay, c, 2), h, 3)),
+    'literal-carry-output': (
+        # a carried output that is a literal (unhashable in a jaxpr)
+        lambda h: jax.lax.scan(lambda c, _: ((_decay(c[0]), 1.0), None), (h, 0.0), None,
+                               length=3)[0][0],
+        lambda h: _times(_decay, h, 3)),
+    'unused-reordering-ys': (
+        # the body also stacks a reordering of the carry, unused after the
+        # loop: off the hidden path, as in the unrolled transition (which the
+        # compiler builds without the dead code)
+        lambda h: jax.lax.scan(lambda c, _: (_decay(c), jnp.sort(c)), h, None, length=5)[0],
+        lambda h: _times(_decay, h, 5)),
+}
+
+
+class TestLoopsOnTheHiddenPath:
+    """A ``scan`` or ``while`` on the hidden path is followed into its body,
+    which the same per-equation rule classifies, so a rolled loop gets the
+    pattern of the same loop unrolled (issue #210)."""
+
+    @pytest.mark.parametrize('label', list(_LOOP_CASES))
+    def test_a_rolled_loop_gets_the_unrolled_pattern(self, label):
+        rolled_fn, unrolled_fn = _LOOP_CASES[label]
+        h = jnp.zeros((6,))
+        rolled = analyze_position_adjacency(_jaxpr(rolled_fn, h), (6,))
+        unrolled = analyze_position_adjacency(_jaxpr(unrolled_fn, h), (6,))
+        assert rolled.conservative == unrolled.conservative, (rolled.reason, unrolled.reason)
+        np.testing.assert_array_equal(flat_adjacency(rolled.axes), flat_adjacency(unrolled.axes))
+        loops = [e.primitive.name for e in _jaxpr(rolled_fn, h).eqns
+                 if e.primitive.name in ('scan', 'while')]
+        assert loops, 'the rolled fixture holds no loop'
+
+    @pytest.mark.parametrize('label, pattern', [
+        ('elementwise-scan', 'identity'), ('carry-feedback', 'identity'),
+        ('elementwise-while', 'identity'), ('nested-loops', 'identity'),
+        ('mixing-then-scan', 'ring'), ('constant-drive-scan', 'ring'),
+        ('scan-then-mixing', 'ring'), ('mixing-then-while', 'ring'),
+        ('mixing-inside-length-1-scan', 'ring'), ('unused-reordering-ys', 'identity'),
+    ])
+    def test_a_position_diagonal_loop_is_seen_through(self, label, pattern):
+        adj = analyze_position_adjacency(_jaxpr(_LOOP_CASES[label][0], jnp.zeros((6,))), (6,))
+        assert not adj.conservative, adj.reason
+        (axis,) = adj.axes
+        expect = _identity_pattern(6) if pattern == 'identity' else (_RING.T > 0)
+        np.testing.assert_array_equal(axis, expect)
+
+    def _assert_conservative(self, fn, *needles, varshape=(6,)):
+        adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros(varshape)), varshape)
+        assert adj.conservative
+        for needle in needles:
+            assert needle in adj.reason, adj.reason
+        for axis, d in zip(adj.axes, varshape):
+            np.testing.assert_array_equal(axis, _full_pattern(d))
+
+    def test_mixing_inside_a_scan_that_runs_more_than_once(self):
+        self._assert_conservative(
+            _LOOP_CASES['mixing-inside-scan'][0],
+            "'etp_sp_mv'", "inside a 'scan' body that runs more than once", 'power')
+
+    def test_mixing_inside_a_while(self):
+        self._assert_conservative(
+            lambda h: _while(_mix, h, 3), "'etp_sp_mv'", "inside a 'while' body", 'power')
+
+    def test_a_non_position_preserving_equation_inside_a_body(self):
+        self._assert_conservative(
+            lambda h: _scan(lambda c: c + jnp.sum(c), h, 3), "'reduce_sum'", "inside a 'scan' body")
+
+    def test_hidden_values_scanned_as_xs(self):
+        # scanning over the hidden state walks its positions as iterations
+        self._assert_conservative(
+            lambda h: h * jax.lax.scan(lambda c, x: (c + x, None), 0.0, h)[0], 'xs')
+
+    def test_hidden_values_stacked_as_ys_on_the_hidden_path(self):
+        self._assert_conservative(
+            lambda h: jax.lax.scan(lambda c, _: (_decay(c), c), h, None, length=3)[1][-1], 'ys')
+
+    def test_a_while_trip_count_reading_the_hidden_carry(self):
+        self._assert_conservative(
+            lambda h: jax.lax.while_loop(lambda c: jnp.max(c) < 1.0, lambda c: c * 1.1 + 0.1, h),
+            'trip count')
+
+    def test_a_while_trip_count_reading_a_hidden_constant(self):
+        self._assert_conservative(
+            lambda h: h + jax.lax.while_loop(lambda c: c < jnp.sum(h), lambda c: c + 1.0, 0.0),
+            'trip count')
+
+    def test_an_unused_hidden_xs_is_off_the_hidden_path(self):
+        # the body ignores its xs, as the unrolled transition would drop them
+        fn = lambda h: jax.lax.scan(lambda c, x: (_decay(c), None), h, h)[0]
+        adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros((6,))), (6,))
+        assert not adj.conservative, adj.reason
+        np.testing.assert_array_equal(adj.axes[0], _identity_pattern(6))
+
+    def test_a_zero_length_scan_passes_its_carry_through(self):
+        fn = lambda h: _mix(_scan(_mix, h, 0))
+        adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros((6,))), (6,))
+        assert not adj.conservative, adj.reason
+        np.testing.assert_array_equal(adj.axes[0], _RING.T > 0)
+
+    def test_a_mixing_equation_inside_and_outside_a_length_1_scan(self):
+        # the unrolled loop holds two mixing equations, so does the rolled one
+        self._assert_conservative(lambda h: _mix(_scan(_mix, h, 1)), 'more than one')
 
 
 # -----------------------------------------------------------------------------
