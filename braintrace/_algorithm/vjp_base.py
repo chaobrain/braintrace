@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Callable, Dict, Tuple, Any, List, Optional, Sequence
 
 import brainstate
@@ -50,6 +51,9 @@ from ._common import FixedRandomFeedback, _update_dict
 from .axes import ETraceConfig
 from .base import ETraceAlgorithm
 from .vjp_graph_executor import ETraceVjpGraphExecutor
+
+# guards the once-per-weight online-credit records (#199) when threads trace at once
+_ONLINE_CREDIT_LOCK = threading.RLock()
 
 __all__ = [
     'ETraceVjpAlgorithm',  # the base class for the eligibility trace algorithm with the VJP gradient computation
@@ -606,23 +610,27 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         re-checks it with the outputs and states the loss does read.
         """
         old = self._online_credit_model()
-        if old is None:
-            self._online_credit = None
-            return
-        if (self._online_credit is not None
-                and self._online_credit.graph.module_info is self.graph.module_info):
-            return  # this graph is reported already
-        self._online_credit = OnlineCreditGraph(self.graph)
-        self._online_credit_reported = set()
-        self._add_records([
-            self._credit_record(f, DiagnosticLevel.INFO, 'compile')
-            for f in self._online_credit.find(old)])
+        with _ONLINE_CREDIT_LOCK:
+            if old is None:
+                self._online_credit = None
+                return
+            if (self._online_credit is not None
+                    and self._online_credit.graph.module_info is self.graph.module_info):
+                return  # this graph is reported already
+            self._online_credit = OnlineCreditGraph(self.graph)
+            self._online_credit_reported = set()
+            self._add_records([
+                self._credit_record(f, DiagnosticLevel.INFO, 'compile')
+                for f in self._online_credit.find(old)])
 
     def _check_online_credit(self, args: Any, grads: Any) -> None:
-        """Warn once per weight whose online gradient is zero for this loss.
+        """Record once per weight whose online gradient is zero for this loss.
 
         Runs in the backward rule, where the cotangents show which step outputs
-        and new state values the loss reads: a symbolic zero is not read.
+        and new state values the loss reads: a symbolic zero is not read. The
+        record is a WARNING, except under a multi-step VJP: given one step, it
+        is zero within this call only, and a later call of two or more steps
+        credits the path, so it is an INFO record.
         """
         credit = self._online_credit
         old = self._online_credit_model()
@@ -652,13 +660,20 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 if path not in credit.state_outvars:
                     return  # an unknown state is read: do not guess
                 used.extend(credit.state_outvars[path])
-        records = []
-        for finding in credit.find(old, used, partial=False):
-            if finding.weight_path in self._online_credit_reported:
-                continue
-            self._online_credit_reported.add(finding.weight_path)
-            records.append(self._credit_record(finding, DiagnosticLevel.WARNING, 'gradient'))
-        self._add_records(records)
+        level = DiagnosticLevel.INFO if old else DiagnosticLevel.WARNING
+        findings = credit.find(old, used, partial=False)
+        with _ONLINE_CREDIT_LOCK:  # once per weight, also when threads trace at once
+            if credit is not self._online_credit:
+                return  # compiled again meanwhile
+            records = []
+            try:
+                for finding in findings:
+                    if finding.weight_path in self._online_credit_reported:
+                        continue
+                    records.append(self._credit_record(finding, level, 'gradient'))
+                    self._online_credit_reported.add(finding.weight_path)
+            finally:
+                self._add_records(records)
 
     def _update_fn_fwd_primal(self, *primals: Any) -> Any:
         # symbolic zeros wrap every primal leaf; the forward rule needs the values

@@ -178,11 +178,14 @@ class DiagnosticKind(str, Enum):
     # exactly zero while BPTT's is not. At compile time the record is INFO and
     # assumes the loss reads only the model outputs; the first gradient
     # computation re-checks it against the outputs and states the loss reads
-    # and emits a WARNING if it holds. Context: ``through`` (the states, a tuple
-    # of paths), ``stage`` (``'compile'`` or ``'gradient'``).
-    # ``ONLINE_GRADIENT_PARTIAL``: the online gradient of a weight is non-zero
-    # but omits the credit through the old value of a non-hidden state, which
-    # can bias it strongly (INFO). Context: ``through``.
+    # and emits a WARNING if it holds (INFO under a multi-step VJP given one
+    # step: zero within that call only). Context: ``through`` (the states, a
+    # tuple of paths), ``stage`` (``'compile'`` or ``'gradient'``).
+    # ``ONLINE_GRADIENT_PARTIAL``: the weight also has a credited path to the
+    # loss, so its online gradient is not known to be zero, but the gradient
+    # omits the credit that the weight's influence carries through the old
+    # value of a non-hidden state, which can bias it (INFO, compile time).
+    # Context: ``through``, ``stage``.
     ONLINE_GRADIENT_ZERO = 'online_gradient_zero'
     ONLINE_GRADIENT_PARTIAL = 'online_gradient_partial'
 

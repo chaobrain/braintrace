@@ -15,12 +15,15 @@
 
 """Tests of the online-credit check (#199).
 
-The acceptance invariant: for the algorithm in use, the ``ONLINE_GRADIENT_ZERO``
-warning fires for a weight iff its online gradient is exactly zero while its
-BPTT gradient is not. It is checked numerically over model families that
-cover the ways credit can reach the loss, under six online algorithms.
+The acceptance invariant: for the algorithm in use, the gradient-time
+``ONLINE_GRADIENT_ZERO`` record is made for a weight iff its online gradient is
+exactly zero while its BPTT gradient is not. It is a WARNING, except under a
+multi-step VJP given one step per call, where it is INFO (zero within that
+call). It is checked numerically over model families that cover the ways
+credit can reach the loss, or fail to, under six online algorithms.
 """
 
+import threading
 import warnings
 
 import brainstate
@@ -44,12 +47,13 @@ def _w(key, shape):
     return brainstate.ParamState(0.8 * jax.random.normal(jax.random.PRNGKey(key), shape))
 
 
-def _delay_net(kind='short', direct=False):
+def _delay_net(kind='short', direct=False, write=None, dtype=None):
     """x -> h1 -> line -> h2 -> out, the line one step long (the #199 model).
 
     ``kind`` holds the line in a ``'short'`` (``ShortTermState``) or a
     ``'hidden'`` (``HiddenState``); ``direct`` also adds layer 1's output to
-    the model output in the same step.
+    the model output in the same step; ``write`` maps layer 1's output to the
+    value written into the line, of dtype ``dtype``.
     """
 
     class Net(brainstate.nn.Module):
@@ -60,13 +64,13 @@ def _delay_net(kind='short', direct=False):
             self.h1 = brainstate.HiddenState(jnp.zeros((1, N)))
             self.h2 = brainstate.HiddenState(jnp.zeros((1, N)))
             cls = brainstate.ShortTermState if kind == 'short' else brainstate.HiddenState
-            self.ring = cls(jnp.zeros((1, N)))
+            self.ring = cls(jnp.zeros((1, N), dtype=dtype))
 
         def update(self, x):
             self.h1.value = 0.9 * self.h1.value + braintrace.matmul(x, self.w1.value)
             y1 = jnp.tanh(self.h1.value)
-            inp = self.ring.value  # written one step ago
-            self.ring.value = y1
+            inp = self.ring.value.astype(y1.dtype)  # written one step ago
+            self.ring.value = y1 if write is None else write(y1)
             self.h2.value = 0.9 * self.h2.value + braintrace.matmul(inp, self.w2.value)
             out = jnp.tanh(self.h2.value)
             return out + 0.1 * y1 if direct else out
@@ -217,6 +221,91 @@ def _ref_net():
     return Net
 
 
+def _readout_net(etp=True, line=False):
+    """The common recurrent cell that reads out the state before updating it.
+
+    ``out = W_out tanh(h); h = 0.9 h + x W_in + tanh(h) W_rec``: the output
+    sees only the old hidden value. ``etp`` takes the readout through an ETP
+    primitive; ``line`` also copies the new value into a ``ShortTermState``
+    that the next step adds to the readout.
+    """
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w_in = _w(0, (3, N))
+            self.w_rec = _w(2, (N, N))
+            self.w_out = _w(1, (N, 2))
+            self.h = brainstate.HiddenState(jnp.zeros((1, N)))
+            self.ring = brainstate.ShortTermState(jnp.zeros((1, N)))
+
+        def update(self, x):
+            r = jnp.tanh(self.h.value)
+            if line:
+                r = r + self.ring.value
+            out = braintrace.matmul(r, self.w_out.value) if etp else r @ self.w_out.value
+            self.h.value = (0.9 * self.h.value + braintrace.matmul(x, self.w_in.value)
+                            + braintrace.matmul(jnp.tanh(self.h.value), self.w_rec.value))
+            self.ring.value = jnp.tanh(self.h.value)
+            return out
+
+    return Net
+
+
+def _old_read_net():
+    """The output is the old value of the weight's own hidden state."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w1 = _w(0, (3, N))
+            self.h1 = brainstate.HiddenState(jnp.zeros((1, N)))
+
+        def update(self, x):
+            old = self.h1.value
+            self.h1.value = 0.9 * self.h1.value + braintrace.matmul(x, self.w1.value)
+            return jnp.tanh(old)
+
+    return Net
+
+
+def _refractory_net():
+    """A LIF-like layer read out in the same step, with an int32 refractory counter."""
+
+    class Net(brainstate.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.w1 = _w(0, (3, N))
+            self.w_out = _w(1, (N, 2))
+            self.v = brainstate.HiddenState(jnp.zeros((1, N)))
+            self.ref = brainstate.ShortTermState(jnp.zeros((1, N), jnp.int32))
+
+        def update(self, x):
+            active = self.ref.value == 0
+            v = jnp.where(active, 0.9 * self.v.value + braintrace.matmul(x, self.w1.value), self.v.value)
+            self.ref.value = jnp.where(v > 0.5, 2, jnp.maximum(self.ref.value - 1, 0)).astype(jnp.int32)
+            self.v.value = v
+            return braintrace.matmul(jax.nn.sigmoid(4 * (v - 0.5)), self.w_out.value)
+
+    return Net
+
+
+def _logged_line_net():
+    """The hidden-state line, with its old value also copied into a log."""
+    base = _delay_net('hidden')
+
+    class Net(base):
+        def __init__(self):
+            super().__init__()
+            self.log = brainstate.ShortTermState(jnp.zeros((1, N)))
+
+        def update(self, x):
+            self.log.value = jnp.tanh(self.ring.value)
+            return super().update(x)
+
+    return Net
+
+
 def _sse(model, out):
     return (out ** 2).sum()
 
@@ -236,6 +325,22 @@ _FAMILIES = {
     'loss-reads-state': (_rate_net(), _sse_and_rate),
     'direct-and-line': (_delay_net('short', direct=True), _sse),
     'logged-only': (_logged_net(), _sse),
+    # the readout reads the old hidden value: the output bypass credits it
+    'readout-then-update': (_readout_net(), _sse),
+    'readout-then-update-plain': (_readout_net(etp=False), _sse),
+    'readout-then-update-line': (_readout_net(line=True), _sse),
+    'old-read': (_old_read_net(), _sse),
+    # the line carries no derivative: BPTT is zero too
+    'line-stop-gradient': (_delay_net('short', write=jax.lax.stop_gradient), _sse),
+    'line-bool': (_delay_net('short', write=lambda y: y > 0.0, dtype=jnp.bool_), _sse),
+    'line-int': (_delay_net('short', write=lambda y: jnp.round(4 * y).astype(jnp.int32),
+                            dtype=jnp.int32), _sse),
+    'line-round': (_delay_net('short', write=jnp.round), _sse),  # inside a jit call
+    'line-remat-stop': (_delay_net('short', write=jax.checkpoint(
+        lambda y: jnp.sin(jax.lax.stop_gradient(y)))), _sse),
+    'hidden-line-logged': (_logged_line_net(), _sse),
+    # an integer state beside a same-step readout
+    'refractory': (_refractory_net(), _sse),
 }
 if hasattr(jax, 'new_ref'):
     _FAMILIES['new-ref'] = (_ref_net(), _sse)
@@ -308,12 +413,18 @@ def test_warning_iff_online_gradient_is_zero_and_bptt_is_not(family, algorithm):
     with brainstate.environ.context(precision=64):
         online, algo, caught = _online(make, loss, factory, multi, xs)
         bptt = _bptt(make, loss, xs)
-    warned = {r.weight_path for r in _records(algo, stage='gradient')}
+    flagged = {r.weight_path for r in _records(algo, stage='gradient')}
     for r in _records(algo, stage='gradient'):
-        assert r.level is DiagnosticLevel.WARNING
-        assert any(r.message == str(w.message) for w in caught)
+        if multi:  # zero within each call of one step: an INFO record, no warning
+            assert r.level is DiagnosticLevel.INFO
+            assert r.message.startswith('Within this call of one step')
+        else:
+            assert r.level is DiagnosticLevel.WARNING
+            assert any(r.message == str(w.message) for w in caught)
+    if multi:
+        assert not any('online gradient' in str(w.message) for w in caught)
     expected = {p for p in bptt if _max(online[p]) == 0.0 and _max(bptt[p]) > 0.0}
-    assert warned == expected, {p: (_max(online[p]), _max(bptt[p])) for p in bptt}
+    assert flagged == expected, {p: (_max(online[p]), _max(bptt[p])) for p in bptt}
 
 
 def test_the_invariant_is_not_vacuous():
@@ -406,9 +517,28 @@ class TestRecords:
         assert _records(algo) == []
         (rec,) = _records(algo, DiagnosticKind.ONLINE_GRADIENT_PARTIAL)
         assert rec.level is DiagnosticLevel.INFO
-        assert rec.weight_path == ('w1',) and rec.context['through'] == (('ring',),)
-        assert 'cosine -0.92' in rec.message
+        assert rec.weight_path == ('w1',) and rec.context == {'through': (('ring',),), 'stage': 'compile'}
+        assert 'can bias the gradient' in rec.message
+        # it states only what the analysis knows: no number, and no claim that
+        # the gradient is non-zero (a ring written first, #216, has a zero one)
+        assert 'cosine' not in rec.message and 'non-zero' not in rec.message
         assert not any('online gradient' in str(w.message) for w in caught)
+
+    def test_partial_record_follows_the_weight_itself(self):
+        # a weight that writes no buffer gets no partial record, even when its
+        # (coupled) hidden group does
+        algo, _ = _compiled(_ring_net(1, order='write_first'), 'ostl')
+        partial = [r.weight_path for r in _records(algo, DiagnosticKind.ONLINE_GRADIENT_PARTIAL)]
+        assert ('w2',) not in partial
+        # an integer state carries no derivative
+        algo, _ = _compiled(_refractory_net())
+        assert _records(algo, DiagnosticKind.ONLINE_GRADIENT_PARTIAL) == []
+        # the bypass credits the old value; the line's credit is still missed
+        algo, _ = _compiled(_readout_net(line=True))
+        assert _records(algo) == []
+        partial = {r.weight_path: r.context['through']
+                   for r in _records(algo, DiagnosticKind.ONLINE_GRADIENT_PARTIAL)}
+        assert partial == {('w_in',): (('ring',),), ('w_rec',): (('ring',),)}
 
     def test_gradient_warning_is_emitted_once_per_weight(self):
         model = _delay_net('short')()
@@ -437,6 +567,62 @@ class TestRecords:
                 lambda xs: (algo(braintrace.MultiStepData(xs)) ** 2).sum(), params)(_xs()[:4])
         assert not any('online gradient' in str(w.message) for w in caught)
         assert _max(g[('w1',)]) > 0.0
+
+    @pytest.mark.parametrize('chunks', [(3, 3, 1), (1, 3, 3)])
+    def test_a_one_step_call_of_a_multi_step_vjp_is_info(self, chunks):
+        # a sequence that ends, or starts, with a call of one step: that call's
+        # gradient is zero, the run's is not, so the record is INFO
+        model = _delay_net('short')()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        algo = braintrace.D_RTRL(model, vjp_method='multi-step')
+        algo.compile_graph(jnp.zeros((1, 3)))
+        algo.init_etrace_state()
+        params = model.states(brainstate.ParamState)
+        xs = jax.random.uniform(jax.random.PRNGKey(7), (sum(chunks), 1, 3))
+        total, start = 0.0, 0
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            for n in chunks:  # one gradient per chunk, as a training loop would
+                g = brainstate.transform.grad(
+                    lambda s: (algo(braintrace.MultiStepData(s)) ** 2).sum(), params)(xs[start:start + n])
+                total, start = total + _max(g[('w1',)]), start + n
+        assert not any('online gradient' in str(w.message) for w in caught)
+        (rec,) = _records(algo, stage='gradient')
+        assert rec.level is DiagnosticLevel.INFO
+        assert rec.message.startswith("Within this call of one step, the online gradient of weight ('w1',)")
+        assert total > 0.0
+
+    def test_records_are_made_once_when_threads_trace_at_once(self):
+        algo, _ = _compiled(_delay_net('short'))
+        x, ct = jnp.zeros((1, 3)), (jnp.ones((1, N)), {}, {}, None)
+        start = threading.Barrier(8)
+
+        def check():
+            start.wait()
+            algo._check_online_credit((x,), ct)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            threads = [threading.Thread(target=check) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert len(_records(algo, stage='gradient')) == 1
+        assert sum('online gradient' in str(w.message) for w in caught) == 1
+
+    def test_a_check_racing_a_recompile_records_nothing(self):
+        algo, _ = _compiled(_delay_net('short'))
+        credit = algo._online_credit
+        find = credit.find
+
+        def find_while_recompiling(*args, **kwargs):
+            algo._online_credit = OnlineCreditGraph(algo.graph)  # compiled again meanwhile
+            return find(*args, **kwargs)
+
+        credit.find = find_while_recompiling
+        algo._check_online_credit((jnp.zeros((1, 3)),), (jnp.ones((1, N)), {}, {}, None))
+        assert _records(algo, stage='gradient') == []
 
     def test_other_learning_signals_are_not_checked(self):
         model = _delay_net('short')()
@@ -568,6 +754,46 @@ class TestAnalysis:
         credit = _graph(Net)
         assert ('w1',) not in credit.weights
         assert credit.find(False) == []
+
+    def test_the_output_bypass_credits_old_hidden_values(self):
+        # a single-step VJP credits an old hidden value that reaches the output
+        # without crossing a new one (#185); without the bypass it would not
+        assert _graph(_old_read_net()).find(False) == []
+        assert _graph(_readout_net()).find(False) == []
+        model = _old_read_net()()
+        brainstate.nn.init_all_states(model, batch_size=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            graph = braintrace.compile_etrace_graph(model, jnp.zeros((1, 3)), include_output_bypass=False)
+        (finding,) = OnlineCreditGraph(graph).find(False)
+        assert finding.weight_path == ('w1',) and finding.zero
+        assert finding.through == (('h1',),)
+
+    @pytest.mark.parametrize('write', [
+        jax.lax.stop_gradient,
+        jnp.round,  # a zero derivative (a jit call, inlined by the compiler)
+        jax.jit(lambda y: jnp.sin(jax.lax.stop_gradient(y))),
+        jax.checkpoint(lambda y: jnp.sin(jax.lax.stop_gradient(y))),  # a cut inside a call
+        jax.checkpoint(lambda y: jnp.floor(y) + jax.lax.stop_gradient(jnp.sin(y))),
+    ])
+    def test_sweeps_stop_where_no_derivative_flows(self, write):
+        assert _graph(_delay_net('short', write=write)).find(False) == []
+
+    @pytest.mark.parametrize('write', [
+        jax.checkpoint(lambda y: (jnp.sin(y), y)[0]),
+        jax.checkpoint(lambda y: jnp.sin(y) + jax.lax.stop_gradient(y)),  # one path is cut
+    ])
+    def test_calls_are_followed(self, write):
+        credit = _graph(_delay_net('short', write=write))
+        assert [(f.weight_path, f.through) for f in credit.find(False)] == [(('w1',), (('ring',),))]
+
+    def test_the_bypass_ends_at_new_hidden_values(self):
+        # the line's old value reaches a log without crossing a new hidden value,
+        # so it is a bypass path; but it reaches the outputs only through h2's
+        # new value, so a single-step VJP still gives w1 no credit
+        credit = _graph(_logged_line_net())
+        assert ('ring',) in credit.bypass_hidden
+        assert [f.weight_path for f in credit.find(False)] == [('w1',)]
 
     @pytest.mark.skipif(not hasattr(jax, 'new_ref'), reason='jax without references')
     def test_a_reference_carries_the_value(self):

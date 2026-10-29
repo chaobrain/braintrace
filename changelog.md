@@ -15,12 +15,17 @@
   assuming the loss reads only the model outputs). At the first gradient
   computation it re-checks the record against the outputs and states the loss
   reads, and warns if the zero holds; it knows these from symbolic-zero
-  cotangents. The record names the weight and the states (`through`), and lists
-  only fixes that give the algorithm in use a non-zero gradient. A weight that
-  also reaches the loss within the step gets `ONLINE_GRADIENT_PARTIAL` (INFO):
-  its gradient omits that credit and can be strongly biased. The analysis is
-  linear in the step's equations. `docs/apis/concepts.rst` explains the credit
-  model. Known gap: a ring written and then read back in the same step is not
+  cotangents. Under a multi-step VJP given one step, that record is INFO (zero
+  within that call only). The record names the weight and the states
+  (`through`), and lists only fixes that give the algorithm in use a non-zero
+  gradient. A single-step algorithm's credit of an old hidden value along the
+  output bypass (a readout taken before the update) counts; `stop_gradient`,
+  zero-derivative primitives and integer or boolean values carry no credit, and
+  `jit`/`remat` calls are followed. A weight whose own influence also reaches
+  the loss along a credited path gets `ONLINE_GRADIENT_PARTIAL` (INFO): its
+  gradient omits the line's credit, which can bias it. The analysis is linear
+  in the step's equations. `docs/apis/concepts.rst` explains the credit model.
+  Known gap: a ring written and then read back in the same step is not
   detected (#216).
 - **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
   hidden-to-hidden transition (#213).** In the default ("without recurrence")

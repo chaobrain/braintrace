@@ -88,12 +88,19 @@ Delay Lines and Other Non-Hidden State
 An online algorithm credits a weight in two ways. The eligibility trace of each
 hidden group the weight feeds carries its influence across steps *within that
 group*. The learning signal then reads, in the same step, how the loss depends
-on the group's new hidden values. A multi-step VJP (``vjp_method='multi-step'``)
-given one step per call also reads the group's old values. Nothing else crosses
-a step. A value kept in any other state, such as a delay line or ring buffer
-held in a ``brainstate.ShortTermState``, is a given input to the next step. For
-a single-step algorithm, a hidden state of *another* group that only a later
-step reads is too.
+on the group's hidden values:
+
+- on the new values, under every algorithm;
+- on the old values along a path to the outputs that crosses no new hidden
+  value, under a single-step algorithm (the output bypass: a readout taken
+  before the state is updated is credited exactly);
+- on the old values along every path, under a multi-step VJP
+  (``vjp_method='multi-step'``) given one step per call.
+
+Nothing else crosses a step. A value kept in any other state, such as a delay
+line or ring buffer held in a ``brainstate.ShortTermState``, is a given input to
+the next step. For a single-step algorithm, a hidden state of *another* group
+that only a later step reads is too.
 
 So a weight whose influence reaches the loss only through the old value of such
 a state has an online gradient of exactly zero, while its BPTT gradient is not
@@ -120,13 +127,24 @@ lists the fixes that work for the algorithm in use:
 
 Given ``MultiStepData`` of two or more steps per call, a multi-step VJP credits
 the line within each call and drops it across calls. The gradient is then not
-zero, and the gradient-time check skips such calls.
+zero, and the gradient-time check skips such calls. A call of one step (the
+remainder of a sequence, say) has a zero gradient, but the run's need not, so
+under a multi-step VJP the gradient-time record is INFO ("zero within this
+call") and emits no warning.
 
-When the weight also reaches the loss within the step, its online gradient is
-not zero but omits the credit through the line, and it can be strongly biased.
-On a two-layer net with a one-step line plus a same-step readout of layer 1, it
-pointed away from BPTT's gradient (cosine -0.92). This is an INFO record,
-``DiagnosticKind.ONLINE_GRADIENT_PARTIAL``, which emits no warning.
+When the weight's own influence also reaches the loss along a credited path, its
+online gradient is not known to be zero but omits the credit through the line,
+which can bias it, even reverse its direction. This is an INFO record,
+``DiagnosticKind.ONLINE_GRADIENT_PARTIAL``, made at compile time, which emits no
+warning.
+
+The check is structural. No derivative flows through ``stop_gradient``, through
+primitives whose derivative is zero (``round``, ``floor``, ``ceil``, ``sign``)
+or through integer and boolean values, and calls (``jit``, ``remat``) are
+followed into their bodies; any other equation is assumed to pass a derivative
+from each input to each output. A derivative that vanishes only for the values
+taken (``jnp.heaviside``, a ReLU that is never active) is not told apart, so
+such a weight can be reported although its BPTT gradient is zero too.
 
 Not checked: ``learning_signal='random_feedback'`` and ``'modulatory'``, and
 random-projection traces (``UORO``), which credit weights differently. Not
@@ -134,7 +152,6 @@ detected (#216): a ring that is written and then read back in the same step,
 such as ``brainstate.nn.Delay`` used as ``update(y)`` and then
 ``retrieve_at_step(d)``. The analysis treats the buffer as one array, so the
 old slot it reads looks like this step's write.
-
 
 Input Data
 ----------
