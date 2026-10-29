@@ -365,22 +365,22 @@ def _outer_relation_consts(
     minfo: 'ModuleInfo',
     num_consts: int,
     producers: Dict[Var, JaxprEqn],
-) -> Dict[int, Tuple[Var, List[JaxprEqn]]]:
+) -> Dict[int, Tuple[Var, Var, List[JaxprEqn]]]:
     """Scan const positions computed from the output ``y`` of an outer
-    relation alone: position -> ``(y, eqns from y to the const)``.
+    relation alone: position -> ``(const, y, eqns from y to the const)``.
 
     A value passed in more than one operand position is left out: the
     compiler then reports the relation (a lifted relation has one constant).
     """
     operands = [v for v in eqn.invars if isinstance(v, Var)]
-    found: Dict[int, Tuple[Var, List[JaxprEqn]]] = {}
+    found: Dict[int, Tuple[Var, Var, List[JaxprEqn]]] = {}
     for c in range(num_consts):
         v = eqn.invars[c]
         if not isinstance(v, Var) or operands.count(v) != 1:
             continue
         hit = _const_from_etp_output(v, minfo, producers)
         if hit is not None:
-            found[c] = hit
+            found[c] = (v, *hit)
     return found
 
 
@@ -628,15 +628,15 @@ def analyze_and_rewrite_scan(
         from .jaxpr_graph import build_producer_map
         producers = build_producer_map(minfo.jaxpr)
     lift_consts = _outer_relation_consts(eqn, minfo, num_consts, producers)
-    outputs = [outer_y for outer_y, _ in lift_consts.values()]
+    outputs = [outer_y for _, outer_y, _ in lift_consts.values()]
     templates: Dict[Var, LiftTemplate] = {
         # an output read through two constants gets none: the compiler then
         # reports its relation
         outer_y: _lift_template(
-            outer_y, eqn.invars[c], prefix, body.invars[c], body,
+            outer_y, const, prefix, body.invars[c], body,
             body_outvar_to_hidden_path, body_hid_path_to_group, path_to_state,
             body_invar_to_weight_path)
-        for c, (outer_y, prefix) in lift_consts.items()
+        for c, (const, outer_y, prefix) in lift_consts.items()
         if outputs.count(outer_y) == 1
     }
 
