@@ -2214,7 +2214,8 @@ class _TauOutsideScan(_SubstepTwoState):
 
 class _TauInBody(_SubstepTwoState):
     """``element_wise(tau)`` inside the body, ``braintrace.matmul`` outside:
-    descent v1 does not support it beyond the unroll limit (issue #211)."""
+    beyond the unroll limit the scan is descended and the outer relation is
+    lifted into it (issue #211)."""
 
     def __init__(self, k, n_in=3, n=4, seed=0):
         super().__init__(k, n_in=n_in, n=n, seed=seed)
@@ -2337,11 +2338,22 @@ class TestPlainWeightInScan:
 
     def test_etp_primitive_in_the_body_still_needs_descent(self):
         # Unchanged by #209: the body holds an ETP primitive, so the scan is
-        # descended, and descent v1 rejects the outer relation (issue #211).
+        # descended; since #211 the outer relation is lifted into it, and the
+        # gradients equal the unrolled path's.
         model = _TauInBody(17)
         brainstate.nn.init_all_states(model)
-        with pytest.raises(NotImplementedError, match='outside a descended scan'):
-            braintrace.compile_etrace_graph(model, jnp.zeros(3))
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            graph = braintrace.compile_etrace_graph(model, jnp.zeros(3))
+            with brainstate.environ.context(precision=64):
+                xs = _substep_inputs()
+                g = _param_grads(lambda: _TauInBody(17), 'd_rtrl', DEFAULT_CONTROL_FLOW_POLICY, xs)
+                g_unrolled = _param_grads(lambda: _TauInBody(17), 'd_rtrl',
+                                          ControlFlowPolicy(scan_unroll_limit=64), xs)
+        assert any(r.control_flow_context is not None and r.control_flow_context.lifted
+                   for r in graph.hidden_param_op_relations)
+        for p in ('W', 'tau'):
+            np.testing.assert_allclose(g[p], g_unrolled[p], rtol=1e-12, atol=1e-15)
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

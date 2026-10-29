@@ -62,6 +62,7 @@ from braintrace._compatible_imports import (
     is_scan_primitive,
     is_while_primitive,
     jaxpr_all_invars,
+    jaxpr_constvars,
     new_var,
     scan_num_consts_carry,
     scan_params_add_ys,
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     'GroupDescent',
+    'LiftTemplate',
     'RelationDescent',
     'ScanDescentBundle',
     'ScanDescentInfo',
@@ -139,10 +141,56 @@ class RelationDescent(NamedTuple):
 
     The relation's ``x_var``/``y_var``/``y_to_hidden_group_jaxprs`` are
     **body**-scoped; runtime values are read through
-    ``scan.stacked_var_map`` (stacked over the substep axis).
+    ``scan.stacked_var_map`` (stacked over the substep axis). A ``lifted``
+    relation keeps an outer ``x_var`` and ``y_var`` (see :attr:`lifted`).
     """
 
     scan: ScanDescentInfo
+
+    lifted: bool = False
+    """``True`` for a relation lifted from outside the scan (issue #211): its
+    ETP primitive runs once per outer step, before the scan, and the scan
+    reads a function of its output ``y`` as a loop constant. ``x_var`` and
+    ``y_var`` are then **outer** vars, constant over the substeps (read
+    unstacked); each ``y_to_hidden_group_jaxprs`` entry takes the outer ``y``
+    as its invar, recomputes the loop constant from it, and continues in the
+    body, so its constvars are body vars read through
+    ``scan.stacked_var_map``."""
+
+
+class LiftTemplate(NamedTuple):
+    """The body side of an outer relation whose output the scan reads.
+
+    Built by :func:`analyze_and_rewrite_scan` for each scan const computed
+    from the output ``y`` of one top-level ETP primitive with a trainable
+    input, by outer equations that read nothing else (issue #211); the
+    compiler turns the outer relation into a lifted one with it.
+    """
+
+    const_var: Var
+    """The outer scan operand computed from ``y`` (``y`` itself when the
+    scan reads it unchanged)."""
+
+    hidden_groups: List['HiddenGroup']
+    """The body groups the constant reaches without crossing a hidden value
+    or another trainable ETP primitive (re-scoped like the body's groups)."""
+
+    y_to_hidden_group_jaxprs: List[Jaxpr]
+    """Transition jaxprs from the outer ``y`` to each group: the outer
+    equations from ``y`` to the constant, then the body's."""
+
+    connected_hidden_paths: List[Path]
+
+    path_classification: Dict[Path, str]
+
+    blocking_eqns: Tuple[JaxprEqn, ...]
+    """Body ETP primitives that cut the constant's path to the carry;
+    reported when no group is reached."""
+
+    body_producers: Dict[Var, JaxprEqn]
+    """The body's producer map (to name the blocking primitives' weights)."""
+
+    body_invar_to_weight_path: Dict[Var, Path]
 
 
 def _descent_blockers(
@@ -259,8 +307,180 @@ class ScanDescentBundle(NamedTuple):
     """Ordered values of ``info.stacked_var_map`` — the fresh outer vars to
     hoist as jaxpr outputs."""
 
+    lift_templates: Dict[Var, LiftTemplate]
+    """Outer ETP output ``y`` the scan reads, through a loop constant
+    computed from it alone -> the body side of its relation (issue #211).
+    Empty when the scan reads no such value."""
 
-def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[ScanDescentBundle]:
+
+def _const_from_etp_output(
+    var: Var,
+    minfo: 'ModuleInfo',
+    producers: Dict[Var, JaxprEqn],
+) -> Optional[Tuple[Var, List[JaxprEqn]]]:
+    """``(y, eqns)`` when *var* is a function of the output ``y`` of one
+    top-level ETP primitive with a trainable input and of nothing else.
+
+    ``eqns`` are the outer equations between ``y`` and *var*, in jaxpr
+    order; they read only ``y``, each other's outputs and literals. ``None``
+    when *var* also depends on an outer input, a constant or another ETP
+    primitive's output.
+    """
+    from braintrace._op import get_trainable_invars
+    from .hid_param_op import _trace_var_to_param
+
+    leaves: Set[Var] = set()
+    selected: Set[int] = set()
+    seen: Set[Var] = set()
+    stack = [var]
+    while stack:
+        v = stack.pop()
+        if v in seen:
+            continue
+        seen.add(v)
+        producer = producers.get(v)
+        if producer is None:
+            return None  # an outer input or constant
+        if is_etp_primitive(producer.primitive):
+            leaves.add(v)
+            continue
+        selected.add(id(producer))
+        stack.extend(iv for iv in producer.invars if isinstance(iv, Var))
+    if len(leaves) != 1:
+        return None
+    y = next(iter(leaves))
+    producer = producers[y]
+    trainable = get_trainable_invars(producer.primitive, producer.params)
+    if not any(
+        isinstance(producer.invars[i], Var)
+        and _trace_var_to_param(producer.invars[i], producers, minfo.invar_to_weight_path)[0] is not None
+        for i in trainable.values()
+    ):
+        return None
+    return y, [e for e in minfo.jaxpr.eqns if id(e) in selected]
+
+
+def _outer_relation_consts(
+    eqn: JaxprEqn,
+    minfo: 'ModuleInfo',
+    num_consts: int,
+    producers: Dict[Var, JaxprEqn],
+) -> Dict[int, Tuple[Var, List[JaxprEqn]]]:
+    """Scan const positions computed from the output ``y`` of an outer
+    relation alone: position -> ``(y, eqns from y to the const)``.
+
+    A value passed in more than one operand position is left out: the
+    compiler then reports the relation (a lifted relation has one constant).
+    """
+    operands = [v for v in eqn.invars if isinstance(v, Var)]
+    found: Dict[int, Tuple[Var, List[JaxprEqn]]] = {}
+    for c in range(num_consts):
+        v = eqn.invars[c]
+        if not isinstance(v, Var) or operands.count(v) != 1:
+            continue
+        hit = _const_from_etp_output(v, minfo, producers)
+        if hit is not None:
+            found[c] = hit
+    return found
+
+
+def _prepend_outer_eqns(
+    y: Var,
+    const_var: Var,
+    body_const: Var,
+    prefix: List[JaxprEqn],
+    jaxpr: Jaxpr,
+) -> Jaxpr:
+    """Extend the body transition *jaxpr* (invar *body_const*) back to *y*.
+
+    The outer *prefix* computes *const_var* from *y*; its producing equation
+    is re-pointed to write *body_const*, which the body equations read.
+    """
+    if not prefix:
+        return jaxpr  # the scan reads ``y`` itself: bound positionally
+    eqns = [
+        e.replace(outvars=[body_const if o is const_var else o for o in e.outvars])
+        if any(o is const_var for o in e.outvars) else e
+        for e in prefix
+    ]
+    return Jaxpr(
+        constvars=jaxpr_constvars(jaxpr, 1),
+        invars=[y],
+        outvars=list(jaxpr.outvars),
+        eqns=eqns + list(jaxpr.eqns),
+        debug_info=jaxpr.debug_info,
+    )
+
+
+def _lift_template(
+    y: Var,
+    const_var: Var,
+    prefix: List[JaxprEqn],
+    body_const: Var,
+    body: Jaxpr,
+    body_outvar_to_hidden_path: Dict[Var, Path],
+    body_hid_path_to_group: Dict[Path, 'HiddenGroup'],
+    path_to_state: Dict[Path, object],
+    body_invar_to_weight_path: Dict[Var, Path],
+) -> LiftTemplate:
+    """The body side of the outer relation whose output *y* the scan reads,
+    through *prefix*, as the body invar *body_const*.
+
+    The same reachability, shape filter, classification and transition
+    jaxprs as :func:`~.hid_param_op.find_hidden_param_op_relations_from_jaxpr`
+    builds for an ETP primitive in the body, started at *body_const*; the
+    transition jaxprs are then extended back to *y*.
+    """
+    from .hid_param_op import (
+        _bfs_forward, _broadcastable, _build_transition_jaxpr, _classify_path,
+        _relatable_hidden_shapes,
+    )
+    from .jaxpr_graph import build_consumer_map, build_producer_map, forward_closure
+
+    consumers = build_consumer_map(body)
+    producers = build_producer_map(body)
+    outvar_to_group_index = {ov: body_hid_path_to_group[p].index
+                             for ov, p in body_outvar_to_hidden_path.items()}
+    reachable, blocking = _bfs_forward(
+        body_const, consumers, set(body_outvar_to_hidden_path),
+        stop_at_non_grad_etp=True, outvar_to_group_index=outvar_to_group_index)
+    forward = forward_closure(body_const, consumers)
+    y_shape = tuple(shaped_aval(y).shape)
+    paths: List[Path] = []
+    classes: Dict[Path, str] = {}
+    for hvar in reachable:
+        path = body_outvar_to_hidden_path[hvar]
+        shapes = _relatable_hidden_shapes(hvar, path_to_state.get(path))  # type: ignore[arg-type]
+        if not any(_broadcastable(y_shape, shape) for shape in shapes):
+            continue  # reported by the outer relation's own shape check
+        paths.append(path)
+        classes[path] = _classify_path(body_const, hvar, consumers, producers,
+                                       self_eqn=None, forward=forward)  # type: ignore[arg-type]
+    groups: List['HiddenGroup'] = []
+    for path in paths:
+        g = body_hid_path_to_group[path]
+        if all(g is not h for h in groups):
+            groups.append(g)
+    return LiftTemplate(
+        const_var=const_var,
+        hidden_groups=groups,
+        y_to_hidden_group_jaxprs=[
+            _prepend_outer_eqns(y, const_var, body_const, prefix,
+                                _build_transition_jaxpr(body_const, g, body))
+            for g in groups],
+        connected_hidden_paths=paths,
+        path_classification=classes,
+        blocking_eqns=tuple(blocking),
+        body_producers=producers,
+        body_invar_to_weight_path=body_invar_to_weight_path,
+    )
+
+
+def analyze_and_rewrite_scan(
+    eqn: JaxprEqn,
+    minfo: 'ModuleInfo',
+    producers: Optional[Dict[Var, JaxprEqn]] = None,
+) -> Optional[ScanDescentBundle]:
     """Analyze one descendable scan and rebuild it with stacked ys.
 
     Runs the flat hidden-group / relation finders on the scan *body* (with
@@ -275,6 +495,9 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[Sca
         A scan equation for which :func:`_descent_blockers` returned ``None``.
     minfo : ModuleInfo
         The enclosing module info (supplies the outer hidden/weight maps).
+    producers : dict, optional
+        The producer map of ``minfo.jaxpr`` (built when not given); it finds
+        the outer ETP outputs the scan reads as loop constants.
 
     Returns
     -------
@@ -400,8 +623,30 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[Sca
             context={'weight_paths': tuple(missing)},
         )
 
+    # ---- outer relations the scan reads as a loop constant (#211) ----------
+    if producers is None:
+        from .jaxpr_graph import build_producer_map
+        producers = build_producer_map(minfo.jaxpr)
+    lift_consts = _outer_relation_consts(eqn, minfo, num_consts, producers)
+    outputs = [outer_y for outer_y, _ in lift_consts.values()]
+    templates: Dict[Var, LiftTemplate] = {
+        # an output read through two constants gets none: the compiler then
+        # reports its relation
+        outer_y: _lift_template(
+            outer_y, eqn.invars[c], prefix, body.invars[c], body,
+            body_outvar_to_hidden_path, body_hid_path_to_group, path_to_state,
+            body_invar_to_weight_path)
+        for c, (outer_y, prefix) in lift_consts.items()
+        if outputs.count(outer_y) == 1
+    }
+
     # ---- assemble the hoist list (ordered dedup, body vars) ----------------
     hoist_seen: Dict[Var, None] = {}
+    for t in templates.values():
+        # the invar is the outer ``y``; only the body constvars are stacked
+        for j in t.y_to_hidden_group_jaxprs:
+            for v in jaxpr_constvars(j, 1):
+                hoist_seen[v] = None
     for r in body_relations:
         if r.x_var is not None:
             hoist_seen[r.x_var] = None
@@ -452,12 +697,19 @@ def analyze_and_rewrite_scan(eqn: JaxprEqn, minfo: 'ModuleInfo') -> Optional[Sca
         for r in body_relations
     ]
 
+    final_templates = {
+        outer_y: t._replace(hidden_groups=[by_paths[tuple(g.hidden_paths)]
+                                           for g in t.hidden_groups])
+        for outer_y, t in templates.items()
+    }
+
     return ScanDescentBundle(
         info=info,
         new_eqn=new_eqn,
         groups=final_groups,
         relations=final_relations,
         stacked_outer_vars=[stacked[v] for v in hoist],
+        lift_templates=final_templates,
     )
 
 
@@ -490,7 +742,10 @@ def apply_scan_descent(minfo: 'ModuleInfo') -> Tuple['ModuleInfo', List[ScanDesc
     if policy.scan_descent != 'auto':
         return minfo, []
 
+    from .jaxpr_graph import build_producer_map
+
     weight_invars = set(minfo.weight_invars)
+    producers = build_producer_map(minfo.jaxpr)
     bundles: List[ScanDescentBundle] = []
     new_eqns: List[JaxprEqn] = []
     for eqn in minfo.jaxpr.eqns:
@@ -517,7 +772,7 @@ def apply_scan_descent(minfo: 'ModuleInfo') -> Tuple['ModuleInfo', List[ScanDesc
                 )
             new_eqns.append(eqn)
             continue
-        bundle = analyze_and_rewrite_scan(eqn, minfo)
+        bundle = analyze_and_rewrite_scan(eqn, minfo, producers)
         if bundle is None:
             # no hidden state in the carry: nothing to descend; the walkers
             # keep their existing behavior for this equation.

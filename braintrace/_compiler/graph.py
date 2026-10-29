@@ -41,6 +41,7 @@ from .diagnostics import (
     emit,
 )
 from .hid_param_op import (
+    _emit_no_relation_diag,
     find_hidden_param_op_relations_from_minfo,
     HiddenParamOpRelation,
 )
@@ -53,7 +54,8 @@ from .hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     HiddenPerturbation,
 )
-from .scan_descent import apply_scan_descent
+from .scan_descent import RelationDescent, ScanDescentBundle, apply_scan_descent
+from .jaxpr_graph import build_consumer_map, forward_closure
 from .module_info import (
     extract_module_info,
     ModuleInfo,
@@ -324,6 +326,106 @@ def _report_plain_weight_scans(minfo: ModuleInfo, descended_eqn_ids: frozenset) 
         )
 
 
+def _lift_outer_relations(
+    relations: Sequence[HiddenParamOpRelation],
+    bundles: Sequence[ScanDescentBundle],
+    group_remaps: Sequence[Dict[int, HiddenGroup]],
+    minfo: ModuleInfo,
+) -> List[HiddenParamOpRelation]:
+    """Lift outer relations that target hidden states of descended scans.
+
+    An ETP relation outside a descended scan reaches the hidden states the
+    scan carries only through the scan's inputs. When the scan reads a value
+    computed from the relation's output ``y`` alone as a loop constant, that
+    value is constant over the substeps, so each substep injects
+    ``x (x) dh/dy`` into the trace, exactly as for an ETP primitive in the
+    body whose input is ``x``. The relation's ``y -> hidden`` map is then
+    rebuilt through the body (``bundle.lift_templates``) and folded with the
+    body's relations (issue #211); a part that reaches flat hidden groups
+    stays a flat relation. Any other route into the scan raises.
+    """
+    if not bundles:
+        return list(relations)
+    consumers = build_consumer_map(minfo.jaxpr)
+    out: List[HiddenParamOpRelation] = []
+    for relation in relations:
+        blocked = [g for g in relation.hidden_groups if g.descent is not None]
+        if not blocked:
+            out.append(relation)
+            continue
+        weight_path = relation.path
+        lifted: List[HiddenParamOpRelation] = []
+        excluded = []
+        for bundle, remap in zip(bundles, group_remaps):
+            own = {id(remap[id(g)]) for g in bundle.groups}
+            mine = [g for g in blocked if id(g) in own]
+            if not mine:
+                continue
+            template = bundle.lift_templates.get(relation.y_var)
+            reached = forward_closure(relation.y_var, consumers)
+            operands = {v for v in bundle.new_eqn.invars
+                        if isinstance(v, Var) and (v is relation.y_var or v in reached)}
+            if template is None or operands != {template.const_var}:
+                paths = [p for g in mine for p in g.hidden_paths]
+                raise NotImplementedError(
+                    f'An ETP relation outside a descended scan (weight '
+                    f'{weight_path}) reaches hidden state(s) {paths} carried by '
+                    f'that scan, but the scan does not read the primitive\'s '
+                    f'output through a single loop constant computed from that '
+                    f'output alone (it reads it in several operands, as a scanned '
+                    f'or carried value, or combined with another outer value). '
+                    f'Structured scan descent lifts an outer relation into the '
+                    f'scan only through such a constant. Pass the primitive\'s '
+                    f'output to the scan and combine it with the other values '
+                    f'inside the scan body, or move the ETP operation inside the '
+                    f'scan body.'
+                )
+            if not template.hidden_groups:
+                excluded.append(template)
+                continue
+            groups = [remap[id(g)] for g in template.hidden_groups]
+            lifted.append(relation._replace(
+                hidden_groups=groups,
+                y_to_hidden_group_jaxprs=list(template.y_to_hidden_group_jaxprs),
+                connected_hidden_paths=list(template.connected_hidden_paths),
+                path_classification=dict(template.path_classification),
+                control_flow_context=RelationDescent(scan=bundle.info, lifted=True),
+            ))
+            emit(
+                kind=DiagnosticKind.SCAN_DESCENT_RELATION_LIFTED,
+                level=DiagnosticLevel.INFO,
+                message=(
+                    f'The ETP relation of weight {weight_path} outside a '
+                    f'length-{bundle.info.length} descended scan, whose output '
+                    f'the scan reads through a loop constant, is folded into '
+                    f'the scan\'s substeps for hidden state(s) '
+                    f'{list(template.connected_hidden_paths)}.'
+                ),
+                primitive=relation.primitive,
+                weight_path=weight_path,
+                hidden_paths=tuple(template.connected_hidden_paths),
+            )
+        flat = [(g, j) for g, j in zip(relation.hidden_groups, relation.y_to_hidden_group_jaxprs)
+                if g.descent is None]
+        if flat:
+            flat_paths = {p for g, _ in flat for p in g.hidden_paths}
+            out.append(relation._replace(
+                hidden_groups=[g for g, _ in flat],
+                y_to_hidden_group_jaxprs=[j for _, j in flat],
+                connected_hidden_paths=[p for p in relation.connected_hidden_paths if p in flat_paths],
+                path_classification={p: c for p, c in relation.path_classification.items()
+                                     if p in flat_paths},
+            ))
+        out.extend(lifted)
+        if not flat and not lifted and excluded:
+            # the output reaches the carry only through a trainable ETP
+            # primitive in the body: excluded, as on the unrolled path
+            t = excluded[0]
+            _emit_no_relation_diag(relation.primitive, weight_path or (), t.blocking_eqns,
+                                   t.body_producers, t.body_invar_to_weight_path, {})
+    return out
+
+
 @contextmanager
 def compiler_context(name: str) -> Iterator[None]:
     """
@@ -579,8 +681,10 @@ def compile_etrace_graph(
         # re-indexed group objects (relations reference groups by identity).
         hidden_groups = list(hidden_groups)
         descended_relations = []
+        group_remaps: List[Dict[int, HiddenGroup]] = []
         for bundle in descent_bundles:
-            group_remap = {}
+            group_remap: Dict[int, HiddenGroup] = {}
+            group_remaps.append(group_remap)
             for g in bundle.groups:
                 final_group = g._replace(index=len(hidden_groups))
                 group_remap[id(g)] = final_group
@@ -603,20 +707,11 @@ def compile_etrace_graph(
             descended_scan_eqn_ids=descended_eqn_ids,
         ))
 
-        # v1 restriction: an *outer* relation may not target a hidden state
-        # whose group lives inside a descended scan — the per-substep trace
-        # fold has no slot for a once-per-outer-step injection.
-        for relation in hidden_param_op_relations:
-            blocked = [g for g in relation.hidden_groups if g.descent is not None]
-            if blocked:
-                blocked_paths = [p for g in blocked for p in g.hidden_paths]
-                raise NotImplementedError(
-                    f'An ETP relation outside a descended scan targets hidden '
-                    f'state(s) {blocked_paths} carried by that scan. This is '
-                    f'not supported by structured scan descent (v1): move the '
-                    f'operation inside the scan body, restructure the model, '
-                    f"or set ControlFlowPolicy(scan_descent='off')."
-                )
+        # An *outer* relation that targets a hidden state carried by a
+        # descended scan is lifted into that scan's per-substep fold when the
+        # scan reads the relation's output as a loop constant (issue #211).
+        hidden_param_op_relations = _lift_outer_relations(
+            hidden_param_op_relations, descent_bundles, group_remaps, minfo)
         hidden_param_op_relations += descended_relations
 
         # ---      Rewrite the jaxpr for computing the needed variables      --- #
@@ -638,13 +733,17 @@ def compile_etrace_graph(
         out_wx_jaxvars = list(dict.fromkeys(
             relation.x_var for relation in hidden_param_op_relations
             if relation.x_var is not None
-            and relation.control_flow_context is None
+            and (relation.control_flow_context is None
+                 or relation.control_flow_context.lifted)
         ))
 
         # all y-to-hidden vars (deduplicate while preserving insertion order)
         out_wy2hid_jaxvars_dict: dict = dict()
         for relation in hidden_param_op_relations:
             if relation.control_flow_context is not None:
+                if relation.control_flow_context.lifted:
+                    # the outer ``y``; the constvars are stacked body values
+                    out_wy2hid_jaxvars_dict[relation.y_var] = None
                 continue
             for hpo_jaxpr in relation.y_to_hidden_group_jaxprs:
                 for v in jaxpr_all_invars(hpo_jaxpr):

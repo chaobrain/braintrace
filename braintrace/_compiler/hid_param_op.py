@@ -210,7 +210,10 @@ class HiddenParamOpRelation(NamedTuple):
     structured scan descent): ``x_var`` / ``y_var`` /
     ``y_to_hidden_group_jaxprs`` are body-scoped, and the executor must read
     their runtime values through ``control_flow_context.scan.stacked_var_map``
-    (stacked over the substep axis). ``None`` for ordinary flat relations."""
+    (stacked over the substep axis). A relation outside the scan that the
+    scan reads through a loop constant is lifted into it
+    (``control_flow_context.lifted``, issue #211): its ``x_var`` and
+    ``y_var`` stay outer. ``None`` for ordinary flat relations."""
 
     # backward compat aliases
     @property

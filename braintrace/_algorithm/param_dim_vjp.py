@@ -240,7 +240,12 @@ def _update_param_dim_etrace_scan_fn(
     for rels in by_scan.values():
         trace_keys = [(id(r.y_var), g.index)
                       for r in rels for g in r.hidden_groups]
-        x_keys = [etrace_x_key(r.x_var) for r in rels if r.x_var is not None]
+        # a relation lifted from outside the scan (#211) has one x per outer
+        # step, constant over the substeps: it is closed over, not scanned
+        x_keys = [etrace_x_key(r.x_var) for r in rels
+                  if r.x_var is not None and not r.control_flow_context.lifted]
+        x_const = {etrace_x_key(r.x_var): etrace_xs_at_t[etrace_x_key(r.x_var)]
+                   for r in rels if r.x_var is not None and r.control_flow_context.lifted}
         df_keys = [etrace_df_key(r.y_var, g.index)
                    for r in rels for g in r.hidden_groups]
         g_idx = sorted({g.index for r in rels for g in r.hidden_groups})
@@ -256,10 +261,11 @@ def _update_param_dim_etrace_scan_fn(
             carry: Dict[ETraceWG_Key, jax.Array],
             sliced: Any,
             _rels: Any = rels,
+            _x_const: Dict = x_const,
         ) -> Tuple[Dict[ETraceWG_Key, jax.Array], None]:
             xs_t, dfs_t, diags_t = sliced
             carry = {**carry, **_apply_relation_step(
-                carry, xs_t, dfs_t, diags_t, _rels,
+                carry, {**_x_const, **xs_t}, dfs_t, diags_t, _rels,
                 weight_path_to_vals, fast_solve, trace_dtype)}
             return carry, None
 

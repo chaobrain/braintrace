@@ -107,8 +107,29 @@
   `braintrace.element_wise` outside the scan and let the scan read its
   result; D-RTRL then matches BPTT for `tau` at any `k`. An ETP op applied
   after the scan credits only that later use, and one inside the body still
-  needs structured descent, which rejects an ETP relation outside the scan
-  beyond 16 substeps (#211).
+  needs structured descent (#211, below).
+- **An ETP relation outside a descended substep scan is folded into it
+  (#211).** An ETP primitive inside a substep `lax.scan`, such as
+  `braintrace.element_wise(tau)`, makes the scan descended beyond
+  `scan_unroll_limit` (16). An ETP relation outside the scan whose output
+  the scan reads, such as the input projection `I = braintrace.matmul(x, W)`,
+  then raised `NotImplementedError`, with a `scan_descent='off'` hint that
+  did not help. When the scan reads a loop constant computed from the
+  relation's output alone (the output itself, `2.0 * jnp.tanh(I)`, ...),
+  that constant is the same in every substep. The relation's `y -> hidden`
+  map now runs through the body, and its trace is folded with the body's
+  relations in each substep, with `x` read once per step. The scan gets no
+  new input. D-RTRL and e-prop gradients for `W` and `tau` equal the
+  unrolled path's and those of the same model with the projection inside
+  the body (f64, 1e-12), and multi-step D-RTRL matches BPTT. A
+  `SCAN_DESCENT_RELATION_LIFTED` record (INFO) names the weight and the
+  states. A relation that also drives states outside the scan keeps that
+  part flat. The issue model compiles in 74–83 ms at `k = 17…256`
+  (graph and first call, CPU), the same as with the projection in the
+  body; unrolled at `k = 16` it takes 669 ms. The scan reading the output combined with another outer value,
+  in several operands, or as a scanned or carried value still raises, now
+  with a message that names the supported forms and drops the
+  `scan_descent='off'` hint.
 
 ### Features
 
