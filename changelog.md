@@ -5,6 +5,16 @@
 
 ### Fixes
 
+- **No more `Jaxpr is missing a DebugInfo` warnings (#197).** Since 0.2.7,
+  every `braintrace.compile` and `etrace_grad` emitted jax's
+  `DeprecationWarning: core.Jaxpr is missing a DebugInfo object`, once per
+  equation the output-bypass rewrite inspected: about 6.5k per run in a
+  downstream test suite, and 5265 over the oracle models under five
+  algorithms. `output_bypass._is_blocking` wrapped each equation in a
+  `Jaxpr` built without `debug_info` to look for a `while` inside it; it now
+  walks the equation directly, with the same result. The test suite turns
+  this warning into an error, so a new jaxpr built without a `DebugInfo`
+  fails it.
 - **A weight whose online gradient is zero is reported (#199).** When the loss
   depends on a weight only in later steps, through the old value of a state the
   online algorithm does not trace, the online gradient is exactly zero while

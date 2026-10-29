@@ -218,3 +218,76 @@ class TestRewrite:
         assert res.bypass_keys == ['w']
         assert res.outvars[0] is jaxpr.outvars[0]
         assert res.outvars[1] is not jaxpr.outvars[1]
+
+
+def _eqn_of(fn, *args):
+    """The single top-level equation of *fn* that is not a ``pjit`` wrapper
+    of the whole function."""
+    (eqn,) = [e for e in jax.make_jaxpr(fn)(*args).jaxpr.eqns
+              if e.primitive.name not in ('convert_element_type',)]
+    return eqn
+
+
+def _settle(h):
+    return jax.lax.while_loop(lambda s: s[0] < 2, lambda s: (s[0] + 1, jnp.tanh(s[1])), (0, h))[1]
+
+
+class TestBlocking:
+    """``_is_blocking`` inspects one equation without building a ``Jaxpr``
+    around it (#197): a ``while`` anywhere inside it, or an effect, blocks
+    the bypass."""
+
+    @pytest.mark.parametrize('fn, blocking', [
+        (lambda h: jnp.tanh(h), False),
+        (lambda h: jax.lax.scan(lambda c, _: (jnp.tanh(c), None), h, None, length=3)[0], False),
+        (_settle, True),
+        (lambda h: jax.lax.scan(lambda c, _: (_settle(c), None), h, None, length=3)[0], True),
+        (lambda h: jax.lax.cond(True, _settle, jnp.tanh, h), True),
+        (lambda h: jax.jit(_settle)(h), True),
+    ], ids=['elementwise', 'scan', 'while', 'while-in-scan', 'while-in-cond', 'while-in-jit'])
+    def test_a_while_anywhere_inside_blocks(self, fn, blocking):
+        from braintrace._compiler.output_bypass import _is_blocking
+        eqn = _eqn_of(fn, jnp.ones(3))
+        assert _is_blocking(eqn) is blocking
+
+    def test_an_effectful_equation_blocks(self):
+        from braintrace._compiler.output_bypass import _is_blocking
+
+        def f(h):
+            jax.debug.print('{}', h)
+            return h
+
+        eqns = jax.make_jaxpr(f)(jnp.ones(3)).jaxpr.eqns
+        (eqn,) = [e for e in eqns if e.effects]
+        assert _is_blocking(eqn)
+
+    def test_no_equation_holds_no_while(self):
+        from braintrace._compiler.hidden_group import _eqns_contain_while
+        assert not _eqns_contain_while([])
+
+    def test_compiling_and_training_warns_no_missing_debug_info(self):
+        # the issue model: _is_blocking used to wrap every equation in a
+        # Jaxpr without DebugInfo, one jax DeprecationWarning each
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(brainstate.random.randn(3, 4))
+
+            def init_state(self, *args, **kwargs):
+                self.V = brainstate.HiddenState(jnp.zeros(4))
+
+            def update(self, x):
+                self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value)
+                return jnp.tanh(self.V.value)
+
+        brainstate.random.seed(0)
+        xs = brainstate.random.rand(10, 3)
+        ys = jnp.full((10, 4), 0.3)
+        net = Cell()
+        brainstate.nn.init_all_states(net)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            learner = braintrace.compile(net, 'd_rtrl', xs[0])
+            learner.etrace_grad(xs, ys, step_fn=lambda x, y: jnp.mean((learner(x) - y) ** 2))
+        assert not [w for w in caught if 'DebugInfo' in str(w.message)]
+
