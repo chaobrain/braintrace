@@ -346,7 +346,8 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
                     f'discovered inside the body of a length-{length} scan). Use '
                     f'an algorithm that supports scan descent '
                     f'({" or ".join(DESCENT_ALGORITHMS)}), or unroll the '
-                    f'scan with ControlFlowPolicy(scan_unroll_limit={length}).'
+                    f'scan with ControlFlowPolicy(scan_unroll_limit={length}) '
+                    f'(compile time grows with the length).'
                     + (f' {reason}' if reason else '')
                 )
 

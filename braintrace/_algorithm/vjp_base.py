@@ -727,7 +727,8 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 f'length-{length} scan, whose transition is always analysed '
                 f"with diagonal recurrence). Use recurrence_scope='diagonal', "
                 f'keep the recurrent weights outside the scan body, or unroll '
-                f'the scan with ControlFlowPolicy(scan_unroll_limit={length}).'
+                f'the scan with ControlFlowPolicy(scan_unroll_limit={length}) '
+                f'(compile time grows with the length).'
             )
 
     def _assert_relations_are_snap_anchored(self) -> None:
