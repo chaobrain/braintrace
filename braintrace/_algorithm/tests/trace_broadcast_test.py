@@ -44,6 +44,7 @@ class _Leaky(brainstate.nn.Module):
     * ``'shared-bias'``: the same with a bias;
     * ``'batch-of-one'``: ``y`` of shape ``(1, 4)``;
     * ``'batched'``: ``y`` of shape ``(2, 4)``, no broadcast;
+    * ``'batched-bias'``: the same with a bias;
     * ``'explicit'``: the shared row broadcast to the batch before the
       projection, ``y`` of shape ``(2, 4)`` (the reference for ``'shared'``);
     * ``'weight-axis'``: ``W`` of shape ``(3, 1)``, ``y`` of shape ``(2, 1)``
@@ -56,7 +57,7 @@ class _Leaky(brainstate.nn.Module):
         n_out = 1 if kind == 'weight-axis' else 4
         with brainstate.random.seed_context(0):
             self.W = brainstate.ParamState(0.5 * brainstate.random.randn(3, n_out))
-            if kind == 'shared-bias':
+            if kind in ('shared-bias', 'batched-bias'):
                 self.b = brainstate.ParamState(0.3 * brainstate.random.randn(4))
         self.V = brainstate.HiddenState(jnp.zeros((2, 4)))
 
@@ -69,6 +70,8 @@ class _Leaky(brainstate.nn.Module):
             y = braintrace.matmul(x[:1], self.W.value)
         elif kind == 'explicit':
             y = braintrace.matmul(jnp.broadcast_to(x[0], x.shape), self.W.value)
+        elif kind == 'batched-bias':
+            y = braintrace.matmul(x, self.W.value, self.b.value)
         else:
             y = braintrace.matmul(x, self.W.value)
         self.V.value = 0.9 * self.V.value + jnp.tanh(y)
@@ -199,26 +202,25 @@ class TestABroadcastAlongAWeightAxis:
 
 
 class TestTheSizingIsChecked:
-    """A rule whose trace neither has the term's shape nor grows to it by
-    broadcasting raises when the trace is allocated, naming the operation,
-    the weight, the leaf and both shapes."""
+    """Under a broadcast, a rule whose trace neither has the term's shape nor
+    grows to it raises when the trace is allocated, naming the operation, the
+    weight, the leaf and both shapes."""
 
-    @pytest.mark.parametrize('kind,lead,shape', [
-        ('shared', (5,), '(5, 3, 4, 1)'),  # does not broadcast to the term
-        ('batched', (1,), '(1, 2, 3, 4, 1)'),  # larger than the term, which broadcasts into it
+    @pytest.mark.parametrize('lead,shape', [
+        ((5,), '(5, 3, 4, 1)'),  # does not broadcast to the term
+        ((1, 2), '(1, 2, 3, 4, 1)'),  # larger than the term, which broadcasts into it
     ], ids=['incompatible', 'larger-than-the-term'])
-    def test_a_wrong_init_is_an_error(self, monkeypatch, kind, lead, shape):
+    def test_a_wrong_init_is_an_error(self, monkeypatch, lead, shape):
         from braintrace._op import ETP_RULES_INIT_DRTRL
-        rule_of = {'shared': 'etp_mv', 'batched': 'etp_mm'}[kind]
-        prim = next(p for p in ETP_RULES_INIT_DRTRL if p.name == rule_of)
-        rule = ETP_RULES_INIT_DRTRL[prim]
+        from braintrace._op.dense import etp_mv_p
+        rule = ETP_RULES_INIT_DRTRL[etp_mv_p]
 
         def wrong(x_var, y_var, weight_vars, num_state, **kw):
             out = rule(x_var, y_var, weight_vars, num_state, **kw)
             return {k: jnp.zeros(lead + v.shape, v.dtype) for k, v in out.items()}
 
-        monkeypatch.setitem(ETP_RULES_INIT_DRTRL, prim, wrong)
-        model = _Leaky(kind)
+        monkeypatch.setitem(ETP_RULES_INIT_DRTRL, etp_mv_p, wrong)
+        model = _Leaky('shared')
         brainstate.nn.init_all_states(model)
         learner = braintrace.D_RTRL(model)
         with warnings.catch_warnings():
@@ -226,5 +228,52 @@ class TestTheSizingIsChecked:
             with pytest.raises(ValueError, match='does not broadcast') as err:
                 learner.compile_graph(_inputs()[0])  # allocates the traces
         message = str(err.value)
-        assert f"'{rule_of}'" in message and "('W',)" in message and "'weight'" in message
+        assert "'etp_mv'" in message and "('W',)" in message and "'weight'" in message
         assert shape in message and '(2, 3, 4, 1)' in message
+
+
+class TestTheFastPath:
+    """A ``y`` that reaches its state with its own shape keeps the rule's init
+    without the abstract evaluation of its term."""
+
+    @staticmethod
+    def _spy(monkeypatch, force=None):
+        from braintrace._algorithm import param_dim_vjp
+        check, taken = param_dim_vjp._reaches_without_broadcast, []
+
+        def spy(relation, group):
+            taken.append(check(relation, group) if force is None else force)
+            return taken[-1]
+
+        monkeypatch.setattr(param_dim_vjp, '_reaches_without_broadcast', spy)
+        return taken
+
+    @staticmethod
+    def _run(kind, algo):
+        with brainstate.environ.context(precision=64):
+            learner = _learner(kind, algo)
+            out = brainstate.transform.for_loop(learner, _inputs())
+        traces = jax.tree.leaves([s.value for s in learner.etrace_bwg.values()])
+        return _trace_shapes(learner), np.asarray(out), [np.asarray(t) for t in traces]
+
+    @pytest.mark.parametrize('algo', sorted(_ALGOS))
+    @pytest.mark.parametrize('kind', ['batched', 'batched-bias', 'explicit'])
+    def test_it_equals_the_full_path(self, kind, algo, monkeypatch):
+        taken = self._spy(monkeypatch)
+        fast = self._run(kind, algo)
+        assert taken and all(taken)
+        self._spy(monkeypatch, force=False)  # the abstract evaluation for every relation
+        full = self._run(kind, algo)
+        assert fast[0] == full[0]
+        np.testing.assert_array_equal(fast[1], full[1])
+        assert len(fast[2]) == len(full[2])
+        for a, b in zip(fast[2], full[2]):
+            assert np.abs(b).max() > 0
+            np.testing.assert_array_equal(a, b)
+
+    @pytest.mark.parametrize('kind', _BROADCAST)
+    def test_a_broadcast_never_takes_it(self, kind, monkeypatch):
+        taken = self._spy(monkeypatch)
+        learner = _learner(kind, 'D_RTRL')
+        assert taken and not any(taken)
+        assert _trace_shapes(learner)[0]['weight'] == (2, 3, 4, 1)

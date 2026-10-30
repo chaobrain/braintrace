@@ -101,6 +101,17 @@ def _hidden_out_avals(relation: HiddenParamOpRelation, group: HiddenGroup) -> Li
     return [_abstract(v) for v in relation.y_to_hidden_group_jaxprs[i].outvars]
 
 
+def _reaches_without_broadcast(relation: HiddenParamOpRelation, group: HiddenGroup) -> bool:
+    """Whether every hidden value that *relation*'s ``y`` reaches in *group* has ``y``'s shape.
+
+    Then ``df`` is ``(*y.shape, num_state)``, the shape every ``init_drtrl``
+    rule sizes the trace for, and the rule's init is the instantaneous term's
+    shape without computing it.
+    """
+    y_shape = tuple(shaped_aval(relation.y_var).shape)
+    return all(tuple(a.shape) == y_shape for a in _hidden_out_avals(relation, group))
+
+
 def _abstract_instant_term(
     relation: HiddenParamOpRelation,
     group: HiddenGroup,
@@ -136,10 +147,17 @@ def _size_trace_from_instant_term(
     kept. Any other leaf raises, an init larger than the term included: an
     unproven shape is not taken on trust.
 
+    When ``y`` reaches every hidden value of the group with its own shape
+    (:func:`_reaches_without_broadcast`), ``df`` is what the rules size the
+    trace for, and the init is kept without the abstract evaluation, which
+    costs about 0.5 ms per (relation, group).
+
     Returns the (possibly re-allocated) trace, and checks that the gradient
     solve reduces a re-allocated trace to the weight's shape
     (:func:`_refuse_broadcast_along_a_weight_axis`).
     """
+    if _reaches_without_broadcast(relation, group):
+        return init_val
     term = _abstract_instant_term(relation, group, fast_solve)
     out: Dict[str, Any] = {}
     grown = False
