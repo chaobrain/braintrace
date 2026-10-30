@@ -78,6 +78,16 @@ class _LinearWithBiasInBody(_TwoState):
         return self.scan(lambda c, _: self.substep(c, self.lin(x)))
 
 
+class _LinearWithBiasBeforeTheScan(_LinearWithBiasInBody):
+    """The ``Linear`` called before the scan, which reads its output as a loop
+    constant: the relation is lifted into the scan (#211) and resolved at top
+    level, where the leaves come in leaf order."""
+
+    def update(self, x):
+        I = self.lin(x)
+        return self.scan(lambda c, _: self.substep(c, I))
+
+
 class _Gains(_TwoState):
     """Gains in one ``ParamState`` of equal-shape leaves ``{'a', 'b', 'c'}``,
     each read in the body through its own ``element_wise``, in the order
@@ -153,9 +163,12 @@ def _descended_relations(make):
 @pytest.mark.parametrize('algo', sorted(_ALGOS))
 class TestLeavesReadInTheBody:
 
-    def test_a_linear_with_a_bias_matches_the_unrolled_scan(self, algo):
-        # main: the bias got the weight's leaf position, a custom VJP type error
-        descended, unrolled = _descended_and_unrolled(_LinearWithBiasInBody, algo)
+    @pytest.mark.parametrize('make', [_LinearWithBiasInBody, _LinearWithBiasBeforeTheScan],
+                             ids=['in-the-body', 'before-the-scan'])
+    def test_a_linear_with_a_bias_matches_the_unrolled_scan(self, algo, make):
+        # main: in the body, the bias got the weight's leaf position, a custom
+        # VJP type error
+        descended, unrolled = _descended_and_unrolled(make, algo)
         for p in descended:
             _close(descended[p], unrolled[p])
         assert any('bias' in p for p in unrolled)
