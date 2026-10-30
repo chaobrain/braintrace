@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, Dict, Tuple, Optional, Sequence, Any
+from typing import Callable, Dict, List, Tuple, Optional, Sequence, Any
 
 import brainstate
 import jax
@@ -32,7 +32,6 @@ from braintrace._compiler import (
     widen_instant_term,
 )
 from braintrace._compatible_imports import shaped_aval
-from braintrace._compiler.hid_param_op import _broadcastable, _relatable_hidden_shapes
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -84,48 +83,150 @@ def _cast_to_dtype(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(lambda a: a.astype(dtype), tree, is_leaf=u.math.is_quantity)
 
 
-def _refuse_descended_broadcast(relation: HiddenParamOpRelation, group: HiddenGroup) -> None:
-    """Refuse a descended relation whose output reaches its hidden state only by broadcasting.
+def _abstract(v: Any) -> jax.ShapeDtypeStruct:
+    aval = shaped_aval(v)
+    return jax.ShapeDtypeStruct(tuple(aval.shape), aval.dtype)
 
-    A rule that sizes the trace from ``x`` and ``y`` (every rule but the
-    elementwise one, which sizes it from the hidden group) leaves out the axes
-    that broadcasting the output into the state adds: an unbatched output
-    driving a batched state, or a size-1 axis. The first update adds them, so
-    the trace changes shape. The substep fold of a descended scan carries the
-    trace through ``jax.lax.scan``, which needs a fixed shape and would fail
-    with a carry type error. Issue #224 sizes the trace from the hidden group
-    and removes this refusal.
+
+def _hidden_out_avals(relation: HiddenParamOpRelation, group: HiddenGroup) -> List[jax.ShapeDtypeStruct]:
+    """The avals of the hidden values that *relation*'s ``y`` reaches in *group*.
+
+    The executor reads ``df`` off the all-ones jvp of the relation's map from
+    ``y`` to these values, concatenated by the group, so ``df`` has their
+    shapes: ``(*varshape, num_state)`` once concatenated. For a relation in a
+    descended scan the map is one substep's (body-scoped), as the fold
+    consumes it.
+    """
+    i = [g.index for g in relation.hidden_groups].index(group.index)
+    return [_abstract(v) for v in relation.y_to_hidden_group_jaxprs[i].outvars]
+
+
+def _abstract_instant_term(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    fast_solve: bool,
+) -> Dict[str, jax.ShapeDtypeStruct]:
+    """The abstract :func:`relation_instant_term` of *relation* for *group*."""
+    x = None if relation.x_var is None or relation.primitive is etp_elemwise_p else _abstract(relation.x_var)
+    weights = {k: _abstract(v) for k, v in relation.trainable_vars.items()}
+
+    def _term(x_: Any, outs: List[jax.Array], w: Dict[str, Any]) -> Any:
+        df = group.concat_hidden(outs)
+        return relation_instant_term(relation, group, x_, df, w, fast_solve=fast_solve)
+
+    return jax.eval_shape(_term, x, _hidden_out_avals(relation, group), weights)
+
+
+def _size_trace_from_instant_term(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    init_val: Dict[str, Any],
+    fast_solve: bool,
+) -> Dict[str, Any]:
+    """Allocate each trace leaf at the shape of its instantaneous term (#224).
+
+    The trace update adds :func:`relation_instant_term`, ``diag(D_f) ⊗ x``,
+    whose ``df`` has the hidden group's shape. A primitive's ``init_drtrl``
+    rule sizes the trace from ``x`` and ``y`` only, so when ``y`` reaches its
+    hidden state only by broadcasting (an unbatched output into a batched
+    state, a batch of one), the term has the axes the broadcast adds and the
+    trace would grow at its first update: a loop over the steps, or the
+    substep fold of a descended scan, could not carry it. Such a leaf is
+    allocated, zero, at the term's shape, and a leaf that already has it is
+    kept. Any other leaf raises, an init larger than the term included: an
+    unproven shape is not taken on trust.
+
+    Returns the (possibly re-allocated) trace, and checks that the gradient
+    solve reduces a re-allocated trace to the weight's shape
+    (:func:`_refuse_broadcast_along_a_weight_axis`).
+    """
+    term = _abstract_instant_term(relation, group, fast_solve)
+    out: Dict[str, Any] = {}
+    grown = False
+    for key, leaf in init_val.items():
+        shape, term_shape = tuple(leaf.shape), tuple(term[key].shape)
+        try:
+            joint = tuple(jnp.broadcast_shapes(shape, term_shape))
+        except ValueError:
+            joint = None
+        if shape == term_shape:
+            out[key] = leaf
+        elif joint == term_shape:  # the term adds the axes of a broadcast
+            out[key] = jnp.zeros(term_shape, dtype=leaf.dtype)
+            grown = True
+        else:
+            raise ValueError(
+                f"The eligibility trace that the init_drtrl rule of the ETP operation "
+                f"'{relation.primitive.name}' allocates for the leaf '{key}' of the weight "
+                f"{relation.path} has shape {shape}, which is not the shape {term_shape} "
+                f"of its instantaneous term (the term the trace update adds for the hidden "
+                f"state(s) {list(group.hidden_paths)}) and does not broadcast to it."
+            )
+    if grown:
+        df = jax.eval_shape(group.concat_hidden, _hidden_out_avals(relation, group))
+        _refuse_broadcast_along_a_weight_axis(relation, group, out, df, fast_solve)
+    return out
+
+
+def _refuse_broadcast_along_a_weight_axis(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    trace: Dict[str, Any],
+    df: Any,
+    fast_solve: bool,
+) -> None:
+    """Refuse a trace that the gradient solve cannot reduce to the weight (#231).
+
+    A broadcast that adds or expands batch axes leaves the trace's weight part
+    intact, and the solve sums the batch. A broadcast along an axis of the
+    weight (``W`` of shape ``(3, 1)`` whose ``(2, 1)`` output drives ``(2, 4)``
+    states) puts the trace in the hidden state's positions, and the solve
+    returns a gradient of the wrong shape (a custom VJP error at the first
+    gradient). This checks, abstractly, that the solve and the batch reduction
+    of :func:`_solve_param_dim_weight_gradients` give each weight its own
+    shape.
 
     Raises
     ------
     NotImplementedError
-        If ``relation`` is folded over a descended scan (in its body or lifted
-        into it) and its output reaches a hidden state of ``group`` only by
-        broadcasting.
+        If they do not.
     """
-    ctx = relation.control_flow_context
-    if ctx is None:
+    weight_vals = {
+        relation.trainable_paths[k]: relation.trainable_param_states[k].value
+        for k in relation.trainable_paths
+    }
+    batched = set(relation.trainable_paths.values()) if is_batched_primitive(relation.primitive) else set()
+
+    def _solve(dg: Any, trace_: Any, values: Any) -> Dict[Path, PyTree]:
+        grads, folded = relation_solve_to_param(relation, group, dg, trace_, values, fast_solve=fast_solve)
+        routed: Dict[Path, PyTree] = {}
+        _route_grads_by_path(relation, grads, values, routed)
+        reduce_param_batch_axes(routed, values, set(routed) if folded else set(), batched)
+        return routed
+
+    cause: Optional[Exception] = None
+    try:
+        solved = jax.eval_shape(_solve, df, trace, weight_vals)
+        bad = [p for p, g in solved.items()
+               if [tuple(a.shape) for a in jax.tree.leaves(g)]
+               != [tuple(u.math.shape(a)) for a in jax.tree.leaves(weight_vals[p])]]
+    except (ValueError, TypeError) as err:  # the solve cannot even take the trace
+        bad, cause = list(weight_vals), err
+    if not bad:
         return
     y_shape = tuple(shaped_aval(relation.y_var).shape)
-    for path, state, hvar in zip(group.hidden_paths, group.hidden_states, group.hidden_outvars):
-        shapes = [s for s in _relatable_hidden_shapes(hvar, state) if _broadcastable(y_shape, s)]
-        if not shapes or any(tuple(jnp.broadcast_shapes(y_shape, s)) == y_shape for s in shapes):
-            continue
-        where = ('the scan reads it as a loop constant' if ctx.lifted
-                 else 'computed inside the scan body')
-        length = ctx.scan.length
-        raise NotImplementedError(
-            f"Structured scan descent does not support this length-{length} scan yet: "
-            f"the output of the ETP operation '{relation.primitive.name}' on the weight "
-            f"{relation.path} ({where}) has shape {y_shape}, and it reaches the hidden "
-            f"state {path} of shape {tuple(shaped_aval(hvar).shape)} only by broadcasting. "
-            f"Its eligibility trace would be allocated without the axes the broadcast adds, "
-            f"which the substep fold cannot carry "
-            f"(https://github.com/chaobrain/braintrace/issues/224). Compute the output with "
-            f"the hidden state's shape (for example, give the input the state's batch axis), "
-            f"or unroll the scan with ControlFlowPolicy(scan_unroll_limit={length}), which "
-            f"runs one call per step."
-        )
+    h_shape = tuple(shaped_aval(group.hidden_outvars[0]).shape)
+    trace_shapes = {k: tuple(v.shape) for k, v in trace.items()}
+    raise NotImplementedError(
+        f"The output of the ETP operation '{relation.primitive.name}' on the weight "
+        f"{relation.path} has shape {y_shape}, and it reaches the hidden state(s) "
+        f"{list(group.hidden_paths)} of shape {h_shape} by broadcasting along an axis of "
+        f"the weight. Its eligibility trace then lives in the hidden state's positions "
+        f"({trace_shapes}), and the gradient solve does not reduce it to the weight's "
+        f"shape yet (https://github.com/chaobrain/braintrace/issues/231). Compute the "
+        f"output with the hidden state's shape, for example with a weight that has the "
+        f"state's number of units."
+    ) from cause
 
 
 def _init_param_dim_state(
@@ -165,8 +266,6 @@ def _init_param_dim_state(
             init_kw['group'] = group
         elif relation.primitive is etp_conv_p:
             init_kw['eqn_params'] = relation.eqn_params
-        if 'group' not in init_kw:
-            _refuse_descended_broadcast(relation, group)
         # ``trace_state_width`` is ``num_state`` at every recurrence_scope but
         # ``sparse_n``, where the trailing state axis carries the SnAp-n
         # neighbourhood as well: ``M = K * num_state``. Every per-primitive rule
@@ -184,6 +283,7 @@ def _init_param_dim_state(
                 f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
                 f'got {type(init_val).__name__}.'
             )
+        init_val = _size_trace_from_instant_term(relation, group, init_val, fast_solve)
         fp = get_fast_path_rules(relation.primitive)
         use_fast = fast_solve and fp is not None and fp.applicable(relation.eqn_params)
         if use_fast:

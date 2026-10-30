@@ -213,15 +213,34 @@
   participate" when only its plain use inside the scan gets no credit, and
   a carried state of another shape that the lifted constant does not reach
   is no longer reported as a shape mismatch.
-- **Structured scan descent refuses an ETP output that reaches its hidden
-  state only by broadcasting**, such as an unbatched input projection
-  driving batched states. The eligibility trace of such an output is
-  allocated without the axes the broadcast adds and changes shape at its
-  first update, which the substep fold cannot carry: in the body it failed
-  with a scan carry type error, and so would the lifted form. Both now
-  raise `NotImplementedError` when the trace is allocated, naming the
-  output, both shapes and #224, which will size the trace from the hidden
-  group and remove the refusal.
+- **An ETP output that reaches its hidden state only by broadcasting gets
+  an eligibility trace of fixed shape (#224).** Such an output is an
+  unbatched input projection driving batched states, `(4,)` into `(2, 4)`,
+  or a batch of one, `(1, 4)` into `(2, 4)`. A primitive's `init_drtrl`
+  rule sizes the trace from the operation's input and output only, so the
+  trace was allocated without the axes the broadcast adds, and the first
+  update added them. A loop over the steps (`for_loop`, `scan`) then
+  failed with a carry type error, multi-step D-RTRL failed with an einsum
+  error for a batch of one, and a descended scan failed with a scan carry
+  type error. The trace is now allocated at the shape of the term its
+  update adds, which `jax.eval_shape` computes when the trace is
+  allocated; a trace the rule already sizes right is kept as it is. The
+  trace therefore grows by the broadcast axes from the start: its memory
+  scales with the batch size, as for a batched input. A loop over the steps
+  equals one call per step, multi-step D-RTRL and e-prop in chunks of two
+  steps equal BPTT, and a descended scan equals the unrolled one (f64,
+  1e-12). Where one call per step already worked, the values are the
+  same, bit for bit, and every other trace keeps its shape. A
+  rule whose trace neither has the term's shape nor grows to it by
+  broadcasting raises `ValueError` when the trace is allocated, naming the
+  operation, the weight, the leaf and both shapes. An output that reaches
+  its state by broadcasting along an axis of the weight, such as a weight
+  of shape `(3, 1)` driving 4 units, is not supported yet (#231): its trace
+  lives in the state's positions, and the gradient solve does not reduce it
+  to the weight's shape. It failed with a custom VJP shape error at the
+  first gradient, flat or descended; it now raises `NotImplementedError`
+  when the trace is allocated, naming the operation, the weight, both
+  shapes and #231.
 
 ### Features
 
