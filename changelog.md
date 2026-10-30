@@ -222,6 +222,19 @@
   raise `NotImplementedError` when the trace is allocated, naming the
   output, both shapes and #224, which will size the trace from the hidden
   group and remove the refusal.
+- **An algorithm that refuses a descended scan names remedies that work
+  (#226).** `pp_prop`, `ES_D_RTRL`, `UORO`, `OSTLFeedforward` and the
+  random-projection engine refuse a scan whose body holds an ETP operation
+  beyond `scan_unroll_limit`. So do `OSTLRecurrent` and `SnAp` under their
+  default recurrence scopes. Their messages suggested
+  `ControlFlowPolicy(scan_descent='off')`, under which the opaque scan
+  rejects the weight inside it. They now give the scan's length and suggest
+  `ControlFlowPolicy(scan_unroll_limit=L)` with that length (the longest
+  descended scan), and the general refusal names `D_RTRL` and `EProp`,
+  which run the descended scan. The `SCAN_DESCENT_SKIPPED` warning, for a
+  carry initialised from a transformed value, made the same suggestion,
+  under which the scan is refused just as when descent is skipped; it now
+  suggests unrolling too.
 - **A multi-leaf `ParamState` read inside a descended scan body gets its
   leaves right (#225).** The body reads the leaves it uses as scan
   constants, in the order of first use, and numbered them in that order
@@ -233,8 +246,9 @@
   was 158 % off the unrolled scan for `a` and 84 % for `b`. One leaf read
   alone got position 0. Each body constant now keeps the leaf position of
   the `ParamState` leaf it stands for. D-RTRL and e-prop then equal the
-  unrolled scan (f64, 1e-12), for a `Linear` with a bias, leaves read in any
-  order, a leaf read alone and a leaf read twice.
+  unrolled scan (f64, 1e-12), for a `Linear` with a bias (masked or not),
+  leaves read in any order, a leaf read alone, a leaf read twice and a leaf
+  read through a `weight_fn`.
 
 ### Features
 
