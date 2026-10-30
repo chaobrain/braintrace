@@ -37,6 +37,33 @@
   in the step's equations. `docs/apis/concepts.rst` explains the credit model.
   Known gap: a ring written and then read back in the same step is not
   detected (#216).
+- **SnAp-n keeps its position pattern through a rolled loop (#210).** The
+  position analysis treated any `scan` or `while` on the hidden path as
+  possibly relabelling or coupling positions, and widened SnAp-n to all
+  positions (`SNAP_PATTERN_CONSERVATIVE`). Since #201/#203 a weight-free
+  substep scan stays rolled beyond its unroll limit, so every substepped
+  neuron paid within-group RTRL for SnAp-n: on the #201 two-state neuron,
+  `K` was the number of positions instead of 1. The analysis now follows the
+  hidden path into the loop body and classifies each body equation with the
+  same rule as a top-level one, over the equations that feed the loop's
+  used outputs, with reachability and liveness closed over the iterations.
+  A body that passes gives the loop the pattern of the same loop unrolled,
+  or a superset of it where what is reached or live differs between
+  iterations (the body is held to the rules for all iterations at once).
+  On the 14 model comparisons that keep a rolled loop (substepped neurons
+  with and without a sparse ring recurrence, and `while_settle_rnn`, at
+  `n = 2, 3`), rolled `K` equals unrolled `K`. On the 12 substepped ones
+  (the `while` model is rolled under both policies), SnAp-n gradients agree
+  to 1e-12 in float64; on rolled ring models they move by about 1 % from
+  before, to the unrolled ones. The loop stays conservative, with a reason
+  naming the case, when a position-mixing equation sits in a body that runs
+  more than once (it transfers a power of its pattern, as two mixing
+  equations do unrolled), when hidden-derived values are scanned as `xs` or
+  stacked as `ys` on the hidden path (their leading axis counts
+  iterations), and when a `while` trip count reads the hidden state (the
+  number of iterations is not fixed). A spiking neuron still gets all
+  positions: its surrogate spike primitive is not yet classified as
+  position-preserving (#219).
 - **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
   hidden-to-hidden transition (#213).** In the default ("without recurrence")
   grouping mode, every `dot_general` that read a hidden-derived value was
@@ -157,8 +184,8 @@
   `pp_prop`/ES-D-RTRL and `OSTLFeedforward` move: by 9 % and 74 % on a carry
   readout of the test model, and by 2 % and 14 % on a `ys` readout. Neither
   path is closer to BPTT in general. explain() reports such a scan with a
-  `SCAN_ROLLED_OUTPUT_READ` INFO. SnAp-n position analysis cannot yet see
-  through a rolled scan, so its pattern widens to all positions (#210).
+  `SCAN_ROLLED_OUTPUT_READ` INFO. SnAp-n gets the unrolled position
+  pattern rolled, or a superset of it (#210).
 
 ## Version 0.2.8
 
