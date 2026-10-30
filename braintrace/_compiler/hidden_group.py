@@ -900,11 +900,20 @@ def _transition_contains_while(jaxpr: Jaxpr) -> bool:
     Used by :meth:`HiddenGroup.diagonal_jacobian` to switch Jacobian
     extraction to forward mode: ``while`` has no reverse-mode rule.
     """
-    for eqn in jaxpr.eqns:
+    return _eqns_contain_while(jaxpr.eqns)
+
+
+def _eqns_contain_while(eqns: Iterable[JaxprEqn]) -> bool:
+    """Whether *eqns* (descending sub-jaxprs) contain a ``while`` equation.
+
+    Takes equations rather than a ``Jaxpr``, so a caller that inspects one
+    equation need not wrap it in a ``Jaxpr`` without debug info (#197).
+    """
+    for eqn in eqns:
         if is_while_primitive(eqn):
             return True
         for sub in _param_subjaxprs(eqn):
-            if _transition_contains_while(sub):
+            if _eqns_contain_while(sub.eqns):
                 return True
     return False
 

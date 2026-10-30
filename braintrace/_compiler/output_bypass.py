@@ -62,17 +62,15 @@ import jax
 import jax.numpy as jnp
 
 from braintrace._compatible_imports import (
-    Jaxpr,
     JaxprEqn,
     Literal,
     Var,
-    is_while_primitive,
     new_jaxpr_eqn,
     new_var,
     shaped_aval,
     stop_gradient_p,
 )
-from .hidden_group import _transition_contains_while
+from .hidden_group import _eqns_contain_while
 
 __all__ = [
     'OutputBypass',
@@ -113,8 +111,7 @@ def _is_blocking(eqn: JaxprEqn) -> bool:
     # duplicating an effectful equation would repeat its effect.
     if eqn.effects:
         return True
-    return is_while_primitive(eqn) or _transition_contains_while(
-        Jaxpr(constvars=[], invars=[], outvars=[], eqns=[eqn]))
+    return _eqns_contain_while([eqn])
 
 
 def _shaped(v: Var) -> jax.core.ShapedArray:
