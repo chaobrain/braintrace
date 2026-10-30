@@ -1325,3 +1325,134 @@ class TestUntrackedCredit:
         for p in descended:
             _close(descended[p], unrolled[p])
         assert np.abs(unrolled['W']).max() > 1e-3
+
+
+class _Batched(_TwoState):
+    """The issue #211 family with a batch of two: hidden states of shape ``(2, n)``."""
+
+    def __init__(self, k, n_in=3, n=4):
+        super().__init__(k, n_in=n_in, n=n)
+        self.V = brainstate.HiddenState(jnp.zeros((2, n)))
+        self.w = brainstate.HiddenState(jnp.zeros((2, n)))
+
+
+class _SharedDrive(_Batched):
+    """p05 of the #217 review: one input row shared by the batch, projected
+    before the scan, so the scan reads a ``(n,)`` constant into ``(2, n)`` states."""
+
+    def update(self, x):
+        I = self.drive(x[0])
+        return self.scan(lambda c, _: self.substep(c, I))
+
+
+class _SharedDriveInBody(_Batched):
+    def update(self, x):
+        return self.scan(lambda c, _: self.substep(c, self.drive(x[0])))
+
+
+class _SharedDriveBroadcastFirst(_Batched):
+    """The shared projection is broadcast to the batch before the scan reads it."""
+
+    def update(self, x):
+        I = jnp.broadcast_to(self.drive(x[0]), self.V.value.shape)
+        return self.scan(lambda c, _: self.substep(c, I))
+
+
+class _SingletonDrive(_Batched):
+    """A batch of one, ``(1, n)``, broadcast to the batch of two."""
+
+    def update(self, x):
+        I = self.drive(x[:1])
+        return self.scan(lambda c, _: self.substep(c, I))
+
+
+class _NarrowDriveInBody(_Batched):
+    """A ``(2, 1)`` projection broadcast along the state's feature axis."""
+
+    def __init__(self, k, n_in=3, n=4):
+        super().__init__(k, n_in=n_in, n=n)
+        with brainstate.random.seed_context(0):
+            self.W = brainstate.ParamState(0.5 * brainstate.random.randn(n_in, 1))
+
+    def update(self, x):
+        return self.scan(lambda c, _: self.substep(c, self.drive(x)))
+
+
+class _BatchedDrive(_Batched):
+    def update(self, x):
+        I = self.drive(x)
+        return self.scan(lambda c, _: self.substep(c, I))
+
+
+class _BatchedDriveInBody(_Batched):
+    def update(self, x):
+        return self.scan(lambda c, _: self.substep(c, self.drive(x)))
+
+
+def _batched_inputs(T=6, n_in=3):
+    with brainstate.random.seed_context(1):
+        return brainstate.random.rand(T, 2, n_in)
+
+
+def _online_batched(make, algo, policy=DEFAULT_CONTROL_FLOW_POLICY):
+    from braintrace._testing.oracle import online_param_gradients_singlestep_naive
+    g = online_param_gradients_singlestep_naive(
+        make, _batched_inputs(), algo_factory=lambda m: _LIFT_ALGOS[algo](m, policy))
+    return {p[0]: np.asarray(v) for p, v in g.items()}
+
+
+class TestBroadcastIntoTheDescendedState:
+    """An ETP output that reaches the hidden state it drives in a descended scan
+    only by broadcasting (p05 of the #217 review: an unbatched output into a
+    batched state) gets a trace sized without the axes the broadcast adds, and
+    the trace changes shape at its first update, which the substep fold cannot
+    carry. It is refused when the trace is allocated, until #224 sizes the trace
+    from the hidden group. On main the lifted form was refused by the #211
+    message and the in-body form failed with a scan carry type error."""
+
+    @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop'])
+    @pytest.mark.parametrize('model, y_shape, where', [
+        (_SharedDrive, (4,), 'loop constant'),
+        (_SharedDriveInBody, (4,), 'inside the scan body'),
+        (_SharedDriveBroadcastFirst, (4,), 'loop constant'),
+        (_SingletonDrive, (1, 4), 'loop constant'),
+        (_NarrowDriveInBody, (2, 1), 'inside the scan body'),
+    ], ids=['shared-row', 'shared-row-in-body', 'broadcast-before-the-scan',
+            'batch-of-one', 'feature-axis-in-body'])
+    def test_an_output_broadcast_into_the_state_is_refused(self, model, y_shape, where, algo):
+        m = model(17)
+        brainstate.nn.init_all_states(m)
+        learner = _LIFT_ALGOS[algo](m, DEFAULT_CONTROL_FLOW_POLICY)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(NotImplementedError, match='only by broadcasting') as err:
+                learner.compile_graph(_batched_inputs()[0])
+        message = str(err.value)
+        assert f'has shape {y_shape}' in message
+        assert 'of shape (2, 4)' in message
+        assert where in message
+        assert "on the weight ('W',)" in message
+        assert 'issues/224' in message
+        assert 'scan_unroll_limit=17' in message
+
+    @pytest.mark.parametrize('model', [_BatchedDrive, _BatchedDriveInBody],
+                             ids=['lifted', 'in-body'])
+    def test_an_output_with_the_state_shape_is_accepted(self, model):
+        # ``tau`` reaches the batched states through ``element_wise`` with shape
+        # (n,) as well: that trace is sized from the hidden group, so it is not refused
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                descended = _online_batched(lambda: model(17), 'd_rtrl')
+                unrolled = _online_batched(lambda: model(17), 'd_rtrl', UNROLL_POLICY)
+        assert set(descended) == {'W', 'tau'}
+        for p in descended:
+            assert np.abs(unrolled[p]).max() > 1e-3
+            _close(descended[p], unrolled[p])
+
+    def test_the_unrolling_the_message_suggests_runs(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                unrolled = _online_batched(lambda: _SharedDrive(17), 'd_rtrl', UNROLL_POLICY)
+        assert np.isfinite(unrolled['W']).all() and np.abs(unrolled['W']).max() > 1e-3

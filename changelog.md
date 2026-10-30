@@ -154,6 +154,15 @@
   participate" when only its plain use inside the scan gets no credit, and
   a carried state of another shape that the lifted constant does not reach
   is no longer reported as a shape mismatch.
+- **Structured scan descent refuses an ETP output that reaches its hidden
+  state only by broadcasting**, such as an unbatched input projection
+  driving batched states. The eligibility trace of such an output is
+  allocated without the axes the broadcast adds and changes shape at its
+  first update, which the substep fold cannot carry: in the body it failed
+  with a scan carry type error, and so would the lifted form. Both now
+  raise `NotImplementedError` when the trace is allocated, naming the
+  output, both shapes and #224, which will size the trace from the hidden
+  group and remove the refusal.
 
 ### Features
 

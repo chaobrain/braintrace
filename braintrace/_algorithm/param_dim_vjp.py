@@ -31,6 +31,7 @@ from braintrace._compiler import (
     gather_learning_signal,
     widen_instant_term,
 )
+from braintrace._compiler.hid_param_op import _broadcastable, _relatable_hidden_shapes
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -82,6 +83,50 @@ def _cast_to_dtype(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(lambda a: a.astype(dtype), tree, is_leaf=u.math.is_quantity)
 
 
+def _refuse_descended_broadcast(relation: HiddenParamOpRelation, group: HiddenGroup) -> None:
+    """Refuse a descended relation whose output reaches its hidden state only by broadcasting.
+
+    A rule that sizes the trace from ``x`` and ``y`` (every rule but the
+    elementwise one, which sizes it from the hidden group) leaves out the axes
+    that broadcasting the output into the state adds: an unbatched output
+    driving a batched state, or a size-1 axis. The first update adds them, so
+    the trace changes shape. The substep fold of a descended scan carries the
+    trace through ``jax.lax.scan``, which needs a fixed shape and would fail
+    with a carry type error. Issue #224 sizes the trace from the hidden group
+    and removes this refusal.
+
+    Raises
+    ------
+    NotImplementedError
+        If ``relation`` is folded over a descended scan (in its body or lifted
+        into it) and its output reaches a hidden state of ``group`` only by
+        broadcasting.
+    """
+    ctx = relation.control_flow_context
+    if ctx is None:
+        return
+    y_shape = tuple(relation.y_var.aval.shape)
+    for path, state, hvar in zip(group.hidden_paths, group.hidden_states, group.hidden_outvars):
+        shapes = [s for s in _relatable_hidden_shapes(hvar, state) if _broadcastable(y_shape, s)]
+        if not shapes or any(tuple(jnp.broadcast_shapes(y_shape, s)) == y_shape for s in shapes):
+            continue
+        where = ('the scan reads it as a loop constant' if ctx.lifted
+                 else 'computed inside the scan body')
+        length = ctx.scan.length
+        raise NotImplementedError(
+            f"Structured scan descent does not support this length-{length} scan yet: "
+            f"the output of the ETP operation '{relation.primitive.name}' on the weight "
+            f"{relation.path} ({where}) has shape {y_shape}, and it reaches the hidden "
+            f"state {path} of shape {tuple(hvar.aval.shape)} only by broadcasting. "
+            f"Its eligibility trace would be allocated without the axes the broadcast adds, "
+            f"which the substep fold cannot carry "
+            f"(https://github.com/chaobrain/braintrace/issues/224). Compute the output with "
+            f"the hidden state's shape (for example, give the input the state's batch axis), "
+            f"or unroll the scan with ControlFlowPolicy(scan_unroll_limit={length}), which "
+            f"runs one call per step."
+        )
+
+
 def _init_param_dim_state(
     etrace_bwg: Dict[ETraceWG_Key, brainstate.State],
     relation: HiddenParamOpRelation,
@@ -119,6 +164,8 @@ def _init_param_dim_state(
             init_kw['group'] = group
         elif relation.primitive is etp_conv_p:
             init_kw['eqn_params'] = relation.eqn_params
+        if 'group' not in init_kw:
+            _refuse_descended_broadcast(relation, group)
         # ``trace_state_width`` is ``num_state`` at every recurrence_scope but
         # ``sparse_n``, where the trailing state axis carries the SnAp-n
         # neighbourhood as well: ``M = K * num_state``. Every per-primitive rule
