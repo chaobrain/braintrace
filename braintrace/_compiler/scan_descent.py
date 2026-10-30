@@ -758,6 +758,10 @@ def analyze_and_rewrite_scan(
     }
     body_invar_to_weight_path: Dict[Var, Path] = {}
     body_weight_path_to_invars: Dict[Path, List[Var]] = {}
+    # The body lists a weight's leaves in the order of its scan inputs (first
+    # use), not in the ParamState's leaf order: each body var keeps the leaf
+    # position of the outer var it stands for (issue #225).
+    body_weight_leaf_index: Dict[Var, int] = {}
     for bv, ov in zip(body.invars, eqn.invars):
         if not isinstance(ov, Var):
             continue
@@ -765,6 +769,9 @@ def analyze_and_rewrite_scan(
         if wp is not None:
             body_invar_to_weight_path[bv] = wp
             body_weight_path_to_invars.setdefault(wp, []).append(bv)
+            # ``invar_to_weight_path`` is built from ``weight_path_to_invars``,
+            # so ``ov`` is one of the leaves of its path.
+            body_weight_leaf_index[bv] = list(minfo.weight_path_to_invars[wp]).index(ov)
     path_to_state = minfo.retrieved_model_states
 
     # ---- reuse the flat finders on the body --------------------------------
@@ -786,6 +793,7 @@ def analyze_and_rewrite_scan(
         hid_path_to_group=body_hid_path_to_group,
         weight_path_to_invars=body_weight_path_to_invars,
         control_flow=policy,
+        weight_leaf_index=body_weight_leaf_index,
     )
 
     # A weight consumed by this scan but routed through no ETP primitive
