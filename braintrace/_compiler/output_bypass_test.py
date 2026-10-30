@@ -221,8 +221,8 @@ class TestRewrite:
 
 
 def _eqn_of(fn, *args):
-    """The single top-level equation of *fn* that is not a ``pjit`` wrapper
-    of the whole function."""
+    """The single top-level equation of *fn*, ignoring the
+    ``convert_element_type`` casts that tracing may add around it."""
     (eqn,) = [e for e in jax.make_jaxpr(fn)(*args).jaxpr.eqns
               if e.primitive.name not in ('convert_element_type',)]
     return eqn
