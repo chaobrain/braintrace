@@ -130,6 +130,10 @@ class DiagnosticKind(str, Enum):
     SCAN_DESCENT_APPLIED = 'scan_descent_applied'
     SCAN_DESCENT_SKIPPED = 'scan_descent_skipped'
     SCAN_DESCENT_NO_RELATIONS = 'scan_descent_no_relations'
+    # ``SCAN_DESCENT_RELATION_LIFTED``: an ETP relation outside a descended
+    # scan, whose output the scan reads as a loop constant, joins the scan's
+    # per-substep trace fold (issue #211; INFO). Context: ``hidden_paths``.
+    SCAN_DESCENT_RELATION_LIFTED = 'scan_descent_relation_lifted'
 
     # Opaque control flow touching weights / hidden states (Phase 3)
     #

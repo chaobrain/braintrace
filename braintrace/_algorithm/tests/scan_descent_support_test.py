@@ -172,7 +172,7 @@ class TestSubstepFold:
         algo = braintrace.pp_prop(net, decay_or_rank=16,
                                   vjp_method='multi-step',
                                   control_flow=DESCEND())
-        with pytest.warns(UserWarning, match='no ETP relation'):
+        with pytest.warns(UserWarning, match='only through plain ops'):
             with pytest.raises(NotImplementedError, match='scan descent'):
                 algo.compile_graph(jnp.ones((4,), dtype='float32'))
 
@@ -206,7 +206,7 @@ class TestSubstepFold:
         brainstate.nn.init_all_states(net, batch_size=1)
         algo = braintrace.D_RTRL(net, vjp_method='multi-step',
                                  control_flow=DESCEND())
-        with pytest.warns(UserWarning, match='no ETP relation'):
+        with pytest.warns(UserWarning, match='only through plain ops'):
             algo.compile_graph(jnp.ones((4,), dtype='float32'))
         assert len(algo.etrace_bwg) == 0
         out = algo.update(jnp.ones((4,), dtype='float32'))

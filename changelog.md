@@ -163,8 +163,65 @@
   `braintrace.element_wise` outside the scan and let the scan read its
   result; D-RTRL then matches BPTT for `tau` at any `k`. An ETP op applied
   after the scan credits only that later use, and one inside the body still
-  needs structured descent, which rejects an ETP relation outside the scan
-  beyond 16 substeps (#211).
+  needs structured descent (#211, below).
+- **An ETP relation outside a descended substep scan is folded into it
+  (#211).** An ETP primitive inside a substep `lax.scan`, such as
+  `braintrace.element_wise(tau)`, makes the scan descended beyond
+  `scan_unroll_limit` (16). An ETP relation outside the scan whose output
+  the scan reads, such as the input projection `I = braintrace.matmul(x, W)`,
+  then raised `NotImplementedError`, with a `scan_descent='off'` hint that
+  did not help. When the scan reads a loop constant computed from the
+  relation's output alone (the output itself, `2.0 * jnp.tanh(I)`, ...),
+  that constant is the same in every substep. The relation's `y -> hidden`
+  map now runs through the body, and its trace is folded with the body's
+  relations in each substep, with `x` read once per step. The scan gets no
+  new input. D-RTRL and e-prop gradients for `W` and `tau` equal the
+  unrolled path's and those of the same model with the projection inside
+  the body (f64, 1e-12). Multi-step D-RTRL in chunks of two steps, which
+  goes through the trace at every chunk boundary, matches BPTT (f64,
+  1e-12). A `SCAN_DESCENT_RELATION_LIFTED` record (INFO) names the weight
+  and the states, and a lifted relation reports a partial path as one in
+  the body does. A relation that also drives states outside the scan keeps
+  that part flat. The issue model compiles in 74–83 ms at `k = 17…256`
+  (graph and first call, CPU), the same as with the projection in the
+  body; unrolled at `k = 16` it takes 669 ms. The scan reading the output
+  combined with another outer value, in several operands, or as a scanned
+  or carried value still raises, now with a message that names how the
+  scan reads it and drops the `scan_descent='off'` hint.
+- **Structured scan descent refuses a scan whose credit its fold cannot
+  follow.** Descent folds the eligibility trace over the scan's hidden
+  carries only. Credit that reaches a hidden carry another way was dropped
+  silently, with gradients up to 90 % off the unrolled path:
+  - a carried value that is not a hidden state, such as a local
+    accumulator, a filtered copy of a state, or a state clipped after the
+    scan, when it depends on a hidden carry, an ETP output or the loop
+    constant of a lifted relation;
+  - a constant or scanned input computed from the step's hidden state
+    before the scan, including a state that an earlier scan carries out
+    in the same step (chained scans).
+
+  Such a scan now raises `NotImplementedError` naming the value, its
+  position and the hidden states it reaches, with the remedies: carry the
+  value as a hidden state of the scan, or unroll the scan. No derivative
+  flows through a comparison's boolean, an integer, a `stop_gradient` or a
+  recurrent ETP projection, so a value reached only through them is
+  accepted (such as a refractory timer or a float spike count set by a
+  threshold test on a state), as is a carried value that depends on none
+  of them (a substep clock). The check is linear in the size of the scan
+  body. The
+  `SCAN_DESCENT_NO_RELATIONS` warning no longer says a weight "will NOT
+  participate" when only its plain use inside the scan gets no credit, and
+  a carried state of another shape that the lifted constant does not reach
+  is no longer reported as a shape mismatch.
+- **Structured scan descent refuses an ETP output that reaches its hidden
+  state only by broadcasting**, such as an unbatched input projection
+  driving batched states. The eligibility trace of such an output is
+  allocated without the axes the broadcast adds and changes shape at its
+  first update, which the substep fold cannot carry: in the body it failed
+  with a scan carry type error, and so would the lifted form. Both now
+  raise `NotImplementedError` when the trace is allocated, naming the
+  output, both shapes and #224, which will size the trace from the hidden
+  group and remove the refusal.
 - **A multi-leaf `ParamState` read inside a descended scan body gets its
   leaves right (#225).** The body reads the leaves it uses as scan
   constants, in the order of first use, and numbered them in that order
