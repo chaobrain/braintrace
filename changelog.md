@@ -165,6 +165,19 @@
   after the scan credits only that later use, and one inside the body still
   needs structured descent, which rejects an ETP relation outside the scan
   beyond 16 substeps (#211).
+- **A multi-leaf `ParamState` read inside a descended scan body gets its
+  leaves right (#225).** The body reads the leaves it uses as scan
+  constants, in the order of first use, and numbered them in that order
+  rather than in the `ParamState`'s leaf order (`jax.tree.leaves`, dict keys
+  sorted). The online gradient of each leaf then went to another leaf. A
+  `braintrace.nn.Linear` with a bias called in the body failed with a custom
+  VJP type error, because `weight` got the bias's position. Leaves of equal
+  shape were silently swapped: for gains `{'a', 'b'}` read `b` first, D-RTRL
+  was 158 % off the unrolled scan for `a` and 84 % for `b`. One leaf read
+  alone got position 0. Each body constant now keeps the leaf position of
+  the `ParamState` leaf it stands for. D-RTRL and e-prop then equal the
+  unrolled scan (f64, 1e-12), for a `Linear` with a bias, leaves read in any
+  order, a leaf read alone and a leaf read twice.
 
 ### Features
 
