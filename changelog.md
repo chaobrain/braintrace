@@ -213,6 +213,33 @@
   participate" when only its plain use inside the scan gets no credit, and
   a carried state of another shape that the lifted constant does not reach
   is no longer reported as a shape mismatch.
+- **An algorithm that refuses a descended scan names remedies that work
+  (#226).** `pp_prop`, `ES_D_RTRL`, `UORO`, `OSTLFeedforward` and the
+  random-projection engine refuse a scan whose body holds an ETP operation
+  beyond `scan_unroll_limit`. So do `OSTLRecurrent` and `SnAp` under their
+  default recurrence scopes. Their messages suggested
+  `ControlFlowPolicy(scan_descent='off')`, under which the opaque scan
+  rejects the weight inside it. They now give the scan's length and suggest
+  `ControlFlowPolicy(scan_unroll_limit=L)` with that length (the longest
+  descended scan), and the general refusal names `D_RTRL` and `EProp`,
+  which run the descended scan. The `SCAN_DESCENT_SKIPPED` warning, for a
+  carry initialised from a transformed value, made the same suggestion,
+  under which the scan is refused just as when descent is skipped; it now
+  suggests unrolling too.
+- **A multi-leaf `ParamState` read inside a descended scan body gets its
+  leaves right (#225).** The body reads the leaves it uses as scan
+  constants, in the order of first use, and numbered them in that order
+  rather than in the `ParamState`'s leaf order (`jax.tree.leaves`, dict keys
+  sorted). The online gradient of each leaf then went to another leaf. A
+  `braintrace.nn.Linear` with a bias called in the body failed with a custom
+  VJP type error, because `weight` got the bias's position. Leaves of equal
+  shape were silently swapped: for gains `{'a', 'b'}` read `b` first, D-RTRL
+  was 158 % off the unrolled scan for `a` and 84 % for `b`. One leaf read
+  alone got position 0. Each body constant now keeps the leaf position of
+  the `ParamState` leaf it stands for. D-RTRL and e-prop then equal the
+  unrolled scan (f64, 1e-12), for a `Linear` with a bias (masked or not),
+  leaves read in any order, a leaf read alone, a leaf read twice and a leaf
+  read through a `weight_fn`.
 - **An ETP output that reaches its hidden state only by broadcasting gets
   an eligibility trace of fixed shape (#224).** Such an output is an
   unbatched input projection driving batched states, `(4,)` into `(2, 4)`,
@@ -222,9 +249,11 @@
   update added them. A loop over the steps (`for_loop`, `scan`) then
   failed with a carry type error, multi-step D-RTRL failed with an einsum
   error for a batch of one, and a descended scan failed with a scan carry
-  type error. The trace is now allocated at the shape of the term its
+  type error. Such a trace is now allocated at the shape of the term its
   update adds, which `jax.eval_shape` computes when the trace is
-  allocated; a trace the rule already sizes right is kept as it is. The
+  allocated; a trace the rule already sizes right is kept as it is. An
+  output that reaches its state with its own shape skips that check, so
+  compile time is unchanged there. The
   trace therefore grows by the broadcast axes from the start: its memory
   scales with the batch size, as for a batched input. A loop over the steps
   equals one call per step, multi-step D-RTRL and e-prop in chunks of two

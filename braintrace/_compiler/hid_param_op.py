@@ -392,19 +392,29 @@ def _resolve_weight_leaf_idx(
     weight_path: Path,
     producers: Dict[Var, JaxprEqn],
     weight_path_to_invars: Optional[Dict[Path, List[Var]]],
+    weight_leaf_index: Optional[Dict[Var, int]] = None,
 ) -> int:
     """Find which leaf of the owning ``ParamState`` produced *weight_var*.
 
     Backtraces *weight_var* through any ``mask``/``weight_fn`` chain to the
     raw ParamState invar and returns its position in the ParamState's leaf
-    list. Falls back to ``0`` when the ParamState only has one leaf.
+    list (``jax.tree.leaves`` order). *weight_path_to_invars* lists the
+    variables that stand for the path's leaves; by default they are in leaf
+    order. *weight_leaf_index* instead gives each variable its leaf position:
+    a scan body reads the leaves it uses as constants in the order of first
+    use, some of them possibly twice and others not at all (issue #225).
+    Without it, a path that lists one variable is leaf ``0``. A variable that
+    traces to none of the listed ones is reported and gets leaf ``0``.
     """
     if weight_path_to_invars is None:
         return 0
     invars_list = weight_path_to_invars.get(weight_path, [])
-    if len(invars_list) <= 1:
-        return 0
-    source_var = weight_var
+    if weight_leaf_index is None:
+        if len(invars_list) <= 1:
+            return 0
+        position = {v: i for i, v in reversed(list(enumerate(invars_list)))}
+    else:
+        position = {v: weight_leaf_index[v] for v in invars_list if v in weight_leaf_index}
     frontier: List[Var] = [weight_var]
     visited: Set[Var] = set()
     while frontier:
@@ -412,29 +422,25 @@ def _resolve_weight_leaf_idx(
         if v in visited:
             continue
         visited.add(v)
-        if v in invars_list:
-            source_var = v
-            break
+        if v in position:
+            return position[v]
         eqn = producers.get(v)
         if eqn is not None:
             for iv in eqn.invars:
                 if isinstance(iv, Var) and iv not in visited:
                     frontier.append(iv)
-    try:
-        return invars_list.index(source_var)
-    except ValueError:
-        emit(
-            kind=DiagnosticKind.PYTREE_WEIGHT_LEAF_AMBIGUOUS,
-            level=DiagnosticLevel.WARNING,
-            message=(
-                f'Could not resolve weight leaf for ParamState at {weight_path}; '
-                f'falling back to leaf index 0.'
-            ),
-            weight_path=weight_path,
-            context={'weight_var': weight_var,
-                     'num_leaves': len(invars_list)},
-        )
-        return 0
+    emit(
+        kind=DiagnosticKind.PYTREE_WEIGHT_LEAF_AMBIGUOUS,
+        level=DiagnosticLevel.WARNING,
+        message=(
+            f'Could not resolve weight leaf for ParamState at {weight_path}; '
+            f'falling back to leaf index 0.'
+        ),
+        weight_path=weight_path,
+        context={'weight_var': weight_var,
+                 'num_leaves': len(invars_list)},
+    )
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1034,7 @@ def find_hidden_param_op_relations_from_jaxpr(
     weight_path_to_invars: Optional[Dict[Path, List[Var]]] = None,
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
+    weight_leaf_index: Optional[Dict[Var, int]] = None,
     **_ignored: Any,
 ) -> Sequence[HiddenParamOpRelation]:
     """Find all ETP-primitive-to-hidden-state relations in *jaxpr*."""
@@ -1110,7 +1117,7 @@ def find_hidden_param_op_relations_from_jaxpr(
                 )
                 continue
             t_leaf = _resolve_weight_leaf_idx(
-                invar, t_path, producers, weight_path_to_invars,
+                invar, t_path, producers, weight_path_to_invars, weight_leaf_index,
             )
             t_state = path_to_state.get(t_path)
             # ``t_path`` is a trainable weight path, so its state is always a present ParamState.
