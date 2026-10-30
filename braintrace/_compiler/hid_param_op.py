@@ -66,6 +66,7 @@ from braintrace._compatible_imports import (
     is_while_primitive,
     is_cond_primitive,
     jaxpr_constvars,
+    scan_num_consts_carry,
     shaped_aval,
 )
 from braintrace._op import (
@@ -181,7 +182,10 @@ class HiddenParamOpRelation(NamedTuple):
         ``ParamState`` invar).
     control_flow_context : RelationDescent or None
         Descent context when this relation lives inside a descended scan body
-        (Phase 4 structured scan descent); ``None`` for flat relations.
+        (Phase 4 structured scan descent), or when it is an outer relation
+        lifted into such a scan because the scan reads its output as a loop
+        constant (``RelationDescent.lifted``, issue #211); ``None`` for flat
+        relations.
 
     Notes
     -----
@@ -210,7 +214,10 @@ class HiddenParamOpRelation(NamedTuple):
     structured scan descent): ``x_var`` / ``y_var`` /
     ``y_to_hidden_group_jaxprs`` are body-scoped, and the executor must read
     their runtime values through ``control_flow_context.scan.stacked_var_map``
-    (stacked over the substep axis). ``None`` for ordinary flat relations."""
+    (stacked over the substep axis). A relation outside the scan that the
+    scan reads through a loop constant is lifted into it
+    (``control_flow_context.lifted``, issue #211): its ``x_var`` and
+    ``y_var`` stay outer. ``None`` for ordinary flat relations."""
 
     # backward compat aliases
     @property
@@ -574,7 +581,7 @@ def _classify_path(
     hidden_outvar: Var,
     consumer_map: Dict[Var, List[JaxprEqn]],
     producer_map: Dict[Var, JaxprEqn],
-    self_eqn: JaxprEqn,
+    self_eqn: Optional[JaxprEqn],
     forward: Dict[Var, None],
 ) -> str:
     """Classify the set of paths from ``y_var`` to ``hidden_outvar``.
@@ -638,6 +645,177 @@ def _classify_path(
     if hidden_outvar in restricted_reach:
         return PathClassification.MIXED
     return PathClassification.ALL_THROUGH_OTHER_ETP
+
+
+class _HiddenReach(NamedTuple):
+    """Where the output of an ETP primitive reaches hidden states
+    (:func:`_reach_hidden`)."""
+
+    paths: List[Path]
+    """Connected hidden paths: reached, and of a relatable shape."""
+
+    classification: Dict[Path, str]
+    """``{path: PathClassification.*}`` for each connected path."""
+
+    blocking: Tuple[JaxprEqn, ...]
+    """Trainable ETP primitives that cut a path to a hidden state."""
+
+    mismatched: List[Tuple[Var, Path, Tuple[Tuple[int, ...], ...]]]
+    """``(hidden var, path, relatable shapes)`` reached with a shape the
+    output does not broadcast with: left out of the relation."""
+
+
+def _reach_hidden(
+    start: Var,
+    y_shape: Tuple[int, ...],
+    consumers: Dict[Var, List[JaxprEqn]],
+    producers: Dict[Var, JaxprEqn],
+    outvar_to_hidden_path: Dict[Var, Path],
+    outvar_to_group_index: Dict[Var, int],
+    path_to_state: Dict[Path, brainstate.State],
+    self_eqn: Optional[JaxprEqn],
+) -> _HiddenReach:
+    """Reachability, shape filter and path classification of an ETP output.
+
+    Shared by the relations found in a jaxpr and the outer relations lifted
+    into a descended scan, which start at the loop constant the scan reads.
+
+    Parameters
+    ----------
+    start : Var
+        The ETP output, or the body invar of the loop constant.
+    y_shape : tuple of int
+        The shape of the ETP output (the outer output for a lifted relation).
+    consumers, producers : dict
+        The consumer and producer maps of the jaxpr holding *start*.
+    outvar_to_hidden_path : dict
+        The hidden outvars of that jaxpr and their paths.
+    outvar_to_group_index : dict
+        Hidden outvar -> its group index (for the blocking report).
+    path_to_state : dict
+        The model states by path.
+    self_eqn : JaxprEqn or None
+        The ETP equation itself, left out of the classification.
+    """
+    reachable, blocking = _bfs_forward(
+        start, consumers, set(outvar_to_hidden_path),
+        stop_at_non_grad_etp=True,
+        outvar_to_group_index=outvar_to_group_index,
+    )
+    # depends only on ``start``: computed once, not once per hidden var
+    forward = forward_closure(start, consumers)
+    paths: List[Path] = []
+    classes: Dict[Path, str] = {}
+    mismatched: List[Tuple[Var, Path, Tuple[Tuple[int, ...], ...]]] = []
+    for hvar in reachable:
+        path = outvar_to_hidden_path[hvar]
+        shapes = _relatable_hidden_shapes(hvar, path_to_state.get(path))
+        if not any(_broadcastable(y_shape, shape) for shape in shapes):
+            mismatched.append((hvar, path, shapes))
+            continue
+        paths.append(path)
+        classes[path] = _classify_path(start, hvar, consumers, producers,
+                                       self_eqn=self_eqn, forward=forward)
+    return _HiddenReach(paths, classes, blocking, mismatched)
+
+
+def _emit_shape_mismatches(
+    primitive: Primitive,
+    weight_path: Path,
+    y_shape: Tuple[int, ...],
+    mismatched: Sequence[Tuple[Var, Path, Tuple[Tuple[int, ...], ...]]],
+) -> None:
+    """Report the hidden states a relation leaves out for their shape."""
+    for _, hpath, hidden_shapes in mismatched:
+        emit(
+            kind=DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH,
+            level=DiagnosticLevel.WARNING,
+            message=(
+                f'ETP op {primitive.name}: weight={weight_path}, '
+                f'y shape={y_shape} not broadcastable with '
+                f'hidden shape={" or ".join(map(str, hidden_shapes))} at '
+                f'{hpath}. Removing connection.'
+            ),
+            primitive=primitive,
+            weight_path=weight_path,
+            hidden_paths=(hpath,),
+            context={
+                'y_shape': y_shape,
+                'hidden_shape': hidden_shapes[0],
+                'hidden_shapes': hidden_shapes,
+            },
+        )
+
+
+def _emit_partial_paths(
+    primitive: Primitive,
+    weight_path: Path,
+    classification: Dict[Path, str],
+) -> None:
+    """Report the hidden states a relation reaches both directly and through
+    another trainable ETP primitive (``PathClassification.MIXED``)."""
+    for hpath, cls in classification.items():
+        if cls == PathClassification.MIXED:
+            emit(
+                kind=DiagnosticKind.RELATION_PARTIAL_PATH,
+                level=DiagnosticLevel.WARNING,
+                message=(
+                    f'ETP primitive {primitive.name} (weight={weight_path}) '
+                    f'reaches hidden state {hpath} through *both* a direct '
+                    f'tail and another trainable ETP primitive. The relation '
+                    f'is still registered (preserving prior behavior) but '
+                    f'the indirect path is not captured by ETP. The gradient '
+                    f'contribution through the indirect path will be missing.'
+                ),
+                primitive=primitive,
+                weight_path=weight_path,
+                hidden_paths=(hpath,),
+                context={'classification': cls},
+            )
+
+
+def _scan_outputs_reached(eqn: JaxprEqn, positions: Sequence[int]) -> List[Var]:
+    """The outputs of the scan *eqn* that depend on its inputs at
+    *positions*, through its body and over its iterations."""
+    body = eqn.params['jaxpr'].jaxpr
+    num_consts, num_carry = scan_num_consts_carry(eqn)
+    consumers = build_consumer_map(body)
+    reach: Set[Var] = set()
+    for j in positions:
+        reach.update(forward_closure(body.invars[j], consumers))
+    grown = True
+    while grown:  # a reached carry is a reached input of the next iteration
+        grown = False
+        for c in range(num_carry):
+            out, inv = body.outvars[c], body.invars[num_consts + c]
+            if isinstance(out, Var) and out in reach and inv not in reach:
+                reach.update(forward_closure(inv, consumers))
+                grown = True
+    return [o for o, b in zip(eqn.outvars, body.outvars)
+            if isinstance(b, Var) and b in reach]
+
+
+def _reach_through_descended_scans(
+    start: Var,
+    consumers: Dict[Var, List[JaxprEqn]],
+    descended_scan_eqn_ids: FrozenSet[int],
+) -> Set[Var]:
+    """The forward closure of *start*, following each descended scan through
+    its body rather than to all of its outputs."""
+    seen: Set[Var] = set()
+    stack = [start]
+    while stack:
+        v = stack.pop()
+        if v in seen:
+            continue
+        seen.add(v)
+        for e in consumers.get(v, ()):
+            if id(e) in descended_scan_eqn_ids:
+                stack.extend(_scan_outputs_reached(
+                    e, [j for j, iv in enumerate(e.invars) if iv is v]))
+            else:
+                stack.extend(o for o in e.outvars if isinstance(o, Var))
+    return seen
 
 
 # ---------------------------------------------------------------------------
@@ -961,78 +1139,33 @@ def find_hidden_param_op_relations_from_jaxpr(
         # The first *resolved* key names the relation in diagnostics.
         weight_path: Path = next(iter(trainable_paths.values()))
 
-        # --- Restricted reachability for relation registration ---
-        reachable_hvars, blocking_eqns = _bfs_forward(
-            y_var, consumers, hidden_outvar_set,
-            stop_at_non_grad_etp=True,
-            outvar_to_group_index=outvar_to_group_index,
-        )
-
-        # --- Filter by shape compatibility ---
-        # The unrestricted forward closure depends only on ``y_var``:
-        # compute it once per primitive equation, not once per hidden var.
-        y_forward = forward_closure(y_var, consumers)
-        connected_paths: List[Path] = []
-        path_class: Dict[Path, str] = {}
+        # --- Reachability, shape filter, classification ---
         y_shape = tuple(shaped_aval(y_var).shape)
-        for hvar in list(reachable_hvars):
-            hpath = outvar_to_hidden_path[hvar]
-            hidden_shapes = _relatable_hidden_shapes(hvar, path_to_state.get(hpath))
-            if not any(_broadcastable(y_shape, shape) for shape in hidden_shapes):
-                emit(
-                    kind=DiagnosticKind.RELATION_EXCLUDED_SHAPE_MISMATCH,
-                    level=DiagnosticLevel.WARNING,
-                    message=(
-                        f'ETP op {primitive.name}: weight={weight_path}, '
-                        f'y shape={y_shape} not broadcastable with '
-                        f'hidden shape={" or ".join(map(str, hidden_shapes))} at '
-                        f'{hpath}. Removing connection.'
-                    ),
-                    primitive=primitive,
-                    weight_path=weight_path,
-                    hidden_paths=(hpath,),
-                    context={
-                        'y_shape': y_shape,
-                        'hidden_shape': hidden_shapes[0],
-                        'hidden_shapes': hidden_shapes,
-                    },
-                )
-                reachable_hvars.pop(hvar, None)
-                continue
-            connected_paths.append(hpath)
-            cls = _classify_path(
-                y_var, hvar, consumers, producers, self_eqn=eqn,
-                forward=y_forward,
-            )
-            path_class[hpath] = cls
+        reach = _reach_hidden(
+            y_var, y_shape, consumers, producers, outvar_to_hidden_path,
+            outvar_to_group_index, path_to_state, self_eqn=eqn,
+        )
+        mismatched = reach.mismatched
+        if any(hid_path_to_group[p].descent is not None for _, p, _ in mismatched):
+            # the walk above reaches every carry of a descended scan; report
+            # only the carries the output reaches through the body
+            through = _reach_through_descended_scans(y_var, consumers, descended_scan_eqn_ids)
+            mismatched = [m for m in mismatched
+                          if hid_path_to_group[m[1]].descent is None or m[0] in through]
+        _emit_shape_mismatches(primitive, weight_path, y_shape, mismatched)
+        connected_paths = reach.paths
+        path_class = reach.classification
 
         if not connected_paths:
             _emit_no_relation_diag(
-                primitive, weight_path, blocking_eqns,
+                primitive, weight_path, reach.blocking,
                 producers, invar_to_weight_path, weight_trace_cache,
             )
             continue
 
-        # MIXED paths: still register but emit info-level diagnostic so callers
-        # know the gradient bookkeeping is only partially captured.
-        for hpath, cls in path_class.items():
-            if cls == PathClassification.MIXED:
-                emit(
-                    kind=DiagnosticKind.RELATION_PARTIAL_PATH,
-                    level=DiagnosticLevel.WARNING,
-                    message=(
-                        f'ETP primitive {primitive.name} (weight={weight_path}) '
-                        f'reaches hidden state {hpath} through *both* a direct '
-                        f'tail and another trainable ETP primitive. The relation '
-                        f'is still registered (preserving prior behavior) but '
-                        f'the indirect path is not captured by ETP. The gradient '
-                        f'contribution through the indirect path will be missing.'
-                    ),
-                    primitive=primitive,
-                    weight_path=weight_path,
-                    hidden_paths=(hpath,),
-                    context={'classification': cls},
-                )
+        # MIXED paths: still register but warn, so callers know the
+        # gradient bookkeeping is only partially captured.
+        _emit_partial_paths(primitive, weight_path, path_class)
 
         # --- Group by hidden group ---
         group_ids_seen: Set[int] = set()
