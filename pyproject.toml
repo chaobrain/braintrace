@@ -126,6 +126,11 @@ markers = [
     "xfail_known: pins a known finding (F-xx) documented in dev/superpowers/findings",
 ]
 addopts = "-m 'not diagnostic'"
+# A jaxpr built without a DebugInfo is a bug here (#197): jax deprecates it and
+# will make it an error, so the suite fails on the first one.
+filterwarnings = [
+    "error:core\\.Jaxpr is missing a DebugInfo object:DeprecationWarning",
+]
 
 
 [tool.mypy]
