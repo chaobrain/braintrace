@@ -326,13 +326,15 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
             if relation.x_var is not None:
                 ctx = relation.control_flow_context
                 x = etrace_x_key(relation.x_var)
-                if ctx is not None:
+                if ctx is not None and not ctx.lifted:
                     # descended relation: ``x_var`` is body-scoped; its
                     # runtime value is the stacked ys output (leading substep
                     # axis L) hoisted by the scan-descent pass.
                     xs[x] = intermediate_values[
                         ctx.scan.stacked_var_map[relation.x_var]]
                 else:
+                    # a flat relation, or one lifted into a descended scan
+                    # (#211): ``x_var`` is outer, constant over the substeps
                     xs[x] = intermediate_values[relation.x_var]
 
         # the weight df
@@ -347,7 +349,6 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                 # flat path uses over the substep axis. Downstream, the
                 # algorithm's substep fold consumes the extra leading axis.
                 m = ctx.scan.stacked_var_map
-                y_stack = intermediate_values[m[relation.y_var]]
                 cvars = list(dict.fromkeys(
                     v for j in relation.y_to_hidden_group_jaxprs
                     for v in jaxpr_constvars(j, 1)))
@@ -368,7 +369,20 @@ class ETraceVjpGraphExecutor(ETraceGraphExecutor):
                     _, tans = jax.jvp(_y2h, (y_t,), (u.math.ones_like(y_t),))
                     return tuple(tans)
 
-                tangents = jax.vmap(_one_substep)(y_stack, c_stacks)
+                if not ctx.lifted:
+                    y_stack = intermediate_values[m[relation.y_var]]
+                    tangents = jax.vmap(_one_substep)(y_stack, c_stacks)
+                else:
+                    # lifted from outside the scan (#211): ``y`` is outer,
+                    # one value for all substeps; the map's constvars are
+                    # per-substep body values
+                    y_val = intermediate_values[relation.y_var]
+                    if c_stacks:
+                        tangents = jax.vmap(_one_substep, in_axes=(None, 0))(y_val, c_stacks)
+                    else:
+                        tangents = tuple(
+                            u.math.broadcast_to(t, (ctx.scan.length,) + tuple(t.shape))
+                            for t in _one_substep(y_val, ()))
                 for tangent, group in zip(tangents, relation.hidden_groups):
                     dfs[etrace_df_key(relation.y_var, group.index)] = tangent
                 continue
