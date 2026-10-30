@@ -66,6 +66,26 @@ class EligibilityTrace(brainstate.ShortTermState):
     __module__ = 'braintrace'
 
 
+def descended_scan_length(graph: ETraceGraph) -> Optional[int]:
+    """The length of the longest scan that *graph* descends, or ``None``.
+
+    A descended scan holds an ETP relation or a hidden group in its body; a
+    group can be descended without any relation (all body weights used
+    through plain ops), so both are read. Unrolling the scan, with
+    ``ControlFlowPolicy(scan_unroll_limit=length)``, removes the descent.
+    """
+    lengths = [r.control_flow_context.scan.length
+               for r in graph.hidden_param_op_relations
+               if r.control_flow_context is not None]
+    lengths += [g.descent.scan.length for g in graph.hidden_groups if g.descent is not None]
+    return max(lengths) if lengths else None
+
+
+#: The algorithms the scan-descent refusal names: they run a descended scan
+#: with their default configuration (``scan_descent_hint_test`` checks it).
+DESCENT_ALGORITHMS: Tuple[str, ...] = ('D_RTRL', 'EProp')
+
+
 class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
     r"""Provide the base interface for eligibility-trace algorithms.
 
@@ -314,19 +334,8 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
             # (all body weights routed through plain ops), so check both.
             # Gate here — after the graph is built, before any trace state
             # is initialized against it.
-            if (
-                (
-                    any(
-                        r.control_flow_context is not None
-                        for r in self.graph.hidden_param_op_relations
-                    )
-                    or any(
-                        g.descent is not None
-                        for g in self.graph.hidden_groups
-                    )
-                )
-                and not getattr(self, '_supports_scan_descent', False)
-            ):
+            length = descended_scan_length(self.graph)
+            if length is not None and not getattr(self, '_supports_scan_descent', False):
                 # Engines whose refusal has an axis-level reason (rather than
                 # merely missing support) state it via this hook, so the message
                 # names the coordinate instead of only the mechanism.
@@ -334,9 +343,10 @@ class ETraceAlgorithm(SequenceDriverMixin, brainstate.nn.Module):
                 raise NotImplementedError(
                     f'{type(self).__name__} does not support structured scan '
                     f'descent yet (an ETP relation or hidden group was '
-                    f'discovered inside a scan body). Use an algorithm that '
-                    f'supports scan descent, or set '
-                    f"ControlFlowPolicy(scan_descent='off')."
+                    f'discovered inside the body of a length-{length} scan). Use '
+                    f'an algorithm that supports scan descent '
+                    f'({" or ".join(DESCENT_ALGORITHMS)}), or unroll the '
+                    f'scan with ControlFlowPolicy(scan_unroll_limit={length}).'
                     + (f' {reason}' if reason else '')
                 )
 

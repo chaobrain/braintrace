@@ -49,7 +49,7 @@ from braintrace._compiler.online_credit import OnlineCreditGraph, credit_message
 from braintrace._op import is_snap_anchored
 from ._common import FixedRandomFeedback, _update_dict
 from .axes import ETraceConfig
-from .base import ETraceAlgorithm
+from .base import ETraceAlgorithm, descended_scan_length
 from .vjp_graph_executor import ETraceVjpGraphExecutor
 
 # guards the once-per-weight online-credit records (#199) when threads trace at once
@@ -718,15 +718,16 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             for r in self.graph.hidden_param_op_relations
         )
         groups = sum(g.descent is not None for g in self.graph.hidden_groups)
-        if relations or groups:
+        length = descended_scan_length(self.graph)
+        if length is not None:
             raise NotImplementedError(
                 f"recurrence_scope={scope!r} is not honoured inside a "
                 f'descended scan ({relations} ETP relation(s) and {groups} '
-                f'hidden group(s) were discovered inside a scan body, whose '
-                f'transition is always analysed with diagonal recurrence). Use '
-                f"recurrence_scope='diagonal', or keep the recurrent weights "
-                f"outside the scan body, or set "
-                f"ControlFlowPolicy(scan_descent='off')."
+                f'hidden group(s) were discovered inside the body of a '
+                f'length-{length} scan, whose transition is always analysed '
+                f"with diagonal recurrence). Use recurrence_scope='diagonal', "
+                f'keep the recurrent weights outside the scan body, or unroll '
+                f'the scan with ControlFlowPolicy(scan_unroll_limit={length}).'
             )
 
     def _assert_relations_are_snap_anchored(self) -> None:
