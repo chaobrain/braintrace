@@ -767,9 +767,9 @@ def analyze_and_rewrite_scan(
         if wp is not None:
             body_invar_to_weight_path[bv] = wp
             body_weight_path_to_invars.setdefault(wp, []).append(bv)
-            leaves = list(minfo.weight_path_to_invars.get(wp, ()))
-            if ov in leaves:
-                body_weight_leaf_index[bv] = leaves.index(ov)
+            # ``invar_to_weight_path`` is built from ``weight_path_to_invars``,
+            # so ``ov`` is one of the leaves of its path.
+            body_weight_leaf_index[bv] = list(minfo.weight_path_to_invars[wp]).index(ov)
     path_to_state = minfo.retrieved_model_states
 
     # ---- reuse the flat finders on the body --------------------------------

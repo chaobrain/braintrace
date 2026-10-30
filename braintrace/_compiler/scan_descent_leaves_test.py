@@ -110,26 +110,72 @@ class _Gains(_TwoState):
         return self.scan(body)
 
 
+class _WeightFnChain(_TwoState):
+    """Rules that use the leaf's value: the body reads ``g['b']`` through an
+    ``exp`` ``weight_fn``, ``g['c']`` through a mask, then ``g['b']`` again.
+    The leaf order is ``a``, ``b``, ``c``."""
+
+    def __init__(self, k=17, n=4):
+        super().__init__(k, n=n)
+        ramp = 0.1 * jnp.arange(n)
+        self.g = brainstate.ParamState(
+            {'c': 0.3 + ramp, 'b': -0.5 + ramp, 'a': 1.2 + ramp})
+
+    def update(self, x):
+        mask = jnp.array([1.0, 0.0, 1.0, 1.0])
+
+        def body(c, _):
+            g = self.g.value
+            I = braintrace.matmul(x, self.W.value)
+            e_exp = braintrace.element_wise(g['b'], weight_fn=jnp.exp)
+            e_mask = braintrace.element_wise(g['c'] * mask)
+            e_b = braintrace.element_wise(g['b'])
+            return self.substep(c, I + e_exp * I + e_mask + 0.5 * jnp.tanh(e_b))
+
+        return self.scan(body)
+
+
+class _MaskedLinearWithBiasInBody(_LinearWithBiasInBody):
+    """A masked ``Linear`` with a bias in the body: its rule applies the mask
+    to the weight's value."""
+
+    def __init__(self, k=17):
+        super().__init__(k)
+        with brainstate.random.seed_context(3):
+            self.lin = braintrace.nn.Linear(
+                3, 4, b_init=braintools.init.Normal(0.0, 0.3),
+                w_mask=jnp.array([[1, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1]]))
+
+
 def _inputs(T=6, n_in=3):
     with brainstate.random.seed_context(1):
         return brainstate.random.rand(T, n_in)
 
 
+_FALLBACK = 'Could not resolve weight leaf'  # PYTREE_WEIGHT_LEAF_AMBIGUOUS
+
+
+def _assert_no_fallback(caught):
+    # every leaf read in these models resolves: the fallback to leaf 0 must not run
+    assert not [w for w in caught if _FALLBACK in str(w.message)]
+
+
 def _online(make, algo, policy=None):
     from braintrace._testing.oracle import online_param_gradients_singlestep_naive
     kw = {} if policy is None else dict(control_flow=policy)
-    g = online_param_gradients_singlestep_naive(
-        make, _inputs(), algo_factory=lambda m: _ALGOS[algo](m, kw))
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        g = online_param_gradients_singlestep_naive(
+            make, _inputs(), algo_factory=lambda m: _ALGOS[algo](m, kw))
+    _assert_no_fallback(caught)
     leaves, _ = jax.tree_util.tree_flatten_with_path(g)
     return {jax.tree_util.keystr(p): np.asarray(v) for p, v in leaves}
 
 
 def _descended_and_unrolled(make, algo):
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
-        with brainstate.environ.context(precision=64):
-            descended = _online(make, algo)
-            unrolled = _online(make, algo, UNROLL_POLICY)
+    with brainstate.environ.context(precision=64):
+        descended = _online(make, algo)
+        unrolled = _online(make, algo, UNROLL_POLICY)
     assert set(descended) == set(unrolled)
     return descended, unrolled
 
@@ -154,9 +200,10 @@ def _descended_relations(make):
     from braintrace._compiler.graph import compile_etrace_graph
     model = make()
     brainstate.nn.init_all_states(model)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore')
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
         graph = compile_etrace_graph(model, jnp.zeros(3))
+    _assert_no_fallback(caught)
     return [r for r in graph.hidden_param_op_relations if r.control_flow_context is not None]
 
 
@@ -173,6 +220,17 @@ class TestLeavesReadInTheBody:
             _close(descended[p], unrolled[p])
         assert any('bias' in p for p in unrolled)
         assert all(np.abs(unrolled[p]).max() > 1e-3 for p in unrolled if 'lin' in p)
+
+    @pytest.mark.parametrize('make', [_WeightFnChain, _MaskedLinearWithBiasInBody],
+                             ids=['weight-fn-and-mask-out-of-order', 'masked-linear-with-a-bias'])
+    def test_a_rule_that_uses_the_leaf_value_matches_the_unrolled_scan(self, algo, make):
+        # the rules read the value of the leaf they are given: a wrong leaf is
+        # 176 % off (g['b'] through exp) or a VJP shape error (the mask)
+        descended, unrolled = _descended_and_unrolled(make, algo)
+        for p in descended:
+            _close(descended[p], unrolled[p])
+        read = [p for p in unrolled if "['b']" in p or "['c']" in p or 'lin' in p]
+        assert read and all(np.abs(unrolled[p]).max() > 1e-3 for p in read)
 
     @pytest.mark.parametrize('reads', ['ba', 'cab', 'abc'],
                              ids=['equal-shapes-out-of-order', 'three-leaves-out-of-order',
@@ -237,6 +295,16 @@ class TestResolveWeightLeafIdx:
         index = {a1: 0, a2: 0, b: 1}
         assert [_resolve_weight_leaf_idx(v, ('g',), {}, listed, index)
                 for v in (a1, a2, b)] == [0, 0, 1]
+
+    def test_a_leaf_of_another_param_state_is_not_taken(self):
+        # one trainable input computed from leaves of two ParamStates (a
+        # documented limitation: one of them gets the credit); the walk meets
+        # the other ParamState's leaf first, and must not return its position
+        from types import SimpleNamespace
+        a, b, other, w = self._vars(4)
+        producers = {w: SimpleNamespace(invars=[b, other])}
+        index = {a: 0, b: 1, other: 2}
+        assert _resolve_weight_leaf_idx(w, ('g',), producers, {('g',): [b, a]}, index) == 1
 
     def test_an_unresolved_variable_warns_and_falls_back_to_zero(self):
         a, b, other = self._vars(3)
