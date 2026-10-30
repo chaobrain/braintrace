@@ -720,7 +720,9 @@ def analyze_and_rewrite_scan(
                     f'state, so part of the per-step transition lies outside '
                     f'the scan and the folded eligibility trace would be '
                     f'wrong. Move the pre-scan update into the scan body, or '
-                    f"set ControlFlowPolicy(scan_descent='off')."
+                    f'unroll the scan with '
+                    f"ControlFlowPolicy(scan_unroll_limit={eqn.params['length']}) "
+                    f'(compile time grows with the length).'
                 ),
                 hidden_paths=(path,),
             )
