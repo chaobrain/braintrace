@@ -61,9 +61,28 @@
   equations do unrolled), when hidden-derived values are scanned as `xs` or
   stacked as `ys` on the hidden path (their leading axis counts
   iterations), and when a `while` trip count reads the hidden state (the
-  number of iterations is not fixed). A spiking neuron still gets all
-  positions: its surrogate spike primitive is not yet classified as
-  position-preserving (#219).
+  number of iterations is not fixed). A spiking neuron got all positions
+  until #219 (below).
+- **SnAp-n keeps a spiking neuron's position pattern (#219).** braintools'
+  surrogate spike (`braintools.surrogate.*`, the primitive
+  `heaviside_surrogate_gradient`) is elementwise, but it was not on the
+  position analysis's allow-list. So every spiking neuron got all positions
+  (`K = P`, `SNAP_PATTERN_CONSERVATIVE`), with or without a substep loop.
+  It is now allow-listed by name, and the usual check that its operands
+  have the group's position layout still applies. Every braintools
+  surrogate's spike traces to this one primitive, plus elementwise
+  arithmetic; a few compute their derivative with `jnp.where`, whose `jit`
+  wrapper the compiler inlines. A feedforward spiking neuron now gets
+  `K = 1` for every braintools surrogate, rolled or unrolled, and its SnAp-n
+  gradients equal BPTT (float64, 1e-12). With a sparse ring recurrence of
+  its spikes, it gets the ring's `K` and rolled gradients equal unrolled
+  ones (float64, 1e-12). A brainspike `aeif_cond_alpha` neuron (RK4,
+  `k = 16` or `k = 1`) under `Online` and `SnAp(n=2)` goes from `K = P = 6`
+  to `K = 1`. A dense recurrent layer keeps `K = P`, which is its pattern at
+  `n >= 2`. The SNN oracle layers concatenate the input with the spikes
+  before their dense weight, so the `concatenate` keeps them conservative,
+  at the same `K`. A test pins the primitive's name, so an upstream rename
+  fails loudly instead of widening spiking neurons again.
 - **A `dot_general` over a `HiddenGroupState`'s state axis stays in the
   hidden-to-hidden transition (#213).** In the default ("without recurrence")
   grouping mode, every `dot_general` that read a hidden-derived value was

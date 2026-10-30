@@ -30,6 +30,7 @@ import itertools
 
 import brainevent
 import brainstate
+import braintools
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -37,6 +38,7 @@ import pytest
 
 import braintrace
 from braintrace._compiler.position_graph import (
+    _POSITION_PRESERVING_PRIMITIVES,
     AxisAdjacency,
     SnapPattern,
     analyze_position_adjacency,
@@ -277,10 +279,20 @@ class TestConservativeFallbacks:
                 braintrace.sparse_matmul(h, data, sparse_mat=csr)), (6,), False, 'exact'),
             ('dense', lambda h: jnp.tanh(
                 braintrace.matmul(h, w_full)), (1, 4), False, 'exact'),
+            # a surrogate spike with a reset (#219): elementwise, so the
+            # transition stays position-diagonal; through a dense projection
+            # it is the dense pattern
+            ('surrogate-spike', lambda h: h * 0.9 - 0.3 * _SPIKE(h - 0.5), (6,), False, 'exact'),
+            ('surrogate-relu-grad', lambda h: h * 0.9 - 0.3 * _RELU_SPIKE(h - 0.5),
+             (6,), False, 'exact'),
+            ('dense-through-a-surrogate', lambda h: jnp.tanh(
+                braintrace.matmul(_SPIKE(h), w_full)), (1, 4), False, 'exact'),
             # loops on the hidden path (#210)
             ('scan-elementwise', lambda h: _scan(_decay, h, 5), (6,), False, 'exact'),
             ('scan-after-mixing', lambda h: _scan(_decay, jnp.tanh(
                 braintrace.sparse_matmul(h, data, sparse_mat=csr)), 3), (6,), False, 'exact'),
+            ('surrogate-spike-in-scan', lambda h: _scan(
+                lambda c: c * 0.9 - 0.3 * _SPIKE(c - 0.5), h, 3), (6,), False, 'exact'),
             ('scan-mixing-inside', lambda h: _scan(lambda c: jnp.tanh(
                 braintrace.sparse_matmul(c, data, sparse_mat=csr)), h, 2), (6,), True, 'lossy'),
             # the iteration closures: a reordering reached only in a later
@@ -334,6 +346,12 @@ class TestConservativeFallbacks:
 _RING = _sparse_pattern(6)
 _RING_CSR = brainevent.CSR.fromdense(jnp.asarray(_RING))
 _RING_DATA = jnp.asarray(_RING_CSR.data)
+
+
+#: braintools' surrogate spikes (#219): ``Sigmoid``, and ``ReluGrad``, the
+#: default of brainspike's neuron templates
+_SPIKE = braintools.surrogate.Sigmoid(alpha=4.0)
+_RELU_SPIKE = braintools.surrogate.ReluGrad()
 
 
 def _mix(h):
@@ -857,3 +875,30 @@ class TestNeighbourhoodDirection:
             assert flat[q, q]
             assert flat[(q + 1) % n_rec, q]
             assert not flat[q, (q + 1) % n_rec]
+
+
+class TestSurrogateSpikes:
+    """braintools' surrogate spike is one elementwise primitive, allow-listed by
+    name (#219). An upstream rename would quietly widen every spiking neuron to
+    all positions, so the name is pinned here."""
+
+    @pytest.mark.parametrize('spike', [_SPIKE, _RELU_SPIKE], ids=['sigmoid', 'relu-grad'])
+    def test_the_spike_traces_to_the_allow_listed_primitive(self, spike):
+        names = {e.primitive.name for e in _jaxpr(spike, jnp.zeros(6)).eqns}
+        assert 'heaviside_surrogate_gradient' in names, names
+        assert 'heaviside_surrogate_gradient' in _POSITION_PRESERVING_PRIMITIVES
+        assert names <= _POSITION_PRESERVING_PRIMITIVES, names - _POSITION_PRESERVING_PRIMITIVES
+
+    def test_a_spike_and_reset_is_position_diagonal(self):
+        adj = analyze_position_adjacency(
+            _jaxpr(lambda h: h * 0.9 - 0.3 * _SPIKE(h - 0.5), jnp.zeros(6)), (6,))
+        assert not adj.conservative, adj.reason
+        np.testing.assert_array_equal(flat_adjacency(adj.axes), np.eye(6, dtype=bool))
+
+    def test_a_spike_of_a_relabelled_state_stays_conservative(self):
+        # allow-listing the spike does not let a relabelling around it through
+        adj = analyze_position_adjacency(
+            _jaxpr(lambda h: h * 0.9 - jnp.ravel(_SPIKE(jnp.reshape(h, (2, 3)))),
+                   jnp.zeros(6)), (6,))
+        assert adj.conservative
+        assert "'reshape'" in adj.reason, adj.reason

@@ -1496,3 +1496,94 @@ class TestRolledLoopsKeepThePattern:
         g = next(g for g in algo.graph.hidden_groups if ('V',) in g.hidden_paths)
         assert g.snap.conservative
         assert "inside a 'scan' body" in g.snap.reason, g.snap.reason
+
+
+# ---------------------------------------------------------------------------
+# spiking neurons: braintools' surrogate spike is position-preserving (#219)
+# ---------------------------------------------------------------------------
+
+def _surrogates():
+    """Every braintools surrogate that constructs with its defaults."""
+    import inspect
+    import braintools
+    found = {c for c in vars(braintools.surrogate).values()
+             if inspect.isclass(c) and issubclass(c, braintools.surrogate.Surrogate)
+             and c is not braintools.surrogate.Surrogate}
+    return sorted(found, key=lambda c: c.__name__)
+
+
+class _SpikingSubstepNeuron(_SubstepNeuron):
+    """The substep neuron with a surrogate spike and a soft reset in every
+    substep; with ``ring``, the spikes drive the sparse ring recurrence."""
+
+    def __init__(self, k, ring=False, spike=None, **kwargs):
+        super().__init__(k, ring=ring, **kwargs)
+        import braintools
+        self.spike = braintools.surrogate.Sigmoid(alpha=4.0) if spike is None else spike
+
+    def update(self, x):
+        drive = braintrace.matmul(x, self.win.value)
+        if self.ring:
+            drive = drive + braintrace.sparse_matmul(
+                self.spike(self.V.value - 0.5), self.w.value, sparse_mat=self.csr)
+        h = 1.0 / self.k
+
+        def substep(c, _):
+            V, a = c
+            s = self.spike(V - 0.5)
+            return (V + h * (-V - a + 2.0 * drive) - 0.3 * s,
+                    a + h * (0.5 * V - a) + 0.1 * s), None
+
+        (self.V.value, self.a.value), _ = jax.lax.scan(
+            substep, (self.V.value, self.a.value), None, length=self.k)
+        return jax.nn.sigmoid(self.V.value) + self.spike(self.V.value - 0.5)
+
+
+def _spiking_spec(k, ring, spike=None):
+    keys = (('win',), ('w',)) if ring else (('win',),)
+    return om.ModelSpec(factory=lambda: _SpikingSubstepNeuron(k, ring=ring, spike=spike),
+                        etp_param_keys=keys, plain_param_keys=())
+
+
+class TestSpikingNeurons:
+    """A surrogate spike no longer widens SnAp-n to every position (#219): a
+    spiking neuron gets the pattern of its recurrence, rolled or unrolled."""
+
+    @pytest.mark.parametrize('surrogate', _surrogates(), ids=lambda c: c.__name__)
+    def test_every_braintools_surrogate_keeps_k_1(self, surrogate):
+        # through the compiler, so a surrogate whose spike traces to another
+        # primitive, or through a wrapper the compiler does not inline, fails here
+        for k, policy in [(4, _ROLLED), (1, _UNROLLED)]:
+            spec = _spiking_spec(k, ring=False, spike=surrogate())
+            algo = _compiled(spec, _snap_at(2, policy), spec.make_inputs(2, N_IN))
+            (g,) = algo.graph.hidden_groups
+            assert not g.snap.conservative, (surrogate.__name__, g.snap.reason)
+            assert g.snap.num_neighbour == 1
+
+    @pytest.mark.parametrize('k', [1, 17])
+    def test_a_feedforward_spiking_neuron_equals_bptt(self, k):
+        # K = 1 holds the whole trace of a position-diagonal transition
+        with brainstate.environ.context(precision=64):
+            spec = _spiking_spec(k, ring=False)
+            xs = spec.make_inputs(T, N_IN, seed=1)
+            assert _k_by_path(_compiled(spec, _snap_at(2, _ROLLED), xs)) == {
+                ('V',): (1, False), ('a',): (1, False)}
+            bptt = bptt_param_gradients(spec.factory, xs)
+            g = _grads(spec, _snap_at(2, _ROLLED), xs, 1)
+            assert np.abs(np.asarray(bptt[('win',)])).max() > 1e-3
+            assert _rel_etp(g, bptt, spec) < 1e-12
+
+    @pytest.mark.parametrize('n', [2, 3])
+    def test_a_spiking_ring_gets_the_ring_pattern_rolled_and_unrolled(self, n):
+        with brainstate.environ.context(precision=64):
+            spec = _spiking_spec(17, ring=True)
+            xs = spec.make_inputs(T, N_IN, seed=1)
+            for policy in (_ROLLED, _UNROLLED):
+                k_by_path = _k_by_path(_compiled(spec, _snap_at(n, policy), xs))
+                assert set(k_by_path.values()) == {(n, False)}, k_by_path
+            g_rolled = _grads(spec, _snap_at(n, _ROLLED), xs, 3)
+            g_unrolled = _grads(spec, _snap_at(n, _UNROLLED), xs, 3)
+            for key in g_unrolled:
+                a, b = np.asarray(g_rolled[key]), np.asarray(g_unrolled[key])
+                np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12 * np.abs(b).max())
+            assert np.abs(np.asarray(g_unrolled[('w',)])).max() > 1e-4

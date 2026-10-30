@@ -151,6 +151,11 @@ _POSITION_PRESERVING_PRIMITIVES = frozenset({
     'is_finite',
     # structural no-ops
     'convert_element_type', 'stop_gradient', 'copy', 'real', 'imag', 'conj',
+    # spiking: braintools' surrogate spike (#219). ``bind(x, dx)`` returns
+    # ``H(x)``, the step of ``x`` at each position, and its JVP is
+    # ``dx * tx``; ``dx`` (the surrogate derivative at ``x``) has ``x``'s
+    # shape, so the shape check below applies to both operands as usual.
+    'heaviside_surrogate_gradient',
 })
 
 
