@@ -335,8 +335,7 @@ def _route_into_scan(
     producers: Dict[Var, JaxprEqn],
 ) -> str:
     """How a descended scan reads values computed from the ETP output *y*:
-    each operand's role, and whether it also reads another outer value or
-    is computed by another scan."""
+    each operand's role, and whether it also reads another outer value."""
     num_consts, num_carry = bundle.info.num_consts, bundle.info.num_carry
     parts = []
     for j, v in enumerate(bundle.new_eqn.invars):
@@ -348,7 +347,7 @@ def _route_into_scan(
             role = f'the carry init at position {j - num_consts}'
         else:
             role = f'the scanned input at position {j - num_consts - num_carry}'
-        through_scan = other = False
+        other = False
         seen: Set[Var] = set()
         stack = [v]
         while stack:  # the equations between ``y`` and the operand
@@ -359,7 +358,6 @@ def _route_into_scan(
             eqn = producers.get(u)
             if eqn is None:
                 continue
-            through_scan = through_scan or is_scan_primitive(eqn)
             for iv in eqn.invars:
                 if isinstance(iv, Var):
                     if iv is y or iv in reached:
@@ -369,7 +367,7 @@ def _route_into_scan(
         if v is y:
             how = ['the output itself']
         else:
-            how = ['computed from it by another scan' if through_scan else 'computed from it']
+            how = ['computed from it']
             if other:
                 how.append('combined with another outer value')
         parts.append(f'{role} ({", ".join(how)})')

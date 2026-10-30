@@ -6,6 +6,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 #
+import time
 import warnings
 
 import brainstate
@@ -1021,6 +1022,65 @@ class _SpikeCount(_TwoState):
         return jax.nn.sigmoid(self.V.value)
 
 
+class _RefractoryTimer(_TwoState):
+    """A float refractory timer, set by a threshold test on ``V``, holds ``V``
+    (p20 of the #217 fix-check): no derivative flows through the boolean, so
+    the timer carries no credit although it is computed from ``V``."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), r = c
+            r = jnp.where(V > 0.2, 0.3, jnp.maximum(r - 1.0 / self.k, 0.0))
+            (V2, w2), _ = self.substep((V, w), I)
+            return ((jnp.where(r > 0.25, V, V2), w2), r), None
+
+        _carry_scan(self, body, jnp.zeros(4))
+        return jax.nn.sigmoid(self.V.value)
+
+
+class _FloatSpikeCount(_TwoState):
+    """A float count of threshold crossings of ``V``, cast from a boolean,
+    adapts the drive (p20 of the #217 fix-check)."""
+
+    def update(self, x):
+        I = self.drive(x)
+
+        def body(c, _):
+            (V, w), n = c
+            n = n + (V > 0.2).astype(V.dtype)
+            return (self.substep((V, w), I - 0.05 * n)[0], n), None
+
+        _carry_scan(self, body, jnp.zeros(4))
+        return jax.nn.sigmoid(self.V.value)
+
+
+def _reverse_delay_line(N, M):
+    """p22 of the #217 fix-check: ``N`` non-hidden carries in a delay line
+    from ``V`` back into ``V``, in the order that a fixpoint over the carries
+    reaches one new carry per pass, every tap also feeding a shared chain of
+    ``M`` operations."""
+
+    class _ReverseDelayLine(_TwoState):
+        def update(self, x):
+            I = self.drive(x)
+
+            def body(c, _):
+                (V, w), zs = c
+                tot = zs[0]
+                for z in zs:  # trace-time loops that build a long body
+                    tot = tot + 0.001 * z
+                for _ in range(M):
+                    tot = jnp.tanh(tot) * 0.99
+                return (self.substep((V, w), I + 0.01 * tot)[0], zs[1:] + (V,)), None
+
+            _carry_scan(self, body, tuple(jnp.zeros(4) for _ in range(N)))
+            return jax.nn.sigmoid(self.V.value)
+
+    return _ReverseDelayLine
+
+
 class _RecurrentOutside(_TwoState):
     """A recurrent ETP projection of ``V`` outside the scan: the constant
     depends on the hidden state only through the ETP primitive."""
@@ -1266,9 +1326,11 @@ class TestOuterRelationLift:
 
 class TestUntrackedCredit:
     """Descent folds the trace over the hidden carries only. A scan input or
-    carried value other than a hidden carry that depends on the hidden state
-    or carries an ETP output across substeps, and feeds a hidden carry, would
-    be missed silently; such a scan is refused (review of #217, HIGH-1)."""
+    carried value other than a hidden carry that is differentiably computed
+    from the hidden state, or carries an ETP output across substeps, and feeds
+    a hidden carry, would be missed silently; such a scan is refused (review of
+    #217, HIGH-1). A value computed through a boolean or an integer carries no
+    derivative and is accepted (fix-check of #217, Q2)."""
 
     @pytest.mark.parametrize('model, what', [
         (_AccumulatedDrive, 'carried value at carry position 2'),
@@ -1311,10 +1373,42 @@ class TestUntrackedCredit:
             assert np.abs(np.asarray(bptt[p])).max() > 1e-3
             _close(np.asarray(chunked[p]), np.asarray(bptt[p]))
 
+    def test_the_guard_is_linear_in_the_body(self, monkeypatch):
+        # p22 of the #217 fix-check: re-closing from every newly reached carry
+        # walks the shared chain once per carry (6 s for this body on b1f4db4)
+        import braintrace._compiler.scan_descent as sd
+        passes, guard = sd._passes_credit, sd._untracked_credit
+        visits, size, spent = [0], [0], [0.0]
+
+        def counted(e):
+            visits[0] += 1
+            return passes(e)
+
+        def timed(eqn, body, *args):
+            size[0] = sum(len(e.invars) + len(e.outvars) for e in body.eqns)
+            monkeypatch.setattr(sd, '_passes_credit', counted)
+            t = time.perf_counter()
+            try:
+                return guard(eqn, body, *args)
+            finally:
+                spent[0] += time.perf_counter() - t
+                monkeypatch.setattr(sd, '_passes_credit', passes)
+
+        monkeypatch.setattr(sd, '_untracked_credit', timed)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with pytest.raises(NotImplementedError, match='not a hidden state carried'):
+                _compiled_graph(_reverse_delay_line(1000, 3000)(17))
+        # one forward closure, one backward closure per hidden carry (V and w)
+        assert 0 < visits[0] <= 3 * size[0]
+        assert spent[0] < 1.0
+
     @pytest.mark.parametrize('model', [_SubstepClock, _SpikeCount, _RecurrentOutside,
-                                       _DetachedStepStartConst, _TauInBody],
+                                       _DetachedStepStartConst, _TauInBody,
+                                       _RefractoryTimer, _FloatSpikeCount],
                              ids=['substep-clock', 'integer-carry', 'recurrent-projection-outside',
-                                  'detached-step-start-constant', 'plain'])
+                                  'detached-step-start-constant', 'plain',
+                                  'float-refractory-timer', 'float-spike-count'])
     def test_inputs_without_untracked_credit_are_accepted(self, model):
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')

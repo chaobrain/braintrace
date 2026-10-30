@@ -483,12 +483,24 @@ def _passes_credit(eqn: JaxprEqn) -> bool:
                 and not is_etp_enable_gradient_primitive(eqn.primitive))
 
 
+def _carries_derivative(v: Var) -> bool:
+    """Whether a derivative can flow through *v*: only an inexact value carries
+    one (a comparison's boolean or an integer has none)."""
+    return bool(jnp.issubdtype(shaped_aval(v).dtype, jnp.inexact))
+
+
 def _credit_closure(
     starts: Sequence[Var],
     consumers: Dict[Var, List[JaxprEqn]],
+    feeds: Optional[Dict[Var, List[Var]]] = None,
 ) -> Set[Var]:
     """The variables that depend on *starts* (included) through equations
-    that pass credit (:func:`_passes_credit`)."""
+    that pass credit (:func:`_passes_credit`), into inexact outputs only.
+
+    *feeds* maps a variable to the variables it becomes next (a carried output
+    to its carried input in the next substep); they join the closure, which so
+    grows in one pass over the body.
+    """
     seen: Set[Var] = set()
     stack = list(starts)
     while stack:
@@ -496,9 +508,29 @@ def _credit_closure(
         if v in seen:
             continue
         seen.add(v)
+        if feeds is not None:
+            stack.extend(feeds.get(v, ()))
         for e in consumers.get(v, ()):
             if _passes_credit(e):
-                stack.extend(o for o in e.outvars if isinstance(o, Var))
+                stack.extend(o for o in e.outvars
+                             if isinstance(o, Var) and _carries_derivative(o))
+    return seen
+
+
+def _credit_coclosure(target: Var, producers: Dict[Var, JaxprEqn]) -> Set[Var]:
+    """The variables on which *target* depends in the sense of
+    :func:`_credit_closure`: *v* is in the result iff ``target`` is in
+    ``_credit_closure([v], consumers)``."""
+    seen: Set[Var] = set()
+    stack = [target]
+    while stack:
+        v = stack.pop()
+        if v in seen:
+            continue
+        seen.add(v)
+        e = producers.get(v)
+        if e is not None and _passes_credit(e) and _carries_derivative(v):
+            stack.extend(i for i in e.invars if isinstance(i, Var))
     return seen
 
 
@@ -532,12 +564,18 @@ def _untracked_credit(
       on a hidden carry, an ETP output, a lifted constant or such an input:
       the fold does not carry it to the next substep.
 
+    Dependence is differentiable dependence: it does not pass into a boolean
+    or an integer (:func:`_credit_closure`). One forward closure, grown
+    across substeps through the carries, and one backward closure per hidden
+    carry keep the check linear in the size of the body.
+
     Returns ``(body invar position, hidden paths it reaches)`` for each such
-    input of an inexact dtype (no derivative flows through an integer).
+    input of an inexact dtype.
     """
-    from .jaxpr_graph import build_consumer_map
+    from .jaxpr_graph import build_consumer_map, build_producer_map
 
     consumers = build_consumer_map(body)
+    producers = build_producer_map(body)
     hidden_in = {num_consts + c for c in carry_hidden}
     hidden_out = {cast(Var, body.outvars[c]): p for c, p in carry_hidden.items()
                   if isinstance(body.outvars[c], Var)}
@@ -546,24 +584,22 @@ def _untracked_credit(
     sources = [body.invars[j] for j in sorted(hidden_in | derived | set(lift_positions))]
     sources += [o for e in body.eqns if is_etp_primitive(e.primitive)
                 for o in e.outvars if isinstance(o, Var)]
-    reach = _credit_closure(sources, consumers)
-    others = [c for c in range(num_carry) if c not in carry_hidden]
-    carried: Set[int] = set()
-    grown = True
-    while grown:  # a carried value reached in one substep carries it to the next
-        grown = False
-        for c in others:
-            out = body.outvars[c]
-            if c not in carried and isinstance(out, Var) and out in reach:
-                carried.add(c)
-                reach |= _credit_closure([body.invars[num_consts + c]], consumers)
-                grown = True
+    # a carried value reached in one substep carries it to the next
+    feeds: Dict[Var, List[Var]] = {}
+    for c in range(num_carry):
+        out = body.outvars[c]
+        if c not in carry_hidden and isinstance(out, Var):
+            feeds.setdefault(out, []).append(body.invars[num_consts + c])
+    reach = _credit_closure(sources, consumers, feeds)
+    carried = {c for c in range(num_carry)
+               if c not in carry_hidden and body.invars[num_consts + c] in reach}
+    reaches = {o: _credit_coclosure(o, producers) for o in hidden_out}
     found = []
     for j in sorted(derived | {num_consts + c for c in carried}):
         v = body.invars[j]
-        if not jnp.issubdtype(shaped_aval(v).dtype, jnp.inexact):
+        if not _carries_derivative(v):
             continue
-        hit = [p for o, p in hidden_out.items() if o in _credit_closure([v], consumers)]
+        hit = [p for o, p in hidden_out.items() if v in reaches[o]]
         if hit:
             found.append((j, hit))
     return found
@@ -595,7 +631,8 @@ def _untracked_credit_message(
         f'by the scan, yet {"it carries" if len(parts) == 1 else "they carry"} a dependence on '
         f'the hidden state or on an ETP operation\'s output into the hidden state(s) {paths} '
         f'that the scan carries. The eligibility trace is folded over the hidden carries only, '
-        f'so the online gradient would silently miss that dependence. Carry the value as a '
+        f'so the online gradient would leave out the credit that flows through this value. '
+        f'Carry the value as a '
         f'hidden state of this scan (merge chained scans into one, keep a value that persists '
         f'across steps in a HiddenState, apply any post-processing of a carried state inside '
         f'the body), or unroll the scan with ControlFlowPolicy(scan_unroll_limit={length}).'

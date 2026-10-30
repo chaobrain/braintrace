@@ -203,9 +203,12 @@
   Such a scan now raises `NotImplementedError` naming the value, its
   position and the hidden states it reaches, with the remedies: carry the
   value as a hidden state of the scan, or unroll the scan. No derivative
-  flows through an integer, a `stop_gradient` or a recurrent ETP
-  projection, so a value reached only through them is accepted, as is a
-  carried value that depends on neither (a substep clock). The
+  flows through a comparison's boolean, an integer, a `stop_gradient` or a
+  recurrent ETP projection, so a value reached only through them is
+  accepted (such as a refractory timer or a float spike count set by a
+  threshold test on a state), as is a carried value that depends on none
+  of them (a substep clock). The check is linear in the size of the scan
+  body. The
   `SCAN_DESCENT_NO_RELATIONS` warning no longer says a weight "will NOT
   participate" when only its plain use inside the scan gets no credit, and
   a carried state of another shape that the lifted constant does not reach
