@@ -1450,24 +1450,30 @@ class TestRolledLoopsKeepThePattern:
                     rolled_only.add(name)
                 elif _rolled_scans(rolled):
                     rolled_both.add(name)
+        # pinned counts (35 models x n = 2, 3, and the rolled sets below): a zoo
+        # change must update them, so no model leaves the comparison unnoticed
         assert len(compared) == 2 * len(zoo) == 70, len(compared)
         # the comparisons that hold a rolled loop: the substep neurons, rolled
         # only under the rolled policy, and a 'while', rolled under both
         assert rolled_only == {name for name in zoo if name.startswith('substep_')}, rolled_only
         assert rolled_both == {'while_settle_rnn'}, rolled_both
 
-    def test_snap_gradients_rolled_equal_unrolled_f64(self):
+    # the 12 substep comparisons of the sweep that hold a rolled loop; the
+    # 'while' model is rolled under both policies, so it is not compared here
+    @pytest.mark.parametrize('n', [2, 3])
+    @pytest.mark.parametrize('ring', [False, True], ids=['input', 'ring'])
+    @pytest.mark.parametrize('k', [2, 4, 17])
+    def test_snap_gradients_rolled_equal_unrolled_f64(self, k, ring, n):
         with brainstate.environ.context(precision=64):
-            for ring, n in [(False, 2), (True, 2), (True, 3)]:
-                spec = _substep_spec(4, ring)
-                xs = spec.make_inputs(T, N_IN, seed=1)
-                g_rolled = _grads(spec, _snap_at(n, _ROLLED), xs, 3)
-                g_unrolled = _grads(spec, _snap_at(n, _UNROLLED), xs, 3)
-                assert set(g_rolled) == set(g_unrolled)
-                for key in g_rolled:
-                    a, b = np.asarray(g_rolled[key]), np.asarray(g_unrolled[key])
-                    np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12 * np.abs(b).max())
-                assert np.abs(np.asarray(g_unrolled[('win',)])).max() > 1e-4
+            spec = _substep_spec(k, ring)
+            xs = spec.make_inputs(T, N_IN, seed=1)
+            g_rolled = _grads(spec, _snap_at(n, _ROLLED), xs, 3)
+            g_unrolled = _grads(spec, _snap_at(n, _UNROLLED), xs, 3)
+            assert set(g_rolled) == set(g_unrolled)
+            for key in g_rolled:
+                a, b = np.asarray(g_rolled[key]), np.asarray(g_unrolled[key])
+                np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12 * np.abs(b).max())
+            assert np.abs(np.asarray(g_unrolled[('win',)])).max() > 1e-4
 
     def test_a_mixing_equation_inside_a_rolled_loop_stays_conservative(self):
         # a weight-free scan applying a constant ring matrix every substep

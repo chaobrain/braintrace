@@ -42,8 +42,9 @@
   iterations (the body is held to the rules for all iterations at once).
   On the 14 model comparisons that keep a rolled loop (substepped neurons
   with and without a sparse ring recurrence, and `while_settle_rnn`, at
-  `n = 2, 3`), rolled `K` equals unrolled `K`, and SnAp-n gradients agree to
-  1e-12 in float64; on rolled ring models they move by about 1 % from
+  `n = 2, 3`), rolled `K` equals unrolled `K`. On the 12 substepped ones
+  (the `while` model is rolled under both policies), SnAp-n gradients agree
+  to 1e-12 in float64; on rolled ring models they move by about 1 % from
   before, to the unrolled ones. The loop stays conservative, with a reason
   naming the case, when a position-mixing equation sits in a body that runs
   more than once (it transfers a power of its pattern, as two mixing

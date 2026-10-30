@@ -295,6 +295,16 @@ class TestConservativeFallbacks:
                 _live_later, (h, jnp.zeros_like(h)), 2)[0], (6,), True, 'lossy'),
             ('live-closure-nested', lambda h: _scan(lambda c: _scan(
                 _live_later, (c, jnp.zeros_like(c)), 2)[0], h, 2), (6,), True, 'lossy'),
+            # closures that need more than one extra round: three hops before
+            # the reordering is reached, two growth steps before it is live
+            ('reach-3-hops-scan', lambda h: _scan(
+                _reach_3_hops, (h,) + (jnp.zeros_like(h),) * 3, 4)[0], (6,), True, 'lossy'),
+            ('reach-3-hops-while', lambda h: _while(
+                _reach_3_hops, (h,) + (jnp.zeros_like(h),) * 3, 4)[0], (6,), True, 'lossy'),
+            ('live-2-steps-scan', lambda h: _scan(
+                _live_2_steps, (h,) + (jnp.zeros_like(h),) * 2, 3)[0], (6,), True, 'lossy'),
+            ('live-2-steps-while', lambda h: _while(
+                _live_2_steps, (h,) + (jnp.zeros_like(h),) * 2, 3)[0], (6,), True, 'lossy'),
         ]
         for label, fn, varshape, conservative, tightness in cases:
             adj = analyze_position_adjacency(_jaxpr(fn, jnp.zeros(varshape)), varshape)
@@ -347,6 +357,20 @@ def _live_later(s):
     ``a`` one iteration later."""
     c, a = s
     return c * 0.9 + a, jnp.roll(c, 1)
+
+
+def _reach_3_hops(s):
+    """``h`` reaches ``a``, ``a`` reaches ``b`` and ``b`` is reordered into
+    ``d``, one iteration each; ``d`` feeds ``h`` in the fourth."""
+    c, a, b, d = s
+    return c * 0.9 + d, c, a, jnp.roll(b, 1)
+
+
+def _live_2_steps(s):
+    """Only ``h`` is used after the loop. It reads ``b``, ``b`` is ``a``'s
+    carry and ``a`` is the reordering of ``h``: live after two growth steps."""
+    c, a, b = s
+    return c * 0.9 + b, jnp.roll(c, 1), a
 
 
 def _scan(body, carry, k):

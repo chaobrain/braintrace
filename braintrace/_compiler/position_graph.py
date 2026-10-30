@@ -59,14 +59,14 @@ which condition failed otherwise:
    A ``scan`` or ``while`` on the hidden path is followed into its body, which
    is held to the same two rules wherever the hidden path runs through it
    (issue #210): a loop whose body passes this check composes a
-   position-diagonal step any number of times, so it is position-diagonal as
-   a whole, as the same loop unrolled. The rolled pattern is the unrolled
-   one, or a superset of it where what is reached or live differs between
+   position-diagonal step any number of times, so it is position-diagonal as a
+   whole, as the same loop unrolled. The rolled pattern is the unrolled one,
+   or a superset of it where what is reached or live differs between
    iterations: the body is held to the rules for every iteration at once, so
-   an equation reached only in the last iteration (or live only in the
-   first) counts as on the hidden path in all of them. A mixing equation inside a loop
-   that runs more than once applies once per iteration and transfers a power
-   of its pattern (a single ``dot`` inside a length-``L`` scan transfers
+   an equation reached only in the last iteration (or live only in the first)
+   counts as on the hidden path in all of them. A mixing equation inside a
+   loop that runs more than once applies once per iteration and transfers a
+   power of its pattern (a single ``dot`` inside a length-``L`` scan transfers
    :math:`A^L`, not :math:`A`), so it is refused, as two mixing equations are
    in the unrolled loop. So are hidden-derived values scanned over as ``xs``
    or stacked as ``ys`` on the hidden path (their leading axis counts
