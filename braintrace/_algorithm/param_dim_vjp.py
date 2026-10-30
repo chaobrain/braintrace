@@ -31,6 +31,7 @@ from braintrace._compiler import (
     gather_learning_signal,
     widen_instant_term,
 )
+from braintrace._compatible_imports import shaped_aval
 from braintrace._compiler.hid_param_op import _broadcastable, _relatable_hidden_shapes
 from braintrace._op import (
     etp_conv_p,
@@ -105,7 +106,7 @@ def _refuse_descended_broadcast(relation: HiddenParamOpRelation, group: HiddenGr
     ctx = relation.control_flow_context
     if ctx is None:
         return
-    y_shape = tuple(relation.y_var.aval.shape)
+    y_shape = tuple(shaped_aval(relation.y_var).shape)
     for path, state, hvar in zip(group.hidden_paths, group.hidden_states, group.hidden_outvars):
         shapes = [s for s in _relatable_hidden_shapes(hvar, state) if _broadcastable(y_shape, s)]
         if not shapes or any(tuple(jnp.broadcast_shapes(y_shape, s)) == y_shape for s in shapes):
@@ -117,7 +118,7 @@ def _refuse_descended_broadcast(relation: HiddenParamOpRelation, group: HiddenGr
             f"Structured scan descent does not support this length-{length} scan yet: "
             f"the output of the ETP operation '{relation.primitive.name}' on the weight "
             f"{relation.path} ({where}) has shape {y_shape}, and it reaches the hidden "
-            f"state {path} of shape {tuple(hvar.aval.shape)} only by broadcasting. "
+            f"state {path} of shape {tuple(shaped_aval(hvar).shape)} only by broadcasting. "
             f"Its eligibility trace would be allocated without the axes the broadcast adds, "
             f"which the substep fold cannot carry "
             f"(https://github.com/chaobrain/braintrace/issues/224). Compute the output with "
