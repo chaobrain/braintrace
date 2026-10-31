@@ -26,7 +26,12 @@ import numpy as np
 import brainunit as u
 from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 
-from braintrace._input_data import MultiStepData, has_multistep_data, is_input
+from braintrace._input_data import (
+    MultiStepData,
+    conform_inputs,
+    has_multistep_data,
+    is_input,
+)
 from braintrace._state_management import assign_state_values_v2
 from braintrace._typing import (
     Path,
@@ -545,6 +550,23 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         if not self.is_compiled:
             raise ValueError('The etrace algorithm has not been compiled. Please call `compile_graph()` first. ')
 
+    def _conform_inputs(self, args: Tuple[Any, ...]) -> Tuple[Any, ...]:
+        """*args* conformed to the compiled example inputs (#227, #241).
+
+        The update replays the jaxpr traced at ``compile_graph()`` on the leaves
+        of *args*, and a :class:`brainunit.Quantity` loses its unit there. One
+        step of *args* is compared with the example inputs first: a lossless
+        upcast within a dtype category and a Python scalar take the compiled
+        dtype, as in JAX; a plain array stands for unit 1 and a list for a tuple.
+        Any other difference in shape, dtype, unit or structure raises a
+        ``TypeError`` that names each differing leaf, before any state is read.
+        See :func:`braintrace._input_data.conform_inputs`.
+        """
+        compiled = self.graph.module_info.input_signature
+        if compiled is None:
+            return args
+        return conform_inputs(compiled, args, f'{type(self).__name__}.update()')
+
     # ------------------------------------------------------------------ #
     # axis: recurrence_scope
     # ------------------------------------------------------------------ #
@@ -904,6 +926,16 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         Any
             The model output.
 
+        Raises
+        ------
+        TypeError
+            If one step of the inputs differs from the example inputs given to
+            ``compile_graph()`` in shape, dtype, unit or structure, other than by
+            a lossless upcast within a dtype category or a Python scalar (both
+            cast to the compiled dtype, as in JAX), a plain array for unit 1, or
+            a list for a tuple. Raised before any state is read; the message
+            names each differing leaf and its remedies (#227, #241).
+
         Notes
         -----
         Suppose all inputs have the shape of ``(10,)``.
@@ -987,6 +1019,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         # check the compilation
         self._assert_compiled()
+        args = self._conform_inputs(args)
 
         # state values
         weight_vals = {

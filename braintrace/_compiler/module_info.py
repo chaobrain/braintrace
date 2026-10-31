@@ -30,6 +30,7 @@ from braintrace._misc import (
     unknown_state_path,
     _remove_quantity,
 )
+from braintrace._input_data import InputSignature, conform_inputs, input_signature as _input_signature
 from braintrace._state_management import sequence_split_state_values
 from braintrace._typing import (
     Path,
@@ -281,6 +282,11 @@ class ModuleInfo(NamedTuple):
         Structured descent of ETP-relevant scans above the unroll limit is
         implemented by the internal ``braintrace._compiler.scan_descent``
         module.
+    input_signature : InputSignature or None
+        The structure and per-leaf shape, dtype and unit of one step of the
+        example inputs the jaxpr was traced with. ``jaxpr_call`` and a
+        learner's update conform their inputs to it (see ``jaxpr_call``).
+        ``None`` when not recorded; then nothing is checked.
 
     See Also
     --------
@@ -330,6 +336,9 @@ class ModuleInfo(NamedTuple):
 
     # control-flow policy the canonicalizer ran with
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY
+
+    # one step of the example inputs: structure, shapes, dtypes and units
+    input_signature: Optional[InputSignature] = None
 
     @property
     def jaxpr(self) -> Jaxpr:
@@ -423,6 +432,14 @@ class ModuleInfo(NamedTuple):
     ]:
         """Evaluate the model on the given inputs using the compiled jaxpr.
 
+        The jaxpr is evaluated on the leaves of the inputs, without a retrace,
+        so the inputs are first conformed to ``input_signature`` (#227, #241):
+        a lossless upcast within a dtype category and a Python scalar take the
+        compiled dtype, as in JAX, a plain array stands for unit 1 and a list
+        for a tuple, and any other difference in shape, dtype, unit or
+        structure raises ``TypeError``. Under a transformation this runs at
+        trace time.
+
         Parameters
         ----------
         *args : Inputs
@@ -441,7 +458,17 @@ class ModuleInfo(NamedTuple):
             The other state values.
         temps : TempData
             The temporary intermediate values.
+
+        Raises
+        ------
+        TypeError
+            If the inputs differ from the example inputs in a way that is not
+            conformed (see above). The message names each differing leaf.
         """
+
+        # the inputs, in the form the jaxpr was traced with
+        if self.input_signature is not None:
+            args = conform_inputs(self.input_signature, args, 'ModuleInfo.jaxpr_call()')
 
         # state checking
         if old_state_vals is None:
@@ -747,4 +774,7 @@ def extract_module_info(
 
         # control-flow policy
         control_flow=policy,
+
+        # one step of the example inputs
+        input_signature=_input_signature(*model_args),
     )

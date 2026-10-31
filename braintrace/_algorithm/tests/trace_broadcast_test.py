@@ -480,6 +480,55 @@ class TestAWeightReadTwice:
             _close(shared[p], explicit[p])
 
 
+def test_the_random_projection_of_a_weight_read_twice_equals_the_explicit_broadcast():
+    # UORO projects the gradient of each read; it must reduce each over its own
+    # batch axes before adding them, as the parameter-dimension solve does.
+    # Adding them first fails with a custom VJP shape error.
+    xs = _inputs()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        with brainstate.environ.context(precision=64):
+            grads = [
+                _flat(online_param_gradients_singlestep_naive(
+                    lambda k=kind: _ReadTwice(k), xs,
+                    algo_factory=lambda m: braintrace.UORO(m, projection_key=0)))
+                for kind in ('mm+mv', 'mm+mv-explicit')
+            ]
+    shared, explicit = grads
+    for p in explicit:
+        assert np.abs(explicit[p]).max() > 1e-3
+        _close(shared[p], explicit[p])
+
+
+class _WeightAndBias(brainstate.nn.Module):
+    """One dict ``ParamState`` ``{'weight': (3, 4), 'bias': (4,)}``, as in
+    ``brainstate.nn.Linear``, whose leaves are read by two unbatched operations
+    that broadcast into ``V`` of shape ``(2, 4)``; each relation covers one leaf."""
+
+    def __init__(self):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            self.P = brainstate.ParamState({
+                'weight': 0.5 * brainstate.random.randn(3, 4),
+                'bias': 0.3 * brainstate.random.randn(4),
+            })
+        self.V = brainstate.HiddenState(jnp.zeros((2, 4)))
+
+    def update(self, x):
+        P = self.P.value
+        y = braintrace.matmul(x[0], P['weight']) + braintrace.element_wise(P['bias']) * (1.0 + x[:, :1])
+        self.V.value = 0.9 * self.V.value + jnp.tanh(y)
+        return jax.nn.sigmoid(self.V.value)
+
+
+@pytest.mark.parametrize('algo', sorted(_ALGOS))
+def test_the_leaves_of_one_param_state_read_by_two_broadcasts_match_bptt(algo):
+    # the reduction of a relation's gradient is chosen from the leaves that
+    # relation covers; requiring every leaf of the state to have grown refuses
+    # this model with a false #231 error
+    _chunked_vs_bptt(_WeightAndBias, algo)
+
+
 class TestTheBatchReductionPerRead:
     """``add_param_grad`` and ``reduce_param_batch_axes``, shared by the
     parameter-dimension solve and the random-projection engine."""

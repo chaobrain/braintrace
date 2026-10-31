@@ -104,9 +104,13 @@ def _hidden_out_avals(relation: HiddenParamOpRelation, group: HiddenGroup) -> Li
 def _reaches_without_broadcast(relation: HiddenParamOpRelation, group: HiddenGroup) -> bool:
     """Whether every hidden value that *relation*'s ``y`` reaches in *group* has ``y``'s shape.
 
-    Then no broadcast adds an axis between ``y`` and its states, the trace that
-    the ``init_drtrl`` rule sizes from ``x`` and ``y`` has the shape of the
-    instantaneous term, and the rule's init is kept without computing it.
+    Then no broadcast adds an axis between ``y`` and its states, so the trace
+    that the ``init_drtrl`` rule sizes from ``x`` and ``y`` is kept without
+    computing the instantaneous term. This does not prove that the two shapes
+    agree: a ``y`` that drives a whole ``HiddenGroupState`` (``y`` of shape
+    ``(4, 2)`` into a state of shape ``(4, 2)`` whose ``varshape`` is ``(4,)``)
+    takes this path, and its first update fails as it did before the trace was
+    sized from the term (#244).
     """
     y_shape = tuple(shaped_aval(relation.y_var).shape)
     return all(tuple(a.shape) == y_shape for a in _hidden_out_avals(relation, group))
