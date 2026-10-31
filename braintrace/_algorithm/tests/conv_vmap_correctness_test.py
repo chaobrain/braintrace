@@ -336,3 +336,84 @@ def test_conv_layernorm_vmap_grad_matches_eager_and_stays_finite():
     for leaf in jax.tree.leaves(ref):
         assert np.all(np.isfinite(np.asarray(leaf))), 'eager grad is non-finite'
     _assert_grads_match(ref, got)
+
+
+def _vmap_trace_and_grads(data, targets, neuron, algo):
+    """The ``Vmap(vmap_states='new')`` flow of :func:`_vmap_grad`, for *algo*.
+
+    Returns the trace shapes at init, the trace after ``N_STEP`` updates (one
+    ``scan``, whose carry fixes their shapes) and the summed gradients.
+    """
+    net = _make_net(neuron)
+    model = getattr(braintrace, algo)(net)
+
+    @brainstate.transform.vmap_new_states(state_tag='new', axis_size=data.shape[1])
+    def init():
+        brainstate.nn.init_all_states(net)
+        with brainstate.environ.context(fit=True):
+            model.compile_graph(data[0, 0])
+
+    init()
+    traces = lambda: [s.value for s in model.etrace_bwg.values()]
+    at_init = jax.tree.map(jnp.shape, traces())
+    vmodel = brainstate.nn.Vmap(model, vmap_states='new')
+    weights = net.states().subset(brainstate.ParamState)
+
+    def _grad(inp):
+        with brainstate.environ.context(fit=True):
+            return _loss(vmodel(inp), targets)
+
+    def _step(prev, x):
+        g = brainstate.transform.grad(_grad, weights)(x)
+        return jax.tree.map(lambda a, b: a + b, prev, g), None
+
+    grads = jax.tree.map(jnp.zeros_like, weights.to_dict_values())
+    grads, _ = brainstate.transform.scan(_step, grads, data)
+    return at_init, traces(), grads
+
+
+@pytest.mark.parametrize('algo', ['D_RTRL', 'EProp'])
+@pytest.mark.parametrize('neuron', ['IF', 'ALIF'], ids=['num_state1_IF', 'num_state2_ALIF'])
+def test_a_singleton_trace_init_is_kept(neuron, algo, monkeypatch):
+    """The conv trace keeps the singleton batch axis of its init (#224).
+
+    Under ``vmap_states='new'`` the conv sees a lane's sample with a leading
+    batch axis of one, so its ``init_drtrl`` rule allocates the trace as
+    ``(1, H, W, kh, kw, C_IN, C_OUT, num_state)``, while the lane's hidden
+    state has no batch axis. The instantaneous term re-inserts that axis on
+    ``df``, so it has the init's shape, and the sizing keeps the init as it
+    is: the trace keeps its singleton axis through several updates, and the
+    trace and the gradients equal, bit for bit, those of the trace as the
+    rule allocates it (main before #224).
+    """
+    from braintrace._algorithm import param_dim_vjp
+
+    rng = np.random.RandomState(42)
+    data = jnp.asarray(rng.rand(N_STEP, B, H, W, C_IN).astype('float32'))
+    targets = jnp.asarray(rng.rand(B, H, W, C_OUT).astype('float32'))
+    num_state = 1 if neuron == 'IF' else 2
+    lane = (1, H, W, 3, 3, C_IN, C_OUT, num_state)  # batch of one, positions, kernel, state
+
+    sized = param_dim_vjp._size_trace_from_instant_term
+    kept = []
+
+    def spy(relation, group, init_val, fast_solve):
+        out = sized(relation, group, init_val, fast_solve)
+        kept.append(all(out[k] is init_val[k] for k in init_val))
+        return out
+
+    monkeypatch.setattr(param_dim_vjp, '_size_trace_from_instant_term', spy)
+    at_init, trace, grads = _vmap_trace_and_grads(data, targets, neuron, algo)
+    assert kept == [True]
+    assert at_init == [{'weight': (B,) + lane}]
+    assert jax.tree.map(jnp.shape, trace) == at_init
+
+    monkeypatch.setattr(param_dim_vjp, '_size_trace_from_instant_term',
+                        lambda relation, group, init_val, fast_solve: init_val)
+    _, ref_trace, ref_grads = _vmap_trace_and_grads(data, targets, neuron, algo)
+    for got, ref in ((trace, ref_trace), (grads, ref_grads)):
+        got, ref = jax.tree.leaves(got), jax.tree.leaves(ref)
+        assert len(got) == len(ref) and got
+        for a, e in zip(got, ref):
+            assert np.abs(np.asarray(e)).max() > 0
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(e))

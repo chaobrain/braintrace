@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, Dict, Tuple, Optional, Sequence, Any
+from typing import Callable, Dict, List, Tuple, Optional, Sequence, Any
 
 import brainstate
 import jax
@@ -32,7 +32,6 @@ from braintrace._compiler import (
     widen_instant_term,
 )
 from braintrace._compatible_imports import shaped_aval
-from braintrace._compiler.hid_param_op import _broadcastable, _relatable_hidden_shapes
 from braintrace._op import (
     etp_conv_p,
     etp_elemwise_p,
@@ -84,48 +83,205 @@ def _cast_to_dtype(tree: Any, dtype: Any) -> Any:
     return jax.tree.map(lambda a: a.astype(dtype), tree, is_leaf=u.math.is_quantity)
 
 
-def _refuse_descended_broadcast(relation: HiddenParamOpRelation, group: HiddenGroup) -> None:
-    """Refuse a descended relation whose output reaches its hidden state only by broadcasting.
+def _abstract(v: Any) -> jax.ShapeDtypeStruct:
+    aval = shaped_aval(v)
+    return jax.ShapeDtypeStruct(tuple(aval.shape), aval.dtype)
 
-    A rule that sizes the trace from ``x`` and ``y`` (every rule but the
-    elementwise one, which sizes it from the hidden group) leaves out the axes
-    that broadcasting the output into the state adds: an unbatched output
-    driving a batched state, or a size-1 axis. The first update adds them, so
-    the trace changes shape. The substep fold of a descended scan carries the
-    trace through ``jax.lax.scan``, which needs a fixed shape and would fail
-    with a carry type error. Issue #224 sizes the trace from the hidden group
-    and removes this refusal.
+
+def _hidden_out_avals(relation: HiddenParamOpRelation, group: HiddenGroup) -> List[jax.ShapeDtypeStruct]:
+    """The avals of the hidden values that *relation*'s ``y`` reaches in *group*.
+
+    The executor reads ``df`` off the all-ones jvp of the relation's map from
+    ``y`` to these values, concatenated by the group, so ``df`` has their
+    shapes: ``(*varshape, num_state)`` once concatenated. For a relation in a
+    descended scan the map is one substep's (body-scoped), as the fold
+    consumes it.
+    """
+    i = [g.index for g in relation.hidden_groups].index(group.index)
+    return [_abstract(v) for v in relation.y_to_hidden_group_jaxprs[i].outvars]
+
+
+def _reaches_without_broadcast(relation: HiddenParamOpRelation, group: HiddenGroup) -> bool:
+    """Whether every hidden value that *relation*'s ``y`` reaches in *group* has ``y``'s shape.
+
+    Then no broadcast adds an axis between ``y`` and its states, the trace that
+    the ``init_drtrl`` rule sizes from ``x`` and ``y`` has the shape of the
+    instantaneous term, and the rule's init is kept without computing it.
+    """
+    y_shape = tuple(shaped_aval(relation.y_var).shape)
+    return all(tuple(a.shape) == y_shape for a in _hidden_out_avals(relation, group))
+
+
+def _reached_states(relation: HiddenParamOpRelation, group: HiddenGroup) -> str:
+    """The hidden states of *group* that *relation*'s ``y`` reaches, with their shapes, for a message."""
+    reached = [
+        (path, tuple(shaped_aval(var).shape))
+        for path, var in zip(group.hidden_paths, group.hidden_outvars)
+        if path in relation.connected_hidden_paths
+    ]
+    shapes = list(dict.fromkeys(shape for _, shape in reached))
+    if len(shapes) == 1:
+        return f"the hidden state(s) {[path for path, _ in reached]} of shape {shapes[0]}"
+    return f"the hidden states {[path for path, _ in reached]} of shapes {[shape for _, shape in reached]}"
+
+
+def _abstract_instant_term(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    fast_solve: bool,
+) -> Tuple[Dict[str, jax.ShapeDtypeStruct], jax.ShapeDtypeStruct]:
+    """The abstract :func:`relation_instant_term` of *relation* for *group*, and its ``df``.
+
+    Raises
+    ------
+    ValueError
+        If the term cannot be computed, naming the operation, the weight and
+        the shapes.
+    """
+    x = None if relation.x_var is None or relation.primitive is etp_elemwise_p else _abstract(relation.x_var)
+    weights = {k: _abstract(v) for k, v in relation.trainable_vars.items()}
+
+    def _term(x_: Any, outs: List[jax.Array], w: Dict[str, Any]) -> Any:
+        df = group.concat_hidden(outs)
+        return relation_instant_term(relation, group, x_, df, w, fast_solve=fast_solve), df
+
+    try:
+        return jax.eval_shape(_term, x, _hidden_out_avals(relation, group), weights)
+    except (ValueError, TypeError) as err:
+        y_shape = tuple(shaped_aval(relation.y_var).shape)
+        raise ValueError(
+            f"The eligibility trace of the ETP operation '{relation.primitive.name}' on the "
+            f"weight {relation.path} cannot be sized: its output has shape {y_shape} and "
+            f"reaches {_reached_states(relation, group)}, and the term its update adds for "
+            f"these states cannot be computed ({type(err).__name__}: {err})."
+        ) from err
+
+
+def _size_trace_from_instant_term(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    init_val: Dict[str, Any],
+    fast_solve: bool,
+) -> Dict[str, Any]:
+    """Allocate each trace leaf at the shape of its instantaneous term (#224).
+
+    The trace update adds :func:`relation_instant_term`, ``diag(D_f) ⊗ x``,
+    whose ``df`` has the hidden group's shape. A primitive's ``init_drtrl``
+    rule sizes the trace from ``x`` and ``y`` only, so when ``y`` reaches its
+    hidden state only by broadcasting (an unbatched output into a batched
+    state, a batch of one), the term has the axes the broadcast adds and the
+    trace would grow at its first update: a loop over the steps, or the
+    substep fold of a descended scan, could not carry it. Such a leaf is
+    allocated, zero, at the term's shape, and a leaf that already has it is
+    kept. Any other leaf raises, an init larger than the term included: an
+    unproven shape is not taken on trust.
+
+    When ``y`` reaches every hidden value of the group with its own shape
+    (:func:`_reaches_without_broadcast`), the init is kept without the
+    abstract evaluation, which costs about 0.5 ms per (relation, group).
+    Otherwise the gradient solve is checked, abstractly, to reduce the trace
+    to the weight's shape (:func:`_refuse_broadcast_along_a_weight_axis`).
+
+    Returns
+    -------
+    dict
+        The (possibly re-allocated) trace.
+
+    Raises
+    ------
+    ValueError
+        If the term cannot be computed, or a leaf neither has its shape nor
+        grows to it by broadcasting.
+    NotImplementedError
+        If the gradient solve cannot reduce the trace to the weight's shape
+        (#231).
+    """
+    if _reaches_without_broadcast(relation, group):
+        return init_val
+    term, df = _abstract_instant_term(relation, group, fast_solve)
+    out: Dict[str, Any] = {}
+    for key, leaf in init_val.items():
+        shape, term_shape = tuple(leaf.shape), tuple(term[key].shape)
+        try:
+            joint = tuple(jnp.broadcast_shapes(shape, term_shape))
+        except ValueError:
+            joint = None
+        if shape == term_shape:
+            out[key] = leaf
+        elif joint == term_shape:  # the term adds the axes of a broadcast
+            out[key] = jnp.zeros(term_shape, dtype=leaf.dtype)
+        else:
+            raise ValueError(
+                f"The eligibility trace that the init_drtrl rule of the ETP operation "
+                f"'{relation.primitive.name}' allocates for the leaf '{key}' of the weight "
+                f"{relation.path} has shape {shape}, which is not the shape {term_shape} "
+                f"of its instantaneous term (the term the trace update adds for the hidden "
+                f"state(s) {list(group.hidden_paths)}) and does not broadcast to it."
+            )
+    _refuse_broadcast_along_a_weight_axis(relation, group, out, df, fast_solve)
+    return out
+
+
+def _refuse_broadcast_along_a_weight_axis(
+    relation: HiddenParamOpRelation,
+    group: HiddenGroup,
+    trace: Dict[str, Any],
+    df: Any,
+    fast_solve: bool,
+) -> None:
+    """Refuse a trace that the gradient solve cannot reduce to the weight (#231).
+
+    A broadcast that adds or expands batch axes leaves the trace's weight part
+    intact, and the solve sums the batch. A broadcast along an axis of the
+    weight (``W`` of shape ``(3, 1)`` whose ``(2, 1)`` output drives ``(2, 4)``
+    states, or an ``etp_elemwise`` weight of shape ``(1,)`` or ``(1, 4)``
+    scaling ``(2, 4)`` states) puts the trace in the hidden state's positions,
+    and the solve returns a gradient of the wrong shape (a custom VJP error at
+    the first gradient). This checks, abstractly, that the solve and the batch
+    reduction of :func:`_solve_param_dim_weight_gradients` give each weight its
+    own shape.
 
     Raises
     ------
     NotImplementedError
-        If ``relation`` is folded over a descended scan (in its body or lifted
-        into it) and its output reaches a hidden state of ``group`` only by
-        broadcasting.
+        If they do not.
     """
-    ctx = relation.control_flow_context
-    if ctx is None:
+    weight_vals = {
+        relation.trainable_paths[k]: relation.trainable_param_states[k].value
+        for k in relation.trainable_paths
+    }
+    batched = is_batched_primitive(relation.primitive)
+
+    def _solve(dg: Any, trace_: Any, values: Any) -> Dict[Path, PyTree]:
+        grads, folded = relation_solve_to_param(relation, group, dg, trace_, values, fast_solve=fast_solve)
+        routed: Dict[Path, PyTree] = {}
+        _route_grads_by_path(relation, grads, values, routed)
+        sums: Dict[Path, Dict[Any, PyTree]] = {}
+        add_param_grad(sums, routed, values, batched=batched, folded=folded)
+        return reduce_param_batch_axes(sums, values)
+
+    cause: Optional[Exception] = None
+    try:
+        solved = jax.eval_shape(_solve, df, trace, weight_vals)
+        bad = [p for p, g in solved.items()
+               if [tuple(a.shape) for a in jax.tree.leaves(g)]
+               != [tuple(u.math.shape(a)) for a in jax.tree.leaves(weight_vals[p])]]
+    except (ValueError, TypeError) as err:  # the solve cannot even take the trace
+        bad, cause = list(weight_vals), err
+    if not bad:
         return
     y_shape = tuple(shaped_aval(relation.y_var).shape)
-    for path, state, hvar in zip(group.hidden_paths, group.hidden_states, group.hidden_outvars):
-        shapes = [s for s in _relatable_hidden_shapes(hvar, state) if _broadcastable(y_shape, s)]
-        if not shapes or any(tuple(jnp.broadcast_shapes(y_shape, s)) == y_shape for s in shapes):
-            continue
-        where = ('the scan reads it as a loop constant' if ctx.lifted
-                 else 'computed inside the scan body')
-        length = ctx.scan.length
-        raise NotImplementedError(
-            f"Structured scan descent does not support this length-{length} scan yet: "
-            f"the output of the ETP operation '{relation.primitive.name}' on the weight "
-            f"{relation.path} ({where}) has shape {y_shape}, and it reaches the hidden "
-            f"state {path} of shape {tuple(shaped_aval(hvar).shape)} only by broadcasting. "
-            f"Its eligibility trace would be allocated without the axes the broadcast adds, "
-            f"which the substep fold cannot carry "
-            f"(https://github.com/chaobrain/braintrace/issues/224). Compute the output with "
-            f"the hidden state's shape (for example, give the input the state's batch axis), "
-            f"or unroll the scan with ControlFlowPolicy(scan_unroll_limit={length}), which "
-            f"runs one call per step."
-        )
+    trace_shapes = {k: tuple(v.shape) for k, v in trace.items()}
+    raise NotImplementedError(
+        f"The output of the ETP operation '{relation.primitive.name}' on the weight "
+        f"{relation.path} has shape {y_shape}, and it reaches "
+        f"{_reached_states(relation, group)} by broadcasting along an axis of "
+        f"the weight. Its eligibility trace then lives in the hidden state's positions "
+        f"({trace_shapes}), and the gradient solve does not reduce it to the weight's "
+        f"shape yet (https://github.com/chaobrain/braintrace/issues/231). Compute the "
+        f"output with the hidden state's shape, for example with a weight that has the "
+        f"state's number of units."
+    ) from cause
 
 
 def _init_param_dim_state(
@@ -165,8 +321,6 @@ def _init_param_dim_state(
             init_kw['group'] = group
         elif relation.primitive is etp_conv_p:
             init_kw['eqn_params'] = relation.eqn_params
-        if 'group' not in init_kw:
-            _refuse_descended_broadcast(relation, group)
         # ``trace_state_width`` is ``num_state`` at every recurrence_scope but
         # ``sparse_n``, where the trailing state axis carries the SnAp-n
         # neighbourhood as well: ``M = K * num_state``. Every per-primitive rule
@@ -184,6 +338,7 @@ def _init_param_dim_state(
                 f'Primitive {relation.primitive.name} init_drtrl must return a dict; '
                 f'got {type(init_val).__name__}.'
             )
+        init_val = _size_trace_from_instant_term(relation, group, init_val, fast_solve)
         fp = get_fast_path_rules(relation.primitive)
         use_fast = fast_solve and fp is not None and fp.applicable(relation.eqn_params)
         if use_fast:
@@ -781,8 +936,8 @@ def relation_solve_to_param(
     # that lost its leading batch axis, while the weight trace keeps the
     # singleton batch from ``init_drtrl``. Both the batched ``dt_to_t`` and
     # the closed-form solve map a shared leading batch axis, so re-insert
-    # the matching singleton on the cotangent; the trailing solve-time sum
-    # (``has_batched`` branch in :func:`reduce_param_batch_axes`) collapses it
+    # the matching singleton on the cotangent; the solve-time batch sum
+    # (:func:`add_param_grad`, :func:`reduce_param_batch_axes`) collapses it
     # again.
     if batched:
         _trace_lead = jax.tree.leaves(etrace_data_unitless)[0].shape[0]
@@ -830,52 +985,102 @@ def relation_solve_to_param(
     return fn_unit_restore(dg_weight_dict), bool(use_fast and batched)
 
 
-def reduce_param_batch_axes(
-    temp_data: Dict[Path, PyTree],
-    weight_vals: Dict[Path, PyTree],
-    folded_paths: set,
-    batched_paths: set,
-) -> None:
-    """Collapse leading batch axes on routed parameter gradients, in place.
+# How a gradient contribution's batch axes reduce (:func:`add_param_grad`).
+_REDUCED = 'reduced'  # folded into the fast-path einsum, or no axis to reduce
+_BATCH = 'batch'  # a batched primitive's leading batch axis
+_LEADING = 'leading'  # the leading axes the weight does not have
 
-    Paths routed through the fast-path einsum (*folded_paths*) were already
-    reduced via ``fold_batch``; unbatched-primitive paths (not in
-    *batched_paths*) never grew a batch axis and must be left intact.
+
+def _leaves(tree: PyTree) -> List[Any]:
+    return jax.tree.leaves(tree, is_leaf=lambda a: isinstance(a, u.Quantity))
+
+
+def add_param_grad(
+    sums: Dict[Path, Dict[Any, PyTree]],
+    routed: Dict[Path, PyTree],
+    weight_vals: Dict[Path, PyTree],
+    batched: bool,
+    folded: bool,
+) -> None:
+    """Add one (relation, hidden group) gradient, routed per weight path.
+
+    How a contribution's batch axes reduce depends on the relation that
+    produced it:
+
+    * folded into the fast-path einsum (*folded*): already reduced;
+    * a batched primitive (*batched*): its leading batch axis is summed;
+    * otherwise, the leading axes the weight does not have are summed. An
+      unbatched primitive usually has none, but an output that reaches
+      batched states by broadcasting (#224) gets their batch axes, and so
+      does ``etp_elemwise`` under ``brainstate.mixin.Batching()``: it has no
+      ``x`` carrier, so neither its input nor its output reveals the batch.
+
+    One weight can be read by relations of different kinds, batched and
+    unbatched, so each contribution is filed under its reduction and its leaf
+    shapes, and :func:`reduce_param_batch_axes` reduces every such bucket
+    before it adds them. Contributions of one kind and shape are summed before
+    the reduction, so a weight read in one way reduces as it always did.
 
     Parameters
     ----------
-    temp_data : dict
-        ``{path: gradient}``, mutated in place.
+    sums : dict
+        ``{path: {bucket: gradient}}``, mutated in place.
+    routed : dict
+        ``{path: gradient}`` of one (relation, hidden group).
     weight_vals : dict
         ``{path: ParamState value}``, used as the rank reference.
-    folded_paths : set
-        Paths whose batch axis was folded into the einsum.
-    batched_paths : set
-        Paths owned by a batched primitive.
+    batched : bool
+        Whether the relation's primitive is batched.
+    folded : bool
+        Whether its batch axis was folded into the fast-path einsum.
     """
-    for key, val in temp_data.items():
-        if key in folded_paths:
-            continue
-        if key in batched_paths:
-            temp_data[key] = jax.tree.map(lambda x: u.math.sum(x, axis=0), val)
+    for path, grad in routed.items():
+        leaves = _leaves(grad)
+        if folded:
+            how = _REDUCED
+        elif batched:
+            how = _BATCH
+        elif any(u.math.ndim(g) > u.math.ndim(w) for g, w in zip(leaves, _leaves(weight_vals[path]))):
+            how = _LEADING
         else:
-            # Unbatched-primitive paths usually carry no batch axis. But under
-            # ``brainstate.mixin.Batching()`` a diagonal op with no ``x`` carrier
-            # (``etp_elemwise``: its output is the weight itself, so neither its
-            # input nor output rank reveals the batch) still acquires a leading
-            # batch axis from the batched hidden state it feeds. ``is_batched_
-            # primitive`` does not flag it, so reduce any leading axes the
-            # parameter itself does not have. This is a no-op for genuinely
-            # unbatched paths (e.g. ``etp_mv``) whose gradient already matches
-            # the parameter rank, and for the per-lane vmap path.
-            ref = weight_vals[key]
-            temp_data[key] = jax.tree.map(
-                lambda g, p: (
-                    u.math.sum(g, axis=tuple(range(u.math.ndim(g) - u.math.ndim(p))))
-                    if u.math.ndim(g) > u.math.ndim(p) else g
-                ),
-                val, ref,
-            )
+            how = _REDUCED
+        bucket = (how, tuple(tuple(u.math.shape(g)) for g in leaves))
+        _update_dict(sums.setdefault(path, {}), bucket, grad)
+
+
+def reduce_param_batch_axes(
+    sums: Dict[Path, Dict[Any, PyTree]],
+    weight_vals: Dict[Path, PyTree],
+) -> Dict[Path, PyTree]:
+    """Reduce the batch axes of each bucket of :func:`add_param_grad`, then add them.
+
+    Parameters
+    ----------
+    sums : dict
+        ``{path: {bucket: gradient}}`` from :func:`add_param_grad`.
+    weight_vals : dict
+        ``{path: ParamState value}``, used as the rank reference.
+
+    Returns
+    -------
+    dict
+        ``{path: gradient}``, each with its weight's shape.
+    """
+    out: Dict[Path, PyTree] = {}
+    for path, buckets in sums.items():
+        for (how, _), grad in buckets.items():
+            if how == _BATCH:
+                grad = jax.tree.map(lambda x: u.math.sum(x, axis=0), grad)
+            elif how == _LEADING:
+                grad = jax.tree.map(
+                    lambda g, p: (
+                        u.math.sum(g, axis=tuple(range(u.math.ndim(g) - u.math.ndim(p))))
+                        if u.math.ndim(g) > u.math.ndim(p) else g
+                    ),
+                    grad, weight_vals[path],
+                )
+            _update_dict(out, path, grad)
+    return out
 
 
 def _solve_param_dim_weight_gradients(
@@ -913,21 +1118,14 @@ def _solve_param_dim_weight_gradients(
         Whether to use the per-primitive fast contraction instead of the legacy
         vmap path.
     """
-    # update the etrace weight gradients
-    temp_data: Dict[Path, PyTree] = dict()
-    # Paths whose gradient was already batch-reduced inside the fast-path einsum
-    # (fold_batch). The trailing batch-sum must skip these.
-    folded_paths: set = set()
-    # Paths owned by a *batched* primitive: only these carry a leading batch axis
-    # in ``temp_data`` and so only these may be batch-summed. A model can mix
-    # batched and unbatched primitives in one solve — under
+    # the gradient contributions per weight path, bucketed by how their batch
+    # axes reduce (``add_param_grad``): one weight can be read by a batched and
+    # an unbatched relation, e.g. ``matmul(x, W) + matmul(x[0], W)``, and under
     # ``brainstate.nn.Vmap(vmap_states='new')`` a conv stays batched while a
-    # ``Linear`` dispatches to the unbatched ``etp_mv`` (1-D per-lane input) — and
-    # summing the unbatched gradient would collapse its leading (in-feature) axis.
-    batched_paths: set = set()
+    # ``Linear`` dispatches to the unbatched ``etp_mv``
+    sums: Dict[Path, Dict[Any, PyTree]] = dict()
     for relation in weight_hidden_relations:
-        if is_batched_primitive(relation.primitive):
-            batched_paths.update(relation.trainable_paths.values())
+        batched = is_batched_primitive(relation.primitive)
 
         group: HiddenGroup
         for group in relation.hidden_groups:
@@ -941,20 +1139,14 @@ def _solve_param_dim_weight_gradients(
                 weight_vals,
                 fast_solve=fast_solve,
             )
-            if batch_folded:
-                folded_paths.update(relation.trainable_paths.values())
 
             # Route per-key to owning ParamState path.
-            _route_grads_by_path(relation, dg_weight_dict, weight_vals, temp_data)
+            routed: Dict[Path, PyTree] = dict()
+            _route_grads_by_path(relation, dg_weight_dict, weight_vals, routed)
+            add_param_grad(sums, routed, weight_vals, batched=batched, folded=batch_folded)
 
-    #
-    # Step 3:
-    #
-    # sum up the batched weight gradients
-    reduce_param_batch_axes(temp_data, weight_vals, folded_paths, batched_paths)
-
-    # update the weight gradients
-    for key, val in temp_data.items():
+    # reduce the batch axes and update the weight gradients
+    for key, val in reduce_param_batch_axes(sums, weight_vals).items():
         _update_dict(dG_weights, key, val)
 
 
