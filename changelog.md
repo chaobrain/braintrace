@@ -329,6 +329,27 @@
   `SCAN_ROLLED_OUTPUT_READ` INFO. SnAp-n gets the unrolled position
   pattern rolled, or a superset of it (#210).
 
+### Internal
+
+- **The silent in-step preconditions are tracked tests (#233-#239).** The probe
+  models of the 2026-10-31 architecture study live in
+  `braintrace/_testing/precondition_models.py`, and `TestPreconditions` in
+  `braintrace/_compile_test.py` checks them end to end through
+  `braintrace.compile` (D-RTRL, single-step, float64, one step per call
+  against BPTT). Each case must give the BPTT gradient, or be refused loudly:
+  an ERROR-level record or a raise. For #233 the Jacobian must be the true
+  per-position block; for #238 an online-credit record must name the weight.
+  The 20 violating cases are strict xfails today, and their 8 controls pass.
+  Two test-only tools support the refinement stages:
+  - `braintrace/_testing/graph_hash.py`, a pytest plugin, fingerprints every
+    compiled graph per test. It covers the transition jaxprs, diagonality, the
+    SnAp pattern, the perturbation and the diagnostics, plus the trace shapes
+    and the run-time records, and it compares two runs.
+  - `braintrace/_testing/census.py`, a pytest plugin, measures how often a
+    suite breaks a precondition (#233, #234, #235, #236, #239).
+
+  Test-only; no runtime behaviour is altered.
+
 ## Version 0.2.8
 
 A packaging release. braintrace now depends on `brainpy>=2.9.0`, which ships
