@@ -36,7 +36,9 @@ any value:
 ``NEWREAD`` (structural, #239)
     A relation's output reaches the new value of a hidden state ``g``, and the
     new ``g`` reaches the new value of another hidden state ``V`` of the
-    relation's groups in the same step, with no ETP op between them.
+    relation's groups in the same step, with no ETP op between them. A read
+    the single-step perturbation holds fixed (``new_read_cuts``) is not
+    flagged; a read it could not hold fixed carries an ERROR record too.
 
 Runtime channels record ``max|used - true| / max|true|`` per site;
 structural channels record ``1.0`` per site. Structural counts are
@@ -180,12 +182,15 @@ def _is_float(v: Any) -> bool:
     return dtype is not None and np.issubdtype(dtype, np.inexact)
 
 
-def _reach_new_hidden(start: Any, consumers: Dict[Any, Any], outvar_path: Dict[Any, Any]) -> set:
+def _reach_new_hidden(start: Any, consumers: Dict[Any, Any], outvar_path: Dict[Any, Any],
+                      first_hit: bool = False) -> set:
     """Paths of the hidden outvars reachable from ``start`` in-step.
 
     The walk follows float values only and stops at ETP ops: a path through a
     second ETP op is cut from the relation (it is not in its ``y -> hidden``
-    map), so it cannot be counted twice.
+    map), so it cannot be counted twice. With ``first_hit`` it also stops at
+    the hidden outvars it finds: the result is the states that read
+    ``start`` first on some path.
     """
     from braintrace._compatible_imports import Var
     from braintrace._op._registries import is_etp_primitive
@@ -201,6 +206,8 @@ def _reach_new_hidden(start: Any, consumers: Dict[Any, Any], outvar_path: Dict[A
                 seen.add(o)
                 if o in outvar_path:
                     found.add(outvar_path[o])
+                    if first_hit:
+                        continue
                 stack.append(o)
     return found
 
@@ -209,15 +216,31 @@ def _new_reads(graph: Any) -> List[str]:
     """``relation: g -> V``: the relation's output reaches the new ``g``, the
     new ``g`` reaches the new ``V`` in the same step without an ETP op between
     them, and ``V`` is one of the relation's hidden paths (its trace carries
-    ``V``). Under ``vjp_method='single-step'`` the term ``W -> g -> V`` then
-    counts twice (#239). A site is exposure: it is recorded for every graph,
-    multi-step ones included, where the double count does not occur."""
+    ``V``). Under ``vjp_method='single-step'`` the term ``W -> g -> V`` would
+    count twice (#239), unless the perturbation holds the read fixed: a path
+    whose first read of the new ``g`` is in ``hidden_perturb.new_read_cuts``
+    is not flagged. A site is exposure otherwise: it is recorded for graphs
+    without a perturbation (multi-step), where the double count does not
+    occur, and for graphs whose reads the plan could not cut, which carry a
+    ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record."""
     from braintrace._compatible_imports import Var
     from braintrace._compiler.jaxpr_graph import build_consumer_map
     minfo = graph.module_info
     consumers = build_consumer_map(minfo.jaxpr)
     outvar_path = {v: p for p, v in minfo.hidden_path_to_outvar.items() if isinstance(v, Var)}
     path_outvar = {p: v for v, p in outvar_path.items()}
+    perturb = getattr(graph, 'hidden_perturb', None)
+    cuts = set(getattr(perturb, 'new_read_cuts', ()) or ())
+
+    def readers(g):  # the new hidden values the new ``g`` reaches past the cut reads
+        if not cuts:
+            return _reach_new_hidden(path_outvar[g], consumers, outvar_path)
+        out = set()
+        for m in _reach_new_hidden(path_outvar[g], consumers, outvar_path, first_hit=True):
+            if (g, m) not in cuts:
+                out |= {m} | _reach_new_hidden(path_outvar[m], consumers, outvar_path)
+        return out
+
     sites = []
     for r in graph.hidden_param_op_relations:
         if r.control_flow_context is not None:
@@ -228,7 +251,7 @@ def _new_reads(graph: Any) -> List[str]:
         for g in reached:
             if not _is_float(path_outvar[g]):
                 continue
-            for v in _reach_new_hidden(path_outvar[g], consumers, outvar_path):
+            for v in readers(g):
                 if v != g and v in reached and v in traced:
                     sites.append(f'{name}: {g} -> {v}')
     return sorted(set(sites))

@@ -474,10 +474,13 @@ def test_compile_docstring_example_runs():
 # compilation record or a raise (a WARNING-level record for the mixing tails
 # of #234; for #233 the Jacobian D-RTRL uses must be the true per-position
 # block; for #238 an online-credit record). Only braintrace's refusal types and
-# the record kinds a case lists count. Today no violation is refused, so its
-# test is a strict xfail that must fail on the verdict's assertion (any other
-# exception is a broken probe, not the issue); the fix of each issue turns it
-# green.
+# the record kinds a case lists count. A violation that nothing refuses yet is
+# a strict xfail that must fail on the verdict's assertion (any other
+# exception is a broken probe, not the issue); the fix of its issue turns it
+# green and adds the issue to ``_RESOLVED``.
+
+#: Issues whose fix has merged: their cases must pass.
+_RESOLVED = frozenset({239})
 
 _UNREFUSED = {
     _pm.EXACT_OR_ERROR: 'wrong gradient, with neither a refusal nor an ERROR record',
@@ -490,7 +493,7 @@ _UNREFUSED = {
 def _precondition_params():
     for case in _pm.CASES:
         marks = ()
-        if case.issue is not None:
+        if case.issue is not None and case.issue not in _RESOLVED:
             reason = f'braintrace#{case.issue}: {_UNREFUSED[case.check]}'
             if case.issue == 237:
                 reason += ' (the relation is dropped with WARNING records only)'

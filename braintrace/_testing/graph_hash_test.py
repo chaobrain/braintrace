@@ -365,7 +365,7 @@ from braintrace._testing import precondition_models as pm
 
 
 def test_probe_after_the_self_tests():
-    case = next(c for c in pm.CASES if c.name == 'newread-new')
+    case = next(c for c in pm.CASES if c.name == 'weight-2p')
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         braintrace.compile(case.model(), 'd_rtrl', case.inputs()[0])
