@@ -499,6 +499,8 @@ def conform_inputs(compiled: InputSignature, args: Tuple[Any, ...], caller: str)
         names every differing leaf by its key path, with every remedy that applies.
     """
     given = input_signature(*args)
+    if given == compiled:  # the common case: nothing to conform
+        return args
     rule = (
         'The compiled program replays the jaxpr traced from the example inputs of '
         '`compile_graph()`: it takes a lossless upcast and a Python scalar in the '
