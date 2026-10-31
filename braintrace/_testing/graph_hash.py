@@ -55,7 +55,10 @@ Usage::
 Run both sides with the same ``--hypothesis-seed`` and an empty Hypothesis
 database (``HYPOTHESIS_STORAGE_DIRECTORY`` pointing at a fresh directory):
 otherwise the property tests draw different examples, and build different
-graphs, on the two sides.
+graphs, on the two sides. Likewise, a model that closes over a constant drawn
+from the unseeded global generator hashes differently on every run, because
+the draw depends on the tests that ran before it on the same worker; build it
+under ``brainstate.random.seed_context``.
 
 Each process (each xdist worker) writes ``<prefix>.main.json`` or
 ``<prefix>.gw<N>.json``; the session removes earlier files of the same
