@@ -253,23 +253,41 @@
   update adds, which `jax.eval_shape` computes when the trace is
   allocated; a trace the rule already sizes right is kept as it is. An
   output that reaches its state with its own shape skips that check, so
-  compile time is unchanged there. The
-  trace therefore grows by the broadcast axes from the start: its memory
-  scales with the batch size, as for a batched input. A loop over the steps
-  equals one call per step, multi-step D-RTRL and e-prop in chunks of two
-  steps equal BPTT, and a descended scan equals the unrolled one (f64,
-  1e-12). Where one call per step already worked, the values are the
-  same, bit for bit, and every other trace keeps its shape. A
-  rule whose trace neither has the term's shape nor grows to it by
-  broadcasting raises `ValueError` when the trace is allocated, naming the
+  compile time is unchanged there. The trace therefore grows by the
+  broadcast axes from the start: its memory scales with the batch size, as
+  for a batched input. For dense, grouped and elementwise operations, a
+  loop over the steps equals one call per step, multi-step D-RTRL and
+  e-prop in chunks of two steps equal BPTT, and a descended scan equals the
+  unrolled one (f64, 1e-12). Where one call per step already worked, the
+  values are the same, bit for bit, and every other trace keeps its shape.
+  The term of an einsum, embedding, LoRA or sparse operation, or of a
+  convolution with a batch of one, cannot be computed for an output that
+  reaches its state by broadcasting: such a model failed with a JAX shape
+  error at the first update, and now raises `ValueError` when the trace is
+  allocated, naming the operation, the weight and the shapes, with the JAX
+  error as its cause. A rule whose trace neither has the term's shape nor
+  grows to it by broadcasting raises `ValueError` as well, naming the
   operation, the weight, the leaf and both shapes. An output that reaches
   its state by broadcasting along an axis of the weight, such as a weight
-  of shape `(3, 1)` driving 4 units, is not supported yet (#231): its trace
-  lives in the state's positions, and the gradient solve does not reduce it
-  to the weight's shape. It failed with a custom VJP shape error at the
-  first gradient, flat or descended; it now raises `NotImplementedError`
-  when the trace is allocated, naming the operation, the weight, both
-  shapes and #231.
+  of shape `(3, 1)` driving 4 units or an elementwise gain of shape `(1,)`
+  or `(1, 4)` scaling `(2, 4)` states, is not supported yet (#231). For a
+  dense, grouped, convolution or elementwise operation its trace lives in
+  the state's positions and the gradient solve does not reduce it to the
+  weight's shape: it failed with a custom VJP shape error at the first
+  gradient, flat or descended, and now raises `NotImplementedError` when
+  the trace is allocated, naming the operation, the weight, both shapes and
+  #231. For the other operations its term cannot be computed, as above.
+- **A weight read by several ETP operations gets the sum of their
+  gradients, each reduced over its own batch axes (#224).** The batch
+  reduction was chosen per weight, after the gradients were added. A weight
+  read by a batched and an unbatched operation, `matmul(x, W) +
+  matmul(x[0], W)` into `(2, 4)` states, failed with a custom VJP shape
+  error at the first gradient. With `fast_solve=False`, a weight read by a
+  batched operation into batched states and by an unbatched one into
+  unbatched states got the unbatched gradient once per batch row, without
+  an error (16 % off BPTT). Multi-step D-RTRL and e-prop now equal BPTT for
+  both (f64, 1e-12), and the random-projection engine reduces the same way.
+  A weight read in one way reduces as before, bit for bit.
 
 ### Features
 
