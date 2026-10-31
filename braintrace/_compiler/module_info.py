@@ -30,6 +30,7 @@ from braintrace._misc import (
     unknown_state_path,
     _remove_quantity,
 )
+from braintrace._input_data import InputSignature, input_signature as _input_signature
 from braintrace._state_management import sequence_split_state_values
 from braintrace._typing import (
     Path,
@@ -281,6 +282,11 @@ class ModuleInfo(NamedTuple):
         Structured descent of ETP-relevant scans above the unroll limit is
         implemented by the internal ``braintrace._compiler.scan_descent``
         module.
+    input_signature : InputSignature or None
+        The structure and per-leaf shape, dtype and unit of one step of the
+        example inputs the jaxpr was traced with. A learner refuses inputs
+        whose signature differs, since ``jaxpr_call`` replays the jaxpr
+        without retracing or casting. ``None`` when not recorded.
 
     See Also
     --------
@@ -330,6 +336,9 @@ class ModuleInfo(NamedTuple):
 
     # control-flow policy the canonicalizer ran with
     control_flow: ControlFlowPolicy = DEFAULT_CONTROL_FLOW_POLICY
+
+    # one step of the example inputs: structure, shapes, dtypes and units
+    input_signature: Optional[InputSignature] = None
 
     @property
     def jaxpr(self) -> Jaxpr:
@@ -747,4 +756,7 @@ def extract_module_info(
 
         # control-flow policy
         control_flow=policy,
+
+        # one step of the example inputs
+        input_signature=_input_signature(*model_args),
     )

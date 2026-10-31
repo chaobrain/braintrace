@@ -5,6 +5,27 @@
 
 ### Fixes
 
+- **A learner refuses inputs that differ from the example inputs it was
+  compiled with (#227, #241).** A learner replays the jaxpr traced at
+  `compile_graph()` on the leaves of its inputs: it neither retraces nor
+  casts. An input of another dtype therefore failed deep inside the replay,
+  with a JAX error naming an internal primitive (a float32 input to a
+  learner compiled with float64: `lax.dynamic_update_slice requires
+  arguments to have the same dtypes`), or ran a program traced for other
+  values. A `Quantity` lost its unit: an input of `1000 mV` to a learner
+  compiled with volts ran as `1000 V`, and the outputs and `dL/dW` were
+  1000 times too large, without an error; an input in another dimension
+  failed with a `UnitMismatchError` from a retrace of the model. The update
+  now compares one step of its inputs with the example inputs first: the
+  structure, and each leaf's shape, dtype and unit. A difference raises
+  `TypeError`, which names each differing leaf by its key path
+  (`args[0]['b']`), the compiled and the given value (`float32[3] in V`,
+  `float32[3] in mV`) and the remedy (`.astype(float32)`, `.in_unit(V)`, or
+  a learner compiled with such an input). A `MultiStepData` is compared per
+  step, a Python scalar by its canonical dtype (`2.0` is `float32` without
+  x64), and weak types are not compared. The signature is recorded in the
+  new `ModuleInfo.input_signature`. One braintrace test fed float32 inputs
+  to learners compiled with float64; it now builds them in float64.
 - **No more `Jaxpr is missing a DebugInfo` warnings (#197).** Since 0.2.7,
   every `braintrace.compile` and `etrace_grad` emitted jax's
   `DeprecationWarning: core.Jaxpr is missing a DebugInfo object`, once per
@@ -255,10 +276,13 @@
   output that reaches its state with its own shape skips that check, so
   compile time is unchanged there. The trace therefore grows by the
   broadcast axes from the start: its memory scales with the batch size, as
-  for a batched input. For dense, grouped and elementwise operations, a
-  loop over the steps equals one call per step, multi-step D-RTRL and
-  e-prop in chunks of two steps equal BPTT, and a descended scan equals the
-  unrolled one (f64, 1e-12). Where one call per step already worked, the
+  for a batched input. For dense, grouped and elementwise operations on the
+  fast solve (the default `fast_solve=True`, without a `weight_fn` or
+  `bias_fn`), a loop over the steps equals one call per step, multi-step
+  D-RTRL and e-prop in chunks of two steps equal BPTT, and a descended scan
+  equals the unrolled one (f64, 1e-12). With `fast_solve=False`, or a
+  `weight_fn` or `bias_fn`, the term of such an output cannot be computed,
+  and it raises the `ValueError` below when the trace is allocated. Where one call per step already worked, the
   values are the same, bit for bit, and every other trace keeps its shape.
   The term of an einsum, embedding, LoRA or sparse operation, or of a
   convolution with a batch of one, cannot be computed for an output that
@@ -285,9 +309,17 @@
   error at the first gradient. With `fast_solve=False`, a weight read by a
   batched operation into batched states and by an unbatched one into
   unbatched states got the unbatched gradient once per batch row, without
-  an error (16 % off BPTT). Multi-step D-RTRL and e-prop now equal BPTT for
-  both (f64, 1e-12), and the random-projection engine reduces the same way.
-  A weight read in one way reduces as before, bit for bit.
+  an error (16 % off BPTT). With the default `fast_solve=True`, a weight
+  read by two unbatched operations into `(2, 4)` states and into `(4,)` or
+  `(1, 4)` states was 22 % off, and an elementwise gain of shape `(4,)`
+  scaling `(2, 4)` states and `(1, 4)` or `(4,)` states 9.8 % off (also with
+  `fast_solve=False`), without an error: the smaller gradient was broadcast
+  into the larger one before the reduction, so it counted once per batch
+  row. With `fast_solve=False`, a weight read by batched operations into
+  `(2, 4)` and into `(1, 4)` states was 15 % off. Multi-step D-RTRL and
+  e-prop now equal BPTT for all of these (f64, 1e-12), and the
+  random-projection engine reduces the same way. A weight read in one way
+  reduces as before, bit for bit.
 
 ### Features
 

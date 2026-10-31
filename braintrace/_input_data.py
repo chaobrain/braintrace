@@ -16,8 +16,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+import dataclasses
+from typing import Any, Optional, Tuple
 
+import brainunit as u
 import jax
 from jax.tree_util import register_pytree_node_class
 
@@ -257,3 +259,156 @@ def has_multistep_data(*args: Any) -> bool:
     """
     leaves, _ = jax.tree.flatten(args, is_leaf=is_input)
     return any(isinstance(leaf, MultiStepData) for leaf in leaves)
+
+
+# ---------------------------------------------------------------------------
+# The signature of one step of the inputs (#227, #241)
+# ---------------------------------------------------------------------------
+
+
+def _is_quantity(x: Any) -> bool:
+    return isinstance(x, u.Quantity)
+
+
+@dataclasses.dataclass(frozen=True)
+class LeafSignature:
+    """The abstract value of one input leaf at one step.
+
+    ``shape`` and ``dtype`` come from :func:`jax.typeof`, so a Python scalar has
+    its canonical dtype and the weak type is dropped. ``unit`` is the unit of a
+    :class:`brainunit.Quantity` and ``None`` for a plain array. A value that is
+    not a JAX type is compared by its Python type only.
+    """
+    kind: str
+    shape: Optional[Tuple[int, ...]] = None
+    dtype: Any = None
+    unit: Any = None
+    per_step: bool = dataclasses.field(default=False, compare=False)
+
+    def describe(self) -> str:
+        if self.shape is None:
+            return f'a {self.kind}'
+        text = f"{self.dtype}[{','.join(str(n) for n in self.shape)}]"
+        if self.unit is not None:
+            text += f' in {self.unit}'
+        if self.per_step:
+            text += ' per step of a MultiStepData'
+        return text
+
+
+@dataclasses.dataclass(frozen=True)
+class InputSignature:
+    """The structure and per-leaf abstract values of one step of the inputs.
+
+    A :class:`brainunit.Quantity` is one leaf, so ``treedef`` does not depend on
+    units; :class:`SingleStepData` and :class:`MultiStepData` are unwrapped, and
+    a :class:`MultiStepData` leaf loses its leading time axis.
+    """
+    treedef: Any
+    leaves: Tuple[Tuple[str, LeafSignature], ...]
+
+
+def _leaf_signature(leaf: Any, per_step: bool) -> LeafSignature:
+    if _is_quantity(leaf):
+        unit, value = leaf.unit, leaf.mantissa
+    else:
+        unit, value = None, leaf
+    try:
+        aval = jax.typeof(value)
+    except TypeError:
+        return LeafSignature(kind=type(leaf).__name__)
+    shape = tuple(aval.shape)
+    if per_step:
+        shape = shape[1:]
+    return LeafSignature(
+        kind='Quantity' if unit is not None else 'array',
+        shape=shape,
+        dtype=aval.dtype,
+        unit=unit,
+        per_step=per_step,
+    )
+
+
+def input_signature(*args: Any) -> InputSignature:
+    """The signature of one step of *args*, as the model sees it.
+
+    Parameters
+    ----------
+    *args : Any
+        The inputs, which may hold :class:`SingleStepData` and
+        :class:`MultiStepData`.
+
+    Returns
+    -------
+    InputSignature
+        The structure of the unwrapped inputs, with a :class:`brainunit.Quantity`
+        as one leaf, and each leaf's key path and :class:`LeafSignature`.
+    """
+    leaves, outer = jax.tree.flatten(args, is_leaf=lambda x: is_input(x) or _is_quantity(x))
+    one_step = []
+    for leaf in leaves:
+        if is_input(leaf):
+            per_step = isinstance(leaf, MultiStepData)
+            one_step.append(
+                jax.tree.map(lambda x: _leaf_signature(x, per_step), leaf.data, is_leaf=_is_quantity)
+            )
+        else:
+            one_step.append(_leaf_signature(leaf, False))
+    with_path, treedef = jax.tree_util.tree_flatten_with_path(jax.tree.unflatten(outer, one_step))
+    return InputSignature(
+        treedef=treedef,
+        leaves=tuple(('args' + jax.tree_util.keystr(path), sig) for path, sig in with_path),
+    )
+
+
+def _hint(compiled: LeafSignature, given: LeafSignature) -> str:
+    if compiled.shape is None or given.shape is None or compiled.kind != given.kind:
+        return f'pass {compiled.describe()}'
+    if compiled.shape != given.shape:
+        return 'compile a new learner with an example input of this shape'
+    if compiled.unit is not None and given.unit is not None and compiled.unit != given.unit:
+        if compiled.unit.dim == given.unit.dim:
+            return f'convert it with `.in_unit({compiled.unit})`'
+        return f'it has another physical dimension than {compiled.unit}'
+    return f'cast it with `.astype({compiled.dtype})`'
+
+
+def check_input_signature(compiled: InputSignature, given: InputSignature, caller: str) -> None:
+    """Raise a ``TypeError`` if *given* differs from the *compiled* signature.
+
+    Parameters
+    ----------
+    compiled : InputSignature
+        The signature of the example inputs the program was traced with.
+    given : InputSignature
+        The signature of the inputs of this call.
+    caller : str
+        The name of the call, for the message.
+
+    Raises
+    ------
+    TypeError
+        If the structures differ, or any leaf's shape, dtype, unit or kind does.
+        The message names every differing leaf by its key path.
+    """
+    why = (
+        'The compiled program replays the jaxpr traced from the example inputs '
+        'of `compile_graph()`; it neither retraces nor casts.'
+    )
+    if compiled.treedef != given.treedef:
+        raise TypeError(
+            f'{caller} was given inputs of structure {given.treedef}, but it was '
+            f'compiled with inputs of structure {compiled.treedef}. {why} Pass '
+            f'inputs of the compiled structure, or compile a new learner with an '
+            f'example input like this one.'
+        )
+    lines = [
+        f'  {path}: compiled with {c.describe()}, given {g.describe()}; {_hint(c, g)}.'
+        for (path, c), (_, g) in zip(compiled.leaves, given.leaves)
+        if c != g
+    ]
+    if lines:
+        raise TypeError(
+            f'{caller} was given inputs that differ from the example inputs it '
+            f'was compiled with:\n' + '\n'.join(lines) + f'\n{why}'
+        )

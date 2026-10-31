@@ -26,7 +26,13 @@ import numpy as np
 import brainunit as u
 from jax.custom_derivatives import CustomVJPPrimal, SymbolicZero
 
-from braintrace._input_data import MultiStepData, has_multistep_data, is_input
+from braintrace._input_data import (
+    MultiStepData,
+    check_input_signature,
+    has_multistep_data,
+    input_signature,
+    is_input,
+)
 from braintrace._state_management import assign_state_values_v2
 from braintrace._typing import (
     Path,
@@ -545,6 +551,19 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         if not self.is_compiled:
             raise ValueError('The etrace algorithm has not been compiled. Please call `compile_graph()` first. ')
 
+    def _check_input_avals(self, args: Tuple[Any, ...]) -> None:
+        """Refuse inputs whose step differs from the compiled example inputs.
+
+        The update replays the jaxpr traced at ``compile_graph()`` on the leaves
+        of *args*: it neither retraces nor casts, and it drops a
+        :class:`brainunit.Quantity`'s unit. An input of another shape, dtype,
+        unit or structure would run a program built for other values, so it
+        raises a ``TypeError`` that names each differing leaf (#227, #241).
+        """
+        compiled = self.graph.module_info.input_signature
+        if compiled is not None:
+            check_input_signature(compiled, input_signature(*args), f'{type(self).__name__}.update()')
+
     # ------------------------------------------------------------------ #
     # axis: recurrence_scope
     # ------------------------------------------------------------------ #
@@ -987,6 +1006,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         # check the compilation
         self._assert_compiled()
+        self._check_input_avals(args)
 
         # state values
         weight_vals = {
