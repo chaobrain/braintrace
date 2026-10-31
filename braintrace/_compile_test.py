@@ -473,16 +473,28 @@ def test_compile_docstring_example_runs():
 # a probe must give the BPTT gradient, or be refused loudly: an ERROR-level
 # compilation record or a raise (a WARNING-level record for the mixing tails
 # of #234; for #233 the Jacobian D-RTRL uses must be the true per-position
-# block; for #238 an online-credit record). Today each violation is silent,
-# so its test is a strict xfail; the fix of each issue turns it green.
+# block; for #238 an online-credit record). Only braintrace's refusal types and
+# the record kinds a case lists count. Today no violation is refused, so its
+# test is a strict xfail that must fail on the verdict's assertion (any other
+# exception is a broken probe, not the issue); the fix of each issue turns it
+# green.
+
+_UNREFUSED = {
+    _pm.EXACT_OR_ERROR: 'wrong gradient, with neither a refusal nor an ERROR record',
+    _pm.EXACT_OR_LOUD: 'wrong gradient, with neither a refusal nor a record',
+    _pm.TRANSITION: 'the Jacobian is not the true per-position block, and nothing refuses it',
+    _pm.CREDIT_RECORDED: 'no online gradient and no online-credit record',
+}
+
 
 def _precondition_params():
     for case in _pm.CASES:
         marks = ()
         if case.issue is not None:
-            marks = pytest.mark.xfail(
-                strict=True,
-                reason=f'braintrace#{case.issue}: the violation is silent (wrong gradient, no ERROR record)')
+            reason = f'braintrace#{case.issue}: {_UNREFUSED[case.check]}'
+            if case.issue == 237:
+                reason += ' (the relation is dropped with WARNING records only)'
+            marks = pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
         yield pytest.param(case, id=case.name, marks=marks)
 
 

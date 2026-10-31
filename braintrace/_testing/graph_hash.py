@@ -21,13 +21,14 @@ pytest plugin records, for every test, three channels:
 
 ``graphs``
     One SHA-1 per :class:`~braintrace.ETraceGraph` built, in build order, over
-    :func:`graph_summary`: the module jaxpr; per hidden group its paths,
-    descent flag, transition jaxpr and constvars, ``is_diagonal_recurrence``
-    and SnAp pattern; per relation its weight paths, leaf indices, groups,
-    connected paths, path classification, control-flow context and
-    ``y -> hidden`` jaxprs; the hidden perturbation (jaxpr, perturbed paths,
-    bypass paths); and the compile-time diagnostics as a multiset of
-    ``(kind, level)``.
+    :func:`graph_summary`: the module jaxpr and the values of its constants;
+    per hidden group its paths, descent flag, transition jaxpr and
+    constvars, ``is_diagonal_recurrence`` and SnAp pattern; per relation its
+    weight paths, leaf indices, groups, connected paths, path
+    classification, control-flow context and ``y -> hidden`` jaxprs; the
+    hidden perturbation (jaxpr, constant values, perturbed paths, bypass
+    paths); and the compile-time diagnostics as a multiset of
+    ``(kind, level)``. Diagnostic messages are not part of it.
 ``traces``
     The sorted set of eligibility-trace shapes and dtypes after
     ``init_etrace_state`` and at the output of each ``_update_etrace_data``,
@@ -37,18 +38,36 @@ pytest plugin records, for every test, three channels:
     The diagnostics an algorithm adds after compiling (the online-credit
     records), as a sorted multiset of ``(kind, level)``.
 
+Next to the channels, every test's ``env`` holds the ``jax_enable_x64`` flag
+and the ``brainstate`` precision each graph was built under. ``compare``
+lists the tests whose environment differs: such a graph changed because an
+earlier test on the same worker leaked a global setting, not because of the
+code under test.
+
 Usage::
 
-    BRAINTRACE_GRAPH_HASH_OUT=/tmp/gh/base pytest -p braintrace._testing.graph_hash braintrace
-    BRAINTRACE_GRAPH_HASH_OUT=/tmp/gh/head pytest -p braintrace._testing.graph_hash braintrace
+    BRAINTRACE_GRAPH_HASH_OUT=/tmp/gh/base pytest -p braintrace._testing.graph_hash \\
+        --hypothesis-seed=0 braintrace
+    BRAINTRACE_GRAPH_HASH_OUT=/tmp/gh/head pytest -p braintrace._testing.graph_hash \\
+        --hypothesis-seed=0 braintrace
     python -m braintrace._testing.graph_hash compare /tmp/gh/base /tmp/gh/head
 
-Each process (each xdist worker) writes ``<prefix>.<worker>.json``;
-:func:`load` merges them. ``compare`` exits with status 1 when any test
-present on both sides changed in any channel.
+Run both sides with the same ``--hypothesis-seed`` and an empty Hypothesis
+database (``HYPOTHESIS_STORAGE_DIRECTORY`` pointing at a fresh directory):
+otherwise the property tests draw different examples, and build different
+graphs, on the two sides.
+
+Each process (each xdist worker) writes ``<prefix>.main.json`` or
+``<prefix>.gw<N>.json``; the session removes earlier files of the same
+prefix when it starts, and :func:`load` merges exactly these names.
+``compare`` exits with status 1 when any test present on both sides changed
+in any channel, or when a test recorded on the base side is missing on the
+head side (pass ``--allow-removed`` when tests were removed on purpose).
 
 The plugin only observes: every hook calls the original and returns its
-result unchanged.
+result unchanged. It patches the algorithm classes that exist when it
+installs (``import braintrace`` registers all of them); a class defined
+later, e.g. inside a test, is observed only through its base classes.
 """
 
 from __future__ import annotations
@@ -59,6 +78,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import sys
 from collections import Counter
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
@@ -129,6 +149,37 @@ def _snap(snap: Any) -> str:
             f'valid={_array(snap.valid)}, conservative={snap.conservative}, reason={snap.reason!r})')
 
 
+def _consts(closed: Any) -> List[str]:
+    """Digests of the constant values of a closed jaxpr and of every closed
+    jaxpr nested in its equations' parameters.
+
+    ``str(jaxpr)`` names a constant but does not print its value, so a
+    changed mask or table would otherwise give the same summary.
+    """
+    out: List[str] = []
+    stack = [closed]
+    while stack:
+        c = stack.pop()
+        for const in getattr(c, 'consts', ()):
+            try:
+                arr = np.asarray(const)
+            except Exception:  # noqa: BLE001 -- not an array: name its type
+                arr = None
+            # an object array's bytes are pointers, which differ between runs
+            out.append(type(const).__name__ if arr is None or arr.dtype == object else _array(arr))
+        if not hasattr(c, 'eqns'):  # a ClosedJaxpr (JAX < 0.11): its equations sit on .jaxpr
+            inner = getattr(c, 'jaxpr', None)
+            if inner is not None and hasattr(inner, 'eqns'):
+                stack.append(inner)
+            continue
+        for eqn in c.eqns:
+            for param in eqn.params.values():
+                for p in (param if isinstance(param, (list, tuple)) else (param,)):
+                    if hasattr(p, 'eqns') or (hasattr(p, 'jaxpr') and hasattr(p, 'consts')):
+                        stack.append(p)
+    return out
+
+
 def _diagnostics(records: Sequence[Any]) -> str:
     counts = Counter((r.kind.value, r.level.name) for r in records)
     return str(sorted(counts.items()))
@@ -149,7 +200,7 @@ def graph_summary(graph: Any) -> str:
     """
     minfo = graph.module_info
     index = _var_index(minfo.jaxpr)
-    parts = [str(minfo.jaxpr)]
+    parts = [str(minfo.jaxpr), f'consts={_consts(minfo.closed_jaxpr)}']
     for grp in graph.hidden_groups:
         parts.append(
             f'G{grp.index} paths={list(grp.hidden_paths)} descent={grp.descent is not None} '
@@ -174,6 +225,7 @@ def graph_summary(graph: Any) -> str:
             f'bypass_params={list(perturb.bypass_param_paths)} '
             f'bypass_hidden={list(perturb.bypass_hidden_paths)}')
         parts.append(str(perturb.perturb_jaxpr))
+        parts.append(f'perturb consts={_consts(perturb.perturb_jaxpr)}')
     parts.append(f'diagnostics={_diagnostics(graph.diagnostics)}')
     return '\n'.join(parts)
 
@@ -273,6 +325,7 @@ class Recorder:
         self.graphs: Dict[str, List[str]] = {}
         self.traces: Dict[str, set] = {}
         self.records: Dict[str, Counter] = {}
+        self.env: Dict[str, set] = {}
 
     @property
     def test(self) -> str:
@@ -280,6 +333,7 @@ class Recorder:
 
     def add_graph(self, graph: Any) -> None:
         self.graphs.setdefault(self.test, []).append(graph_digest(graph))
+        self.env.setdefault(self.test, set()).add(_environment())
 
     def add_traces(self, items: Sequence[str]) -> None:
         self.traces.setdefault(self.test, set()).update(items)
@@ -295,7 +349,19 @@ class Recorder:
             'graphs': {t: list(v) for t, v in self.graphs.items()},
             'traces': {t: sorted(v) for t, v in self.traces.items()},
             'records': {t: sorted(f'{k}x{n}' for k, n in v.items()) for t, v in self.records.items()},
+            'env': {t: sorted(v) for t, v in self.env.items()},
         }
+
+
+def _environment() -> str:
+    """The global settings a graph is built under: x64 and brainstate's precision."""
+    import brainstate
+    import jax
+    try:
+        precision = brainstate.environ.get_precision()
+    except Exception as e:  # noqa: BLE001 -- an observer never raises
+        precision = f'ERR {type(e).__name__}'
+    return f'x64={bool(jax.config.jax_enable_x64)} precision={precision}'
 
 
 def _algorithm_classes() -> List[type]:
@@ -328,64 +394,67 @@ def install(recorder: Recorder) -> Callable[[], None]:
         restore.append((owner, name, owner.__dict__[name]))
         setattr(owner, name, new)
 
-    graph_cls = graph_module.ETraceGraph
-    orig_new = graph_cls.__new__
-
-    def new(cls: Any, *args: Any, **kwargs: Any) -> Any:
-        obj = orig_new(cls, *args, **kwargs)
-        recorder.add_graph(obj)
-        return obj
-
-    patch(graph_cls, '__new__', new)
-
-    # Nesting depth of init_etrace_state per algorithm object (a subclass calls
-    # super()); kept here, never on the module, so the module graph is untouched.
-    depths: Dict[int, int] = {}
-
-    for cls in _algorithm_classes():
-        if 'init_etrace_state' in cls.__dict__:
-            def init(self: Any, *args: Any, _orig: Any = cls.__dict__['init_etrace_state'], **kwargs: Any) -> Any:
-                depth = depths.get(id(self), 0)
-                depths[id(self)] = depth + 1
-                try:
-                    out = _orig(self, *args, **kwargs)
-                finally:
-                    if depth:
-                        depths[id(self)] = depth
-                    else:
-                        depths.pop(id(self), None)
-                if depth == 0:
-                    try:
-                        recorder.add_traces(trace_labels(self, self._get_etrace_data(), 'init'))
-                    except Exception as e:  # noqa: BLE001 -- an observer never raises
-                        recorder.add_traces([f'{type(self).__name__}|init|ERR {type(e).__name__}'])
-                return out
-
-            patch(cls, 'init_etrace_state', init)
-        if '_update_etrace_data' in cls.__dict__:
-            def update(self: Any, *args: Any, _orig: Any = cls.__dict__['_update_etrace_data'], **kwargs: Any) -> Any:
-                out = _orig(self, *args, **kwargs)
-                try:
-                    recorder.add_traces(trace_labels(self, out, 'update'))
-                except Exception as e:  # noqa: BLE001
-                    recorder.add_traces([f'{type(self).__name__}|update|ERR {type(e).__name__}'])
-                return out
-
-            patch(cls, '_update_etrace_data', update)
-
-    orig_add = ETraceVjpAlgorithm.__dict__['_add_records']
-
-    def add_records(self: Any, records: Sequence[Any]) -> None:
-        recorder.add_records(records)
-        return orig_add(self, records)
-
-    patch(ETraceVjpAlgorithm, '_add_records', add_records)
-
     def uninstall() -> None:
         for owner, name, value in reversed(restore):
             setattr(owner, name, value)
         restore.clear()
 
+    try:
+        graph_cls = graph_module.ETraceGraph
+        orig_new = graph_cls.__new__
+
+        def new(cls: Any, *args: Any, **kwargs: Any) -> Any:
+            obj = orig_new(cls, *args, **kwargs)
+            recorder.add_graph(obj)
+            return obj
+
+        patch(graph_cls, '__new__', new)
+
+        # Nesting depth of init_etrace_state per algorithm object (a subclass calls
+        # super()); kept here, never on the module, so the module graph is untouched.
+        depths: Dict[int, int] = {}
+
+        for cls in _algorithm_classes():
+            if 'init_etrace_state' in cls.__dict__:
+                def init(self: Any, *args: Any, _orig: Any = cls.__dict__['init_etrace_state'], **kwargs: Any) -> Any:
+                    depth = depths.get(id(self), 0)
+                    depths[id(self)] = depth + 1
+                    try:
+                        out = _orig(self, *args, **kwargs)
+                    finally:
+                        if depth:
+                            depths[id(self)] = depth
+                        else:
+                            depths.pop(id(self), None)
+                    if depth == 0:
+                        try:
+                            recorder.add_traces(trace_labels(self, self._get_etrace_data(), 'init'))
+                        except Exception as e:  # noqa: BLE001 -- an observer never raises
+                            recorder.add_traces([f'{type(self).__name__}|init|ERR {type(e).__name__}'])
+                    return out
+
+                patch(cls, 'init_etrace_state', init)
+            if '_update_etrace_data' in cls.__dict__:
+                def update(self: Any, *args: Any, _orig: Any = cls.__dict__['_update_etrace_data'], **kwargs: Any) -> Any:
+                    out = _orig(self, *args, **kwargs)
+                    try:
+                        recorder.add_traces(trace_labels(self, out, 'update'))
+                    except Exception as e:  # noqa: BLE001
+                        recorder.add_traces([f'{type(self).__name__}|update|ERR {type(e).__name__}'])
+                    return out
+
+                patch(cls, '_update_etrace_data', update)
+
+        orig_add = ETraceVjpAlgorithm.__dict__['_add_records']
+
+        def add_records(self: Any, records: Sequence[Any]) -> None:
+            recorder.add_records(records)
+            return orig_add(self, records)
+
+        patch(ETraceVjpAlgorithm, '_add_records', add_records)
+    except BaseException:
+        uninstall()  # a failed install leaves nothing patched
+        raise
     return uninstall
 
 
@@ -406,11 +475,19 @@ def recording(test: str = 'test') -> Iterator[Recorder]:
 # ---------------------------------------------------------------------------
 
 _RECORDER = Recorder()
-_UNINSTALL: List[Callable[[], None]] = []
+
+#: The plugin's install, keyed by ``id()`` of the pytest config that made it.
+#: A second configure (a nested in-process session, or a test calling the
+#: hooks) installs nothing, and an unconfigure undoes only its own install.
+_INSTALLS: Dict[int, Callable[[], None]] = {}
 
 
 def pytest_configure(config: Any) -> None:
-    _UNINSTALL.append(install(_RECORDER))
+    if _INSTALLS:
+        return  # already recording: patching twice would record twice
+    if not os.environ.get('PYTEST_XDIST_WORKER'):
+        _remove_stale_files(os.environ.get(OUT_ENV))
+    _INSTALLS[id(config)] = install(_RECORDER)
 
 
 def pytest_runtest_setup(item: Any) -> None:
@@ -427,24 +504,39 @@ def pytest_sessionfinish(session: Any) -> None:
 
 
 def pytest_unconfigure(config: Any) -> None:
-    while _UNINSTALL:
-        _UNINSTALL.pop()()
+    uninstall = _INSTALLS.pop(id(config), None)
+    if uninstall is not None:
+        uninstall()
 
 
 # ---------------------------------------------------------------------------
 # comparison
 # ---------------------------------------------------------------------------
 
+def _worker_files(prefix: Optional[str]) -> List[str]:
+    """The per-process files of one run: ``<prefix>.main.json`` and ``<prefix>.gw<N>.json``."""
+    if not prefix:
+        return []
+    pattern = re.compile(re.escape(prefix) + r'\.(main|gw\d+)\.json')
+    return sorted(p for p in glob.glob(f'{glob.escape(prefix)}.*.json') if pattern.fullmatch(p))
+
+
+def _remove_stale_files(prefix: Optional[str]) -> None:
+    """Remove a previous run's per-process files, so :func:`load` sees this run only."""
+    for path in _worker_files(prefix):
+        os.remove(path)
+
+
 def load(prefix: str) -> Dict[str, Dict[str, Any]]:
-    """Merge the per-process files ``<prefix>.*.json``."""
-    merged: Dict[str, Dict[str, Any]] = {c: {} for c in CHANNELS}
-    files = sorted(glob.glob(f'{glob.escape(prefix)}.*.json'))
+    """Merge the per-process files ``<prefix>.main.json`` and ``<prefix>.gw<N>.json``."""
+    merged: Dict[str, Dict[str, Any]] = {c: {} for c in CHANNELS + ('env',)}
+    files = _worker_files(prefix)
     if not files:
-        raise FileNotFoundError(f'no {prefix}.*.json files')
+        raise FileNotFoundError(f'no {prefix}.main.json or {prefix}.gw<N>.json files')
     for path in files:
         with open(path) as f:
             data = json.load(f)
-        for channel in CHANNELS:
+        for channel in CHANNELS + ('env',):
             merged[channel].update(data.get(channel, {}))
     return merged
 
@@ -453,7 +545,9 @@ def compare(base: Dict[str, Dict[str, Any]], head: Dict[str, Dict[str, Any]]) ->
     """Per channel: the tests that changed, and the tests found on one side only.
 
     A test missing from a channel on one side but present on the other counts
-    as added or removed for that channel.
+    as added or removed for that channel. ``report['env']['changed']`` lists
+    the tests whose graphs were built under a different x64 or precision
+    setting on the two sides.
     """
     report: Dict[str, Dict[str, List[str]]] = {}
     for channel in CHANNELS:
@@ -463,22 +557,26 @@ def compare(base: Dict[str, Dict[str, Any]], head: Dict[str, Dict[str, Any]]) ->
             'only_base': sorted(b.keys() - h.keys()),
             'only_head': sorted(h.keys() - b.keys()),
         }
+    b, h = base.get('env', {}), head.get('env', {})
+    report['env'] = {'changed': sorted(t for t in b.keys() & h.keys() if b[t] != h[t])}
     return report
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """``python -m braintrace._testing.graph_hash compare BASE HEAD``."""
+    """``python -m braintrace._testing.graph_hash compare BASE HEAD [--allow-removed]``."""
     parser = argparse.ArgumentParser(prog='python -m braintrace._testing.graph_hash')
     sub = parser.add_subparsers(dest='command', required=True)
     cmp = sub.add_parser('compare', help='compare two recorded runs')
     cmp.add_argument('base')
     cmp.add_argument('head')
     cmp.add_argument('--show', type=int, default=20, help='tests listed per category')
+    cmp.add_argument('--allow-removed', action='store_true',
+                     help='do not fail on tests recorded on the base side only')
     args = parser.parse_args(argv)
 
     base, head = load(args.base), load(args.head)
     report = compare(base, head)
-    changed = 0
+    changed = removed = 0
     for channel in CHANNELS:
         r = report[channel]
         n_tests = len(base[channel].keys() | head[channel].keys())
@@ -491,7 +589,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if len(r[category]) > args.show:
                 print(f'  {category}: ... {len(r[category]) - args.show} more')
         changed += len(r['changed'])
-    return 1 if changed else 0
+        removed += len(r['only_base'])
+    env = report['env']['changed']
+    print(f'env: {len(env)} tests built their graphs under another x64/precision setting '
+          f'(a global setting leaked from an earlier test)')
+    for t in env[:args.show]:
+        print(f'  env: {t}: {base["env"][t]} -> {head["env"][t]}')
+    if removed and not args.allow_removed:
+        print('tests recorded on the base side are missing on the head side '
+              '(pass --allow-removed if they were removed on purpose)')
+    return 1 if changed or (removed and not args.allow_removed) else 0
 
 
 if __name__ == '__main__':

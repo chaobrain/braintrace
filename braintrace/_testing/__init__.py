@@ -47,4 +47,14 @@ compiler_models
     Small models exercising specific compiler paths.
 scenario_catalog
     The parameterised scenario matrix the compiler suites enumerate.
+precondition_models
+    Probes of the in-step preconditions the online algorithms rely on
+    (issues #233-#239) and their verdict; run by ``_compile_test.py``.
+graph_hash
+    The graph-hash gate: a pytest plugin that records every compiled graph,
+    eligibility-trace shape and run-time record per test, and compares two
+    runs.
+census
+    The precondition census: a pytest plugin that measures, without changing
+    any value, how often a run violates those preconditions.
 """

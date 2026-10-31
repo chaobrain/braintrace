@@ -26,18 +26,26 @@ sum-of-squares loss). :func:`satisfied` then states what the case promises:
 ``EXACT``
     The online gradient equals BPTT (a control).
 ``EXACT_OR_ERROR``
-    Equal to BPTT, or an ERROR-level compilation record, or compiling or
-    running raises. Today's WARNING-only paths do not satisfy it.
+    Equal to BPTT, or an ERROR-level compilation record of one of the
+    case's :attr:`~PreconditionCase.records` kinds, or a refusal. Today's
+    WARNING-only paths do not satisfy it.
 ``EXACT_OR_LOUD``
-    Equal to BPTT, or a WARNING- or ERROR-level record, or a raise. Used for
-    the mixing tails (#234), where the fix may keep the approximation and
-    report it.
+    Equal to BPTT, or a WARNING- or ERROR-level record of one of the case's
+    kinds, or a refusal. Used for the mixing tails (#234), where the fix may
+    keep the approximation and report it.
 ``TRANSITION``
     The Jacobian the algorithm uses for a default-mode group equals the true
-    per-position block (#233), or an ERROR-level record, or a raise.
+    per-position block (#233), measured on at least one group; or an
+    ERROR-level record of one of the case's kinds, or a refusal.
 ``CREDIT_RECORDED``
-    An online-gradient record (zero or partial) names the weight, or a raise
-    (#238).
+    An online-gradient record (zero or partial) names the weight, or a
+    refusal (#238).
+
+A refusal is a raise of one of :data:`REFUSALS`, braintrace's own refusal
+types; any other exception is a crash and satisfies nothing. A record
+satisfies a case only if its kind is one the case lists, so an unrelated
+ERROR cannot keep a fixed issue's test green. The fix of an issue that
+refuses with a new record kind adds that kind to its cases.
 
 A control (``issue is None``) must satisfy its check without raising and
 without an ERROR record. The tests live in ``braintrace/_compile_test.py``
@@ -48,7 +56,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import brainstate
 import jax
@@ -66,6 +74,8 @@ __all__ = [
     'EXACT_OR_LOUD',
     'TRANSITION',
     'CREDIT_RECORDED',
+    'REFUSALS',
+    'CREDIT_KINDS',
     'PreconditionCase',
     'Outcome',
     'CASES',
@@ -81,6 +91,13 @@ CREDIT_RECORDED = 'credit_recorded'
 
 #: Relative error (f64) under which an online gradient counts as equal to BPTT.
 RTOL = 1e-9
+
+#: The exceptions that count as braintrace refusing a model.
+REFUSALS: Tuple[type, ...] = (braintrace.NotSupportedError, braintrace.CompilationError)
+
+#: The record kinds an online-credit check accepts.
+CREDIT_KINDS: Tuple[str, ...] = (DiagnosticKind.ONLINE_GRADIENT_ZERO.value,
+                                 DiagnosticKind.ONLINE_GRADIENT_PARTIAL.value)
 
 N_IN = 3
 
@@ -318,6 +335,10 @@ class PreconditionCase:
         Leading axis of each input step.
     steps : int
         Window length.
+    records : tuple of str
+        The :class:`~braintrace.DiagnosticKind` values whose record counts as
+        the case's loud outcome. Empty: only exactness or a refusal satisfies
+        the check. ``CREDIT_RECORDED`` cases list :data:`CREDIT_KINDS`.
     """
 
     name: str
@@ -326,6 +347,7 @@ class PreconditionCase:
     issue: Optional[int] = None
     rows: int = 1
     steps: int = 8
+    records: Tuple[str, ...] = ()
 
     @property
     def control(self) -> bool:
@@ -369,8 +391,8 @@ def _cases() -> Tuple[PreconditionCase, ...]:
         c('drop-transposed', _variant(DropNet, kind='transposed'), EXACT_OR_ERROR, 237, rows=4),
         c('drop-reshaped', _variant(DropNet, kind='reshaped'), EXACT_OR_ERROR, 237, rows=4),
         c('drop-partial', _variant(DropNet, kind='partial'), EXACT_OR_ERROR, 237, rows=4),
-        c('credit-4-substeps', _variant(CreditNet, substeps=4), CREDIT_RECORDED),
-        c('credit-20-substeps', _variant(CreditNet, substeps=20), CREDIT_RECORDED, 238),
+        c('credit-4-substeps', _variant(CreditNet, substeps=4), CREDIT_RECORDED, records=CREDIT_KINDS),
+        c('credit-20-substeps', _variant(CreditNet, substeps=20), CREDIT_RECORDED, 238, records=CREDIT_KINDS),
         c('newread-old', _variant(NewReadNet, order='old'), EXACT),
         c('newread-new', _variant(NewReadNet, order='new'), EXACT_OR_ERROR, 239),
     ]
@@ -401,12 +423,15 @@ class Outcome:
     deviation : float
         Largest DIAG deviation measured while running (see
         :mod:`braintrace._testing.census`).
+    diag_sites : int
+        How many DIAG sites were measured; ``TRANSITION`` needs at least one.
     """
 
     raised: Optional[BaseException] = None
     errors: Dict[str, float] = dataclasses.field(default_factory=dict)
     records: Tuple[Tuple[DiagnosticKind, DiagnosticLevel], ...] = ()
     deviation: float = 0.0
+    diag_sites: int = 0
 
     @property
     def exact(self) -> bool:
@@ -414,6 +439,10 @@ class Outcome:
 
     def has(self, *levels: DiagnosticLevel) -> bool:
         return any(level in levels for _, level in self.records)
+
+    def has_kind(self, kinds: Sequence[str], *levels: DiagnosticLevel) -> bool:
+        """Whether a record of one of ``kinds`` (values) has one of ``levels``."""
+        return any(kind.value in kinds and level in levels for kind, level in self.records)
 
 
 def _flat(tree: Any) -> Dict[str, np.ndarray]:
@@ -473,6 +502,7 @@ def evaluate(case: PreconditionCase, algorithm: str = 'd_rtrl', **options: Any) 
             except Exception as e:  # noqa: BLE001 -- a raise is one of the accepted outcomes
                 outcome.raised = e
         outcome.deviation = measured.max('DIAG')
+        outcome.diag_sites = sum(1 for v in measured.values.values() for k in v if k.startswith('DIAG|'))
         if learner is not None:
             outcome.records = tuple((r.kind, r.level) for r in learner.graph.diagnostics)
     return outcome
@@ -481,23 +511,27 @@ def evaluate(case: PreconditionCase, algorithm: str = 'd_rtrl', **options: Any) 
 def satisfied(case: PreconditionCase, outcome: Outcome) -> bool:
     """Whether ``outcome`` keeps the promise ``case.check`` states.
 
-    A control must keep it without raising and, unless the record is what
-    it checks for (``CREDIT_RECORDED``), without an ERROR record.
+    Only a raise of :data:`REFUSALS` counts as a refusal, and only a record
+    of one of ``case.records`` counts as loud. A control must keep its
+    promise without raising and, unless the record is what it checks for
+    (``CREDIT_RECORDED``), without an ERROR record.
     """
-    credit = (DiagnosticKind.ONLINE_GRADIENT_ZERO, DiagnosticKind.ONLINE_GRADIENT_PARTIAL)
+    if outcome.raised is not None:
+        return (isinstance(outcome.raised, REFUSALS) and not case.control
+                and case.check != EXACT)
     if case.check == CREDIT_RECORDED:
-        if outcome.raised is not None:
-            return not case.control
-        return any(kind in credit for kind, _ in outcome.records)
-    error = outcome.has(DiagnosticLevel.ERROR)
-    if outcome.raised is not None or error:
-        return not case.control and case.check != EXACT
-    if case.check in (EXACT, EXACT_OR_ERROR):
+        return outcome.has_kind(case.records, *DiagnosticLevel)
+    if case.control and outcome.has(DiagnosticLevel.ERROR):
+        return False
+    error = outcome.has_kind(case.records, DiagnosticLevel.ERROR)
+    if case.check == EXACT:
         return outcome.exact
+    if case.check == EXACT_OR_ERROR:
+        return outcome.exact or error
     if case.check == EXACT_OR_LOUD:
-        return outcome.exact or outcome.has(DiagnosticLevel.WARNING)
+        return outcome.exact or outcome.has_kind(case.records, DiagnosticLevel.WARNING, DiagnosticLevel.ERROR)
     if case.check == TRANSITION:
-        return outcome.deviation <= RTOL
+        return (outcome.diag_sites > 0 and outcome.deviation <= RTOL) or error
     raise ValueError(f'unknown check {case.check!r}')
 
 

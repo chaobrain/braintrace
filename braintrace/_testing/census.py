@@ -35,14 +35,24 @@ any value:
     A trainable input of an ETP op that depends on more than one leaf.
 ``NEWREAD`` (structural, #239)
     A relation's output reaches the new value of a hidden state ``g``, and the
-    new ``g`` reaches another hidden state's new value in the same step with
-    no ETP op between them.
+    new ``g`` reaches the new value of another hidden state ``V`` of the
+    relation's groups in the same step, with no ETP op between them.
 
 Runtime channels record ``max|used - true| / max|true|`` per site;
-structural channels record ``1.0`` per site. Usage::
+structural channels record ``1.0`` per site. Structural counts are
+exposure: a site is recorded for every compiled graph, including graphs that
+run ``vjp_method='multi-step'``, which the defect does not affect. Usage::
 
     BRAINTRACE_CENSUS_OUT=/tmp/census/run pytest -p braintrace._testing.census braintrace
     python -m braintrace._testing.census summarize /tmp/census/run
+
+Each process writes ``<prefix>.main.json`` or ``<prefix>.gw<N>.json``; the
+session removes earlier files of the same prefix when it starts.
+
+Attribution: a runtime value is booked to the test that was current when
+the measured function was traced. When a later test reuses a cached
+executable (same shapes, same function), its values go to the first test;
+the maxima per site are right, the test names may not be.
 
 For a single model use :func:`measuring`.
 """
@@ -51,7 +61,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import glob
 import json
 import os
 import sys
@@ -59,6 +68,8 @@ import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
+
+from braintrace._testing.graph_hash import _remove_stale_files, _worker_files
 
 __all__ = [
     'CHANNELS',
@@ -195,10 +206,12 @@ def _reach_new_hidden(start: Any, consumers: Dict[Any, Any], outvar_path: Dict[A
 
 
 def _new_reads(graph: Any) -> List[str]:
-    """``relation: g -> V``: the relation's output reaches the new ``g``, and the
+    """``relation: g -> V``: the relation's output reaches the new ``g``, the
     new ``g`` reaches the new ``V`` in the same step without an ETP op between
-    them. Under ``vjp_method='single-step'`` the term ``W -> g -> V`` then counts
-    twice (#239)."""
+    them, and ``V`` is one of the relation's hidden paths (its trace carries
+    ``V``). Under ``vjp_method='single-step'`` the term ``W -> g -> V`` then
+    counts twice (#239). A site is exposure: it is recorded for every graph,
+    multi-step ones included, where the double count does not occur."""
     from braintrace._compatible_imports import Var
     from braintrace._compiler.jaxpr_graph import build_consumer_map
     minfo = graph.module_info
@@ -210,12 +223,13 @@ def _new_reads(graph: Any) -> List[str]:
         if r.control_flow_context is not None:
             continue  # body-scoped vars: not in the module jaxpr
         reached = _reach_new_hidden(r.y_var, consumers, outvar_path)
+        traced = {p for grp in r.hidden_groups for p in grp.hidden_paths}
         name = f'{r.primitive.name}{sorted(map(str, r.trainable_paths.values()))}'
         for g in reached:
             if not _is_float(path_outvar[g]):
                 continue
             for v in _reach_new_hidden(path_outvar[g], consumers, outvar_path):
-                if v != g and v in reached:
+                if v != g and v in reached and v in traced:
                     sites.append(f'{name}: {g} -> {v}')
     return sorted(set(sites))
 
@@ -289,87 +303,90 @@ def install(census: Census) -> Callable[[], None]:
         restore.append((owner, name, owner.__dict__[name]))
         setattr(owner, name, new)
 
-    graph_cls = graph_module.ETraceGraph
-    orig_new = graph_cls.__new__
-
-    def new(cls: Any, *args: Any, **kwargs: Any) -> Any:
-        obj = orig_new(cls, *args, **kwargs)
-        try:
-            for channel, sites in structural_sites(obj).items():
-                for site in sites:
-                    census.record(channel, site, 1.0)
-        except Exception as e:  # noqa: BLE001 -- an observer never raises
-            census.skip('STRUCT', 'graph', f'{type(e).__name__}: {e}')
-        return obj
-
-    patch(graph_cls, '__new__', new)
-
-    group_cls = hidden_group_module.HiddenGroup
-    orig_diag = group_cls.__dict__['diagonal_jacobian']
-
-    def diagonal_jacobian(self: Any, hidden_vals: Any, input_vals: Any, *args: Any, **kwargs: Any) -> Any:
-        out = orig_diag(self, hidden_vals, input_vals, *args, **kwargs)
-        if self.snap is None and self.is_diagonal_recurrence:
-            site = _group_site(self)
-            try:
-                concat = self.concat_hidden(hidden_vals)
-                size = int(np.prod(concat.shape))
-                if size > MAX_FULL:
-                    census.skip('DIAG', site, f'size {size} > {MAX_FULL}')
-                else:
-                    def fn(hid: Any) -> Any:
-                        return self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
-
-                    true = hidden_group_module.block_diagonal_last_dim(
-                        fn, concat,
-                        use_forward_mode=hidden_group_module._transition_contains_while(self.transition_jaxpr))
-                    jax.debug.callback(_callback(census, 'DIAG', site),
-                                       u.get_mantissa(out) - u.get_mantissa(true), u.get_mantissa(true))
-            except Exception as e:  # noqa: BLE001
-                census.skip('DIAG', site, f'{type(e).__name__}: {e}')
-        return out
-
-    patch(group_cls, 'diagonal_jacobian', diagonal_jacobian)
-
-    executor_cls = executor_module.ETraceVjpGraphExecutor
-    orig_h2w = executor_cls.__dict__['_compute_hid2weight_jacobian']
-
-    def compute_hid2weight_jacobian(self: Any, intermediate_values: Any) -> Any:
-        xs, dfs = orig_h2w(self, intermediate_values)
-        for relation in self.graph.hidden_param_op_relations:
-            if relation.control_flow_context is not None:
-                continue
-            y = intermediate_values[relation.y_var]
-            for gi, group in enumerate(relation.hidden_groups):
-                site = f'{relation.primitive.name}{sorted(map(str, relation.trainable_paths.values()))}->{_group_site(group)}'
-                try:
-                    df = u.get_mantissa(dfs[etrace_df_key(relation.y_var, group.index)])
-                    ym = u.get_mantissa(y)
-                    v = _tangent(ym.shape, ym.dtype)
-                    v_in = u.Quantity(v, unit=u.get_unit(y)) if u.get_unit(y) != u.get_unit(1.0) else v
-
-                    def y2h(y_val: Any, _r: Any = relation, _gi: int = gi) -> Any:
-                        return _r.y_to_hidden_groups(y_val, intermediate_values, concat_hidden_vals=True)[_gi]
-
-                    _, actual = jax.jvp(y2h, (y,), (v_in,))
-                    actual = u.get_mantissa(actual)
-                    varshape = tuple(group.varshape)
-                    vm = v
-                    while vm.ndim > len(varshape) and vm.shape[0] == 1:
-                        vm = vm[0]
-                    predicted = df * jax.numpy.broadcast_to(vm, varshape)[..., None]
-                    jax.debug.callback(_callback(census, 'TAIL', site), actual - predicted, actual)
-                except Exception as e:  # noqa: BLE001
-                    census.skip('TAIL', site, f'{type(e).__name__}: {e}')
-        return xs, dfs
-
-    patch(executor_cls, '_compute_hid2weight_jacobian', compute_hid2weight_jacobian)
-
     def uninstall() -> None:
         for owner, name, value in reversed(restore):
             setattr(owner, name, value)
         restore.clear()
 
+    try:
+        graph_cls = graph_module.ETraceGraph
+        orig_new = graph_cls.__new__
+
+        def new(cls: Any, *args: Any, **kwargs: Any) -> Any:
+            obj = orig_new(cls, *args, **kwargs)
+            try:
+                for channel, sites in structural_sites(obj).items():
+                    for site in sites:
+                        census.record(channel, site, 1.0)
+            except Exception as e:  # noqa: BLE001 -- an observer never raises
+                census.skip('STRUCT', 'graph', f'{type(e).__name__}: {e}')
+            return obj
+
+        patch(graph_cls, '__new__', new)
+
+        group_cls = hidden_group_module.HiddenGroup
+        orig_diag = group_cls.__dict__['diagonal_jacobian']
+
+        def diagonal_jacobian(self: Any, hidden_vals: Any, input_vals: Any, *args: Any, **kwargs: Any) -> Any:
+            out = orig_diag(self, hidden_vals, input_vals, *args, **kwargs)
+            if self.snap is None and self.is_diagonal_recurrence:
+                site = _group_site(self)
+                try:
+                    concat = self.concat_hidden(hidden_vals)
+                    size = int(np.prod(concat.shape))
+                    if size > MAX_FULL:
+                        census.skip('DIAG', site, f'size {size} > {MAX_FULL}')
+                    else:
+                        def fn(hid: Any) -> Any:
+                            return self.concat_hidden(self.transition(self.split_hidden(hid), input_vals))
+
+                        true = hidden_group_module.block_diagonal_last_dim(
+                            fn, concat,
+                            use_forward_mode=hidden_group_module._transition_contains_while(self.transition_jaxpr))
+                        jax.debug.callback(_callback(census, 'DIAG', site),
+                                           u.get_mantissa(out) - u.get_mantissa(true), u.get_mantissa(true))
+                except Exception as e:  # noqa: BLE001
+                    census.skip('DIAG', site, f'{type(e).__name__}: {e}')
+            return out
+
+        patch(group_cls, 'diagonal_jacobian', diagonal_jacobian)
+
+        executor_cls = executor_module.ETraceVjpGraphExecutor
+        orig_h2w = executor_cls.__dict__['_compute_hid2weight_jacobian']
+
+        def compute_hid2weight_jacobian(self: Any, intermediate_values: Any) -> Any:
+            xs, dfs = orig_h2w(self, intermediate_values)
+            for relation in self.graph.hidden_param_op_relations:
+                if relation.control_flow_context is not None:
+                    continue
+                y = intermediate_values[relation.y_var]
+                for gi, group in enumerate(relation.hidden_groups):
+                    site = f'{relation.primitive.name}{sorted(map(str, relation.trainable_paths.values()))}->{_group_site(group)}'
+                    try:
+                        df = u.get_mantissa(dfs[etrace_df_key(relation.y_var, group.index)])
+                        ym = u.get_mantissa(y)
+                        v = _tangent(ym.shape, ym.dtype)
+                        v_in = u.Quantity(v, unit=u.get_unit(y)) if u.get_unit(y) != u.get_unit(1.0) else v
+
+                        def y2h(y_val: Any, _r: Any = relation, _gi: int = gi) -> Any:
+                            return _r.y_to_hidden_groups(y_val, intermediate_values, concat_hidden_vals=True)[_gi]
+
+                        _, actual = jax.jvp(y2h, (y,), (v_in,))
+                        actual = u.get_mantissa(actual)
+                        varshape = tuple(group.varshape)
+                        vm = v
+                        while vm.ndim > len(varshape) and vm.shape[0] == 1:
+                            vm = vm[0]
+                        predicted = df * jax.numpy.broadcast_to(vm, varshape)[..., None]
+                        jax.debug.callback(_callback(census, 'TAIL', site), actual - predicted, actual)
+                    except Exception as e:  # noqa: BLE001
+                        census.skip('TAIL', site, f'{type(e).__name__}: {e}')
+            return xs, dfs
+
+        patch(executor_cls, '_compute_hid2weight_jacobian', compute_hid2weight_jacobian)
+    except BaseException:
+        uninstall()  # a failed install leaves nothing patched
+        raise
     return uninstall
 
 
@@ -403,11 +420,18 @@ def measuring(test: str = 'test') -> Iterator[Census]:
 # ---------------------------------------------------------------------------
 
 _CENSUS = Census()
-_UNINSTALL: List[Callable[[], None]] = []
+
+#: The plugin's install, keyed by ``id()`` of the pytest config that made it
+#: (see :data:`braintrace._testing.graph_hash._INSTALLS`).
+_INSTALLS: Dict[int, Callable[[], None]] = {}
 
 
 def pytest_configure(config: Any) -> None:
-    _UNINSTALL.append(install(_CENSUS))
+    if _INSTALLS:
+        return  # already measuring: patching twice would measure twice
+    if not os.environ.get('PYTEST_XDIST_WORKER'):
+        _remove_stale_files(os.environ.get(OUT_ENV))
+    _INSTALLS[id(config)] = install(_CENSUS)
 
 
 def pytest_runtest_setup(item: Any) -> None:
@@ -429,8 +453,9 @@ def pytest_sessionfinish(session: Any) -> None:
 
 
 def pytest_unconfigure(config: Any) -> None:
-    while _UNINSTALL:
-        _UNINSTALL.pop()()
+    uninstall = _INSTALLS.pop(id(config), None)
+    if uninstall is not None:
+        uninstall()
 
 
 # ---------------------------------------------------------------------------
@@ -438,10 +463,10 @@ def pytest_unconfigure(config: Any) -> None:
 # ---------------------------------------------------------------------------
 
 def load(prefix: str) -> Dict[str, Any]:
-    """Merge the per-process files ``<prefix>.*.json``."""
-    files = sorted(glob.glob(f'{glob.escape(prefix)}.*.json'))
+    """Merge the per-process files ``<prefix>.main.json`` and ``<prefix>.gw<N>.json``."""
+    files = _worker_files(prefix)
     if not files:
-        raise FileNotFoundError(f'no {prefix}.*.json files')
+        raise FileNotFoundError(f'no {prefix}.main.json or {prefix}.gw<N>.json files')
     merged: Dict[str, Any] = {'values': {}, 'skipped': {}}
     for path in files:
         with open(path) as f:

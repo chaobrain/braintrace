@@ -16,10 +16,15 @@
 """Tests for the graph-hash gate (``braintrace._testing.graph_hash``)."""
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 import warnings
 
 import brainstate
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 import braintrace
@@ -86,6 +91,53 @@ class TestGraphSummary:
 
     def test_digest_of_a_broken_graph_is_an_error_marker(self):
         assert gh.graph_digest(object()).startswith('ERR ')
+
+    def test_digest_sees_the_value_of_a_constant_array(self):
+        def make(mask):
+            class Net(brainstate.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.p = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                    self.h = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+                def update(self, x):
+                    self.h.value = 0.9 * self.h.value * jnp.asarray(mask) + braintrace.matmul(x, self.p.value)
+                    return self.h.value
+
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                return braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3))).graph
+
+        a = make(np.array([[1., 0., 1., 1.]]))
+        b = make(np.array([[1., 1., 0., 1.]]))
+        assert gh._consts(a.module_info.closed_jaxpr)  # the mask is a constant of the module jaxpr
+        assert gh.graph_digest(a) != gh.graph_digest(b)
+        assert gh.graph_digest(a) == gh.graph_digest(make(np.array([[1., 0., 1., 1.]])))
+
+    def test_consts_of_nested_jaxprs_are_hashed(self):
+        import jax
+        c1, c2 = np.arange(3.) + 0.5, np.arange(3.) + 1.5
+        nested = [jax.make_jaxpr(lambda x, c=c: jax.jit(lambda y: y * c)(x))(jnp.ones(3)) for c in (c1, c2)]
+        assert all(any(d.startswith('float32(3,)') for d in gh._consts(j)) for j in nested)
+        assert gh._consts(nested[0]) != gh._consts(nested[1])
+
+    def test_consts_of_an_old_closed_jaxpr_and_non_array_constants(self):
+        """JAX < 0.11: a ClosedJaxpr has no ``eqns``; its equations sit on
+        ``.jaxpr``. A constant that is not an array is named by its type, never
+        hashed by its address."""
+        import jax
+        new = jax.make_jaxpr(lambda x: jax.jit(lambda y: y * (np.arange(3.) + 0.5))(x))(jnp.ones(3))
+
+        class Unconvertible:
+            def __array__(self, *args, **kwargs):
+                raise TypeError('no array')
+
+        class Old:
+            consts = (object(), Unconvertible())
+            jaxpr = new
+
+        assert gh._consts(new)
+        assert gh._consts(Old()) == ['object', 'Unconvertible'] + gh._consts(new)
 
 
 class TestTraceLabels:
@@ -156,6 +208,24 @@ class TestRecording:
                  ParamDimVjpAlgorithm.__dict__['_update_etrace_data'])
         assert after == before
 
+    def test_records_the_environment_of_every_graph(self):
+        with gh.recording('t') as rec:
+            _compile('weight-raw')
+            with brainstate.environ.context(precision=64):
+                _compile('weight-raw')
+        assert rec.as_dict()['env']['t'] == ['x64=False precision=32', 'x64=True precision=64']
+
+    def test_a_failed_install_leaves_nothing_patched(self, monkeypatch):
+        before = ETraceGraph.__dict__['__new__']
+
+        def broken():
+            raise RuntimeError('boom')
+
+        monkeypatch.setattr(gh, '_algorithm_classes', broken)
+        with pytest.raises(RuntimeError, match='boom'):
+            gh.install(gh.Recorder())
+        assert ETraceGraph.__dict__['__new__'] is before
+
     def test_recording_does_not_change_the_gradient(self):
         case = _case('newread-new')
         plain = pm.evaluate(case)
@@ -190,6 +260,31 @@ class TestCompare:
         out = capsys.readouterr().out
         assert 'graphs: 1 tests' in out and 'changed 1' in out and '... 1 more' in out
 
+    def test_main_fails_when_tests_vanish(self, tmp_path, capsys):
+        self._write(tmp_path, 'base', 'main', {'graphs': {'a': ['1'], 'b': ['2']}})
+        self._write(tmp_path, 'head', 'main', {'graphs': {'a': ['1']}})
+        assert gh.main(['compare', str(tmp_path / 'base'), str(tmp_path / 'head')]) == 1
+        assert 'missing on the head side' in capsys.readouterr().out
+        assert gh.main(['compare', str(tmp_path / 'base'), str(tmp_path / 'head'), '--allow-removed']) == 0
+        # a test added on the head side is not a failure
+        assert gh.main(['compare', str(tmp_path / 'head'), str(tmp_path / 'base')]) == 0
+
+    def test_compare_lists_environment_changes(self, tmp_path, capsys):
+        self._write(tmp_path, 'base', 'main', {'graphs': {'a': ['1']}, 'env': {'a': ['x64=False precision=32']}})
+        self._write(tmp_path, 'head', 'main', {'graphs': {'a': ['2']}, 'env': {'a': ['x64=True precision=64']}})
+        report = gh.compare(gh.load(str(tmp_path / 'base')), gh.load(str(tmp_path / 'head')))
+        assert report['env'] == {'changed': ['a']}
+        assert gh.main(['compare', str(tmp_path / 'base'), str(tmp_path / 'head')]) == 1
+        out = capsys.readouterr().out
+        assert 'env: 1 tests' in out and "precision=32'] -> ['x64=True" in out
+
+    def test_load_reads_only_this_run_s_worker_files(self, tmp_path):
+        self._write(tmp_path, 'run', 'gw0', {'graphs': {'a': ['1']}})
+        self._write(tmp_path, 'run', 'main', {'graphs': {'b': ['2']}})
+        self._write(tmp_path, 'run.rerun', 'gw0', {'graphs': {'a': ['stale']}})  # another prefix
+        self._write(tmp_path, 'run', 'gwx', {'graphs': {'c': ['3']}})            # not a worker name
+        assert gh.load(str(tmp_path / 'run'))['graphs'] == {'a': ['1'], 'b': ['2']}
+
     def test_load_without_files_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             gh.load(str(tmp_path / 'missing'))
@@ -219,12 +314,85 @@ class TestPlugin:
         class Item:
             nodeid = 'n'
 
+        config = object()
         monkeypatch.setattr(gh, '_RECORDER', gh.Recorder())
-        gh.pytest_configure(None)
+        monkeypatch.setattr(gh, '_INSTALLS', {})  # leave a session install (``-p``) alone
+        gh.pytest_configure(config)
         try:
             assert ETraceGraph.__dict__['__new__'] is not before
             gh.pytest_runtest_setup(Item())
             assert gh._RECORDER.current == 'n'
         finally:
-            gh.pytest_unconfigure(None)
+            gh.pytest_unconfigure(config)
         assert ETraceGraph.__dict__['__new__'] is before
+
+    def test_unconfigure_undoes_only_its_own_install(self, monkeypatch):
+        before = ETraceGraph.__dict__['__new__']
+        monkeypatch.setattr(gh, '_INSTALLS', {})
+        session, nested = object(), object()
+        gh.pytest_configure(session)
+        try:
+            patched = ETraceGraph.__dict__['__new__']
+            gh.pytest_configure(nested)  # a second configure installs nothing ...
+            assert ETraceGraph.__dict__['__new__'] is patched
+            gh.pytest_unconfigure(nested)  # ... and its unconfigure removes nothing
+            assert ETraceGraph.__dict__['__new__'] is patched
+        finally:
+            gh.pytest_unconfigure(session)
+        assert ETraceGraph.__dict__['__new__'] is before
+
+    def test_configure_removes_stale_files_once(self, tmp_path, monkeypatch):
+        prefix = str(tmp_path / 'run')
+        for name in ('run.gw0.json', 'run.main.json', 'other.gw0.json'):
+            (tmp_path / name).write_text('{}')
+        monkeypatch.setattr(gh, '_INSTALLS', {})
+        monkeypatch.setenv(gh.OUT_ENV, prefix)
+        monkeypatch.setenv('PYTEST_XDIST_WORKER', 'gw1')  # a worker never cleans
+        config = object()
+        gh.pytest_configure(config)
+        gh.pytest_unconfigure(config)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['other.gw0.json', 'run.gw0.json', 'run.main.json']
+        monkeypatch.delenv('PYTEST_XDIST_WORKER')  # the controller (or a plain run) does
+        gh.pytest_configure(config)
+        gh.pytest_unconfigure(config)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['other.gw0.json']
+
+
+_PROBE = """
+import warnings
+import braintrace
+from braintrace._testing import precondition_models as pm
+
+
+def test_probe_after_the_self_tests():
+    case = next(c for c in pm.CASES if c.name == 'newread-new')
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        braintrace.compile(case.model(), 'd_rtrl', case.inputs()[0])
+"""
+
+
+def run_after_self_tests(tmp_path, plugin, self_test, env_name):
+    """Run ``self_test`` and then a probe test in a fresh pytest session that
+    loads ``plugin`` with ``-p``; return the output prefix."""
+    probe = tmp_path / 'probe_test.py'
+    probe.write_text(textwrap.dedent(_PROBE))
+    root = os.path.dirname(os.path.dirname(os.path.abspath(braintrace.__file__)))
+    prefix = str(tmp_path / 'run')
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join([root, os.environ.get('PYTHONPATH', '')]))
+    env[env_name] = prefix
+    env.pop('PYTEST_XDIST_WORKER', None)
+    cmd = [sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', '-p', 'no:xdist',
+           '-p', plugin, '--rootdir', root, self_test, str(probe)]
+    done = subprocess.run(cmd, cwd=root, env=env, capture_output=True, text=True, timeout=600)
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    return prefix
+
+
+def test_recording_continues_after_the_plugin_self_tests(tmp_path):
+    """H1 (PR #242 review): the self-tests call the plugin hooks; the session's
+    ``-p`` install must survive them, so the probe that runs after is recorded."""
+    self_test = os.path.abspath(__file__) + '::TestPlugin'
+    prefix = run_after_self_tests(tmp_path, 'braintrace._testing.graph_hash', self_test, gh.OUT_ENV)
+    graphs = gh.load(prefix)['graphs']
+    assert any(t.endswith('::test_probe_after_the_self_tests') for t in graphs), sorted(graphs)

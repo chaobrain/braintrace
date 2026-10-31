@@ -16,6 +16,7 @@
 """Tests for the precondition census (``braintrace._testing.census``)."""
 
 import json
+import os
 import warnings
 
 import brainstate
@@ -28,6 +29,7 @@ from braintrace._compiler.graph import ETraceGraph
 from braintrace._compiler.hidden_group import HiddenGroup
 from braintrace._testing import census
 from braintrace._testing import precondition_models as pm
+from braintrace._testing.graph_hash_test import run_after_self_tests
 
 
 def _case(name):
@@ -150,6 +152,29 @@ class TestStructuralChannels:
             learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
         assert census.structural_sites(learner.graph)['NEWREAD'] == []
 
+    def test_newread_ignores_a_reader_outside_the_relation(self):
+        """V reads the new g, but V's shape keeps it out of the relation's
+        groups: the trace does not carry V, so nothing counts twice."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.g = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.V = brainstate.HiddenState(jnp.zeros((2, 2)))
+
+            def update(self, x):
+                self.g.value = 0.9 * self.g.value + braintrace.matmul(x, self.w.value)
+                self.V.value = 0.95 * self.V.value + jnp.reshape(jnp.tanh(self.g.value), (2, 2))
+                return self.V.value
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
+        traced = {p for r in learner.graph.hidden_param_op_relations for g in r.hidden_groups for p in g.hidden_paths}
+        assert traced == {('g',)}
+        assert census.structural_sites(learner.graph)['NEWREAD'] == []
+
     def test_descended_relation_is_read_through_the_scan_body(self):
         c = _measure('credit-20-substeps', steps=1)
         flagged = [k for k in c.values.get('credit-20-substeps', {}) if k.startswith(('CHAIN|', 'MULTISOURCE|'))]
@@ -174,6 +199,13 @@ class TestInstall:
         after = (ETraceGraph.__dict__['__new__'], HiddenGroup.__dict__['diagonal_jacobian'],
                  ETraceVjpGraphExecutor.__dict__['_compute_hid2weight_jacobian'])
         assert after == before
+
+    def test_a_failed_install_leaves_nothing_patched(self, monkeypatch):
+        before = ETraceGraph.__dict__['__new__']
+        monkeypatch.delattr(HiddenGroup, 'diagonal_jacobian')  # the second patch fails
+        with pytest.raises(KeyError):
+            census.install(census.Census())
+        assert ETraceGraph.__dict__['__new__'] is before
 
     def test_relative_and_record(self):
         assert census._relative([0.5], [2.0]) == 0.25
@@ -209,6 +241,13 @@ class TestSummary:
         out = capsys.readouterr().out
         assert '1 tests measured' in out and 'NEWREAD: 1 tests, 1 sites' in out and 't1' in out
 
+    def test_load_reads_only_this_run_s_worker_files(self, tmp_path):
+        self._write(tmp_path, 'gw0', {'values': {'a': {'DIAG|s': 0.1}}, 'skipped': {}})
+        self._write(tmp_path, 'main', {'values': {'b': {'DIAG|s': 0.2}}, 'skipped': {}})
+        self._write(tmp_path, 'rerun.gw0', {'values': {'a': {'DIAG|s': 9.0}}, 'skipped': {}})  # another prefix
+        self._write(tmp_path, 'gwx', {'values': {'c': {'DIAG|s': 9.0}}, 'skipped': {}})       # not a worker name
+        assert census.load(str(tmp_path / 'run'))['values'] == {'a': {'DIAG|s': 0.1}, 'b': {'DIAG|s': 0.2}}
+
     def test_load_without_files_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             census.load(str(tmp_path / 'missing'))
@@ -237,12 +276,54 @@ class TestPlugin:
         class Item:
             nodeid = 'n'
 
+        config = object()
         monkeypatch.setattr(census, '_CENSUS', census.Census())
-        census.pytest_configure(None)
+        monkeypatch.setattr(census, '_INSTALLS', {})  # leave a session install (``-p``) alone
+        census.pytest_configure(config)
         try:
             assert HiddenGroup.__dict__['diagonal_jacobian'] is not before
             census.pytest_runtest_setup(Item())
             assert census._CENSUS.current == 'n'
         finally:
-            census.pytest_unconfigure(None)
+            census.pytest_unconfigure(config)
         assert HiddenGroup.__dict__['diagonal_jacobian'] is before
+
+    def test_unconfigure_undoes_only_its_own_install(self, monkeypatch):
+        before = HiddenGroup.__dict__['diagonal_jacobian']
+        monkeypatch.setattr(census, '_INSTALLS', {})
+        session, nested = object(), object()
+        census.pytest_configure(session)
+        try:
+            patched = HiddenGroup.__dict__['diagonal_jacobian']
+            census.pytest_configure(nested)  # a second configure installs nothing ...
+            assert HiddenGroup.__dict__['diagonal_jacobian'] is patched
+            census.pytest_unconfigure(nested)  # ... and its unconfigure removes nothing
+            assert HiddenGroup.__dict__['diagonal_jacobian'] is patched
+        finally:
+            census.pytest_unconfigure(session)
+        assert HiddenGroup.__dict__['diagonal_jacobian'] is before
+
+    def test_configure_removes_stale_files_once(self, tmp_path, monkeypatch):
+        for name in ('run.gw0.json', 'run.main.json', 'other.gw0.json'):
+            (tmp_path / name).write_text('{}')
+        monkeypatch.setattr(census, '_INSTALLS', {})
+        monkeypatch.setenv(census.OUT_ENV, str(tmp_path / 'run'))
+        monkeypatch.setenv('PYTEST_XDIST_WORKER', 'gw1')  # a worker never cleans
+        config = object()
+        census.pytest_configure(config)
+        census.pytest_unconfigure(config)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['other.gw0.json', 'run.gw0.json', 'run.main.json']
+        monkeypatch.delenv('PYTEST_XDIST_WORKER')  # the controller (or a plain run) does
+        census.pytest_configure(config)
+        census.pytest_unconfigure(config)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['other.gw0.json']
+
+
+def test_recording_continues_after_the_plugin_self_tests(tmp_path):
+    """H1 (PR #242 review): the session's ``-p`` install survives the plugin
+    self-tests, so the probe that runs after them is measured."""
+    self_test = os.path.abspath(__file__) + '::TestPlugin'
+    prefix = run_after_self_tests(tmp_path, 'braintrace._testing.census', self_test, census.OUT_ENV)
+    values = census.load(prefix)['values']
+    probe = [v for t, v in values.items() if t.endswith('::test_probe_after_the_self_tests')]
+    assert probe and any(k.startswith('NEWREAD|') for k in probe[0]), sorted(values)
