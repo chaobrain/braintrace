@@ -153,6 +153,27 @@ such as ``brainstate.nn.Delay`` used as ``update(y)`` and then
 ``retrieve_at_step(d)``. The analysis treats the buffer as one array, so the
 old slot it reads looks like this step's write.
 
+Reads of a New Hidden Value in the Same Step
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A hidden update often reads another hidden state's *new* value: the membrane
+potential reads this step's synaptic current (``g -> V``), an LSTM output reads
+this step's cell (``c -> h``). The eligibility trace of ``V`` already carries the
+path ``W -> g -> V``, because its ``y -> hidden`` derivative is taken through the
+update of ``g``. Under a single-step algorithm the signal of ``g`` must then hold
+that read fixed, or the path is counted twice. The compiler cuts such a read when
+every relation whose hidden groups include ``g``'s group also includes ``V``'s,
+and records it (``DiagnosticKind.HIDDEN_NEW_READ_CUT``, INFO); the perturbed
+step evaluates the read on the unperturbed ``g``, and an equation that also
+feeds the outputs on the perturbed one. A read through an ETP op without
+gradient (a stacked layer), or one that no trace carries, keeps the total
+derivative. When the reads cannot be separated, for instance when one relation
+traces ``V``'s group and another does not, the signal stays the total derivative
+and the graph records ``DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT`` (ERROR,
+also warned); ``vjp_method='multi-step'`` builds no perturbation and avoids it.
+``graph.hidden_perturb`` declares the outcome: ``new_read_cuts``,
+``new_read_conflicts`` and ``new_read_exact``.
+
 Input Data
 ----------
 
