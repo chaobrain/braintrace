@@ -338,13 +338,16 @@
 - **A learner now refuses calls that ran before (#227, #241).** Each ran the
   jaxpr traced for the example inputs on values of another kind, for some
   models at least; some gave wrong results without an error:
-  - a Python bool where the example was a float (it ran as `1.0` or `0.0`),
+  - a Python bool where the example was a number (it ran as `1` or `0`),
     and a Python float where the example was a Python int;
-  - an array of another dtype category: an int array for a float example, an
-    unsigned int for a signed one;
-  - a narrower dtype than the example's, such as `float32` for a `float16`
-    example or `int32` for an `int8` one, and `float16` and `bfloat16` for
-    each other; these ran when the model cast its input;
+  - an array of another dtype category: an int or a bool array for a float
+    example, a float array for an int one, an int array for a bool one, a
+    complex array for a real one, and an unsigned int for a signed one or
+    the reverse;
+  - a dtype wider than the example's, which the learner would have to
+    narrow, such as `float32` for a `float16` example or `int32` for an
+    `int8` one, and `float16` and `bfloat16` for each other. These dtype
+    cases ran when the model cast its input;
   - a `Quantity` with a unit for a plain array, a plain array for a
     `Quantity` with a unit, and a `Quantity` in another unit, which ran at
     the wrong scale (#241);
