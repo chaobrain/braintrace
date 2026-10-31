@@ -57,6 +57,9 @@ class ThreeFactor(ParamDimVjpAlgorithm):
     degenerate check -- set the modulator to ``dL/dh`` and recover ``symmetric``
     exactly -- impossible to satisfy, leaving the axis with no coordinate at which
     it reduces to the rule it generalises.
+    On a graph whose single-step signal holds in-step reads of new hidden values
+    fixed (``graph.hidden_perturb.new_read_cuts``, #239), the ``dL/dh`` that
+    recovers ``symmetric`` is that partial derivative, not the total one.
 
     **One array, expanded to every group.** A scalar reward is valid for any model
     whatever its HiddenGroup count. There is deliberately no per-group sequence

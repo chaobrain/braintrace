@@ -55,6 +55,7 @@ from .position_graph import DEFAULT_MAX_JACOBIAN_ELEMENTS
 from .hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     HiddenPerturbation,
+    NewReadPolicy,
 )
 from .scan_descent import RelationDescent, ScanDescentBundle, apply_scan_descent
 from .jaxpr_graph import build_consumer_map, build_producer_map, forward_closure
@@ -847,7 +848,8 @@ def compile_etrace_graph(
         hidden_perturb = (
             add_hidden_perturbation_from_minfo(
                 minfo, descended_scan_eqn_ids=descended_eqn_ids,
-                include_output_bypass=include_output_bypass)
+                include_output_bypass=include_output_bypass,
+                new_read_policy=NewReadPolicy(hid_path_to_group, hidden_param_op_relations))
             if include_hidden_perturb else None
         )
 

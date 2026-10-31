@@ -283,3 +283,97 @@ def test_multistep_method_is_the_exact_path():
         spec.factory, inputs,
         algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'))
     assert_param_gradients_close(g_multi, g_bptt, atol=ATOL_BPTT)
+
+
+# =============================================================================
+# Single-step and in-step reads of new hidden values (#239)
+# =============================================================================
+#
+# These models update one hidden state from another's *new* value in the same
+# step: a synaptic current read by the membrane potential (``g -> V``), the
+# STP utilisation read by the resources (``u -> x``), the LSTM cell read by
+# the output (``c -> h``). The single-step learning signal holds such a read
+# fixed when the eligibility traces carry it; before #239 it counted the path
+# twice (2.000x BPTT on LSTMCell's ``Wi`` and ``Wg``).
+#
+# From a zero state, one step has no history for an algorithm to approximate,
+# so every algorithm must equal BPTT at T = 1. Without recurrent weights the
+# SNN layers are diagonal, and single-step D-RTRL must equal BPTT at any T.
+# ``MinimalRNNCell`` is left out: its input projection feeds a second hidden
+# state through a partial path (#237), which is not this issue.
+
+import braintools
+import brainunit as u
+
+from braintrace._testing import models as _snn
+from braintrace._testing.oracle import online_param_gradients_singlestep_naive
+
+# ``ALIF_Delta_Dense_Layer`` is left out: its BPTT gradient is zero on these inputs.
+_SNN_LAYERS = [
+    'IF_Delta_Dense_Layer', 'LIF_ExpCo_Dense_Layer', 'ALIF_ExpCo_Dense_Layer', 'LIF_ExpCu_Dense_Layer',
+    'LIF_STDExpCu_Dense_Layer', 'LIF_STPExpCu_Dense_Layer', 'ALIF_ExpCu_Dense_Layer',
+    'ALIF_STDExpCu_Dense_Layer', 'ALIF_STPExpCu_Dense_Layer',
+]
+_RNN_CELLS = ['LSTMCell', 'GRUCell', 'MGUCell', 'URLSTMCell', 'LRUCell']
+_SINGLE_STEP_ALGOS = {
+    'D_RTRL': lambda m: braintrace.D_RTRL(m),
+    'pp_prop': lambda m: braintrace.pp_prop(m, decay_or_rank=0.9),
+    'EProp': lambda m: braintrace.EProp(m),
+    'OSTLRecurrent': lambda m: braintrace.OSTLRecurrent(m),
+    'OSTLFeedforward': lambda m: braintrace.OSTLFeedforward(m),
+    'SnAp': lambda m: braintrace.SnAp(m, n=2),
+}
+
+
+def _layer_factory(name, diagonal=False):
+    def make():
+        with brainstate.random.seed_context(1):
+            if name in _RNN_CELLS:
+                return getattr(braintrace.nn, name)(3, 4)
+            kwargs = dict(V_th=0.05 * u.mV)
+            if diagonal:
+                kwargs['rec_init'] = braintools.init.ZeroInit()
+            return getattr(_snn, name)(3, 4, **kwargs)
+    return make
+
+
+def _layer_inputs(name, steps):
+    with brainstate.random.seed_context(2):
+        if name in _RNN_CELLS:
+            return brainstate.random.randn(steps, 1, 3)
+        return (brainstate.random.rand(steps, 1, 3) < 0.7).astype(float) * 4.0
+
+
+def _worst_singlestep_error(name, steps, algo_factory, diagonal=False, precision=64):
+    make = _layer_factory(name, diagonal)
+    with brainstate.environ.context(precision=precision, dt=0.1 * u.ms):
+        xs = _layer_inputs(name, steps)
+        ref = bptt_param_gradients(make, xs)
+        got = online_param_gradients_singlestep_naive(make, xs, algo_factory=algo_factory)
+    errors = []
+    for (path, r), (_, g) in zip(jax.tree_util.tree_flatten_with_path(ref, is_leaf=u.math.is_quantity)[0],
+                                 jax.tree_util.tree_flatten_with_path(got, is_leaf=u.math.is_quantity)[0]):
+        r = np.asarray(u.get_mantissa(r), dtype=np.float64)
+        g = np.asarray(u.get_mantissa(g), dtype=np.float64)
+        if np.linalg.norm(r) > 0:
+            errors.append(float(np.linalg.norm(g - r) / np.linalg.norm(r)))
+    assert errors, 'no non-zero BPTT gradient to compare'
+    return max(errors)
+
+
+@pytest.mark.parametrize('algo', list(_SINGLE_STEP_ALGOS))
+@pytest.mark.parametrize('name', _SNN_LAYERS + _RNN_CELLS)
+def test_single_step_equals_bptt_at_one_step(name, algo):
+    assert _worst_singlestep_error(name, 1, _SINGLE_STEP_ALGOS[algo]) < 1e-12
+
+
+@pytest.mark.parametrize('name', [n for n in _SNN_LAYERS if n != 'IF_Delta_Dense_Layer'])
+def test_single_step_d_rtrl_equals_bptt_on_diagonal_layers(name):
+    """IF_Delta is left out: it has no in-step read, and its 0.035 at T = 10
+    is not this issue."""
+    assert _worst_singlestep_error(name, 10, _SINGLE_STEP_ALGOS['D_RTRL'], diagonal=True) < 1e-12
+
+
+@pytest.mark.parametrize('name', ['LSTMCell', 'ALIF_ExpCu_Dense_Layer', 'LIF_STPExpCu_Dense_Layer'])
+def test_single_step_float32_matches_float32_bptt(name):
+    assert _worst_singlestep_error(name, 1, _SINGLE_STEP_ALGOS['D_RTRL'], precision=32) < 1e-6

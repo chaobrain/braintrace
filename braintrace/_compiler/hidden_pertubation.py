@@ -14,7 +14,8 @@
 # ==============================================================================
 
 
-from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, Union
+from collections import defaultdict
+from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, Tuple, Union
 
 import brainstate
 import jax.core
@@ -35,6 +36,10 @@ from braintrace._compatible_imports import (
 )
 from braintrace._misc import (
     git_issue_addr,
+)
+from braintrace._op import (
+    is_etp_enable_gradient_primitive,
+    is_etp_primitive,
 )
 from braintrace._typing import (
     HiddenInVar,
@@ -86,6 +91,21 @@ class HiddenPerturbation(NamedTuple):
         The hidden states that are perturbed.
     perturb_jaxpr : ClosedJaxpr
         The perturbed jaxpr.
+    new_read_cuts : sequence of (Path, Path)
+        The in-step reads ``(k, j)``, by the update of ``h_j``, of the new
+        value of ``h_k`` that the learning signal holds fixed, because every
+        eligibility trace paired with ``h_k``'s signal already carries them
+        (see the Notes). Empty when nothing is cut.
+    new_read_conflicts : sequence of str
+        Why the in-step reads could not be separated. When non-empty, no read
+        is cut: the signal is today's total derivative, which counts some
+        in-step paths twice, and the graph carries a
+        ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record.
+    new_read_exact : bool
+        ``True`` iff the reads were planned and no conflict was found: every
+        in-step read of a new hidden value is then either cut or counted
+        once. ``False`` when they were not planned (no relations, as in
+        :func:`add_hidden_perturbation_in_module`) or a conflict was found.
 
     See Also
     --------
@@ -102,6 +122,19 @@ class HiddenPerturbation(NamedTuple):
 
         \frac{\partial L^t}{\partial h^t}
         = \frac{\partial L^t}{\partial \mathrm{perturb\_var}}.
+
+    Every reader of :math:`h^t_k` in the step sees the perturbed value, so this
+    is the total derivative: it includes the update of another hidden state
+    :math:`h^t_j` that reads the new :math:`h^t_k`,
+    :math:`s_k = \partial_k L + J_{jk}^\top s_j` with
+    :math:`J_{jk} = \partial \hat{h}^t_j / \partial h^t_k`. When the graph is
+    compiled with its relations, a read that every trace paired with
+    :math:`s_k` already carries is *cut* (``new_read_cuts``): it sees
+    :math:`\hat{h}^t_k` instead, and :math:`s_k` is the partial derivative with
+    that read held fixed. Otherwise the path through the read would be
+    counted twice, once in :math:`s_j e_j` and once in :math:`s_k e_k`
+    (issue #239). An equation that serves both a cut read and the outputs is
+    emitted twice, once for each.
 
     Examples
     --------
@@ -128,6 +161,10 @@ class HiddenPerturbation(NamedTuple):
     # copies of their previous values
     bypass_hidden_paths: Sequence[Path] = ()
     bypass_hidden_vars: Sequence[Var] = ()
+    # in-step reads of new hidden values (#239); see the class Notes
+    new_read_cuts: Sequence[Tuple[Path, Path]] = ()
+    new_read_conflicts: Sequence[str] = ()
+    new_read_exact: bool = False
 
     def eval_jaxpr(
         self,
@@ -316,6 +353,294 @@ class HiddenPerturbation(NamedTuple):
 HiddenPerturbation.__module__ = 'braintrace'
 
 
+class NewReadPolicy:
+    """Which in-step reads of a new hidden value the relations' traces carry.
+
+    Used by :func:`plan_new_read_cuts` (issue #239). The update of ``h_j``
+    reads the new value of ``h_k`` in the same step. The relations whose
+    groups include ``h_k``'s group are the ones whose traces pair with
+    ``h_k``'s learning signal. The read is:
+
+    ``'cut'``
+        when every one of them also includes ``h_j``'s group. Each of their
+        traces then carries the path through the read, because the
+        ``y -> hidden`` jaxpr of ``h_j``'s group walks back through the
+        producer of ``h_k`` (``hid_param_op._build_transition_jaxpr``). The
+        signal of ``h_k`` must hold the read fixed.
+    ``'keep'``
+        when none of them includes ``h_j``'s group, when ``h_k`` or ``h_j``
+        is in no group, or when no relation traces ``h_k``'s group. No trace
+        paired with ``h_k`` carries the read, so the signal keeps it.
+    ``'conflict'``
+        when some do and some do not: one signal cannot serve them all.
+
+    Parameters
+    ----------
+    hid_path_to_group : mapping of Path to HiddenGroup
+        The group of each grouped hidden state.
+    relations : sequence of HiddenParamOpRelation
+        The graph's relations; only their ``hidden_groups`` are read.
+    """
+
+    def __init__(self, hid_path_to_group: Mapping[Path, HiddenGroup], relations: Sequence[Any]):
+        self._group = {path: group.index for path, group in hid_path_to_group.items()}
+        self._relation_groups = tuple(
+            frozenset(group.index for group in relation.hidden_groups) for relation in relations
+        )
+
+    def group(self, path: Path) -> Optional[int]:
+        """The index of ``path``'s group, or ``None`` if it is in no group."""
+        return self._group.get(path)
+
+    def traced(self, path: Path) -> FrozenSet[int]:
+        """The groups of the relations whose groups include ``path``'s group."""
+        index = self.group(path)
+        out: Set[int] = set()
+        if index is not None:
+            for groups in self._relation_groups:
+                if index in groups:
+                    out |= groups
+        return frozenset(out)
+
+    def edge(self, path_k: Path, path_j: Path) -> str:
+        """``'cut'``, ``'keep'`` or ``'conflict'`` for the read of the new
+        ``path_k`` by the update of ``path_j``."""
+        gk, gj = self.group(path_k), self.group(path_j)
+        if gk is None or gj is None:
+            return 'keep'
+        covers = [gj in groups for groups in self._relation_groups if gk in groups]
+        if covers and all(covers):
+            return 'cut'
+        if not any(covers):
+            return 'keep'
+        return 'conflict'
+
+
+class NewReadPlan(NamedTuple):
+    """The plan :func:`plan_new_read_cuts` returns (issue #239).
+
+    Attributes
+    ----------
+    sources : dict of Var to None
+        The hidden outvars, in order, with at least one cut read. A cut read
+        sees the unperturbed new value; every other reader sees it perturbed.
+    state_eqns : frozenset of int
+        Indices of the equations on a cut read, between a source and the
+        hidden state that reads it without an ETP op. They read the
+        unperturbed sources.
+    output_eqns : frozenset of int
+        Indices of the equations between a source and a kept read, a model
+        output or a non-hidden state. They read the perturbed sources. An
+        equation in both sets is emitted twice.
+    cuts : tuple of (Path, Path)
+        The cut reads ``(path_k, path_j)``.
+    conflicts : tuple of str
+        Why the reads cannot be separated. When non-empty the plan must not
+        be applied.
+    """
+    sources: Dict[Var, None]
+    state_eqns: FrozenSet[int]
+    output_eqns: FrozenSet[int]
+    cuts: Tuple[Tuple[Path, Path], ...]
+    conflicts: Tuple[str, ...]
+
+
+def _is_trace_boundary(eqn: JaxprEqn) -> bool:
+    """An ETP op without gradient: the ``y -> hidden`` jaxprs stop there."""
+    return is_etp_primitive(eqn.primitive) and not is_etp_enable_gradient_primitive(eqn.primitive)
+
+
+def plan_new_read_cuts(
+    jaxpr: Jaxpr,
+    hidden_outvars: Sequence[Var],
+    outvar_to_hidden_path: Mapping[Var, Path],
+    merge_positions: Sequence[int],
+    policy: NewReadPolicy,
+) -> NewReadPlan:
+    """Find the in-step reads of new hidden values that the traces already
+    carry, and the equations that serve them (issue #239).
+
+    A *read* of the new ``h_k`` by ``h_j``: ``h_j`` is the first hidden outvar
+    on a path of top-level equations from ``h_k``. A read on a path without
+    an ETP op that has no gradient (a *direct* read) is decided by
+    ``policy.edge``; a read only through such an op is kept, because the
+    traces stop there. A read inside one equation (a ``jit`` or ``scan``
+    that produces both states) is not a read here: the perturbation is added
+    after the equation.
+
+    Parameters
+    ----------
+    jaxpr : Jaxpr
+        The module jaxpr.
+    hidden_outvars : sequence of Var
+        The hidden outvars, in order.
+    outvar_to_hidden_path : mapping of Var to Path
+        The path of each hidden outvar.
+    merge_positions : sequence of int
+        The outvar positions of the model outputs and the non-hidden states.
+    policy : NewReadPolicy
+        Decides each direct read.
+
+    Returns
+    -------
+    NewReadPlan
+        The cut reads, the equations to emit in each world and the
+        conflicts. A conflict is recorded, not raised, when:
+
+        - the relations disagree on a read (``policy.edge``);
+        - a cut read is also made through an ETP op;
+        - a kept direct read reaches, without an ETP op, a group that the
+          relations tracing the source trace (one signal cannot keep and cut
+          the same path);
+        - a hidden state has a cut read and a kept direct read of a source
+          with cuts;
+        - an equation serving both worlds is a ``while``, has effects or
+          produces a hidden state that a cut source reads directly and keeps.
+    """
+    eqns = jaxpr.eqns
+    producer: Dict[Var, int] = {}
+    consumers: Dict[Var, List[int]] = defaultdict(list)
+    for i, eqn in enumerate(eqns):
+        for v in eqn.invars:
+            if isinstance(v, Var):
+                consumers[v].append(i)
+        for v in eqn.outvars:
+            producer[v] = i
+    hidden = set(hidden_outvars)
+    path_of = outvar_to_hidden_path
+    # a read-only hidden state has no producer: its readers see h^{t-1}
+    sources = [v for v in dict.fromkeys(hidden_outvars) if v in producer]
+
+    def forward(k: Var):
+        """The equations reached from ``k`` (all, and those on a direct
+        path), and the hidden outvars reached first, with how."""
+        seen: Set[Tuple[Var, bool]] = set()
+        stack = [(k, False)]
+        direct: Set[int] = set()
+        every: Set[int] = set()
+        sinks: Dict[Var, Set[str]] = {}
+        while stack:
+            v, through = stack.pop()
+            if (v, through) in seen:
+                continue
+            seen.add((v, through))
+            if v is not k and v in hidden:
+                sinks.setdefault(v, set()).add('etp' if through else 'direct')
+                continue
+            for i in consumers.get(v, ()):
+                t = through or _is_trace_boundary(eqns[i])
+                every.add(i)
+                if not t:
+                    direct.add(i)
+                stack.extend((ov, t) for ov in eqns[i].outvars)
+        return direct, every, sinks
+
+    def direct_closure(m: Var) -> Set[Var]:
+        """The hidden outvars reached from ``m`` without an ETP op, through
+        other hidden outvars too (what a ``y -> hidden`` jaxpr walks)."""
+        seen: Set[Var] = set()
+        stack = [m]
+        out: Set[Var] = set()
+        while stack:
+            v = stack.pop()
+            if v in seen:
+                continue
+            seen.add(v)
+            if v is not m and v in hidden:
+                out.add(v)
+            for i in consumers.get(v, ()):
+                if not _is_trace_boundary(eqns[i]):
+                    stack.extend(eqns[i].outvars)
+        return out
+
+    def backward(starts: Sequence[Var], direct_only: bool) -> Set[int]:
+        """The equations a var of ``starts`` depends on, stopping at other
+        hidden outvars (and at ETP ops when ``direct_only``)."""
+        first = set(starts)
+        seen: Set[Var] = set()
+        stack = list(starts)
+        out: Set[int] = set()
+        while stack:
+            v = stack.pop()
+            if v in seen:
+                continue
+            seen.add(v)
+            if v in hidden and v not in first:
+                continue
+            i = producer.get(v)
+            if i is None or (direct_only and _is_trace_boundary(eqns[i])):
+                continue
+            out.add(i)
+            stack.extend(iv for iv in eqns[i].invars if isinstance(iv, Var))
+        return out
+
+    outvars = jaxpr.outvars
+    merge_nonhidden = [
+        outvars[i] for i in merge_positions
+        if i < len(outvars) and isinstance(outvars[i], Var) and outvars[i] not in hidden
+    ]
+
+    conflicts: List[str] = []
+    found = {}
+    kept_direct: List[Tuple[Var, Var]] = []
+    for k in sources:
+        direct, every, sinks = forward(k)
+        cut, kept = [], []
+        for j in sorted(sinks, key=producer.__getitem__):
+            how = sinks[j]
+            if 'direct' not in how:
+                kept.append(j)  # only through an ETP op: no trace carries it
+                continue
+            decision = policy.edge(path_of[k], path_of[j])
+            if decision == 'conflict':
+                conflicts.append(f'the relations disagree on the read {path_of[k]} -> {path_of[j]}')
+            elif decision == 'cut' and 'etp' in how:
+                conflicts.append(f'{path_of[j]} reads {path_of[k]} both directly and through an ETP op')
+            elif decision == 'cut':
+                cut.append(j)
+            else:
+                kept.append(j)
+                kept_direct.append((k, j))
+        found[k] = (direct, every, cut, kept)
+
+    cut_sources = {k: None for k in sources if found[k][2]}
+    cut_sinks = {j for k in cut_sources for j in found[k][2]}
+    for k, m in kept_direct:
+        traced = policy.traced(path_of[k])
+        if any(policy.group(path_of[j]) in traced for j in direct_closure(m)):
+            conflicts.append(
+                f'the kept read {path_of[k]} -> {path_of[m]} reaches a group that '
+                f'the relations of {path_of[k]} trace'
+            )
+        if m in cut_sinks and k in cut_sources:
+            conflicts.append(f'{path_of[m]} has a cut read and a kept read of {path_of[k]}')
+
+    state_eqns: Set[int] = set()
+    output_eqns: Set[int] = set()
+    cuts: List[Tuple[Path, Path]] = []
+    for k in cut_sources:
+        direct, every, cut, kept = found[k]
+        cuts.extend((path_of[k], path_of[j]) for j in cut)
+        state_eqns |= direct & backward(cut, direct_only=True)
+        output_eqns |= every & backward(kept + merge_nonhidden, direct_only=False)
+    for i in sorted(state_eqns & output_eqns):
+        eqn = eqns[i]
+        if is_while_primitive(eqn) or eqn.effects:
+            conflicts.append(f'an equation ({eqn.primitive}) serves a cut read and the outputs, '
+                             f'and cannot be emitted twice')
+        for ov in eqn.outvars:
+            if ov in hidden and ov not in cut_sinks:
+                conflicts.append(f'one equation ({eqn.primitive}) computes a cut read and the kept '
+                                 f'read of {path_of[ov]}')
+    return NewReadPlan(
+        sources=cut_sources,
+        state_eqns=frozenset(state_eqns),
+        output_eqns=frozenset(output_eqns),
+        cuts=tuple(cuts),
+        conflicts=tuple(dict.fromkeys(conflicts)),
+    )
+
+
 class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
@@ -338,6 +663,10 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
     descended_scan_eqn_ids : frozenset of int
         ``id()`` values of scan equations rewritten by structured scan descent
         (Phase 4); exempt from the unsupported-op checks.
+    new_read_policy : NewReadPolicy, optional
+        Decides which in-step reads of new hidden values the traces carry
+        (issue #239). ``None`` (default): no read is cut, and every reader
+        sees the perturbed value.
 
     Returns
     -------
@@ -376,9 +705,11 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
         weight_path_to_invars: Optional[Mapping[Path, Sequence[Var]]] = None,
         bypass_merge_positions: Sequence[int] = (),
+        new_read_policy: Optional[NewReadPolicy] = None,
     ):
         # necessary data structures
         self.closed_jaxpr = closed_jaxpr
+        self.new_read_policy = new_read_policy
 
         # Same-step bypass gradients (issue #185): the parameter leaves, and
         # the outvar positions (model outputs, non-hidden state outputs) where
@@ -431,8 +762,22 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         self._while_ids_to_detach = _while_eqns_reaching(
             self.closed_jaxpr.jaxpr, set(self.hidden_outvars))
 
+        # [in-step reads of new hidden values, #239]
+        # ``_perturbed`` maps a cut source and every output of an equation
+        # emitted twice to its value in the perturbed world
+        self._new_read_plan = self._plan_new_reads()
+        self._perturbed: Dict[Var, Var] = {}
+        self._eqn_index = 0
+
         # revising equations
         self._eval_jaxpr(self.closed_jaxpr.jaxpr)
+        plan = self._new_read_plan
+        if plan is not None and self._eqn_index != len(self.closed_jaxpr.jaxpr.eqns):
+            raise RuntimeError(
+                f'Internal error: the perturbation visited {self._eqn_index} of '
+                f'{len(self.closed_jaxpr.jaxpr.eqns)} equations. Please report '
+                f'an issue at {git_issue_addr}.'
+            )
 
         # [read-only hidden states]
         # A hidden state that is read but never written has no producing
@@ -480,6 +825,15 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             outvar_subst.get(v, v) if isinstance(v, Var) else v
             for v in self.closed_jaxpr.jaxpr.outvars
         ]
+        if plan is not None:
+            # the outputs, the non-hidden states and the new values of the cut
+            # sources come from the perturbed world
+            merge = set(self.bypass_merge_positions)
+            for pos, v in enumerate(new_outvars):
+                if isinstance(v, Var) and (pos in merge or v in plan.sources):
+                    new_outvars[pos] = self._perturbed.get(v, v)
+            for v in plan.sources:
+                outvar_subst[v] = self._perturbed[v]
 
         # [same-step bypass gradients]
         bypass = self._add_output_bypass(
@@ -517,13 +871,66 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
             bypass_vars=brainstate.util.PrettyList(bypass.bypass_vars[:n_param_leaves]),
             bypass_hidden_paths=brainstate.util.PrettyList([k[1] for k in hidden_bypass_keys]),
             bypass_hidden_vars=brainstate.util.PrettyList(bypass.bypass_vars[n_param_leaves:]),
+            new_read_cuts=() if plan is None else plan.cuts,
+            new_read_conflicts=self._new_read_conflicts,
+            new_read_exact=self.new_read_policy is not None and not self._new_read_conflicts,
         )
 
         # remove the temporal data
         self.perturb_invars = dict()
         self.revised_eqns = []
         self.hidden_jaxvars_to_remove = set()
+        self._perturbed = {}
+        self._new_read_plan = None
         return info
+
+    def _plan_new_reads(self) -> Optional[NewReadPlan]:
+        """Plan the cut reads (#239) and record the outcome; return the plan
+        to apply, or ``None`` (no policy, nothing to cut, or a conflict)."""
+        self._new_read_conflicts: Tuple[str, ...] = ()
+        if self.new_read_policy is None:
+            return None
+        plan = plan_new_read_cuts(
+            self.closed_jaxpr.jaxpr,
+            self._hidden_outvars_ordered,
+            self.outvar_to_hidden_path,
+            self.bypass_merge_positions,
+            self.new_read_policy,
+        )
+        paths = tuple(dict.fromkeys(p for cut in plan.cuts for p in cut))
+        if plan.conflicts:
+            self._new_read_conflicts = plan.conflicts
+            emit(
+                kind=DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT,
+                level=DiagnosticLevel.ERROR,
+                message=(
+                    f'Hidden updates read the new value of another hidden state '
+                    f'in the same step, and these reads cannot be separated: '
+                    f'{list(plan.conflicts)}. The single-step learning signal '
+                    f'is the total derivative, which counts the path through '
+                    f'such a read twice when the eligibility trace carries it '
+                    f'too, so the gradient can be wrong. '
+                    f"vjp_method='multi-step' builds no perturbation and "
+                    f'avoids it.'
+                ),
+                hidden_paths=paths,
+                context={'cuts': plan.cuts, 'conflicts': plan.conflicts},
+            )
+            return None
+        if not plan.cuts:
+            return None
+        emit(
+            kind=DiagnosticKind.HIDDEN_NEW_READ_CUT,
+            level=DiagnosticLevel.INFO,
+            message=(
+                f'The single-step learning signal holds the in-step reads '
+                f'{list(plan.cuts)} fixed: the eligibility traces already carry '
+                f'them.'
+            ),
+            hidden_paths=paths,
+            context={'cuts': plan.cuts},
+        )
+        return plan
 
     def _add_output_bypass(self, outvars: List, cut_vars: Set[Var]) -> OutputBypass:
         """Rewrite the perturbed step to also yield the same-step bypass
@@ -665,7 +1072,35 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         # then a perturbation equation re-defines the hidden var
         #    y = new_outvar + perturb_var
         #
+        # With cut reads (#239) an equation is emitted in the world it
+        # serves: on a cut read it reads the unperturbed sources; towards a
+        # kept read, an output or a non-hidden state it reads the perturbed
+        # ones; serving both, it is emitted once for each.
         # ------------------------------------------------
+        plan = self._new_read_plan
+        if plan is None:
+            self._perturb_outvars(eqn)
+            return
+        index = self._eqn_index
+        self._eqn_index += 1
+        if index not in plan.output_eqns:
+            self._perturb_outvars(eqn)
+            return
+        perturbed_in = [self._perturbed.get(v, v) if isinstance(v, Var) else v for v in eqn.invars]
+        if index not in plan.state_eqns:
+            self._perturb_outvars(eqn.replace(invars=perturbed_in))
+            return
+        self._perturb_outvars(eqn)
+        fresh = [self._new_var_like(ov) for ov in eqn.outvars]
+        self.revised_eqns.append(eqn.replace(invars=perturbed_in, outvars=fresh))
+        for ov, nv in zip(eqn.outvars, fresh):
+            if ov not in self.hidden_outvars:  # its hidden outputs are cut reads: unused
+                self._perturbed[ov] = nv
+
+    def _perturb_outvars(self, eqn: JaxprEqn) -> None:
+        """Emit ``eqn`` and redefine its hidden outvars ``h = f(x) + p``. A
+        cut source keeps its outvar for the cut reads, and its perturbed
+        value goes to a fresh var for every other reader."""
         hidden_positions = [
             i for i, ov in enumerate(eqn.outvars)
             if ov in self.hidden_jaxvars_to_remove
@@ -673,25 +1108,27 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
         if not hidden_positions:
             self.revised_eqns.append(eqn.replace())
             return
+        plan = self._new_read_plan
+        sources = {} if plan is None else plan.sources
 
         new_outvars = list(eqn.outvars)
         for i in hidden_positions:
             hidden_var = eqn.outvars[i]
             self.hidden_jaxvars_to_remove.remove(hidden_var)
-            new_outvars[i] = self._new_var_like(hidden_var)
+            if hidden_var not in sources:
+                new_outvars[i] = self._new_var_like(hidden_var)
         self.revised_eqns.append(eqn.replace(outvars=new_outvars))
 
         for i in hidden_positions:
             hidden_var = eqn.outvars[i]
+            if hidden_var in sources:
+                perturbed = self._new_var_like(hidden_var)
+                self._perturbed[hidden_var] = perturbed
+                ins, outs = [hidden_var, self.perturb_invars[hidden_var]], [perturbed]
+            else:
+                ins, outs = [new_outvars[i], self.perturb_invars[hidden_var]], [hidden_var]
             self.revised_eqns.append(
-                new_jaxpr_eqn(
-                    [new_outvars[i], self.perturb_invars[hidden_var]],
-                    [hidden_var],
-                    jax.lax.add_p,
-                    {},
-                    set(),
-                    eqn.source_info.replace(),
-                )
+                new_jaxpr_eqn(ins, outs, jax.lax.add_p, {}, set(), eqn.source_info.replace())
             )
 
     def _new_var_like(self, v: Var) -> Var:
@@ -728,6 +1165,7 @@ def add_hidden_perturbation_in_jaxpr(
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     weight_path_to_invars: Optional[Mapping[Path, Sequence[Var]]] = None,
     bypass_merge_positions: Sequence[int] = (),
+    new_read_policy: Optional[NewReadPolicy] = None,
 ) -> HiddenPerturbation:
     """
     Adding perturbations to the hidden states in the jaxpr, and replacing the hidden states with the perturbed states.
@@ -762,6 +1200,9 @@ def add_hidden_perturbation_in_jaxpr(
         this.
     bypass_merge_positions : sequence of int, optional
         Positions of the jaxpr outvars where a bypass is attached.
+    new_read_policy : NewReadPolicy, optional
+        Decides which in-step reads of new hidden values to cut (issue
+        #239; see :class:`HiddenPerturbation`). ``None`` (default) cuts none.
 
     Returns
     -------
@@ -779,6 +1220,7 @@ def add_hidden_perturbation_in_jaxpr(
         descended_scan_eqn_ids=descended_scan_eqn_ids,
         weight_path_to_invars=weight_path_to_invars,
         bypass_merge_positions=bypass_merge_positions,
+        new_read_policy=new_read_policy,
     ).compile()
 
 
@@ -786,6 +1228,7 @@ def add_hidden_perturbation_from_minfo(
     minfo: ModuleInfo,
     descended_scan_eqn_ids: FrozenSet[int] = frozenset(),
     include_output_bypass: bool = True,
+    new_read_policy: Optional[NewReadPolicy] = None,
 ) -> HiddenPerturbation:
     """Add hidden-state perturbations from a ``ModuleInfo``.
 
@@ -804,6 +1247,10 @@ def add_hidden_perturbation_from_minfo(
         of the previous hidden values (see
         :attr:`HiddenPerturbation.bypass_param_paths`). Disable it for a
         learning signal that replaces ``dL/dh`` (``'modulatory'``).
+    new_read_policy : NewReadPolicy, optional
+        Decides which in-step reads of new hidden values to cut (issue
+        #239; see :class:`HiddenPerturbation`). ``None`` (default) cuts none:
+        the signal is the total derivative.
 
     Returns
     -------
@@ -825,6 +1272,7 @@ def add_hidden_perturbation_from_minfo(
         descended_scan_eqn_ids=descended_scan_eqn_ids,
         weight_path_to_invars=minfo.weight_path_to_invars if include_output_bypass else None,
         bypass_merge_positions=_bypass_merge_positions(minfo),
+        new_read_policy=new_read_policy,
     )
 
 
