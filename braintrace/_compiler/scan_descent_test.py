@@ -1498,36 +1498,40 @@ def _online_batched(make, algo, policy=DEFAULT_CONTROL_FLOW_POLICY):
 class TestBroadcastIntoTheDescendedState:
     """An ETP output that reaches the hidden state it drives in a descended scan
     only by broadcasting (p05 of the #217 review: an unbatched output into a
-    batched state) gets a trace sized without the axes the broadcast adds, and
-    the trace changes shape at its first update, which the substep fold cannot
-    carry. It is refused when the trace is allocated, until #224 sizes the trace
-    from the hidden group. On main the lifted form was refused by the #211
-    message and the in-body form failed with a scan carry type error."""
+    batched state). Its trace has the axes the broadcast adds; #224 allocates
+    it at that shape, so the substep fold carries it. On main the lifted form
+    was refused by the #211 message and the in-body form failed with a scan
+    carry type error; #217 refused both. A broadcast along an axis of the
+    weight (a ``(2, 1)`` output into ``(2, 4)`` states) is refused (#231)."""
 
     @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop'])
-    @pytest.mark.parametrize('model, y_shape, where', [
-        (_SharedDrive, (4,), 'loop constant'),
-        (_SharedDriveInBody, (4,), 'inside the scan body'),
-        (_SharedDriveBroadcastFirst, (4,), 'loop constant'),
-        (_SingletonDrive, (1, 4), 'loop constant'),
-        (_NarrowDriveInBody, (2, 1), 'inside the scan body'),
-    ], ids=['shared-row', 'shared-row-in-body', 'broadcast-before-the-scan',
-            'batch-of-one', 'feature-axis-in-body'])
-    def test_an_output_broadcast_into_the_state_is_refused(self, model, y_shape, where, algo):
-        m = model(17)
+    @pytest.mark.parametrize('model', [
+        _SharedDrive, _SharedDriveInBody, _SharedDriveBroadcastFirst, _SingletonDrive,
+    ], ids=['shared-row', 'shared-row-in-body', 'broadcast-before-the-scan', 'batch-of-one'])
+    def test_an_output_broadcast_into_the_state_matches_the_unrolled_scan(self, model, algo):
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            with brainstate.environ.context(precision=64):
+                descended = _online_batched(lambda: model(17), algo)
+                unrolled = _online_batched(lambda: model(17), algo, UNROLL_POLICY)
+        assert set(descended) == {'W', 'tau'}
+        for p in descended:
+            assert np.abs(unrolled[p]).max() > 1e-3
+            _close(descended[p], unrolled[p])
+
+    @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop'])
+    def test_a_broadcast_along_a_weight_axis_is_refused(self, algo):
+        m = _NarrowDriveInBody(17)
         brainstate.nn.init_all_states(m)
         learner = _LIFT_ALGOS[algo](m, DEFAULT_CONTROL_FLOW_POLICY)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            with pytest.raises(NotImplementedError, match='only by broadcasting') as err:
+            with pytest.raises(NotImplementedError, match='broadcasting along an axis of the weight') as err:
                 learner.compile_graph(_batched_inputs()[0])
         message = str(err.value)
-        assert f'has shape {y_shape}' in message
-        assert 'of shape (2, 4)' in message
-        assert where in message
-        assert "on the weight ('W',)" in message
-        assert 'issues/224' in message
-        assert 'scan_unroll_limit=17' in message
+        assert 'shape (2, 1)' in message and 'shape (2, 4)' in message
+        assert "('W',)" in message
+        assert 'issues/231' in message
 
     @pytest.mark.parametrize('model', [_BatchedDrive, _BatchedDriveInBody],
                              ids=['lifted', 'in-body'])
@@ -1544,9 +1548,3 @@ class TestBroadcastIntoTheDescendedState:
             assert np.abs(unrolled[p]).max() > 1e-3
             _close(descended[p], unrolled[p])
 
-    def test_the_unrolling_the_message_suggests_runs(self):
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            with brainstate.environ.context(precision=64):
-                unrolled = _online_batched(lambda: _SharedDrive(17), 'd_rtrl', UNROLL_POLICY)
-        assert np.isfinite(unrolled['W']).all() and np.abs(unrolled['W']).max() > 1e-3

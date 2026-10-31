@@ -45,6 +45,7 @@ from braintrace._typing import (
 from ._common import _route_grads_by_path, _update_dict
 from .axes import ETraceConfig
 from .param_dim_vjp import (
+    add_param_grad,
     reduce_param_batch_axes,
     relation_instant_term,
     relation_solve_to_param,
@@ -529,17 +530,12 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
         ``einsum``'s shared-axis restriction, conv's bias reduction and LoRA's
         chaining through the current weights.
         """
-        temp: Dict[Path, PyTree] = {}
-        folded_paths: set = set()
-        batched_paths: set = set()
+        sums: Dict[Path, Dict[Any, PyTree]] = {}
 
         relation: HiddenParamOpRelation
         for relation in self.graph.hidden_param_op_relations:
             if group not in relation.hidden_groups:
                 continue
-            if is_batched_primitive(relation.primitive):
-                batched_paths.update(relation.trainable_paths.values())
-
             weights_dict = relation_weights_dict(relation, weight_vals)
             x = (
                 None if relation.primitive is etp_elemwise_p
@@ -554,12 +550,14 @@ class RandomProjectionVjpAlgorithm(ETraceVjpAlgorithm):
                 relation, group, nu, instant, weight_vals,
                 fast_solve=self.fast_solve,
             )
-            if batch_folded:
-                folded_paths.update(relation.trainable_paths.values())
-            _route_grads_by_path(relation, proj_dict, weight_vals, temp)
+            routed: Dict[Path, PyTree] = {}
+            _route_grads_by_path(relation, proj_dict, weight_vals, routed)
+            add_param_grad(
+                sums, routed, weight_vals,
+                batched=is_batched_primitive(relation.primitive), folded=batch_folded,
+            )
 
-        reduce_param_batch_axes(temp, weight_vals, folded_paths, batched_paths)
-        return temp
+        return reduce_param_batch_axes(sums, weight_vals)
 
     # ------------------------------------------------------------------ #
     # the step
