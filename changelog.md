@@ -5,27 +5,38 @@
 
 ### Fixes
 
-- **A learner refuses inputs that differ from the example inputs it was
-  compiled with (#227, #241).** A learner replays the jaxpr traced at
-  `compile_graph()` on the leaves of its inputs: it neither retraces nor
-  casts. An input of another dtype therefore failed deep inside the replay,
-  with a JAX error naming an internal primitive (a float32 input to a
-  learner compiled with float64: `lax.dynamic_update_slice requires
-  arguments to have the same dtypes`), or ran a program traced for other
-  values. A `Quantity` lost its unit: an input of `1000 mV` to a learner
-  compiled with volts ran as `1000 V`, and the outputs and `dL/dW` were
-  1000 times too large, without an error; an input in another dimension
-  failed with a `UnitMismatchError` from a retrace of the model. The update
-  now compares one step of its inputs with the example inputs first: the
-  structure, and each leaf's shape, dtype and unit. A difference raises
-  `TypeError`, which names each differing leaf by its key path
-  (`args[0]['b']`), the compiled and the given value (`float32[3] in V`,
-  `float32[3] in mV`) and the remedy (`.astype(float32)`, `.in_unit(V)`, or
-  a learner compiled with such an input). A `MultiStepData` is compared per
-  step, a Python scalar by its canonical dtype (`2.0` is `float32` without
-  x64), and weak types are not compared. The signature is recorded in the
-  new `ModuleInfo.input_signature`. One braintrace test fed float32 inputs
-  to learners compiled with float64; it now builds them in float64.
+- **A learner conforms its inputs to the example inputs it was compiled
+  with (#227, #241).** A learner replays the jaxpr traced at
+  `compile_graph()` on the leaves of its inputs, without a retrace. An input
+  of another dtype therefore failed deep inside the replay, with a JAX error
+  naming an internal primitive (a float32 input to a learner compiled with
+  float64: `lax.dynamic_update_slice requires arguments to have the same
+  dtypes`), or ran a program traced for other values. A `Quantity` lost its
+  unit: an input of `1000 mV` to a learner compiled with volts ran as
+  `1000 V`, and the outputs and `dL/dW` were 1000 times too large, without
+  an error; an input in another dimension failed with a `UnitMismatchError`
+  from a retrace of the model. The update now compares one step of its
+  inputs with the example inputs first, before any state is read:
+  - a lossless upcast within a dtype category (`float16` or `bfloat16` to
+    `float32` or `float64`, `float32` to `float64`, `int8` to `int32`,
+    `complex64` to `complex128`) is cast to the compiled dtype, which gives
+    the result of a cast by hand, bit for bit. A Python scalar, or another
+    weak-typed value, takes the compiled dtype as in JAX: `2` for a float,
+    and under x64 `2.0` for a float32. Under a transformation the cast is one
+    `convert_element_type` and no retrace;
+  - a plain array stands for a `Quantity` in unit 1 and the reverse, and a
+    list for a tuple;
+  - any other difference in shape, dtype, unit or structure raises
+    `TypeError`. It names each differing leaf by its key path
+    (`args[0]['b']`), the compiled and the given value (`float32[3] in V`,
+    `float32[3] in mV`) and every remedy that applies (`.astype(float32)`,
+    `pass a Python float or a float32 scalar`, `.in_unit(V)`, `pass a plain
+    array`, or a learner compiled with such an input).
+
+  A `MultiStepData` is compared per step and cast whole. The signature is
+  recorded in the new `ModuleInfo.input_signature`, and the public
+  `ModuleInfo.jaxpr_call` conforms its inputs in the same way, at trace time
+  under a transformation.
 - **No more `Jaxpr is missing a DebugInfo` warnings (#197).** Since 0.2.7,
   every `braintrace.compile` and `etrace_grad` emitted jax's
   `DeprecationWarning: core.Jaxpr is missing a DebugInfo object`, once per
@@ -282,8 +293,9 @@
   D-RTRL and e-prop in chunks of two steps equal BPTT, and a descended scan
   equals the unrolled one (f64, 1e-12). With `fast_solve=False`, or a
   `weight_fn` or `bias_fn`, the term of such an output cannot be computed,
-  and it raises the `ValueError` below when the trace is allocated. Where one call per step already worked, the
-  values are the same, bit for bit, and every other trace keeps its shape.
+  and it raises the `ValueError` below when the trace is allocated. Where
+  one call per step already worked, the values are the same, bit for bit,
+  and every other trace keeps its shape.
   The term of an einsum, embedding, LoRA or sparse operation, or of a
   convolution with a batch of one, cannot be computed for an output that
   reaches its state by broadcasting: such a model failed with a JAX shape
@@ -320,6 +332,26 @@
   e-prop now equal BPTT for all of these (f64, 1e-12), and the
   random-projection engine reduces the same way. A weight read in one way
   reduces as before, bit for bit.
+
+### Behavior changes
+
+- **A learner now refuses calls that ran before (#227, #241).** Each ran the
+  jaxpr traced for the example inputs on values of another kind, for some
+  models at least; some gave wrong results without an error:
+  - a Python bool where the example was a float (it ran as `1.0` or `0.0`),
+    and a Python float where the example was a Python int;
+  - an array of another dtype category: an int array for a float example, an
+    unsigned int for a signed one;
+  - a narrower dtype than the example's, such as `float32` for a `float16`
+    example or `int32` for an `int8` one, and `float16` and `bfloat16` for
+    each other; these ran when the model cast its input;
+  - a `Quantity` with a unit for a plain array, a plain array for a
+    `Quantity` with a unit, and a `Quantity` in another unit, which ran at
+    the wrong scale (#241);
+  - an `OrderedDict` for a `dict`, or the reverse. A dict flattens in sorted
+    key order and an `OrderedDict` in insertion order, so when the orders
+    differed the leaves were swapped without an error. Other differences in
+    node type, such as a namedtuple for a tuple, are refused as well.
 
 ### Features
 

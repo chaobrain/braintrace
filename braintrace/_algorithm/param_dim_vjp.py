@@ -110,7 +110,7 @@ def _reaches_without_broadcast(relation: HiddenParamOpRelation, group: HiddenGro
     agree: a ``y`` that drives a whole ``HiddenGroupState`` (``y`` of shape
     ``(4, 2)`` into a state of shape ``(4, 2)`` whose ``varshape`` is ``(4,)``)
     takes this path, and its first update fails as it did before the trace was
-    sized from the term.
+    sized from the term (#244).
     """
     y_shape = tuple(shaped_aval(relation.y_var).shape)
     return all(tuple(a.shape) == y_shape for a in _hidden_out_avals(relation, group))

@@ -127,8 +127,8 @@ class TestTheTraceHasItsShapeAtInit:
     @pytest.mark.parametrize('kind', _BROADCAST)
     def test_a_loop_over_the_steps_equals_one_call_per_step(self, kind, algo):
         # main: the loop carry changed type, a TypeError
+        xs = _inputs()
         with brainstate.environ.context(precision=64):
-            xs = _inputs()  # float64, as the example input the learners are compiled with
             looped = _learner(kind, algo)
             out_loop = brainstate.transform.for_loop(looped, xs)
             called = _learner(kind, algo)
