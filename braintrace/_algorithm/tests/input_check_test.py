@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._input_data import LeafSignature, input_signature
+from braintrace._input_data import LeafSignature, conform_inputs, input_signature
 
 _ALGOS = {'d_rtrl': {}, 'eprop': {}, 'pp_prop': {'decay_or_rank': 0.9}, 'ostl_recurrent': {}, 'uoro': {}}
 
@@ -502,3 +502,26 @@ class TestTheSignature:
         assert input_signature('a') == input_signature('b')
         assert dict(input_signature('a').leaves)['args[0]'].describe() == 'a str'
         assert input_signature('a') != input_signature(1.0)
+
+
+class TestConformInputs:
+    """``conform_inputs`` on its own, for the leaves no learner test reaches."""
+
+    def test_a_prng_key_is_compared_by_its_dtype(self):
+        key = jax.random.key(0)
+        args = (jax.random.key(1),)
+        assert conform_inputs(input_signature(key), args, 'f') is args
+        with pytest.raises(TypeError, match=r'compiled with key<fry>\[\], given float32\[\]; pass a key<fry> value\.'):
+            conform_inputs(input_signature(key), (jnp.float32(1.0),), 'f')
+        with pytest.raises(TypeError, match=r'compiled with float32\[\], given key<fry>\[\]; pass a float32 value\.'):
+            conform_inputs(input_signature(jnp.float32(1.0)), (key,), 'f')
+
+    def test_a_value_that_is_not_a_jax_type_is_kept(self):
+        args = ('b',)
+        assert conform_inputs(input_signature('a'), args, 'f') is args
+        with pytest.raises(TypeError, match=r"compiled with a str, given float32\[\]; pass a str\."):
+            conform_inputs(input_signature('a'), (1.0,), 'f')
+
+    def test_nothing_is_rebuilt_when_nothing_changes(self):
+        args = (jnp.ones(3), {'a': jnp.ones(2) * u.mV}, [1.0])
+        assert conform_inputs(input_signature(*args), args, 'f') is args

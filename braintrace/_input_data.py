@@ -393,12 +393,10 @@ _RANK = {'bool': 0, 'int': 1, 'float': 2, 'complex': 3}
 
 
 def _category(dtype: Any) -> Optional[str]:
+    """The category of *dtype*, ``None`` for an extended dtype such as a PRNG key."""
     for name, category in _CATEGORIES:
-        try:
-            if jnp.issubdtype(dtype, category):
-                return name
-        except TypeError:
-            return None
+        if jnp.issubdtype(dtype, category):
+            return name
     return None
 
 
@@ -450,7 +448,9 @@ def _conform_leaf(leaf: Any, compiled: LeafSignature, given: LeafSignature) -> T
             remedies.append(f'it has another physical dimension than {c_unit}')
     cast = compiled.dtype != given.dtype
     if cast and not _takes_the_dtype(compiled, given):
-        if given.scalar is not None:
+        if _category(compiled.dtype) is None or _category(given.dtype) is None:
+            remedies.append(f'pass {_article(str(compiled.dtype))} {compiled.dtype} value')
+        elif given.scalar is not None:
             kind = _python_type(compiled.dtype)
             dtype = str(compiled.dtype)
             remedies.append(f'pass a Python {kind} or {_article(dtype)} {dtype} scalar')
