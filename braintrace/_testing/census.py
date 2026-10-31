@@ -34,8 +34,9 @@ any value:
 ``MULTISOURCE`` (structural, #236)
     A trainable input of an ETP op that depends on more than one leaf.
 ``NEWREAD`` (structural, #239)
-    A new hidden value read, in the same step, by an equation that reaches
-    another hidden state's new value.
+    A relation's output reaches the new value of a hidden state ``g``, and the
+    new ``g`` reaches another hidden state's new value in the same step with
+    no ETP op between them.
 
 Runtime channels record ``max|used - true| / max|true|`` per site;
 structural channels record ``1.0`` per site. Usage::
@@ -168,28 +169,54 @@ def _is_float(v: Any) -> bool:
     return dtype is not None and np.issubdtype(dtype, np.inexact)
 
 
-def _new_reads(minfo: Any) -> List[str]:
-    """Pairs ``g -> V``: the new value of ``g`` reaches the new value of ``V`` in-step."""
+def _reach_new_hidden(start: Any, consumers: Dict[Any, Any], outvar_path: Dict[Any, Any]) -> set:
+    """Paths of the hidden outvars reachable from ``start`` in-step.
+
+    The walk follows float values only and stops at ETP ops: a path through a
+    second ETP op is cut from the relation (it is not in its ``y -> hidden``
+    map), so it cannot be counted twice.
+    """
+    from braintrace._compatible_imports import Var
+    from braintrace._op._registries import is_etp_primitive
+    found, seen, stack = set(), {start}, [start]
+    while stack:
+        w = stack.pop()
+        for eqn in consumers.get(w, ()):
+            if is_etp_primitive(eqn.primitive):
+                continue
+            for o in eqn.outvars:
+                if not isinstance(o, Var) or o in seen or not _is_float(o):
+                    continue
+                seen.add(o)
+                if o in outvar_path:
+                    found.add(outvar_path[o])
+                stack.append(o)
+    return found
+
+
+def _new_reads(graph: Any) -> List[str]:
+    """``relation: g -> V``: the relation's output reaches the new ``g``, and the
+    new ``g`` reaches the new ``V`` in the same step without an ETP op between
+    them. Under ``vjp_method='single-step'`` the term ``W -> g -> V`` then counts
+    twice (#239)."""
     from braintrace._compatible_imports import Var
     from braintrace._compiler.jaxpr_graph import build_consumer_map
-    jaxpr = minfo.jaxpr
-    consumers = build_consumer_map(jaxpr)
+    minfo = graph.module_info
+    consumers = build_consumer_map(minfo.jaxpr)
     outvar_path = {v: p for p, v in minfo.hidden_path_to_outvar.items() if isinstance(v, Var)}
+    path_outvar = {p: v for v, p in outvar_path.items()}
     sites = []
-    for path, start in minfo.hidden_path_to_outvar.items():
-        if not isinstance(start, Var) or not _is_float(start):
-            continue
-        seen, stack = {start}, [start]
-        while stack:
-            w = stack.pop()
-            for eqn in consumers.get(w, ()):
-                for o in eqn.outvars:
-                    if not isinstance(o, Var) or o in seen or not _is_float(o):
-                        continue
-                    seen.add(o)
-                    if o in outvar_path and outvar_path[o] != path:
-                        sites.append(f'{path} -> {outvar_path[o]}')
-                    stack.append(o)
+    for r in graph.hidden_param_op_relations:
+        if r.control_flow_context is not None:
+            continue  # body-scoped vars: not in the module jaxpr
+        reached = _reach_new_hidden(r.y_var, consumers, outvar_path)
+        name = f'{r.primitive.name}{sorted(map(str, r.trainable_paths.values()))}'
+        for g in reached:
+            if not _is_float(path_outvar[g]):
+                continue
+            for v in _reach_new_hidden(path_outvar[g], consumers, outvar_path):
+                if v != g and v in reached:
+                    sites.append(f'{name}: {g} -> {v}')
     return sorted(set(sites))
 
 
@@ -233,7 +260,7 @@ def structural_sites(graph: Any) -> Dict[str, List[str]]:
                 out['CHAIN'].append(f'{site} via {prims}')
             if len(leaves) > 1:
                 out['MULTISOURCE'].append(f'{site} from {len(leaves)} leaves')
-    out['NEWREAD'] = _new_reads(minfo)
+    out['NEWREAD'] = _new_reads(graph)
     return out
 
 

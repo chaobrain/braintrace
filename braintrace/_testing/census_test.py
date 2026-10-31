@@ -19,6 +19,7 @@ import json
 import warnings
 
 import brainstate
+import jax.numpy as jnp
 import pytest
 
 import braintrace
@@ -120,7 +121,34 @@ class TestStructuralChannels:
 
     def test_newread_names_both_states(self):
         c = _measure('newread-new', steps=1)
-        assert "NEWREAD|('g',) -> ('V',)" in c.values['newread-new']
+        assert 'NEWREAD|etp_mm["(\'w\',)"]: (\'g\',) -> (\'V\',)' in c.values['newread-new'], c.values
+
+    @pytest.mark.parametrize('order', ['through_etp', 'weight_free_g'])
+    def test_newread_ignores_reads_that_cannot_double_count(self, order):
+        """A read through a second ETP op is cut from the relation; a read of a
+        state the weight does not reach adds nothing to the weight's trace."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.w2 = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.g = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.V = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                if order == 'through_etp':  # a stacked layer: V reads the new g through w2
+                    self.g.value = 0.9 * self.g.value + braintrace.matmul(x, self.w.value)
+                    self.V.value = 0.9 * self.V.value + braintrace.matmul(jnp.tanh(self.g.value), self.w2.value)
+                else:  # g is weight-free; V reads its new value
+                    self.g.value = 0.9 * self.g.value + x.sum(-1, keepdims=True)
+                    self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value) * jnp.tanh(self.g.value)
+                return self.V.value
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
+        assert census.structural_sites(learner.graph)['NEWREAD'] == []
 
     def test_descended_relation_is_read_through_the_scan_body(self):
         c = _measure('credit-20-substeps', steps=1)
