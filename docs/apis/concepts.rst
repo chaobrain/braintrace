@@ -161,18 +161,30 @@ potential reads this step's synaptic current (``g -> V``), an LSTM output reads
 this step's cell (``c -> h``). The eligibility trace of ``V`` already carries the
 path ``W -> g -> V``, because its ``y -> hidden`` derivative is taken through the
 update of ``g``. Under a single-step algorithm the signal of ``g`` must then hold
-that read fixed, or the path is counted twice. The compiler cuts such a read when
-every relation whose hidden groups include ``g``'s group also includes ``V``'s,
-and records it (``DiagnosticKind.HIDDEN_NEW_READ_CUT``, INFO); the perturbed
-step evaluates the read on the unperturbed ``g``, and an equation that also
-feeds the outputs on the perturbed one. A read through an ETP op without
-gradient (a stacked layer), or one that no trace carries, keeps the total
-derivative. When the reads cannot be separated, for instance when one relation
-traces ``V``'s group and another does not, the signal stays the total derivative
-and the graph records ``DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT`` (ERROR,
-also warned); ``vjp_method='multi-step'`` builds no perturbation and avoids it.
+that read fixed, or the path is counted twice. Holding it fixed also drops the
+history ``g^{t-1} -> g^t -> V^t`` from the signal of ``g``, so the trace of ``V``
+must carry that too, through the transition of its hidden group. The compiler
+therefore cuts a read only when every relation whose hidden groups include
+``g``'s group also includes ``V``'s, ``g`` and ``V`` share a hidden group, and
+every equation on the read is one the group transition computes
+position-diagonally (``HiddenGroup.carried_vars``: the transition contains it,
+and it is not a position-coupling ``dot_general``/``conv``, an ETP mixing op or
+a ``stop_gradient``). It records the cut (``DiagnosticKind.HIDDEN_NEW_READ_CUT``,
+INFO); the perturbed step evaluates the read on the unperturbed ``g``, and an
+equation that also feeds the outputs on the perturbed one. A read through an
+ETP op without gradient (a stacked layer), or one that no trace carries, keeps
+the total derivative. When a read cannot be cut although a trace carries it
+within the step (one relation traces ``V``'s group and another does not; the
+read crosses hidden groups, or goes through a ``dot_general`` the diagonal
+transition leaves out), the signal stays the total derivative and the graph
+records ``DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT`` (ERROR, also warned);
+``vjp_method='multi-step'`` builds no perturbation and avoids it.
 ``graph.hidden_perturb`` declares the outcome: ``new_read_cuts``,
-``new_read_conflicts`` and ``new_read_exact``.
+``new_read_conflicts`` and ``new_read_exact``. ``new_read_exact`` means only
+that no in-step read of a new hidden value is double counted in the single-step
+learning signal; it does not say the single-step gradient is exact, since the
+learner's own approximations (a diagonal trace of a coupled recurrence, paths
+across groups) are separate.
 
 Input Data
 ----------
