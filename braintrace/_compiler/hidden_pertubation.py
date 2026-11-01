@@ -648,9 +648,9 @@ def plan_new_read_cuts(
         return out
 
     outvars = jaxpr.outvars
-    merge_nonhidden = [
-        outvars[i] for i in merge_positions
-        if i < len(outvars) and isinstance(outvars[i], Var) and outvars[i] not in hidden
+    merge_nonhidden: List[Var] = [
+        v for v in (outvars[i] for i in merge_positions if i < len(outvars))
+        if isinstance(v, Var) and v not in hidden
     ]
 
     conflicts: List[str] = []
