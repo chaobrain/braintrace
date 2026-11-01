@@ -371,8 +371,9 @@ def eqn_preserves_positions(eqn: JaxprEqn, varshape: Tuple[int, ...], path_posit
     that is not a ``dot_general`` -- a ``rev``, a cumulative sum, a reduction
     broadcast back, a ``gather`` -- keeps the shape, so only a proof counts.
     A call-like equation (:data:`CALL_PRIMITIVES`) is proven when its path
-    operands and outputs carry ``varshape`` as their leading axes and every
-    equation its body applies to them is proven in turn; a ``custom_jvp_call``
+    operands carry ``varshape`` as their leading axes and every equation its
+    body applies to them is proven in turn (so the outputs they reach keep
+    that shape); a ``custom_jvp_call``
     must also have a JVP rule that is proven on the path tangents. A
     ``custom_vjp_call`` is never proven: its derivative is a Python function.
     Control flow (``scan``, ``while``, ``cond``) is not proven either.
@@ -397,8 +398,6 @@ def eqn_preserves_positions(eqn: JaxprEqn, varshape: Tuple[int, ...], path_posit
     if name == 'custom_vjp_call':
         return False
     if not all(_leading(eqn.invars[i], varshape) for i in path_positions):
-        return False
-    if not all(_leading(v, varshape) for v in eqn.outvars):
         return False
     body = _call_body(eqn)
     if body is None or not _body_preserves_positions(body, [body.invars[i] for i in path_positions], varshape):
