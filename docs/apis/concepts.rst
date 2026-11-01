@@ -171,7 +171,8 @@ every equation on the read is computed by the group transition
 an allow-listed elementwise primitive on the full position shape, or a
 ``custom_jvp``/``checkpoint`` call whose body and derivative rule are made of
 them. A ``roll``, a reduction, a ``gather``, a ``reshape``, a ``dot_general``
-or a ``custom_vjp`` on the read is not proven, so the read is not cut. It
+or a ``custom_vjp`` on the read is not proven, so the read is not cut; for now
+neither is a read into or out of one slot of a ``HiddenGroupState``. It
 records the cut (``DiagnosticKind.HIDDEN_NEW_READ_CUT``,
 INFO); the perturbed step evaluates the read on the unperturbed ``g``, and an
 equation that also feeds the outputs on the perturbed one. A read through an
