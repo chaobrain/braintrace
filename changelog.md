@@ -52,16 +52,19 @@
   cuts a read only when the traces carry it, within the step and across
   steps: every relation whose groups include `h_k`'s group also includes
   `h_j`'s, `h_k` and `h_j` share a hidden group, and every equation on the
-  read is one the group transition computes position-diagonally
-  (`HiddenGroup.carried_vars`, the hidden-group walker's own inclusion
-  rule). A cut read sees the unperturbed value, and an equation that serves
+  read is computed by the group transition (`HiddenGroup.carried_vars`) and
+  is proven position-preserving (elementwise): an allow-listed elementwise
+  primitive on the full position shape, or a `custom_jvp`/`checkpoint` call
+  whose body (and derivative rule) is made of them. A cut read sees the
+  unperturbed value, and an equation that serves
   both a cut read and the outputs is emitted twice. Reads through an ETP op
   without gradient, reads of a state in no group and reads that no trace
   carries are kept. The graph records the cut reads (`HIDDEN_NEW_READ_CUT`,
   INFO). When a read cannot be cut although a trace carries it in-step (the
   relations disagree; the read crosses hidden groups or goes through an
-  equation the transition leaves out, such as a position-coupling
-  `dot_general`, or that couples positions; a cut read is also made through
+  equation the transition leaves out or that is not proven
+  position-preserving, such as a `dot_general`, a `roll`, a reduction, a
+  `gather` or a `custom_vjp`; a cut read is also made through
   an ETP op; a kept read reaches a traced group; or a shared equation is a
   `while` or has effects), the graph keeps the previous signal and records
   `HIDDEN_NEW_READ_DOUBLE_COUNT` (ERROR, also warned). `HiddenPerturbation`
@@ -408,8 +411,7 @@
   `new_read_cuts`, `new_read_conflicts` and `new_read_exact`. Its `len()`
   grows from 8 to 11, so positional unpacking of all its fields changes;
   the defaults (`()`, `()`, `False`) keep construction by keyword working.
-  `HiddenGroup` likewise gains a trailing `position_coupled_outvars` field
-  (default empty; `len()` from 10 to 11) and a `carried_vars()` method.
+  `HiddenGroup` gains a `carried_vars()` method.
 - **`add_hidden_perturbation_from_minfo` takes `new_read_policy` (#239),**
   a keyword with default `None`, which plans no cut and keeps the total
   derivative, as before.

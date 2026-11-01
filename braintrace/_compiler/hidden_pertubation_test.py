@@ -566,12 +566,14 @@ import jax.numpy as jnp
 import numpy as np
 from jax.experimental import io_callback
 
+from braintrace._compatible_imports import Var
 from braintrace._compiler.diagnostics import DiagnosticKind, DiagnosticLevel
 from braintrace._compiler.hidden_pertubation import (
     NewReadPolicy,
     add_hidden_perturbation_from_minfo,
     plan_new_read_cuts,
 )
+from braintrace._compiler.position_graph import eqn_preserves_positions
 from braintrace._testing.oracle import (
     bptt_param_gradients,
     chunked_online_param_gradients,
@@ -926,20 +928,15 @@ class _Everything:
 
 
 class _Group:
-    """A group stub; its transition carries every value unless ``carried``
+    """A group stub; its transition computes every value unless ``carried``
     names the ones it does."""
 
-    def __init__(self, index, carried=None):
-        self.index = index
+    def __init__(self, index, carried=None, varshape=(1, _N)):
+        self.index, self.varshape = index, varshape
         self._carried = _Everything() if carried is None else frozenset(carried)
 
     def carried_vars(self):
         return self._carried
-
-
-class _Eqn:
-    def __init__(self, primitive, *outvars):
-        self.primitive, self.outvars = primitive, list(outvars)
 
 
 class _Relation:
@@ -983,35 +980,218 @@ class TestNewReadPolicy:
         assert policy.traced(('x',)) == frozenset()
 
 
+def _read_of(fn):
+    """The equations of ``fn(g, v) -> new v`` that read the new ``g``, and the
+    values on that read."""
+    closed = jax.make_jaxpr(fn)(jnp.ones((1, _N)), jnp.ones((1, _N)))
+    read_vars = {closed.jaxpr.invars[0]}
+    eqns = []
+    for eqn in closed.jaxpr.eqns:
+        if any(isinstance(v, Var) and v in read_vars for v in eqn.invars):
+            eqns.append(eqn)
+            read_vars.update(eqn.outvars)
+    return eqns, read_vars
+
+
+_DENSE_NN = np.linspace(0.1, 0.9, _N * _N).reshape(_N, _N) / 2
+_PERM = np.array([2, 0, 3, 1])
+
+
+def _mix(a):
+    return a @ jnp.asarray(_DENSE_NN, a.dtype)
+
+
+@jax.custom_jvp
+def _cj_mix(a):
+    return _mix(a)
+
+
+@_cj_mix.defjvp
+def _cj_mix_jvp(primals, tangents):
+    return _mix(primals[0]), _mix(tangents[0])
+
+
+@jax.custom_jvp
+def _cj_tanh(a):
+    return jnp.tanh(a)
+
+
+@_cj_tanh.defjvp
+def _cj_tanh_jvp(primals, tangents):
+    return jnp.tanh(primals[0]), tangents[0] * 1.5 / (1 + primals[0] ** 2)
+
+
+@jax.custom_jvp
+def _cj_tanh_mixing_rule(a):
+    """An elementwise primal whose derivative rule mixes positions."""
+    return jnp.tanh(a)
+
+
+@_cj_tanh_mixing_rule.defjvp
+def _cj_tanh_mixing_rule_jvp(primals, tangents):
+    return jnp.tanh(primals[0]), _mix(tangents[0])
+
+
+@jax.custom_vjp
+def _cv_tanh(a):
+    return jnp.tanh(a)
+
+
+_cv_tanh.defvjp(lambda a: (jnp.tanh(a), a), lambda a, g: (g * (1 - jnp.tanh(a) ** 2),))
+
+
+def _scan_tanh(a):
+    out, _ = jax.lax.scan(lambda c, _: (jnp.tanh(c), None), a, None, length=1)
+    return out
+
+
+# reads of the new g that do not keep positions, or are not proven to (the
+# review's p18 and p19 probes): a cut would not be carried
+_UNPROVEN_READS = {
+    'roll': lambda a: jnp.roll(a, 1, axis=-1),
+    'flip': lambda a: jnp.flip(a, axis=-1),
+    'cumsum': lambda a: 0.5 * jnp.cumsum(a, axis=-1),
+    'mean-field': lambda a: a - jnp.mean(a, axis=-1, keepdims=True),
+    'gather': lambda a: a[..., _PERM],
+    'sum-broadcast': lambda a: 0.3 * jnp.sum(a, axis=-1, keepdims=True) * jnp.ones_like(a),
+    'pad-shift': lambda a: jnp.pad(a, ((0, 0), (1, 0)))[..., :_N],
+    'sort': lambda a: jnp.sort(a, axis=-1),
+    'reshape': lambda a: jnp.tanh(a.reshape(_N, 1)).reshape(1, _N),
+    'diagonal-dot': lambda a: a @ jnp.asarray(0.6 * np.eye(_N), a.dtype),
+    'dense-dot': _mix,
+    'custom_jvp-dense': _cj_mix,
+    'custom_jvp-mixing-rule': _cj_tanh_mixing_rule,
+    'checkpoint-dense': jax.checkpoint(_mix),
+    'custom_vjp': _cv_tanh,
+    'cond': lambda a: jax.lax.cond(True, jnp.tanh, jnp.sin, a),
+    'scan': _scan_tanh,
+}
+_PROVEN_READS = {
+    'elementwise': lambda a: 0.6 * jnp.tanh(a) + jnp.where(a > 0, a, 0.1 * a),
+    'custom_jvp-elementwise': _cj_tanh,
+    'checkpoint-elementwise': jax.checkpoint(lambda a: jnp.exp(-a) * jnp.sin(a)),
+    'nested-calls': jax.checkpoint(lambda a: _cj_tanh(a) * 2.0),
+}
+
+
+class _ReadsH1(brainstate.nn.Module):
+    """One group over ``_N`` positions (h2 also reads the new h0): h1 and h2
+    read the new h0 elementwise, h2 reads the new h1 through ``read``."""
+
+    read = staticmethod(lambda a: 0.6 * a)
+
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for i in range(3):
+            setattr(self, f'h{i}', brainstate.HiddenState(0.3 * (i + 1) * jnp.ones((batch_size, _N))))
+
+    def update(self, x):
+        self.h0.value = 0.8 * self.h0.value + jnp.tanh(self.W(x))
+        self.h1.value = 0.5 * self.h1.value + jnp.tanh(self.h0.value)
+        self.h2.value = 0.5 * self.h2.value + type(self).read(self.h1.value) + 0.1 * jnp.tanh(self.h0.value)
+        return self.h2.value
+
+
+def _reads_h1(name, read):
+    return type(f'_ReadsH1_{name}', (_ReadsH1,), {'read': staticmethod(read)})
+
+
+class _CrossGroupAdd(_TwoStates):
+    """g recurs through a constant mix (its own group); V adds the new g, so
+    every equation on the read (an ``add``) is in V's transition. Only the
+    group condition keeps the read (review of 003943c, p24)."""
+
+    def update(self, x):
+        y = self.W(x)
+        self.g.value = self.g.value @ jnp.asarray(_MIX44 / 3, y.dtype) + y
+        self.V.value = 0.9 * self.V.value + jnp.sin(y) + self.g.value
+        return self.V.value
+
+
+class _NoRecGAdd(_TwoStates):
+    """The same with a g that has no recurrence."""
+
+    def update(self, x):
+        y = self.W(x)
+        self.g.value = y * 1.0
+        self.V.value = 0.9 * self.V.value + jnp.sin(y) + self.g.value
+        return self.V.value
+
+
+_CARRY_CASES.update({f'reads-h1-{n}': (_reads_h1(n, r), _P7, None) for n, r in _UNPROVEN_READS.items()})
+_CARRY_CASES.update({f'reads-h1-{n}': (_reads_h1(n, r), _P7, _ALL_THREE) for n, r in _PROVEN_READS.items()})
+_CARRY_CASES.update({'cross-group-add': (_CrossGroupAdd, _P3, None), 'no-rec-g-add': (_NoRecGAdd, _P3, None)})
+
+
 class TestWhyNotCarried:
     """A read the relations would cut is cut only if the group transition
-    carries it across steps: one group, every equation on the read computing
-    a value of ``HiddenGroup.carried_vars``."""
+    provably carries it across steps: one group, and every equation on the
+    read computing a value of ``HiddenGroup.carried_vars`` and proven to
+    keep positions (an allow-listed elementwise primitive on the full
+    position shape, or a call made of them)."""
 
-    def _policy(self):
-        g0 = _Group(0, carried={'t', 'v'})
-        groups = {('g',): g0, ('V',): g0, ('c',): _Group(1)}
-        return NewReadPolicy(groups, [_Relation(0, 1)])
+    def _policy(self, carried=None):
+        g0 = _Group(0, carried=carried)
+        return NewReadPolicy({('g',): g0, ('V',): g0, ('c',): _Group(1)}, [_Relation(0, 1)])
 
-    def test_a_read_within_the_group_through_carried_equations_is_carried(self):
-        policy = self._policy()
-        assert policy.why_not_carried(('g',), ('V',), [_Eqn('tanh', 't'), _Eqn('add', 'v')]) is None
-        assert policy.why_not_carried(('g',), ('V',), []) is None
+    @pytest.mark.parametrize('name', sorted(_PROVEN_READS))
+    def test_a_read_through_elementwise_equations_is_carried(self, name):
+        read = _PROVEN_READS[name]
+        eqns, read_vars = _read_of(lambda g, v: 0.9 * v + read(g))
+        assert self._policy().why_not_carried(('g',), ('V',), eqns, read_vars) is None
+
+    def test_an_empty_read_is_carried(self):
+        assert self._policy().why_not_carried(('g',), ('V',), [], set()) is None
 
     def test_a_read_across_groups_is_not_carried(self):
         policy = self._policy()
         assert policy.edge(('g',), ('c',)) == 'cut'
-        why = policy.why_not_carried(('g',), ('c',), [_Eqn('tanh', 't')])
+        eqns, read_vars = _read_of(lambda g, v: 0.9 * v + jnp.tanh(g))
+        why = policy.why_not_carried(('g',), ('c',), eqns, read_vars)
         assert why == "the read ('g',) -> ('c',) crosses hidden groups, whose traces do not carry it across steps"
-        assert 'crosses hidden groups' in policy.why_not_carried(('x',), ('V',), [])
+        assert 'crosses hidden groups' in policy.why_not_carried(('x',), ('V',), [], set())
 
     def test_a_read_through_an_equation_the_transition_leaves_out_is_not_carried(self):
-        policy = self._policy()
-        why = policy.why_not_carried(('g',), ('V',), [_Eqn('dot_general', 'm'), _Eqn('add', 'v')])
-        assert why == ("the read ('g',) -> ('V',) goes through dot_general, which the transition "
-                       "of their group does not carry position-diagonally")
-        # every output of a multi-output equation must be carried
-        assert policy.why_not_carried(('g',), ('V',), [_Eqn('jit', 't', 'm')]) is not None
+        eqns, read_vars = _read_of(lambda g, v: 0.9 * v + jnp.tanh(g))
+        tanh, add = eqns
+        why = self._policy(carried=add.outvars).why_not_carried(('g',), ('V',), eqns, read_vars)
+        assert why == ("the read ('g',) -> ('V',) goes through tanh, which the transition "
+                       "of their group leaves out or holds fixed")
+
+    @pytest.mark.parametrize('name', sorted(_UNPROVEN_READS))
+    def test_a_read_not_proven_to_keep_positions_is_not_carried(self, name):
+        read = _UNPROVEN_READS[name]
+        eqns, read_vars = _read_of(lambda g, v: 0.9 * v + read(g))
+        why = self._policy().why_not_carried(('g',), ('V',), eqns, read_vars)
+        assert why is not None and why.startswith("the read ('g',) -> ('V',) goes through ")
+        assert why.endswith('which is not proven to keep positions '
+                            '(only elementwise equations on the full position shape are)')
+
+    def test_an_elementwise_read_on_a_partial_shape_is_not_carried(self):
+        """The group's positions are (1, 2 * _N): a read of the first half only
+        is elementwise on a value that is not the full position shape."""
+        g0 = _Group(0, varshape=(1, 2 * _N))
+        policy = NewReadPolicy({('g',): g0, ('V',): g0}, [_Relation(0)])
+        eqns, read_vars = _read_of(lambda g, v: 0.9 * v + jnp.tanh(g))
+        assert 'not proven to keep positions' in policy.why_not_carried(('g',), ('V',), eqns, read_vars)
+
+    def test_a_custom_jvp_constant_on_the_read_is_not_proven(self):
+        """A custom_jvp has no derivative in a value it closes over."""
+        def fn(g, v):
+            @jax.custom_jvp
+            def scaled(a):
+                return a * g
+
+            scaled.defjvp(lambda p, t: (scaled(p[0]), t[0] * g))
+            return scaled(v)
+
+        eqns, read_vars = _read_of(fn)
+        (call,) = [e for e in eqns if e.primitive.name == 'custom_jvp_call']
+        assert call.params['num_consts'] >= 1
+        assert not eqn_preserves_positions(call, (1, _N), [0])
 
 
 class _Rule:
@@ -1024,7 +1204,7 @@ class _Rule:
     def edge(self, path_k, path_j):
         return self.edges.get((path_k, path_j), 'keep')
 
-    def why_not_carried(self, path_k, path_j, read_eqns):
+    def why_not_carried(self, path_k, path_j, read_eqns, read_vars):
         self.asked.append((path_k, path_j, [str(e.primitive) for e in read_eqns]))
         return f'not carried: {path_k} -> {path_j}' if (path_k, path_j) in self.uncarried else None
 

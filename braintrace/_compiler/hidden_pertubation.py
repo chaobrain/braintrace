@@ -15,7 +15,7 @@
 
 
 from collections import defaultdict
-from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Sequence, NamedTuple, Any, Tuple, Union
+from typing import Any, Collection, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple, Union
 
 import brainstate
 import jax.core
@@ -55,6 +55,7 @@ from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .hidden_group import (
     HiddenGroup,
 )
+from .position_graph import eqn_preserves_positions
 from .module_info import (
     extract_module_info,
     ModuleInfo,
@@ -99,9 +100,10 @@ class HiddenPerturbation(NamedTuple):
         is cut.
     new_read_conflicts : sequence of str
         Why some in-step reads could not be cut: the relations disagree, the
-        traces do not carry a read across steps (it crosses hidden groups, or
-        goes through an equation the group transition leaves out or that
-        couples positions), or the reads cannot be emitted apart. When
+        traces are not proven to carry a read across steps (it crosses hidden
+        groups, or goes through an equation the group transition leaves out
+        or one not proven position-preserving, i.e. not elementwise), or the
+        reads cannot be emitted apart. When
         non-empty, no read is cut: the signal is the total derivative, which
         counts some in-step paths twice, and the graph carries a
         ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record (also warned).
@@ -145,8 +147,10 @@ class HiddenPerturbation(NamedTuple):
     :math:`h_j`'s group walks through it (within the step) and the transition
     of that group holds it too (across steps): :math:`h_k` and :math:`h_j`
     share the group, and every equation on the read is one the transition
-    computes position-diagonally (:meth:`HiddenGroup.carried_vars`). A read
-    the relations would cut but the transition does not carry is a conflict.
+    computes (:meth:`HiddenGroup.carried_vars`) and is proven
+    position-preserving (elementwise; see
+    :meth:`NewReadPolicy.why_not_carried`). A read the relations would cut
+    but the transition does not provably carry is a conflict.
     An equation that serves both a cut read and the outputs is emitted
     twice, once for each.
 
@@ -394,7 +398,7 @@ class NewReadPolicy:
     ----------
     hid_path_to_group : mapping of Path to HiddenGroup
         The group of each grouped hidden state; :meth:`why_not_carried` reads
-        their :meth:`HiddenGroup.carried_vars`.
+        their :meth:`HiddenGroup.carried_vars` and ``varshape``.
     relations : sequence of HiddenParamOpRelation
         The graph's relations; only their ``hidden_groups`` are read.
     """
@@ -434,22 +438,38 @@ class NewReadPolicy:
             return 'keep'
         return 'conflict'
 
-    def why_not_carried(self, path_k: Path, path_j: Path, read_eqns: Sequence[JaxprEqn]) -> Optional[str]:
+    def why_not_carried(
+        self,
+        path_k: Path,
+        path_j: Path,
+        read_eqns: Sequence[JaxprEqn],
+        read_vars: Collection[Var],
+    ) -> Optional[str]:
         """Why the traces do not carry the read across steps, or ``None``.
 
         A trace carries the history of ``h_j`` through the transition of its
-        group: ``e_j^t = D e^{t-1} + (in-step term)``. When ``h_j``'s update
-        reads the new ``h_k``, the true history of ``h_j`` includes
+        group: ``e_j^t = D e^{t-1} + (in-step term)``, where ``D`` and the
+        in-step term are taken per position. When ``h_j``'s update reads the
+        new ``h_k``, the true history of ``h_j`` includes
         ``h_k^{t-1} -> h_k^t -> h_j^t``. A cut drops that path from the signal
         of ``h_k``, so it is exact only if ``D`` holds it instead. That is
         proven when ``h_k`` and ``h_j`` share a group and every equation on
-        the read (``read_eqns``, from the new ``h_k`` to ``h_j``) computes a
-        value of :meth:`HiddenGroup.carried_vars`: the transition contains it
-        and it keeps positions diagonal (the walker's own inclusion rule).
-        Across groups, through an equation the transition leaves out (a
-        position-coupling ``dot_general``/``conv``, an ETP mixing op, a
-        ``stop_gradient``, a value bound from the forward pass) or through
-        one that couples positions, the read is not carried.
+        the read (``read_eqns``, from the new ``h_k`` to ``h_j``):
+
+        - computes a value of :meth:`HiddenGroup.carried_vars` (the
+          transition contains it; a value bound from the forward pass is held
+          fixed), and
+        - is proven to keep positions, in value and in derivative
+          (:func:`~braintrace._compiler.position_graph.eqn_preserves_positions`:
+          an allow-listed elementwise primitive on the full position shape, or
+          a call whose body and derivative are made of them).
+
+        Anything else is not proven, so not carried: a read across groups;
+        through an equation the transition leaves out (a ``dot_general``/
+        ``conv``, an ETP mixing op, control flow that mixes); or through any
+        equation that is not proven elementwise (a ``roll``, a reduction, a
+        ``gather``, a ``reshape``, a ``custom_vjp``, ...), which the
+        per-position traces carry only in part, if at all.
 
         Parameters
         ----------
@@ -457,6 +477,10 @@ class NewReadPolicy:
             The source and the reader.
         read_eqns : sequence of JaxprEqn
             The equations between the new ``h_k`` and ``h_j``.
+        read_vars : collection of Var
+            The values on the read: the new ``h_k`` and the outvars of
+            ``read_eqns``. An equation's operands among them are its path
+            operands.
 
         Returns
         -------
@@ -466,13 +490,19 @@ class NewReadPolicy:
         gk, gj = self.group(path_k), self.group(path_j)
         if gk is None or gk != gj:
             return f'the read {path_k} -> {path_j} crosses hidden groups, whose traces do not carry it across steps'
+        group = self._groups[gj]
         if gj not in self._carried:
-            self._carried[gj] = self._groups[gj].carried_vars()
+            self._carried[gj] = group.carried_vars()
         carried = self._carried[gj]
+        varshape = tuple(group.varshape)
         for eqn in read_eqns:
             if not all(ov in carried for ov in eqn.outvars):
                 return (f'the read {path_k} -> {path_j} goes through {eqn.primitive}, which the '
-                        f'transition of their group does not carry position-diagonally')
+                        f'transition of their group leaves out or holds fixed')
+            hit = [i for i, v in enumerate(eqn.invars) if isinstance(v, Var) and v in read_vars]
+            if not eqn_preserves_positions(eqn, varshape, hit):
+                return (f'the read {path_k} -> {path_j} goes through {eqn.primitive}, which is not proven '
+                        f'to keep positions (only elementwise equations on the full position shape are)')
         return None
 
 
@@ -557,8 +587,8 @@ def plan_new_read_cuts(
         conflicts. A conflict is recorded, not raised, when:
 
         - the relations disagree on a read (``policy.edge``);
-        - the relations would cut a read that the transition does not carry
-          across steps (``policy.why_not_carried``);
+        - the relations would cut a read that the transition is not proven to
+          carry across steps (``policy.why_not_carried``);
         - a cut read is also made through an ETP op;
         - a kept direct read reaches, without an ETP op, a group that the
           relations tracing the source trace (one signal cannot keep and cut
@@ -671,7 +701,8 @@ def plan_new_read_cuts(
                 conflicts.append(f'{path_of[j]} reads {path_of[k]} both directly and through an ETP op')
             elif decision == 'cut':
                 read_eqns = [eqns[i] for i in sorted(direct & backward([j], direct_only=True))]
-                why = policy.why_not_carried(path_of[k], path_of[j], read_eqns)
+                read_vars = {k, *(ov for e in read_eqns for ov in e.outvars)}
+                why = policy.why_not_carried(path_of[k], path_of[j], read_eqns, read_vars)
                 if why is None:
                     cut.append(j)
                 else:

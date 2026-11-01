@@ -81,6 +81,7 @@ from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
 from .position_graph import (
     _POSITION_PRESERVING_PRIMITIVES,
+    CALL_PRIMITIVES,
     DEFAULT_MAX_JACOBIAN_ELEMENTS,
     build_snap_pattern,
 )
@@ -137,10 +138,6 @@ class HiddenGroup(NamedTuple):
         Descent context when this group's transition is one substep of a
         descended scan (Phase 4 structured scan descent); ``None`` for
         ordinary groups.
-    position_coupled_outvars : frozenset of Var
-        Outvars of the transition equations that couple positions (the
-        recurrent mixing traced in under ``include_recurrent_mixing=True``);
-        empty under diagonal recurrence. See :meth:`carried_vars`.
 
     See Also
     --------
@@ -223,35 +220,27 @@ class HiddenGroup(NamedTuple):
     ``hidden_outvars`` are the outer scan carry vars. ``None`` for ordinary
     groups."""
 
-    position_coupled_outvars: FrozenSet[Var] = frozenset()
-    """Outvars of the equations of ``transition_jaxpr`` that couple the
-    leading ``varshape`` positions: the recurrent mixing that
-    ``include_recurrent_mixing=True`` traces in (the reasons of the walker's
-    position-diagonal inclusion rule). Always empty under diagonal
-    recurrence, whose transition leaves those equations out. Read by
-    :meth:`carried_vars`."""
-
     def carried_vars(self) -> FrozenSet[Var]:
-        """The values the transition computes position-diagonally (issue #239).
+        """The values the transition computes (issue #239).
 
-        The outvars of the equations of ``transition_jaxpr``, less
-        :attr:`position_coupled_outvars`. A value outside this set is either
-        bound from the forward pass (a constvar, so the transition holds it
-        fixed and the group's Jacobian has no term through it) or computed by
-        an equation that couples positions, which the per-position traces
-        carry only in part. The hidden perturbation cuts an in-step read of a
-        new hidden value only when every equation on the read computes a
-        value in this set.
+        The outvars of the equations of ``transition_jaxpr``. A value outside
+        this set is bound from the forward pass (a constvar), so the
+        transition holds it fixed and the group's Jacobian has no term
+        through it. The hidden perturbation cuts an in-step read of a new
+        hidden value only when every equation on the read computes a value in
+        this set *and* is proven to keep positions
+        (:func:`~braintrace._compiler.position_graph.eqn_preserves_positions`):
+        a position-coupling equation the transition holds (traced in under
+        ``include_recurrent_mixing=True``, or one the walker's rule does not
+        name, such as a ``roll``) is carried by the per-position traces only
+        in part.
 
         Returns
         -------
         frozenset of Var
-            The position-diagonal values of the transition.
+            The values the transition computes.
         """
-        return frozenset(
-            ov for eq in self.transition_jaxpr.eqns for ov in eq.outvars
-            if ov not in self.position_coupled_outvars
-        )
+        return frozenset(ov for eq in self.transition_jaxpr.eqns for ov in eq.outvars)
 
     @property
     def varshape(self) -> Tuple[int, ...]:
@@ -1482,10 +1471,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # where hidden-derived values keep their positions (``_position_layout``)
         self.position_layout: Dict[Var, _PositionLayout] = dict()
 
-        # outvars of every equation the position-diagonal inclusion rule
-        # (``_diagonal_boundary``) leaves out, in either mode (an ordered set)
-        self.diagonal_boundary_outvars: Dict[Var, None] = dict()
-
         super().__init__(
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
@@ -1506,7 +1491,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # the data structures for the tracing hidden-hidden relationships
         self.active_tracers = dict()
         self.position_layout = dict()
-        self.diagonal_boundary_outvars = dict()
 
         # evaluating the jaxpr
         self._eval_jaxpr(self.jaxpr)
@@ -1531,11 +1515,8 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         """Why the position-diagonal transition leaves ``eqn`` out, or ``None``.
 
         The one inclusion rule of the hidden-to-hidden transition under
-        diagonal recurrence (``include_recurrent_mixing=False``). It is
-        evaluated in both modes: :meth:`_eval_eqn` applies it, and every
-        equation it names is recorded in :attr:`diagonal_boundary_outvars`,
-        which the in-step read cuts of the hidden perturbation consult
-        (issue #239, :meth:`HiddenGroup.carried_vars`). The reasons:
+        diagonal recurrence (``include_recurrent_mixing=False``), applied by
+        :meth:`_eval_eqn`. The reasons:
 
         ``'stop_gradient'``
             No derivative flows through it, in either mode.
@@ -1574,11 +1555,15 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             (and reported by :meth:`_eval_eqn`).
         ``'control_flow_mixing'``
             An opaque control-flow equation (while, or a scan/cond the
-            canonicalizer left opaque) whose *body* applies a recurrent
-            weight-mixing primitive to the carried hidden state: it couples
-            the positions exactly like a top-level recurrent matmul. Bodies
-            that only mix loop constants (an input projection ``x @ W_in``)
-            are kept.
+            canonicalizer left opaque) or a call-like equation the
+            canonicalizer does not inline (``custom_jvp_call``,
+            ``custom_vjp_call``, ``checkpoint``/``remat``, a ``closed_call``)
+            whose *body* applies a recurrent weight-mixing primitive to a
+            hidden-derived input: it couples the positions exactly like a
+            top-level recurrent matmul (issue #239). Bodies that only mix
+            loop constants (an input projection ``x @ W_in``) are kept. A
+            call body whose inputs cannot be matched to the equation's is
+            assumed to mix.
         """
         if eqn.primitive.name == 'stop_gradient':
             return 'stop_gradient'
@@ -1600,6 +1585,8 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             and self._control_flow_mixes_hidden(eqn)
         ):
             return 'control_flow_mixing'
+        if eqn.primitive.name in CALL_PRIMITIVES and self._call_mixes_hidden(eqn):
+            return 'control_flow_mixing'
         return None
 
     def _eval_eqn(self, eqn: JaxprEqn) -> None:
@@ -1607,8 +1594,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         Evaluating the normal jaxpr equation.
         """
         why = self._diagonal_boundary(eqn)
-        if why is not None:
-            self.diagonal_boundary_outvars.update(dict.fromkeys(eqn.outvars))
         if why == 'stop_gradient':
             return
 
@@ -1932,6 +1917,24 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             for sub, seeds, feedback in _map_positions_to_subjaxpr_seeds(eqn, positions)
         )
 
+    def _call_mixes_hidden(self, eqn: JaxprEqn) -> bool:
+        """Whether a call-like equation's body applies a recurrent
+        weight-mixing primitive to a hidden-derived input (issue #239).
+
+        The body's inputs are the equation's, position for position (as
+        :func:`_jaxpr_mixes_from` descends a call inside a loop body); a body
+        whose arity differs is assumed to mix.
+        """
+        positions = self._hidden_derived_invar_positions(eqn)
+        if not positions:
+            return False
+        for sub in _param_subjaxprs(eqn):
+            if len(sub.invars) != len(eqn.invars):
+                return True
+            if _jaxpr_mixes_from(sub, [sub.invars[j] for j in positions], {}):
+                return True
+        return False
+
     def _attach_snap_pattern(self, group: HiddenGroup) -> HiddenGroup:
         """Derive and attach this group's SnAp-n neighbourhood, if one is asked for.
 
@@ -2110,11 +2113,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                 # constvars bound from the forward pass.
                 transition_jaxpr_constvars=jaxpr_constvars(jaxpr, len(hidden_invars)),
                 is_diagonal_recurrence=not self.include_recurrent_mixing,
-                # empty in the default mode, whose transition leaves these out
-                position_coupled_outvars=frozenset(
-                    ov for eq in jaxpr.eqns for ov in eq.outvars
-                    if ov in self.diagonal_boundary_outvars
-                ),
             )
             group = self._attach_snap_pattern(group)
             # Belt-and-braces: the per-transition shape filter in

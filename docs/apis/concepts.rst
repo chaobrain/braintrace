@@ -166,17 +166,20 @@ history ``g^{t-1} -> g^t -> V^t`` from the signal of ``g``, so the trace of ``V`
 must carry that too, through the transition of its hidden group. The compiler
 therefore cuts a read only when every relation whose hidden groups include
 ``g``'s group also includes ``V``'s, ``g`` and ``V`` share a hidden group, and
-every equation on the read is one the group transition computes
-position-diagonally (``HiddenGroup.carried_vars``: the transition contains it,
-and it is not a position-coupling ``dot_general``/``conv``, an ETP mixing op or
-a ``stop_gradient``). It records the cut (``DiagnosticKind.HIDDEN_NEW_READ_CUT``,
+every equation on the read is computed by the group transition
+(``HiddenGroup.carried_vars``) and is proven position-preserving (elementwise):
+an allow-listed elementwise primitive on the full position shape, or a
+``custom_jvp``/``checkpoint`` call whose body and derivative rule are made of
+them. A ``roll``, a reduction, a ``gather``, a ``reshape``, a ``dot_general``
+or a ``custom_vjp`` on the read is not proven, so the read is not cut. It
+records the cut (``DiagnosticKind.HIDDEN_NEW_READ_CUT``,
 INFO); the perturbed step evaluates the read on the unperturbed ``g``, and an
 equation that also feeds the outputs on the perturbed one. A read through an
 ETP op without gradient (a stacked layer), or one that no trace carries, keeps
 the total derivative. When a read cannot be cut although a trace carries it
 within the step (one relation traces ``V``'s group and another does not; the
-read crosses hidden groups, or goes through a ``dot_general`` the diagonal
-transition leaves out), the signal stays the total derivative and the graph
+read crosses hidden groups, or goes through an equation not proven
+position-preserving), the signal stays the total derivative and the graph
 records ``DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT`` (ERROR, also warned);
 ``vjp_method='multi-step'`` builds no perturbation and avoids it.
 ``graph.hidden_perturb`` declares the outcome: ``new_read_cuts``,

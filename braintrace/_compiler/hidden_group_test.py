@@ -2638,7 +2638,7 @@ def _channel_graph(**kwargs):
     return groups, assumed
 
 
-def _channel_grads(algorithm, steps=30, **kwargs):
+def _channel_grads(algorithm, steps=30, vjp_method='single-step', **kwargs):
     with brainstate.environ.context(precision=64):
         cell = _ChannelCell(**kwargs)
         brainstate.nn.init_all_states(cell)
@@ -2647,7 +2647,7 @@ def _channel_grads(algorithm, steps=30, **kwargs):
         ys = jnp.asarray(rng.uniform(0, 1, (steps, cell.n)))
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
-            learner = braintrace.compile(cell, algorithm, xs[0])
+            learner = braintrace.compile(cell, algorithm, xs[0], vjp_method=vjp_method)
             g = learner.etrace_grad(
                 xs, ys, step_fn=lambda x, y: jnp.mean((learner(x) - y) ** 2),
                 weights={'W_in': cell.W_in, 'W_rec': cell.W_rec}, reduction='sum')
@@ -2676,7 +2676,14 @@ class TestStateAxisContraction:
         assert groups == _ONE_GROUP and not assumed
         g_dot = _channel_grads(algorithm, total='dot', recurrent=recurrent)
         _assert_grads_equal(g_dot, _channel_grads(algorithm, total='sum', recurrent=recurrent))
-        _assert_grads_equal(g_dot, _channel_grads(algorithm, total='separate', recurrent=recurrent))
+        # Single-step, V's read of the new channels is cut only for the separate
+        # states (elementwise adds); a read of a group state's slots (a sum or a
+        # dot over its state axis) is not proven position-preserving, so those
+        # graphs keep the total derivative (#239; slot reads are follow-up work
+        # under #233). Multi-step builds no perturbation: all three agree.
+        _assert_grads_equal(_channel_grads(algorithm, total='dot', recurrent=recurrent, vjp_method='multi-step'),
+                            _channel_grads(algorithm, total='separate', recurrent=recurrent,
+                                           vjp_method='multi-step'))
 
     def test_paired_position_batch_dims_stay_in_the_group(self):
         groups, assumed = _channel_graph(total='sq_einsum')
@@ -2782,9 +2789,8 @@ class _ReadThroughDot(brainstate.nn.Module):
 
 
 class TestCarriedVars:
-    """``HiddenGroup.carried_vars`` and ``position_coupled_outvars`` (#239): the
-    values the transition computes position-diagonally, by the walker's own
-    inclusion rule."""
+    """``HiddenGroup.carried_vars`` (#239): the values the transition computes.
+    Whether they keep positions is the planner's separate proof."""
 
     @staticmethod
     def _group(include_recurrent_mixing):
@@ -2799,21 +2805,17 @@ class TestCarriedVars:
     def _outvars(group, name):
         return {ov for e in group.transition_jaxpr.eqns if e.primitive.name == name for ov in e.outvars}
 
-    def test_diagonal_transition_leaves_the_dot_out_and_carries_the_rest(self):
+    def test_diagonal_transition_leaves_the_dot_out(self):
         group = self._group(False)
-        assert group.position_coupled_outvars == frozenset()
         assert self._outvars(group, 'dot_general') == set()
         carried = group.carried_vars()
-        tanh = self._outvars(group, 'tanh')
-        assert tanh and tanh <= carried
+        assert self._outvars(group, 'tanh') and self._outvars(group, 'tanh') <= carried
         assert carried == {ov for e in group.transition_jaxpr.eqns for ov in e.outvars}
 
-    def test_coupled_transition_holds_the_dot_but_does_not_carry_it(self):
+    def test_coupled_transition_holds_the_dot(self):
         group = self._group(True)
         dot = self._outvars(group, 'dot_general')
-        assert dot and group.position_coupled_outvars == dot
-        carried = group.carried_vars()
-        assert not dot & carried and self._outvars(group, 'tanh') <= carried
+        assert dot and dot <= group.carried_vars()
 
     def test_stop_gradient_is_a_boundary_in_both_modes(self):
         class _Detached(_ReadThroughDot):
@@ -2827,5 +2829,93 @@ class TestCarriedVars:
             brainstate.nn.init_all_states(cell, batch_size=1)
             groups, _ = find_hidden_groups_from_module(cell, jnp.ones((1, 3)), include_recurrent_mixing=mode)
             for group in groups:
-                names = {e.primitive.name for e in group.transition_jaxpr.eqns}
-                assert 'stop_gradient' not in names and group.position_coupled_outvars == frozenset()
+                assert 'stop_gradient' not in {e.primitive.name for e in group.transition_jaxpr.eqns}
+
+
+_DENSE33 = np.linspace(0.1, 0.9, 9).reshape(3, 3) / 2
+
+
+def _dense33(a):
+    return a @ jnp.asarray(_DENSE33, a.dtype)
+
+
+@jax.custom_jvp
+def _cj_dense33(a):
+    return _dense33(a)
+
+
+@_cj_dense33.defjvp
+def _cj_dense33_jvp(primals, tangents):
+    return _dense33(primals[0]), _dense33(tangents[0])
+
+
+@jax.custom_jvp
+def _cj_tanh(a):
+    return jnp.tanh(a)
+
+
+@_cj_tanh.defjvp
+def _cj_tanh_jvp(primals, tangents):
+    return jnp.tanh(primals[0]), tangents[0] * 1.5 / (1 + primals[0] ** 2)
+
+
+class _CallRecurrence(brainstate.nn.Module):
+    """h recurs through ``call(h)``, a call-like equation the canonicalizer
+    does not inline."""
+
+    call = staticmethod(_dense33)
+
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.h = brainstate.HiddenState(0.3 * jnp.ones((batch_size, 3)))
+
+    def update(self, x):
+        self.h.value = 0.5 * self.h.value + type(self).call(self.h.value) + self.W(x)
+        return self.h.value
+
+
+_CALLS = {
+    'custom_jvp-dense': (_cj_dense33, 'custom_jvp_call', True),
+    'checkpoint-dense': (jax.checkpoint(_dense33), 'remat2', True),
+    'custom_jvp-elementwise': (_cj_tanh, 'custom_jvp_call', False),
+    'checkpoint-elementwise': (jax.checkpoint(jnp.tanh), 'remat2', False),
+}
+
+
+class TestCallLikeRecurrentMixing:
+    """A recurrent weight-mixing primitive inside a call-like equation
+    (``custom_jvp_call``, ``checkpoint``) couples positions like a top-level
+    one (#239 fix-check): under diagonal recurrence the call is a boundary,
+    reported as ``CONTROL_FLOW_RECURRENT_MIXING``; a call whose body keeps
+    positions stays in the transition."""
+
+    @staticmethod
+    def _compile(call, include_recurrent_mixing):
+        cls = type('_Cell', (_CallRecurrence,), {'call': staticmethod(call)})
+        cell = cls()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                groups, _ = find_hidden_groups_from_module(
+                    cell, jnp.ones((1, 3)), include_recurrent_mixing=include_recurrent_mixing)
+        (group,) = groups
+        names = {e.primitive.name for e in group.transition_jaxpr.eqns}
+        kinds = {r.kind for r in reporter.records()}
+        return names, kinds
+
+    @pytest.mark.parametrize('name', sorted(_CALLS))
+    def test_diagonal_recurrence(self, name):
+        call, primitive, mixes = _CALLS[name]
+        names, kinds = self._compile(call, False)
+        assert (primitive in names) is not mixes
+        assert (DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING in kinds) is mixes
+
+    @pytest.mark.parametrize('name', sorted(_CALLS))
+    def test_coupled_recurrence_traces_through_the_call(self, name):
+        call, primitive, _ = _CALLS[name]
+        names, kinds = self._compile(call, True)
+        assert primitive in names and DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
