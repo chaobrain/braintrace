@@ -94,18 +94,26 @@ class HiddenPerturbation(NamedTuple):
     new_read_cuts : sequence of (Path, Path)
         The in-step reads ``(k, j)``, by the update of ``h_j``, of the new
         value of ``h_k`` that the learning signal holds fixed, because every
-        eligibility trace paired with ``h_k``'s signal already carries them
-        (see the Notes). Empty when nothing is cut.
+        eligibility trace paired with ``h_k``'s signal already carries them,
+        within the step and across steps (see the Notes). Empty when nothing
+        is cut.
     new_read_conflicts : sequence of str
-        Why the in-step reads could not be separated. When non-empty, no read
-        is cut: the signal is today's total derivative, which counts some
-        in-step paths twice, and the graph carries a
-        ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record.
+        Why some in-step reads could not be cut: the relations disagree, the
+        traces do not carry a read across steps (it crosses hidden groups, or
+        goes through an equation the group transition leaves out or that
+        couples positions), or the reads cannot be emitted apart. When
+        non-empty, no read is cut: the signal is the total derivative, which
+        counts some in-step paths twice, and the graph carries a
+        ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record (also warned).
     new_read_exact : bool
-        ``True`` iff the reads were planned and no conflict was found: every
-        in-step read of a new hidden value is then either cut or counted
-        once. ``False`` when they were not planned (no relations, as in
-        :func:`add_hidden_perturbation_in_module`) or a conflict was found.
+        ``True`` iff the reads were planned and no conflict was found: then no
+        in-step read of a new hidden value is double counted in the
+        single-step learning signal. It does not say that the single-step
+        gradient is exact: the approximations of the learner itself (a
+        diagonal trace of a coupled recurrence, a path the traces do not
+        cover) are separate. ``False`` when the reads were not planned (no
+        relations, as in :func:`add_hidden_perturbation_in_module`) or a
+        conflict was found.
 
     See Also
     --------
@@ -133,8 +141,14 @@ class HiddenPerturbation(NamedTuple):
     :math:`\hat{h}^t_k` instead, and :math:`s_k` is the partial derivative with
     that read held fixed. Otherwise the path through the read would be
     counted twice, once in :math:`s_j e_j` and once in :math:`s_k e_k`
-    (issue #239). An equation that serves both a cut read and the outputs is
-    emitted twice, once for each.
+    (issue #239). A trace carries a read when the ``y -> hidden`` jaxpr of
+    :math:`h_j`'s group walks through it (within the step) and the transition
+    of that group holds it too (across steps): :math:`h_k` and :math:`h_j`
+    share the group, and every equation on the read is one the transition
+    computes position-diagonally (:meth:`HiddenGroup.carried_vars`). A read
+    the relations would cut but the transition does not carry is a conflict.
+    An equation that serves both a cut read and the outputs is emitted
+    twice, once for each.
 
     Examples
     --------
@@ -354,19 +368,21 @@ HiddenPerturbation.__module__ = 'braintrace'
 
 
 class NewReadPolicy:
-    """Which in-step reads of a new hidden value the relations' traces carry.
+    """Which in-step reads of a new hidden value the traces carry.
 
     Used by :func:`plan_new_read_cuts` (issue #239). The update of ``h_j``
     reads the new value of ``h_k`` in the same step. The relations whose
     groups include ``h_k``'s group are the ones whose traces pair with
-    ``h_k``'s learning signal. The read is:
+    ``h_k``'s learning signal. :meth:`edge` decides the read from them:
 
     ``'cut'``
         when every one of them also includes ``h_j``'s group. Each of their
-        traces then carries the path through the read, because the
+        traces then carries the in-step path through the read, because the
         ``y -> hidden`` jaxpr of ``h_j``'s group walks back through the
-        producer of ``h_k`` (``hid_param_op._build_transition_jaxpr``). The
-        signal of ``h_k`` must hold the read fixed.
+        producer of ``h_k`` (``hid_param_op._build_transition_jaxpr``), so
+        the signal of ``h_k`` would count it a second time. The read is cut
+        only if the traces also carry it across steps
+        (:meth:`why_not_carried`); otherwise it is a conflict.
     ``'keep'``
         when none of them includes ``h_j``'s group, when ``h_k`` or ``h_j``
         is in no group, or when no relation traces ``h_k``'s group. No trace
@@ -377,13 +393,16 @@ class NewReadPolicy:
     Parameters
     ----------
     hid_path_to_group : mapping of Path to HiddenGroup
-        The group of each grouped hidden state.
+        The group of each grouped hidden state; :meth:`why_not_carried` reads
+        their :meth:`HiddenGroup.carried_vars`.
     relations : sequence of HiddenParamOpRelation
         The graph's relations; only their ``hidden_groups`` are read.
     """
 
     def __init__(self, hid_path_to_group: Mapping[Path, HiddenGroup], relations: Sequence[Any]):
         self._group = {path: group.index for path, group in hid_path_to_group.items()}
+        self._groups = {group.index: group for group in hid_path_to_group.values()}
+        self._carried: Dict[int, FrozenSet[Var]] = {}
         self._relation_groups = tuple(
             frozenset(group.index for group in relation.hidden_groups) for relation in relations
         )
@@ -414,6 +433,47 @@ class NewReadPolicy:
         if not any(covers):
             return 'keep'
         return 'conflict'
+
+    def why_not_carried(self, path_k: Path, path_j: Path, read_eqns: Sequence[JaxprEqn]) -> Optional[str]:
+        """Why the traces do not carry the read across steps, or ``None``.
+
+        A trace carries the history of ``h_j`` through the transition of its
+        group: ``e_j^t = D e^{t-1} + (in-step term)``. When ``h_j``'s update
+        reads the new ``h_k``, the true history of ``h_j`` includes
+        ``h_k^{t-1} -> h_k^t -> h_j^t``. A cut drops that path from the signal
+        of ``h_k``, so it is exact only if ``D`` holds it instead. That is
+        proven when ``h_k`` and ``h_j`` share a group and every equation on
+        the read (``read_eqns``, from the new ``h_k`` to ``h_j``) computes a
+        value of :meth:`HiddenGroup.carried_vars`: the transition contains it
+        and it keeps positions diagonal (the walker's own inclusion rule).
+        Across groups, through an equation the transition leaves out (a
+        position-coupling ``dot_general``/``conv``, an ETP mixing op, a
+        ``stop_gradient``, a value bound from the forward pass) or through
+        one that couples positions, the read is not carried.
+
+        Parameters
+        ----------
+        path_k, path_j : Path
+            The source and the reader.
+        read_eqns : sequence of JaxprEqn
+            The equations between the new ``h_k`` and ``h_j``.
+
+        Returns
+        -------
+        str or None
+            The reason, for the conflict record; ``None`` when carried.
+        """
+        gk, gj = self.group(path_k), self.group(path_j)
+        if gk is None or gk != gj:
+            return f'the read {path_k} -> {path_j} crosses hidden groups, whose traces do not carry it across steps'
+        if gj not in self._carried:
+            self._carried[gj] = self._groups[gj].carried_vars()
+        carried = self._carried[gj]
+        for eqn in read_eqns:
+            if not all(ov in carried for ov in eqn.outvars):
+                return (f'the read {path_k} -> {path_j} goes through {eqn.primitive}, which the '
+                        f'transition of their group does not carry position-diagonally')
+        return None
 
 
 class NewReadPlan(NamedTuple):
@@ -463,10 +523,11 @@ def plan_new_read_cuts(
     A *read* of the new ``h_k`` by ``h_j``: ``h_j`` is the first hidden outvar
     on a path of top-level equations from ``h_k``. A read on a path without
     an ETP op that has no gradient (a *direct* read) is decided by
-    ``policy.edge``; a read only through such an op is kept, because the
-    traces stop there. A read inside one equation (a ``jit`` or ``scan``
-    that produces both states) is not a read here: the perturbation is added
-    after the equation.
+    ``policy.edge``, and a read it would cut is cut only if
+    ``policy.why_not_carried`` finds the group transition carries it; a read
+    only through such an op is kept, because the traces stop there. A read
+    inside one equation (a ``jit`` or ``scan`` that produces both states) is
+    not a read here: the perturbation is added after the equation.
 
     Parameters
     ----------
@@ -488,6 +549,8 @@ def plan_new_read_cuts(
         conflicts. A conflict is recorded, not raised, when:
 
         - the relations disagree on a read (``policy.edge``);
+        - the relations would cut a read that the transition does not carry
+          across steps (``policy.why_not_carried``);
         - a cut read is also made through an ETP op;
         - a kept direct read reaches, without an ETP op, a group that the
           relations tracing the source trace (one signal cannot keep and cut
@@ -511,7 +574,7 @@ def plan_new_read_cuts(
     # a read-only hidden state has no producer: its readers see h^{t-1}
     sources = [v for v in dict.fromkeys(hidden_outvars) if v in producer]
 
-    def forward(k: Var):
+    def forward(k: Var) -> Tuple[Set[int], Set[int], Dict[Var, Set[str]]]:
         """The equations reached from ``k`` (all, and those on a direct
         path), and the hidden outvars reached first, with how."""
         seen: Set[Tuple[Var, bool]] = set()
@@ -597,7 +660,12 @@ def plan_new_read_cuts(
             elif decision == 'cut' and 'etp' in how:
                 conflicts.append(f'{path_of[j]} reads {path_of[k]} both directly and through an ETP op')
             elif decision == 'cut':
-                cut.append(j)
+                read_eqns = [eqns[i] for i in sorted(direct & backward([j], direct_only=True))]
+                why = policy.why_not_carried(path_of[k], path_of[j], read_eqns)
+                if why is None:
+                    cut.append(j)
+                else:
+                    conflicts.append(why)
             else:
                 kept.append(j)
                 kept_direct.append((k, j))

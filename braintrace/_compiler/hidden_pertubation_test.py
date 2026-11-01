@@ -572,7 +572,11 @@ from braintrace._compiler.hidden_pertubation import (
     add_hidden_perturbation_from_minfo,
     plan_new_read_cuts,
 )
-from braintrace._testing.oracle import bptt_param_gradients, online_param_gradients_singlestep_naive
+from braintrace._testing.oracle import (
+    bptt_param_gradients,
+    chunked_online_param_gradients,
+    online_param_gradients_singlestep_naive,
+)
 
 _N = 4
 _MIX = np.linspace(0.5, 1.5, _N * 3).reshape(_N, 3)
@@ -713,6 +717,163 @@ class _DirectAndEtp(_SameGroup):
         return self.V.value
 
 
+class _ConflictPlusCut(brainstate.nn.Module):
+    """A conflict (h2 reads h1 directly and through an ETP op) next to an
+    independent read the policy would cut (g -> V): no read is cut."""
+
+    def __init__(self):
+        super().__init__()
+        self.W1 = braintrace.nn.Linear(3, _N)
+        self.W2 = braintrace.nn.Linear(_N, _N)
+        self.Wg = braintrace.nn.Linear(3, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for name in ('h1', 'h2', 'g', 'V'):
+            setattr(self, name, brainstate.HiddenState(_zeros(batch_size)))
+
+    def update(self, x):
+        self.h1.value = 0.8 * self.h1.value + jnp.tanh(self.W1(x))
+        self.h2.value = 0.9 * self.h2.value + jnp.tanh(self.W2(self.h1.value)) + 0.3 * jnp.sin(self.h1.value)
+        self.g.value = 0.8 * self.g.value + self.Wg(x)
+        self.V.value = 0.9 * self.V.value + jnp.tanh(self.g.value)
+        return self.h2.value + self.V.value
+
+
+class _CutSourceEtpReader(brainstate.nn.Module):
+    """g1 -> V1 is cut; a stacked layer also reads the new g1 through an ETP
+    op, and that read must see the perturbed g1."""
+
+    def __init__(self):
+        super().__init__()
+        self.W1 = braintrace.nn.Linear(3, _N)
+        self.W2 = braintrace.nn.Linear(_N, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for name in ('g1', 'V1', 'h2'):
+            setattr(self, name, brainstate.HiddenState(_zeros(batch_size)))
+
+    def update(self, x):
+        self.g1.value = 0.8 * self.g1.value + self.W1(x)
+        self.V1.value = 0.9 * self.V1.value + jnp.tanh(self.g1.value)
+        self.h2.value = 0.9 * self.h2.value + jnp.tanh(self.W2(self.g1.value))
+        return self.V1.value + self.h2.value
+
+
+# The reads a trace does not carry across steps (review of #247): the
+# relations would cut them, but the transition of the reader's group does not
+# hold the read, so a cut would drop the history term ``h_k^{t-1} -> h_k^t ->
+# h_j^t`` from every signal. Each must be reported, not cut.
+_MIX44 = np.linspace(0.2, 1.0, _N * _N).reshape(_N, _N)
+
+
+class _TwoStates(brainstate.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.g = brainstate.HiddenState(_zeros(batch_size))
+        self.V = brainstate.HiddenState(_zeros(batch_size))
+
+
+class _NoRecG(_TwoStates):
+    """g has no recurrence: g and V fall in two groups, V reads the new g."""
+
+    def update(self, x):
+        y = self.W(x)
+        self.g.value = y * 1.0
+        self.V.value = 0.9 * self.V.value + jnp.tanh(self.g.value) + jnp.sin(y)
+        return self.V.value
+
+
+class _DiagMix(_TwoStates):
+    """V reads the new g through 0.7 I (a dot_general): two groups."""
+
+    def update(self, x):
+        y = self.W(x)
+        self.g.value = 0.8 * self.g.value + y
+        mix = jnp.asarray(0.7 * np.eye(_N), self.g.value.dtype)
+        self.V.value = 0.9 * self.V.value + jnp.sin(y) + jnp.tanh(self.g.value) @ mix
+        return self.V.value
+
+
+class _MixG(_TwoStates):
+    """g recurs through a constant mix (its own group); V reads it elementwise."""
+
+    def update(self, x):
+        y = self.W(x)
+        mix = jnp.asarray(_MIX44 / 3, self.g.value.dtype)
+        self.g.value = self.g.value @ mix + y
+        self.V.value = 0.9 * self.V.value + jnp.sin(y) + jnp.tanh(self.g.value)
+        return self.V.value
+
+
+class _RecViaEtp(_TwoStates):
+    """g recurs through an ETP matrix: the relations disagree on g -> V."""
+
+    def __init__(self):
+        super().__init__()
+        self.R = braintrace.nn.Linear(_N, _N)
+
+    def update(self, x):
+        y = self.W(x)
+        self.g.value = 0.3 * self.R(self.g.value) + y
+        self.V.value = 0.9 * self.V.value + jnp.sin(y) + jnp.tanh(self.g.value)
+        return self.V.value
+
+
+class _Real(brainstate.nn.Module):
+    """One group: h1 and h2 read the new h0 elementwise, h2 reads the new h1
+    through M = 0.6 I (a dot_general the diagonal transition leaves out)."""
+
+    M = 0.6 * np.eye(3)
+
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for i in range(3):
+            setattr(self, f'h{i}', brainstate.HiddenState(0.3 * (i + 1) * jnp.ones((batch_size, 3))))
+
+    def read_h1(self, h1):
+        return h1 @ jnp.asarray(self.M, h1.dtype)
+
+    def update(self, x):
+        self.h0.value = 0.8 * self.h0.value + jnp.tanh(self.W(x))
+        self.h1.value = 0.5 * self.h1.value + jnp.tanh(self.h0.value)
+        self.h2.value = 0.5 * self.h2.value + self.read_h1(self.h1.value) + 0.1 * jnp.tanh(self.h0.value)
+        return self.h2.value
+
+
+class _RealDense(_Real):
+    """The same with a dense M."""
+
+    M = np.linspace(0.1, 0.9, 9).reshape(3, 3) / 2
+
+
+class _RealMul(_Real):
+    """The same read written elementwise: every read is carried and cut."""
+
+    def read_h1(self, h1):
+        return 0.6 * h1
+
+
+_ALGORITHMS = {'D_RTRL': braintrace.D_RTRL, 'EProp': braintrace.EProp, 'OSTLRecurrent': braintrace.OSTLRecurrent}
+_P3 = ('D_RTRL', 'EProp')
+_P7 = ('D_RTRL', 'EProp', 'OSTLRecurrent')
+_ALL_THREE = [(('h0',), ('h1',)), (('h0',), ('h2',)), (('h1',), ('h2',))]
+# name: (model, algorithms, the declared cuts, or None for a reported conflict)
+_CARRY_CASES = {
+    'no-rec-g': (_NoRecG, _P3, None),
+    'diag-mix': (_DiagMix, _P3, None),
+    'mix-g': (_MixG, _P3, None),
+    'rec-via-etp': (_RecViaEtp, _P3, None),
+    'real': (_Real, _P7, None),
+    'real-dense': (_RealDense, _P7, None),
+    'real-mul': (_RealMul, _P7, _ALL_THREE),
+}
+
 _CUT_MODELS = {
     'same-group': (_SameGroup, [(('g',), ('V',))]),
     'shared': (_Shared, [(('g',), ('V',))]),
@@ -759,9 +920,26 @@ def _worst_relative_error(cls, steps, algo_factory=braintrace.D_RTRL, precision=
                if np.linalg.norm(r) > 0)
 
 
+class _Everything:
+    def __contains__(self, item):
+        return True
+
+
 class _Group:
-    def __init__(self, index):
+    """A group stub; its transition carries every value unless ``carried``
+    names the ones it does."""
+
+    def __init__(self, index, carried=None):
         self.index = index
+        self._carried = _Everything() if carried is None else frozenset(carried)
+
+    def carried_vars(self):
+        return self._carried
+
+
+class _Eqn:
+    def __init__(self, primitive, *outvars):
+        self.primitive, self.outvars = primitive, list(outvars)
 
 
 class _Relation:
@@ -805,14 +983,50 @@ class TestNewReadPolicy:
         assert policy.traced(('x',)) == frozenset()
 
 
+class TestWhyNotCarried:
+    """A read the relations would cut is cut only if the group transition
+    carries it across steps: one group, every equation on the read computing
+    a value of ``HiddenGroup.carried_vars``."""
+
+    def _policy(self):
+        g0 = _Group(0, carried={'t', 'v'})
+        groups = {('g',): g0, ('V',): g0, ('c',): _Group(1)}
+        return NewReadPolicy(groups, [_Relation(0, 1)])
+
+    def test_a_read_within_the_group_through_carried_equations_is_carried(self):
+        policy = self._policy()
+        assert policy.why_not_carried(('g',), ('V',), [_Eqn('tanh', 't'), _Eqn('add', 'v')]) is None
+        assert policy.why_not_carried(('g',), ('V',), []) is None
+
+    def test_a_read_across_groups_is_not_carried(self):
+        policy = self._policy()
+        assert policy.edge(('g',), ('c',)) == 'cut'
+        why = policy.why_not_carried(('g',), ('c',), [_Eqn('tanh', 't')])
+        assert why == "the read ('g',) -> ('c',) crosses hidden groups, whose traces do not carry it across steps"
+        assert 'crosses hidden groups' in policy.why_not_carried(('x',), ('V',), [])
+
+    def test_a_read_through_an_equation_the_transition_leaves_out_is_not_carried(self):
+        policy = self._policy()
+        why = policy.why_not_carried(('g',), ('V',), [_Eqn('dot_general', 'm'), _Eqn('add', 'v')])
+        assert why == ("the read ('g',) -> ('V',) goes through dot_general, which the transition "
+                       "of their group does not carry position-diagonally")
+        # every output of a multi-output equation must be carried
+        assert policy.why_not_carried(('g',), ('V',), [_Eqn('jit', 't', 'm')]) is not None
+
+
 class _Rule:
     """A planner policy from fixed decisions (for hand-built jaxprs)."""
 
-    def __init__(self, edges, groups=None, traced=()):
+    def __init__(self, edges, groups=None, traced=(), uncarried=()):
         self.edges, self.groups, self._traced = edges, groups or {}, frozenset(traced)
+        self.uncarried, self.asked = frozenset(uncarried), []
 
     def edge(self, path_k, path_j):
         return self.edges.get((path_k, path_j), 'keep')
+
+    def why_not_carried(self, path_k, path_j, read_eqns):
+        self.asked.append((path_k, path_j, [str(e.primitive) for e in read_eqns]))
+        return f'not carried: {path_k} -> {path_j}' if (path_k, path_j) in self.uncarried else None
 
     def group(self, path):
         return self.groups.get(path)
@@ -976,6 +1190,36 @@ class TestPlanNewReadCuts:
         assert plan.cuts == ((('h0',), ('h1',)),) and plan.conflicts == ()
         assert out_eqn in plan.output_eqns and out_eqn not in plan.state_eqns
 
+    def test_one_source_with_two_cut_reads_cuts_both(self):
+        # h0 -> h1 and h0 -> h2: every cut read of one source is cut
+        def fn(h0, h1, h2, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), 0.9 * h2 + jnp.sin(n0), h2
+
+        rule = _Rule({(('h0',), ('h1',)): 'cut', (('h0',), ('h2',)): 'cut'})
+        plan = _plan(fn, 3, rule, n_args=4)
+        assert plan.cuts == ((('h0',), ('h1',)), (('h0',), ('h2',))) and plan.conflicts == ()
+        assert len(plan.sources) == 1
+
+    def test_the_policy_is_asked_about_the_equations_on_the_read(self):
+        def fn(h0, h1, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), h1
+
+        rule = _Rule(self.cut01)
+        _plan(fn, 2, rule)
+        assert rule.asked == [(('h0',), ('h1',), ['tanh', 'add'])]
+
+    def test_a_cut_read_the_transition_does_not_carry_conflicts(self):
+        def fn(h0, h1, h2, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), 0.9 * h2 + jnp.sin(n0), h2
+
+        rule = _Rule({(('h0',), ('h1',)): 'cut', (('h0',), ('h2',)): 'cut'},
+                     uncarried={(('h0',), ('h2',))})
+        plan = _plan(fn, 3, rule, n_args=4)
+        assert plan.conflicts == ("not carried: ('h0',) -> ('h2',)",)
+
     def test_a_reader_in_no_group_is_kept_and_reads_the_perturbed_value(self):
         # #240's latch: h2 (in no group) copies the new h0; h1 (h0's group) is cut
         def fn(h0, h1, h2, x, w):
@@ -1022,7 +1266,9 @@ class TestNewReadCutsOnGraphs:
     def test_a_kept_read_is_exact_at_one_step(self, name):
         assert _worst_relative_error(_KEEP_MODELS[name], 1) < 1e-12
 
-    @pytest.mark.parametrize('cls', [_Disagree, _DirectAndEtp])
+    # _ConflictPlusCut and _Real also hold a read the policy would cut: the
+    # plan of a graph with a conflict must not be applied at all
+    @pytest.mark.parametrize('cls', [_Disagree, _DirectAndEtp, _ConflictPlusCut, _Real])
     def test_a_conflict_keeps_today_s_signal_and_records_an_error(self, cls):
         with pytest.warns(UserWarning, match='cannot be separated'):
             model = _make(cls)()
@@ -1075,3 +1321,102 @@ class TestNewReadCutsOnGraphs:
     @pytest.mark.parametrize('name', ['same-group', 'chain'])
     def test_float32_is_exact_against_float32_bptt(self, name):
         assert _worst_relative_error(_CUT_MODELS[name][0], 1, precision=32) < 1e-6
+
+    def test_a_cut_source_s_own_slot_is_perturbed(self):
+        """The new value of a cut source leaves the step perturbed: a loss on
+        it gets ``dL/dp`` through the slot (the cut reads alone see the
+        unperturbed value)."""
+        graph = _graph(_SameGroup)
+        hp, minfo = graph.hidden_perturb, graph.module_info
+        (g_out,) = [v for v, path in minfo.outvar_to_hidden_path.items() if path == ('g',)]
+        slot = list(minfo.jaxpr.outvars).index(g_out)
+        inputs = jax.tree.leaves(((jnp.ones((1, 3)),), [st.value for st in minfo.compiled_model_states]))
+        grads = jax.grad(lambda p: jnp.sum(hp.eval_jaxpr(inputs, p)[slot]))(hp.init_perturb_data())
+        g = list(hp.perturb_hidden_paths).index(('g',))
+        np.testing.assert_array_equal(np.asarray(grads[g]), np.ones_like(np.asarray(grads[g])))
+
+    def test_a_loss_on_the_new_hidden_values_is_exact_at_one_step(self):
+        """A loss that also reads the new hidden values, through the state
+        slots, at one step from a zero state."""
+        def step_loss(model, out):
+            return (out ** 2).sum() + 0.7 * (model.g.value ** 2).sum() + 0.3 * jnp.sin(model.V.value).sum()
+
+        with brainstate.environ.context(precision=64):
+            x = jnp.asarray([[0.3, 0.7, 0.2]])
+            ref_model = _make(_SameGroup)()
+            brainstate.nn.init_all_states(ref_model, batch_size=1)
+            ref_params = ref_model.states(brainstate.ParamState)
+            ref = brainstate.transform.grad(lambda: step_loss(ref_model, ref_model(x)), ref_params)()
+
+            model = _make(_SameGroup)()
+            brainstate.nn.init_all_states(model, batch_size=1)
+            learner = braintrace.D_RTRL(model)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                learner.compile_graph(x)
+            learner.init_etrace_state()
+            params = model.states(brainstate.ParamState)
+            got = brainstate.transform.grad(lambda xx: step_loss(model, learner(xx)), params)(x)
+        assert list(learner.graph.hidden_perturb.new_read_cuts) == [(('g',), ('V',))]
+        ref, got = _flat(ref), _flat(got)
+        for key, r in ref.items():
+            assert np.linalg.norm(got[key] - r) <= 1e-12 * np.linalg.norm(r), key
+
+    @pytest.mark.parametrize('algo', [braintrace.D_RTRL, braintrace.EProp])
+    def test_an_etp_read_of_a_cut_source_sees_the_perturbed_value(self, algo):
+        """A stacked layer reads the cut source g1 through an ETP op: that
+        read is kept, in the perturbed world."""
+        hp = _graph(_CutSourceEtpReader, algo).hidden_perturb
+        assert list(hp.new_read_cuts) == [(('g1',), ('V1',))] and hp.new_read_exact is True
+        assert _worst_relative_error(_CutSourceEtpReader, 1, algo_factory=algo) < 1e-12
+
+
+def _compile_recording(cls, algo):
+    model = _make(cls)()
+    brainstate.nn.init_all_states(model, batch_size=1)
+    learner = algo(model)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        learner.compile_graph(jnp.ones((1, 3)))
+    return learner.graph, [w for w in caught if 'cannot be separated' in str(w.message)]
+
+
+def _single_vs_multi(cls, steps, algo):
+    """Single-step against forced multi-step (one step per chunk), f64."""
+    with brainstate.environ.context(precision=64):
+        with brainstate.random.seed_context(7):
+            xs = brainstate.random.rand(steps, 1, 3) + 0.1
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            single = _flat(online_param_gradients_singlestep_naive(_make(cls), xs, algo_factory=algo))
+            multi = _flat(chunked_online_param_gradients(
+                _make(cls), xs, algo_factory=lambda m: algo(m, vjp_method='multi-step'), chunk_size=1))
+    return max(float(np.linalg.norm(single[k] - r) / np.linalg.norm(r)) for k, r in multi.items()
+               if np.linalg.norm(r) > 0)
+
+
+class TestOnlyCarriedReadsAreCut:
+    """A read is cut only when the group transition carries it across steps
+    (review of #247): otherwise the cut would drop ``h_k^{t-1} -> h_k^t ->
+    h_j^t`` from every signal. Each case either declares no double count and
+    matches multi-step at T in {1, 2, 6}, or is reported."""
+
+    @pytest.mark.parametrize('name, algo', [(n, a) for n, case in _CARRY_CASES.items() for a in case[1]])
+    def test_a_read_is_cut_only_when_the_transition_carries_it(self, name, algo):
+        cls, _, cuts = _CARRY_CASES[name]
+        graph, warned = _compile_recording(cls, _ALGORITHMS[algo])
+        hp = graph.hidden_perturb
+        if cuts is None:
+            assert hp.new_read_exact is False and hp.new_read_cuts == () and hp.new_read_conflicts
+            assert len(warned) == 1 and issubclass(warned[0].category, UserWarning)
+            (record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT)
+            assert record.level is DiagnosticLevel.ERROR
+            today = add_hidden_perturbation_from_minfo(graph.module_info)
+            assert str(hp.perturb_jaxpr) == str(today.perturb_jaxpr)
+        else:
+            assert hp.new_read_exact is True and list(hp.new_read_cuts) == cuts and warned == []
+
+    @pytest.mark.parametrize('steps', [1, 2, 6])
+    @pytest.mark.parametrize('name, algo', [(n, a) for n, case in _CARRY_CASES.items() if case[2] for a in case[1]])
+    def test_a_carried_cut_matches_multi_step(self, name, algo, steps):
+        assert _single_vs_multi(_CARRY_CASES[name][0], steps, _ALGORITHMS[algo]) < 1e-12

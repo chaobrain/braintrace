@@ -2759,3 +2759,73 @@ class TestStateAxisContraction:
             brainstate.nn.init_all_states(cell)
             groups, _ = find_hidden_groups_from_module(cell, jnp.zeros(3), include_recurrent_mixing=True)
             assert sorted(sorted(g.hidden_paths) for g in groups) == _ONE_GROUP
+
+
+class _ReadThroughDot(brainstate.nn.Module):
+    """h1 reads the new h0 elementwise; h2 reads the new h1 through a
+    ``dot_general`` (a constant 3x3 matrix) and the new h0 elementwise."""
+
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for i in range(3):
+            setattr(self, f'h{i}', brainstate.HiddenState(0.3 * (i + 1) * jnp.ones((batch_size, 3))))
+
+    def update(self, x):
+        self.h0.value = 0.8 * self.h0.value + jnp.tanh(self.W(x))
+        self.h1.value = 0.5 * self.h1.value + jnp.tanh(self.h0.value)
+        mix = jnp.asarray(np.linspace(0.1, 0.9, 9).reshape(3, 3), self.h1.value.dtype)
+        self.h2.value = 0.5 * self.h2.value + self.h1.value @ mix + 0.1 * jnp.tanh(self.h0.value)
+        return self.h2.value
+
+
+class TestCarriedVars:
+    """``HiddenGroup.carried_vars`` and ``position_coupled_outvars`` (#239): the
+    values the transition computes position-diagonally, by the walker's own
+    inclusion rule."""
+
+    @staticmethod
+    def _group(include_recurrent_mixing):
+        cell = _ReadThroughDot()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        groups, _ = find_hidden_groups_from_module(
+            cell, jnp.ones((1, 3)), include_recurrent_mixing=include_recurrent_mixing)
+        (group,) = groups
+        return group
+
+    @staticmethod
+    def _outvars(group, name):
+        return {ov for e in group.transition_jaxpr.eqns if e.primitive.name == name for ov in e.outvars}
+
+    def test_diagonal_transition_leaves_the_dot_out_and_carries_the_rest(self):
+        group = self._group(False)
+        assert group.position_coupled_outvars == frozenset()
+        assert self._outvars(group, 'dot_general') == set()
+        carried = group.carried_vars()
+        tanh = self._outvars(group, 'tanh')
+        assert tanh and tanh <= carried
+        assert carried == {ov for e in group.transition_jaxpr.eqns for ov in e.outvars}
+
+    def test_coupled_transition_holds_the_dot_but_does_not_carry_it(self):
+        group = self._group(True)
+        dot = self._outvars(group, 'dot_general')
+        assert dot and group.position_coupled_outvars == dot
+        carried = group.carried_vars()
+        assert not dot & carried and self._outvars(group, 'tanh') <= carried
+
+    def test_stop_gradient_is_a_boundary_in_both_modes(self):
+        class _Detached(_ReadThroughDot):
+            def update(self, x):
+                self.h0.value = 0.8 * self.h0.value + jnp.tanh(self.W(x))
+                self.h1.value = 0.5 * self.h1.value + jax.lax.stop_gradient(jnp.tanh(self.h0.value))
+                return self.h1.value
+
+        for mode in (False, True):
+            cell = _Detached()
+            brainstate.nn.init_all_states(cell, batch_size=1)
+            groups, _ = find_hidden_groups_from_module(cell, jnp.ones((1, 3)), include_recurrent_mixing=mode)
+            for group in groups:
+                names = {e.primitive.name for e in group.transition_jaxpr.eqns}
+                assert 'stop_gradient' not in names and group.position_coupled_outvars == frozenset()
