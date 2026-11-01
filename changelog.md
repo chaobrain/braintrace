@@ -64,16 +64,30 @@
   relations disagree; the read crosses hidden groups or goes through an
   equation the transition leaves out or that is not proven
   position-preserving, such as a `dot_general`, a `roll`, a reduction, a
-  `gather` or a `custom_vjp`; a cut read is also made through
-  an ETP op; a kept read reaches a traced group; or a shared equation is a
-  `while` or has effects), the graph keeps the previous signal and records
-  `HIDDEN_NEW_READ_DOUBLE_COUNT` (ERROR, also warned). `HiddenPerturbation`
-  declares the outcome: `new_read_cuts`, `new_read_conflicts` and
-  `new_read_exact`. `new_read_exact` is `True` iff the reads were planned and
-  nothing conflicts, and it means only that no in-step read of a new hidden
-  value is double counted in the single-step learning signal; it does not
-  say the single-step gradient is exact. Multi-step VJPs build no
-  perturbation and are unchanged.
+  `gather`, a `scatter` or a `custom_vjp`, which for now includes a read
+  into or out of one slot of a `HiddenGroupState`; a cut read is also made
+  through an ETP op; a kept read reaches a traced group; or a shared
+  equation is a `while` or has effects), the graph keeps the previous signal
+  and records `HIDDEN_NEW_READ_DOUBLE_COUNT` (ERROR, also warned).
+  `HiddenPerturbation` declares the outcome: `new_read_cuts`,
+  `new_read_conflicts` and `new_read_exact`. `new_read_exact` is `True` iff
+  the reads were planned and nothing conflicts, and it means only that no
+  in-step read of a new hidden value is double counted in the single-step
+  learning signal; it does not say the single-step gradient is exact.
+  Multi-step VJPs build no perturbation and are unchanged.
+- **A recurrent matmul inside a `custom_jvp`, `custom_vjp` or `checkpoint`
+  call is left out of a diagonal transition and reported (#239).** Under
+  diagonal recurrence the hidden-group walker leaves out a weight-mixing
+  `dot_general`/`conv` that reads a hidden-derived value, and an opaque loop
+  that applies one (`CONTROL_FLOW_RECURRENT_MIXING`). It did not look inside
+  a call that the canonicalizer keeps (`custom_jvp_call`, `custom_vjp_call`,
+  `checkpoint`/`remat`, `closed_call`), so a recurrent matmul there was traced
+  into the transition, which then coupled positions without a report. The
+  walker now looks inside such calls as it does inside loop bodies: under
+  diagonal recurrence the call is left out and reported; under
+  `recurrence_scope='coupled'` it is traced in, as before. A call whose body
+  mixes only values that do not derive from a hidden state (an input
+  projection) is kept.
 - **No more `Jaxpr is missing a DebugInfo` warnings (#197).** Since 0.2.7,
   every `braintrace.compile` and `etrace_grad` emitted jax's
   `DeprecationWarning: core.Jaxpr is missing a DebugInfo object`, once per
