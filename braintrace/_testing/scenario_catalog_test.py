@@ -769,7 +769,8 @@ class TestCategoryI_MaskedWeight:
     ``weight_processing_chain`` so callers can reason about the chain."""
 
     def test_masked_weight_records_processing_chain(self):
-        model = MaskedWeightRNN(3, 4)
+        with brainstate.random.seed_context(0):  # the mask is a graph constant
+            model = MaskedWeightRNN(3, 4)
         brainstate.nn.init_all_states(model)
         inp = brainstate.random.rand(3)
 
@@ -1237,7 +1238,8 @@ class TestCategoryQ_AnyTrainableKeyGating:
     the unresolvable first key."""
 
     def test_bias_only_relation_registers(self):
-        model = ConstWeightParamBiasRNN(3, 4)
+        with brainstate.random.seed_context(0):  # the weight is a graph constant
+            model = ConstWeightParamBiasRNN(3, 4)
         brainstate.nn.init_all_states(model)
         inp = brainstate.random.rand(3)
 
@@ -1267,7 +1269,8 @@ class TestCategoryQ_AnyTrainableKeyGating:
                 self.h.value = jnp.tanh(braintrace.matmul(xh, self.w_const))
                 return self.h.value
 
-        model = _AllConstRNN()
+        with brainstate.random.seed_context(0):  # the weight is a graph constant
+            model = _AllConstRNN()
         brainstate.nn.init_all_states(model)
         inp = brainstate.random.rand(3)
 

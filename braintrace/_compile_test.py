@@ -21,6 +21,7 @@ import pytest
 
 import braintrace
 from braintrace._compile import _resolve_algorithm
+from braintrace._testing import precondition_models as _pm
 from braintrace._testing.oracle_models import tanh_rnn
 
 
@@ -461,3 +462,45 @@ def test_compile_docstring_example_runs():
     assert y.shape == (1, 1)
     assert bool(jnp.all(jnp.isfinite(y)))
     assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+# --- in-step preconditions: what ``compile`` promises end to end --------------
+#
+# Each probe in ``braintrace/_testing/precondition_models.py`` violates one
+# precondition the online algorithms rely on (issues #233-#239), or is the
+# control that satisfies it. Compiled with ``braintrace.compile`` (D-RTRL,
+# default ``vjp_method='single-step'``) and run one step per call in float64,
+# a probe must give the BPTT gradient, or be refused loudly: an ERROR-level
+# compilation record or a raise (a WARNING-level record for the mixing tails
+# of #234; for #233 the Jacobian D-RTRL uses must be the true per-position
+# block; for #238 an online-credit record). Only braintrace's refusal types and
+# the record kinds a case lists count. Today no violation is refused, so its
+# test is a strict xfail that must fail on the verdict's assertion (any other
+# exception is a broken probe, not the issue); the fix of each issue turns it
+# green.
+
+_UNREFUSED = {
+    _pm.EXACT_OR_ERROR: 'wrong gradient, with neither a refusal nor an ERROR record',
+    _pm.EXACT_OR_LOUD: 'wrong gradient, with neither a refusal nor a record',
+    _pm.TRANSITION: 'the Jacobian is not the true per-position block, and nothing refuses it',
+    _pm.CREDIT_RECORDED: 'no online gradient and no online-credit record',
+}
+
+
+def _precondition_params():
+    for case in _pm.CASES:
+        marks = ()
+        if case.issue is not None:
+            reason = f'braintrace#{case.issue}: {_UNREFUSED[case.check]}'
+            if case.issue == 237:
+                reason += ' (the relation is dropped with WARNING records only)'
+            marks = pytest.mark.xfail(strict=True, raises=AssertionError, reason=reason)
+        yield pytest.param(case, id=case.name, marks=marks)
+
+
+class TestPreconditions:
+
+    @pytest.mark.parametrize('case', list(_precondition_params()))
+    def test_exact_or_refused(self, case):
+        outcome = _pm.evaluate(case)
+        assert _pm.satisfied(case, outcome), f'{case.name} ({case.check}): {_pm.describe(outcome)}'

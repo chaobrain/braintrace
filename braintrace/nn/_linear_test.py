@@ -946,40 +946,42 @@ class TestScaledWSLinearForwardBiasGain:
 
     def test_bias_not_scaled_by_gain(self):
         """Non-zero bias with non-unit gain: braintrace must match brainstate."""
-        brainstate.environ.set(precision=64)
-        brainstate.random.seed(7)
+        # A context, not ``environ.set``: a global precision would leak into every
+        # later test on this worker and turn their graphs into float64.
+        with brainstate.environ.context(precision=64):
+            brainstate.random.seed(7)
 
-        in_size, out_size = 6, 4
+            in_size, out_size = 6, 4
 
-        # Build braintrace layer (the one being fixed).
-        bt_layer = braintrace.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
-        # Build brainstate reference layer (uses the original correct forward).
-        bs_layer = brainstate.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
+            # Build braintrace layer (the one being fixed).
+            bt_layer = braintrace.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
+            # Build brainstate reference layer (uses the original correct forward).
+            bs_layer = brainstate.nn.ScaledWSLinear(in_size=in_size, out_size=out_size)
 
-        # Copy weight params from braintrace to brainstate so they are identical.
-        bt_params = bt_layer.weight.value
-        bs_layer.weight.value = dict(bt_params)
+            # Copy weight params from braintrace to brainstate so they are identical.
+            bt_params = bt_layer.weight.value
+            bs_layer.weight.value = dict(bt_params)
 
-        # Override bias and gain on BOTH layers with non-trivial values.
-        bias_val = jnp.array([1.0, 2.0, 3.0, 4.0])
-        gain_val = jnp.array([[2.0, 0.5, 3.0, 1.5]])  # shape (1, out_size)
+            # Override bias and gain on BOTH layers with non-trivial values.
+            bias_val = jnp.array([1.0, 2.0, 3.0, 4.0])
+            gain_val = jnp.array([[2.0, 0.5, 3.0, 1.5]])  # shape (1, out_size)
 
-        new_params = dict(bt_params)
-        new_params['bias'] = bias_val
-        new_params['gain'] = gain_val
-        bt_layer.weight.value = new_params
-        bs_layer.weight.value = dict(new_params)
+            new_params = dict(bt_params)
+            new_params['bias'] = bias_val
+            new_params['gain'] = gain_val
+            bt_layer.weight.value = new_params
+            bs_layer.weight.value = dict(new_params)
 
-        x = brainstate.random.randn(3, in_size)
+            x = brainstate.random.randn(3, in_size)
 
-        bt_out = bt_layer.update(x)
-        bs_out = bs_layer.update(x)
+            bt_out = bt_layer.update(x)
+            bs_out = bs_layer.update(x)
 
-        maxabsdiff = float(jnp.max(jnp.abs(bt_out - bs_out)))
-        assert maxabsdiff < 1e-5, (
-            f"braintrace ScaledWSLinear forward differs from brainstate reference "
-            f"by {maxabsdiff:.6f} (max-abs-diff). Bias is being scaled by gain."
-        )
+            maxabsdiff = float(jnp.max(jnp.abs(bt_out - bs_out)))
+            assert maxabsdiff < 1e-5, (
+                f"braintrace ScaledWSLinear forward differs from brainstate reference "
+                f"by {maxabsdiff:.6f} (max-abs-diff). Bias is being scaled by gain."
+            )
 
 
 class TestGroupedLinear:

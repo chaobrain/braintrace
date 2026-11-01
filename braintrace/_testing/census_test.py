@@ -1,0 +1,329 @@
+# Copyright 2026 BrainX Ecosystem Limited. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+
+"""Tests for the precondition census (``braintrace._testing.census``)."""
+
+import json
+import os
+import warnings
+
+import brainstate
+import jax.numpy as jnp
+import pytest
+
+import braintrace
+from braintrace._algorithm.vjp_graph_executor import ETraceVjpGraphExecutor
+from braintrace._compiler.graph import ETraceGraph
+from braintrace._compiler.hidden_group import HiddenGroup
+from braintrace._testing import census
+from braintrace._testing import precondition_models as pm
+from braintrace._testing.graph_hash_test import run_after_self_tests
+
+
+def _case(name):
+    return next(c for c in pm.CASES if c.name == name)
+
+
+def _measure(name, steps=2):
+    """Compile ``name`` and run ``steps`` steps in float64 while measuring."""
+    case = _case(name)
+    with brainstate.environ.context(precision=64), warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        with census.measuring(name) as c:
+            model = case.model()
+            xs = case.inputs()
+            learner = braintrace.compile(model, 'd_rtrl', xs[0])
+            pm.online_gradients(learner, model, xs[:steps])
+    return c
+
+
+class TestRuntimeChannels:
+
+    @pytest.mark.parametrize('name', ['transition-roll', 'transition-mean', 'transition-reverse'])
+    def test_diag_flags_a_coupled_transition(self, name):
+        assert _measure(name).max('DIAG') > 0.1
+
+    def test_diag_is_zero_on_a_diagonal_transition(self):
+        c = _measure('transition-none')
+        assert any(k.startswith('DIAG|') for k in c.values['transition-none'])
+        assert c.max('DIAG') < 1e-12
+
+    @pytest.mark.parametrize('name', ['tail-roll', 'tail-reverse', 'tail-transpose', 'tail-softmax'])
+    def test_tail_flags_a_non_elementwise_tail(self, name):
+        assert _measure(name).max('TAIL') > 0.1
+
+    def test_tail_is_zero_on_an_elementwise_tail(self):
+        c = _measure('tail-elementwise')
+        assert any(k.startswith('TAIL|') for k in c.values['tail-elementwise'])
+        assert c.max('TAIL') < 1e-12
+
+    def test_large_groups_are_skipped(self, monkeypatch):
+        monkeypatch.setattr(census, 'MAX_FULL', 0)
+        c = _measure('transition-roll')
+        assert c.max('DIAG') == 0.0
+        assert any(k.startswith('DIAG|') and 'size' in v for k, v in c.skipped['transition-roll'].items())
+
+    def test_failures_inside_a_check_are_skipped_not_raised(self, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError('boom')
+
+        monkeypatch.setattr(census, '_tangent', broken)
+        monkeypatch.setattr(braintrace._compiler.hidden_group, 'block_diagonal_last_dim', broken)
+        c = _measure('transition-roll')
+        reasons = list(c.skipped['transition-roll'].values())
+        assert sum('RuntimeError: boom' in r for r in reasons) == 2
+
+    def test_measuring_does_not_change_the_gradient(self):
+        case = _case('tail-roll')
+        with brainstate.environ.context(precision=64), warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            xs = case.inputs()
+            grads = []
+            for observe in (False, True):
+                model = case.model()
+                learner = braintrace.compile(model, 'd_rtrl', xs[0])
+                if observe:
+                    with census.measuring():
+                        grads.append(pm.online_gradients(learner, model, xs))
+                else:
+                    grads.append(pm.online_gradients(learner, model, xs))
+        assert pm.relative_errors(grads[1], grads[0]) == {"[('w',)]": 0.0}
+
+
+class TestStructuralChannels:
+
+    @pytest.mark.parametrize('name,channel', [
+        ('weight-2p', 'CHAIN'),
+        ('weight-mask', 'CHAIN'),
+        ('source-two-params', 'MULTISOURCE'),
+        ('source-two-leaves', 'MULTISOURCE'),
+        ('newread-new', 'NEWREAD'),
+    ])
+    def test_flags_the_violation(self, name, channel):
+        c = _measure(name, steps=1)
+        assert any(k.startswith(channel + '|') for k in c.values[name])
+
+    @pytest.mark.parametrize('name', ['weight-raw', 'weight-mask-as-weight-fn', 'source-one', 'newread-old'])
+    def test_controls_are_clean(self, name):
+        c = _measure(name, steps=1)
+        flagged = [k for k in c.values.get(name, {}) if k.split('|')[0] in ('CHAIN', 'MULTISOURCE', 'NEWREAD')]
+        assert flagged == []
+
+    def test_newread_names_both_states(self):
+        c = _measure('newread-new', steps=1)
+        assert 'NEWREAD|etp_mm["(\'w\',)"]: (\'g\',) -> (\'V\',)' in c.values['newread-new'], c.values
+
+    @pytest.mark.parametrize('order', ['through_etp', 'weight_free_g'])
+    def test_newread_ignores_reads_that_cannot_double_count(self, order):
+        """A read through a second ETP op is cut from the relation; a read of a
+        state the weight does not reach adds nothing to the weight's trace."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.w2 = brainstate.ParamState(jnp.ones((4, 4)) * 0.1)
+                self.g = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.V = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                if order == 'through_etp':  # a stacked layer: V reads the new g through w2
+                    self.g.value = 0.9 * self.g.value + braintrace.matmul(x, self.w.value)
+                    self.V.value = 0.9 * self.V.value + braintrace.matmul(jnp.tanh(self.g.value), self.w2.value)
+                else:  # g is weight-free; V reads its new value
+                    self.g.value = 0.9 * self.g.value + x.sum(-1, keepdims=True)
+                    self.V.value = 0.9 * self.V.value + braintrace.matmul(x, self.w.value) * jnp.tanh(self.g.value)
+                return self.V.value
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
+        assert census.structural_sites(learner.graph)['NEWREAD'] == []
+
+    def test_newread_ignores_a_reader_outside_the_relation(self):
+        """V reads the new g, but V's shape keeps it out of the relation's
+        groups: the trace does not carry V, so nothing counts twice."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.g = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.V = brainstate.HiddenState(jnp.zeros((2, 2)))
+
+            def update(self, x):
+                self.g.value = 0.9 * self.g.value + braintrace.matmul(x, self.w.value)
+                self.V.value = 0.95 * self.V.value + jnp.reshape(jnp.tanh(self.g.value), (2, 2))
+                return self.V.value
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
+        traced = {p for r in learner.graph.hidden_param_op_relations for g in r.hidden_groups for p in g.hidden_paths}
+        assert traced == {('g',)}
+        assert census.structural_sites(learner.graph)['NEWREAD'] == []
+
+    def test_descended_relation_is_read_through_the_scan_body(self):
+        c = _measure('credit-20-substeps', steps=1)
+        flagged = [k for k in c.values.get('credit-20-substeps', {}) if k.startswith(('CHAIN|', 'MULTISOURCE|'))]
+        assert flagged == []
+
+    def test_structural_failure_is_skipped_not_raised(self, monkeypatch):
+        def broken(graph):
+            raise RuntimeError('boom')
+
+        monkeypatch.setattr(census, 'structural_sites', broken)
+        c = _measure('weight-raw', steps=1)
+        assert 'RuntimeError: boom' in c.skipped['weight-raw']['STRUCT|graph']
+
+
+class TestInstall:
+
+    def test_uninstall_restores_every_patch(self):
+        before = (ETraceGraph.__dict__['__new__'], HiddenGroup.__dict__['diagonal_jacobian'],
+                  ETraceVjpGraphExecutor.__dict__['_compute_hid2weight_jacobian'])
+        with census.measuring():
+            assert HiddenGroup.__dict__['diagonal_jacobian'] is not before[1]
+        after = (ETraceGraph.__dict__['__new__'], HiddenGroup.__dict__['diagonal_jacobian'],
+                 ETraceVjpGraphExecutor.__dict__['_compute_hid2weight_jacobian'])
+        assert after == before
+
+    def test_a_failed_install_leaves_nothing_patched(self, monkeypatch):
+        before = ETraceGraph.__dict__['__new__']
+        monkeypatch.delattr(HiddenGroup, 'diagonal_jacobian')  # the second patch fails
+        with pytest.raises(KeyError):
+            census.install(census.Census())
+        assert ETraceGraph.__dict__['__new__'] is before
+
+    def test_relative_and_record(self):
+        assert census._relative([0.5], [2.0]) == 0.25
+        assert census._relative([0.5], [0.0]) == 0.5
+        assert census._relative([], []) == 0.0
+        c = census.Census()
+        c.record('DIAG', 's', 0.1)
+        c.record('DIAG', 's', 0.05)
+        assert c.values == {'<no test>': {'DIAG|s': 0.1}}
+        assert c.max('TAIL') == 0.0
+
+
+class TestSummary:
+
+    def _write(self, tmp_path, worker, data):
+        with open(tmp_path / f'run.{worker}.json', 'w') as f:
+            json.dump(data, f)
+
+    def test_summarize_counts_tests_above_threshold(self, tmp_path):
+        self._write(tmp_path, 'gw0', {'values': {'t1': {'DIAG|a': 0.5, 'TAIL|b': 1e-9}},
+                                      'skipped': {'t1': {'DIAG|c': 'size'}}})
+        self._write(tmp_path, 'gw1', {'values': {'t2': {'DIAG|a': 0.2, 'OTHER|x': 1.0}}, 'skipped': {}})
+        data = census.load(str(tmp_path / 'run'))
+        report = census.summarize(data, threshold=1e-4)
+        assert report['DIAG']['tests'] == {'t1': 0.5, 't2': 0.2}
+        assert report['DIAG']['sites'] == {'a': 0.5}
+        assert report['DIAG']['skipped'] == 1
+        assert report['TAIL']['tests'] == {}
+
+    def test_main_prints_a_summary(self, tmp_path, capsys):
+        self._write(tmp_path, 'main', {'values': {'t1': {'NEWREAD|g -> V': 1.0}}, 'skipped': {}})
+        assert census.main(['summarize', str(tmp_path / 'run'), '--show', '1']) == 0
+        out = capsys.readouterr().out
+        assert '1 tests measured' in out and 'NEWREAD: 1 tests, 1 sites' in out and 't1' in out
+
+    def test_load_reads_only_this_run_s_worker_files(self, tmp_path):
+        self._write(tmp_path, 'gw0', {'values': {'a': {'DIAG|s': 0.1}}, 'skipped': {}})
+        self._write(tmp_path, 'main', {'values': {'b': {'DIAG|s': 0.2}}, 'skipped': {}})
+        self._write(tmp_path, 'rerun.gw0', {'values': {'a': {'DIAG|s': 9.0}}, 'skipped': {}})  # another prefix
+        self._write(tmp_path, 'gwx', {'values': {'c': {'DIAG|s': 9.0}}, 'skipped': {}})       # not a worker name
+        assert census.load(str(tmp_path / 'run'))['values'] == {'a': {'DIAG|s': 0.1}, 'b': {'DIAG|s': 0.2}}
+
+    def test_load_without_files_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            census.load(str(tmp_path / 'missing'))
+
+
+class TestPlugin:
+
+    def test_session_writes_one_file_per_worker(self, tmp_path, monkeypatch):
+        monkeypatch.setenv(census.OUT_ENV, str(tmp_path / 'run'))
+        monkeypatch.setenv('PYTEST_XDIST_WORKER', 'gw2')
+        c = census.Census()
+        c.record('DIAG', 's', 0.3, test='x')
+        monkeypatch.setattr(census, '_CENSUS', c)
+        census.pytest_sessionfinish(None)
+        assert census.load(str(tmp_path / 'run'))['values'] == {'x': {'DIAG|s': 0.3}}
+
+    def test_session_without_output_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(census.OUT_ENV, raising=False)
+        monkeypatch.chdir(tmp_path)
+        census.pytest_sessionfinish(None)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_configure_and_unconfigure_pair(self, monkeypatch):
+        before = HiddenGroup.__dict__['diagonal_jacobian']
+
+        class Item:
+            nodeid = 'n'
+
+        config = object()
+        monkeypatch.setattr(census, '_CENSUS', census.Census())
+        monkeypatch.setattr(census, '_INSTALLS', {})  # leave a session install (``-p``) alone
+        census.pytest_configure(config)
+        try:
+            assert HiddenGroup.__dict__['diagonal_jacobian'] is not before
+            census.pytest_runtest_setup(Item())
+            assert census._CENSUS.current == 'n'
+        finally:
+            census.pytest_unconfigure(config)
+        assert HiddenGroup.__dict__['diagonal_jacobian'] is before
+
+    def test_unconfigure_undoes_only_its_own_install(self, monkeypatch):
+        before = HiddenGroup.__dict__['diagonal_jacobian']
+        monkeypatch.setattr(census, '_INSTALLS', {})
+        session, nested = object(), object()
+        census.pytest_configure(session)
+        try:
+            patched = HiddenGroup.__dict__['diagonal_jacobian']
+            census.pytest_configure(nested)  # a second configure installs nothing ...
+            assert HiddenGroup.__dict__['diagonal_jacobian'] is patched
+            census.pytest_unconfigure(nested)  # ... and its unconfigure removes nothing
+            assert HiddenGroup.__dict__['diagonal_jacobian'] is patched
+        finally:
+            census.pytest_unconfigure(session)
+        assert HiddenGroup.__dict__['diagonal_jacobian'] is before
+
+    def test_configure_removes_stale_files_once(self, tmp_path, monkeypatch):
+        for name in ('run.gw0.json', 'run.main.json', 'other.gw0.json'):
+            (tmp_path / name).write_text('{}')
+        monkeypatch.setattr(census, '_INSTALLS', {})
+        monkeypatch.setenv(census.OUT_ENV, str(tmp_path / 'run'))
+        monkeypatch.setenv('PYTEST_XDIST_WORKER', 'gw1')  # a worker never cleans
+        config = object()
+        census.pytest_configure(config)
+        census.pytest_unconfigure(config)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['other.gw0.json', 'run.gw0.json', 'run.main.json']
+        monkeypatch.delenv('PYTEST_XDIST_WORKER')  # the controller (or a plain run) does
+        census.pytest_configure(config)
+        census.pytest_unconfigure(config)
+        assert sorted(p.name for p in tmp_path.iterdir()) == ['other.gw0.json']
+
+
+def test_recording_continues_after_the_plugin_self_tests(tmp_path):
+    """H1 (PR #242 review): the session's ``-p`` install survives the plugin
+    self-tests, so the probe that runs after them is measured."""
+    self_test = os.path.abspath(__file__) + '::TestPlugin'
+    prefix = run_after_self_tests(tmp_path, 'braintrace._testing.census', self_test, census.OUT_ENV)
+    values = census.load(prefix)['values']
+    probe = [v for t, v in values.items() if t.endswith('::test_probe_after_the_self_tests')]
+    assert probe and any(k.startswith('NEWREAD|') for k in probe[0]), sorted(values)
