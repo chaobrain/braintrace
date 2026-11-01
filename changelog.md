@@ -381,9 +381,6 @@
     key order and an `OrderedDict` in insertion order, so when the orders
     differed the leaves were swapped without an error. Other differences in
     node type, such as a namedtuple for a tuple, are refused as well.
-
-### Behavior changes
-
 - **Single-step gradients change on graphs with a cut read (#239).** They are
   now exact where they double counted (see Fixes); a graph without such a
   read compiles to the same perturbed jaxpr as before.
