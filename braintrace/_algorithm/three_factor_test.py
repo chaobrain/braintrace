@@ -397,7 +397,19 @@ class TestRefusalsAndLifecycle:
         # otherwise this test could not tell a leaked keyword from the attribute.
         algo = self._algo()
         assert algo.modulator is None
-        with pytest.raises(Exception):
+
+        def fail(*args):
+            raise RuntimeError('mid-update')
+
+        # an exception from the update itself, after the inputs are checked
+        update_rule, algo._true_update_fun = algo._true_update_fun, fail
+        with pytest.raises(RuntimeError, match='mid-update'):
+            algo.update(_inputs()[0], modulator=1.0)
+        algo._true_update_fun = update_rule
+        with pytest.raises(RuntimeError, match='modulator'):
+            algo(_inputs()[0])
+        # and an input refused before the update
+        with pytest.raises(TypeError, match='differ from the example inputs'):
             algo.update(jnp.ones((1, H + 3)), modulator=1.0)  # wrong input width
         with pytest.raises(RuntimeError, match='modulator'):
             algo(_inputs()[0])

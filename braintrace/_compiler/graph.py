@@ -23,6 +23,7 @@ import jax
 import numpy as np
 
 from braintrace._compatible_imports import JaxprEqn, is_scan_primitive, jaxpr_all_invars, Var
+from braintrace._input_data import conform_inputs
 from braintrace._misc import NotSupportedError
 from braintrace._typing import (
     ETraceVals,
@@ -198,6 +199,9 @@ class ETraceGraph(NamedTuple):
         perturbation term added to it. This is the primitive used to probe
         hidden->hidden and hidden->output sensitivities.
 
+        The inputs are first conformed to ``module_info.input_signature``, as in
+        :meth:`ModuleInfo.jaxpr_call` (#227, #241).
+
         Parameters
         ----------
         args : Inputs
@@ -226,7 +230,17 @@ class ETraceGraph(NamedTuple):
             ``(outputs, etrace_state_vals, other_state_vals, temp_data)`` --
             the same four-element structure produced by a normal forward call
             through :meth:`ModuleInfo.jaxpr_call`.
+
+        Raises
+        ------
+        TypeError
+            If the inputs differ from the example inputs in a way that is not
+            conformed (see :meth:`ModuleInfo.jaxpr_call`).
         """
+        # the inputs, in the form the jaxpr was traced with
+        if self.module_info.input_signature is not None:
+            args = conform_inputs(self.module_info.input_signature, args, 'ETraceGraph.call_hidden_perturb()')
+
         # state checking
         if old_state_vals is None:
             old_state_vals = [st.value for st in self.module_info.compiled_model_states]
