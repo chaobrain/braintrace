@@ -92,6 +92,28 @@ class _Pair(brainstate.nn.Module):
         return self.V.value
 
 
+class _Recurrent(brainstate.nn.Module):
+    """``V`` driven by ``x @ W`` and by ``tanh(V) @ Wr``, without a cast of the
+    input. With ``delay``, the input is first written into a buffer of the
+    default float dtype, as in the model of issue #227."""
+
+    def __init__(self, delay=False):
+        super().__init__()
+        self.delay = delay
+        self.W = brainstate.ParamState(jnp.full((3, 4), 0.5))
+        self.Wr = brainstate.ParamState(jnp.eye(4) * 0.1)
+
+    def init_state(self, *args, **kwargs):
+        self.V = brainstate.HiddenState(jnp.zeros(4))
+
+    def update(self, x):
+        if self.delay:
+            x = jax.lax.dynamic_update_slice(jnp.zeros(4), x.astype(self.W.value.dtype), (0,))[:3]
+        self.V.value = (0.9 * self.V.value + braintrace.matmul(x, self.W.value)
+                        + braintrace.matmul(jnp.tanh(self.V.value), self.Wr.value))
+        return self.V.value
+
+
 def _learner(*example, algo='d_rtrl', model=None, **kw):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
@@ -250,6 +272,29 @@ class TestTheCast:
         extra = collections.Counter(runs['cast'][2]) - collections.Counter(runs['manual'][2])
         assert extra == collections.Counter({'convert_element_type': 1})
         assert not collections.Counter(runs['manual'][2]) - collections.Counter(runs['cast'][2])
+
+    @pytest.mark.parametrize('delay', [False, True], ids=['plain', 'issue_227'])
+    @pytest.mark.parametrize('algo', ['d_rtrl', 'eprop'])
+    def test_the_gradient_is_bit_equal_to_a_manual_cast(self, algo, delay, _x64):
+        # under grad, the forward of the update's custom VJP replays through
+        # ETraceGraph.call_hidden_perturb, on the inputs _update_impl conformed
+        x = jnp.asarray([0.1, 0.7, 1.3], jnp.float32)
+
+        def run(inputs):
+            model = _Recurrent(delay)
+            learner = _learner(jnp.ones(3, jnp.float64), algo=algo, model=model)
+            grad = brainstate.transform.grad(
+                lambda v: learner(v).sum(), model.states(brainstate.ParamState), return_value=True
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                return [_array(leaf) for leaf in jax.tree.leaves([grad(inputs) for _ in range(3)])]
+
+        cast, manual = run(x), run(x.astype(jnp.float64))
+        assert len(cast) == len(manual) == 9  # (dW, dWr, the output) per step
+        for a, b in zip(cast, manual):
+            assert a.dtype == b.dtype == np.float64
+            np.testing.assert_array_equal(a, b)
 
 
 class TestTheRefusals:
@@ -464,6 +509,31 @@ class TestModuleInfoJaxprCall:
         minfo = self._minfo(jnp.ones(3))
         x = jnp.asarray([0.3, -1.2, 2.1], jnp.float16)
         cast, manual = minfo.jaxpr_call(x)[0], minfo.jaxpr_call(x.astype(jnp.float32))[0]
+        assert cast.dtype == jnp.float32
+        np.testing.assert_array_equal(cast, manual)
+
+
+class TestCallHiddenPerturb:
+    """The public perturbed replay of the graph conforms its inputs in the same way."""
+
+    @staticmethod
+    def _graph(x):
+        graph = _learner(x).graph  # D-RTRL with the single-step VJP has a hidden perturbation
+        assert graph.hidden_perturb is not None
+        return graph, graph.hidden_perturb.init_perturb_data()
+
+    def test_it_refuses(self):
+        # before: 1000 mV ran as 1000 V
+        graph, data = self._graph(jnp.ones(3) * u.volt)
+        message = r'(?s)ETraceGraph.call_hidden_perturb\(\) was given .*in V, given float32\[3\] in mV'
+        with pytest.raises(TypeError, match=message):
+            graph.call_hidden_perturb((jnp.ones(3) * 1000.0 * u.mV,), data)
+
+    def test_it_casts(self):
+        graph, data = self._graph(jnp.ones(3))
+        x = jnp.asarray([0.3, -1.2, 2.1], jnp.float16)
+        cast = graph.call_hidden_perturb((x,), data)[0]
+        manual = graph.call_hidden_perturb((x.astype(jnp.float32),), data)[0]
         assert cast.dtype == jnp.float32
         np.testing.assert_array_equal(cast, manual)
 
