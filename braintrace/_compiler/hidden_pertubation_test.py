@@ -950,6 +950,43 @@ class TestPlanNewReadCuts:
         plan = _plan(fn, 3, _Rule(self.cut01), n_args=4)  # h0 -> h2 is kept
         assert any("kept read of ('h2',)" in c for c in plan.conflicts), plan.conflicts
 
+    def test_two_cut_reads_in_a_row(self):
+        # g -> V -> a: each read is cut, each source keeps its own cut read
+        def fn(h0, h1, h2, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + jnp.tanh(n0)
+            return n0, n1, 0.9 * h2 + jnp.sin(n1), h2
+
+        rule = _Rule({(('h0',), ('h1',)): 'cut', (('h1',), ('h2',)): 'cut'})
+        plan = _plan(fn, 3, rule, n_args=4)
+        assert plan.cuts == ((('h0',), ('h1',)), (('h1',), ('h2',))) and plan.conflicts == ()
+        assert len(plan.sources) == 2 and not plan.output_eqns
+
+    def test_a_non_hidden_output_of_the_source_is_in_the_perturbed_world(self):
+        # the model output (a merge position) reads the new h0 through mul
+        def fn(h0, h1, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), 2.0 * n0
+
+        closed = jax.make_jaxpr(fn)(jnp.ones((1, _N)), jnp.ones((1, _N)), jnp.ones((1, 3)), jnp.ones((3, _N)))
+        hidden = closed.jaxpr.outvars[:2]
+        plan = plan_new_read_cuts(closed.jaxpr, hidden, {v: (f'h{i}',) for i, v in enumerate(hidden)},
+                                  [2], _Rule(self.cut01))
+        (out_eqn,) = [i for i, e in enumerate(closed.jaxpr.eqns) if closed.jaxpr.outvars[2] in e.outvars]
+        assert plan.cuts == ((('h0',), ('h1',)),) and plan.conflicts == ()
+        assert out_eqn in plan.output_eqns and out_eqn not in plan.state_eqns
+
+    def test_a_reader_in_no_group_is_kept_and_reads_the_perturbed_value(self):
+        # #240's latch: h2 (in no group) copies the new h0; h1 (h0's group) is cut
+        def fn(h0, h1, h2, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), jnp.sin(n0), h2
+
+        policy = NewReadPolicy({('h0',): _Group(0), ('h1',): _Group(0)}, [_Relation(0)])
+        plan = _plan(fn, 3, policy, n_args=4)
+        assert plan.cuts == ((('h0',), ('h1',)),) and plan.conflicts == ()
+        assert plan.output_eqns  # the eqn that feeds h2 reads the perturbed h0
+
 
 class TestNewReadCutsOnGraphs:
     """The plan applied by ``compile_etrace_graph`` (single-step D-RTRL)."""
