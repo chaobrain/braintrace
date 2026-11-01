@@ -1210,6 +1210,19 @@ class TestPlanNewReadCuts:
         _plan(fn, 2, rule)
         assert rule.asked == [(('h0',), ('h1',), ['tanh', 'add'])]
 
+    def test_a_path_through_stop_gradient_is_no_part_of_a_read(self):
+        # h1 = pre - stop_gradient(f(pre)), pre = 0.9 h1 + n0: the detached
+        # branch carries no derivative, in a trace or a signal
+        def fn(h0, h1, h2, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            pre = 0.9 * h1 + n0
+            return n0, pre - jax.lax.stop_gradient(jnp.tanh(pre - 1.0)), 0.9 * h2 + jax.lax.stop_gradient(n0), pre
+
+        rule = _Rule({(('h0',), ('h1',)): 'cut', (('h0',), ('h2',)): 'cut'})
+        plan = _plan(fn, 3, rule, n_args=4)
+        assert plan.cuts == ((('h0',), ('h1',)),) and plan.conflicts == ()   # h2 reads h0 only detached
+        assert rule.asked == [(('h0',), ('h1',), ['add', 'sub'])]
+
     def test_a_cut_read_the_transition_does_not_carry_conflicts(self):
         def fn(h0, h1, h2, x, w):
             n0 = 0.9 * h0 + braintrace.matmul(x, w)

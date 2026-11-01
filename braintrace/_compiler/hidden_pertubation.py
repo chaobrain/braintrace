@@ -510,6 +510,13 @@ def _is_trace_boundary(eqn: JaxprEqn) -> bool:
     return is_etp_primitive(eqn.primitive) and not is_etp_enable_gradient_primitive(eqn.primitive)
 
 
+def _has_no_derivative(eqn: JaxprEqn) -> bool:
+    """A ``stop_gradient``: no path through it carries a derivative, neither
+    in a trace (its ``jvp`` is zero, and the group transition leaves it out)
+    nor in a learning signal, so it is no part of a read."""
+    return eqn.primitive.name == 'stop_gradient'
+
+
 def plan_new_read_cuts(
     jaxpr: Jaxpr,
     hidden_outvars: Sequence[Var],
@@ -521,7 +528,8 @@ def plan_new_read_cuts(
     carry, and the equations that serve them (issue #239).
 
     A *read* of the new ``h_k`` by ``h_j``: ``h_j`` is the first hidden outvar
-    on a path of top-level equations from ``h_k``. A read on a path without
+    on a path of top-level equations from ``h_k`` that crosses no
+    ``stop_gradient`` (no derivative flows there). A read on a path without
     an ETP op that has no gradient (a *direct* read) is decided by
     ``policy.edge``, and a read it would cut is cut only if
     ``policy.why_not_carried`` finds the group transition carries it; a read
@@ -591,6 +599,8 @@ def plan_new_read_cuts(
                 sinks.setdefault(v, set()).add('etp' if through else 'direct')
                 continue
             for i in consumers.get(v, ()):
+                if _has_no_derivative(eqns[i]):
+                    continue
                 t = through or _is_trace_boundary(eqns[i])
                 every.add(i)
                 if not t:
@@ -612,7 +622,7 @@ def plan_new_read_cuts(
             if v is not m and v in hidden:
                 out.add(v)
             for i in consumers.get(v, ()):
-                if not _is_trace_boundary(eqns[i]):
+                if not _is_trace_boundary(eqns[i]) and not _has_no_derivative(eqns[i]):
                     stack.extend(eqns[i].outvars)
         return out
 
@@ -631,7 +641,7 @@ def plan_new_read_cuts(
             if v in hidden and v not in first:
                 continue
             i = producer.get(v)
-            if i is None or (direct_only and _is_trace_boundary(eqns[i])):
+            if i is None or _has_no_derivative(eqns[i]) or (direct_only and _is_trace_boundary(eqns[i])):
                 continue
             out.add(i)
             stack.extend(iv for iv in eqns[i].invars if isinstance(iv, Var))
