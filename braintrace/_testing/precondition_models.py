@@ -76,6 +76,7 @@ __all__ = [
     'CREDIT_RECORDED',
     'REFUSALS',
     'CREDIT_KINDS',
+    'NEW_READ_KINDS',
     'PreconditionCase',
     'Outcome',
     'CASES',
@@ -98,6 +99,10 @@ REFUSALS: Tuple[type, ...] = (braintrace.NotSupportedError, braintrace.Compilati
 #: The record kinds an online-credit check accepts.
 CREDIT_KINDS: Tuple[str, ...] = (DiagnosticKind.ONLINE_GRADIENT_ZERO.value,
                                  DiagnosticKind.ONLINE_GRADIENT_PARTIAL.value)
+
+#: The record kind that reports an in-step read the single-step signal
+#: cannot hold fixed (#239).
+NEW_READ_KINDS: Tuple[str, ...] = (DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT.value,)
 
 N_IN = 3
 
@@ -293,7 +298,12 @@ class CreditNet(brainstate.nn.Module):
 
 
 class NewReadNet(brainstate.nn.Module):
-    """#239: a hidden state's update reads another hidden state's new value."""
+    """#239: a hidden state's update reads another hidden state's new value.
+
+    ``order='new'`` is the read the single-step signal must hold fixed;
+    ``'conflict'`` adds a second read of the new ``g`` through an ETP op,
+    which one signal cannot serve together with the first; ``'old'`` is the
+    control."""
 
     order = 'old'
     N = 5
@@ -301,14 +311,19 @@ class NewReadNet(brainstate.nn.Module):
     def __init__(self) -> None:
         super().__init__()
         self.w = brainstate.ParamState(_randn(N_IN, self.N, seed=1))
+        if self.order == 'conflict':
+            self.w2 = brainstate.ParamState(_randn(self.N, self.N, seed=2))
         self.g = brainstate.HiddenState(0.5 * jnp.ones((1, self.N)))
         self.V = brainstate.HiddenState(jnp.zeros((1, self.N)))
 
     def update(self, x: jax.Array) -> jax.Array:
         g_old = self.g.value
         self.g.value = 0.9 * g_old + braintrace.matmul(x, self.w.value)
-        g_read = self.g.value if self.order == 'new' else g_old  # 'old' is the control
-        self.V.value = 0.95 * self.V.value + jnp.tanh(g_read)
+        g_read = g_old if self.order == 'old' else self.g.value
+        V = 0.95 * self.V.value + jnp.tanh(g_read)
+        if self.order == 'conflict':
+            V = V + braintrace.matmul(self.g.value, self.w2.value)
+        self.V.value = V
         return self.V.value
 
 
@@ -394,7 +409,8 @@ def _cases() -> Tuple[PreconditionCase, ...]:
         c('credit-4-substeps', _variant(CreditNet, substeps=4), CREDIT_RECORDED, records=CREDIT_KINDS),
         c('credit-20-substeps', _variant(CreditNet, substeps=20), CREDIT_RECORDED, 238, records=CREDIT_KINDS),
         c('newread-old', _variant(NewReadNet, order='old'), EXACT),
-        c('newread-new', _variant(NewReadNet, order='new'), EXACT_OR_ERROR, 239),
+        c('newread-new', _variant(NewReadNet, order='new'), EXACT_OR_ERROR, 239, records=NEW_READ_KINDS),
+        c('newread-conflict', _variant(NewReadNet, order='conflict'), EXACT_OR_ERROR, 239, records=NEW_READ_KINDS),
     ]
     return tuple(cases)
 

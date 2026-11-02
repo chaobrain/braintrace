@@ -82,7 +82,7 @@ which condition failed otherwise:
 from __future__ import annotations
 
 import itertools
-from typing import List, NamedTuple, Optional, Sequence, Set, Tuple, Union
+from typing import Any, List, NamedTuple, Optional, Sequence, Set, Tuple, Union
 
 import numpy as np
 
@@ -106,11 +106,13 @@ from braintrace._op import (
 from .jaxpr_graph import _RECURRENT_WEIGHT_MIXING_PRIMITIVES
 
 __all__ = [
+    'CALL_PRIMITIVES',
     'AxisAdjacency',
     'SnapPattern',
     'analyze_position_adjacency',
     'build_snap_pattern',
     'close_adjacency',
+    'eqn_preserves_positions',
     'flat_adjacency',
 ]
 
@@ -282,6 +284,126 @@ def _is_position_preserving(eqn: JaxprEqn, varshape: Tuple[int, ...]) -> bool:
             continue  # a scalar operand broadcasts to every position alike
         if len(shape) < rank or shape[:rank] != varshape:
             return False
+    return True
+
+
+#: Call-like primitives whose body jaxpr takes the equation's inputs position
+#: for position (``call_jaxpr`` or ``jaxpr`` param). ``jit``/``pjit`` calls are
+#: usually inlined before the analyses run (``jaxpr_graph``); the
+#: custom-derivative calls and ``checkpoint``/``remat`` are not.
+CALL_PRIMITIVES = frozenset({
+    'jit', 'pjit', 'closed_call', 'core_call', 'remat', 'remat2', 'checkpoint',
+    'custom_jvp_call', 'custom_vjp_call',
+})
+
+
+def _leading(var: Union[Var, Literal], varshape: Tuple[int, ...]) -> bool:
+    """Whether *var* is a scalar or carries ``varshape`` as its leading axes."""
+    shape = tuple(getattr(getattr(var, 'aval', None), 'shape', ()))
+    return shape == () or (len(shape) >= len(varshape) and shape[:len(varshape)] == varshape)
+
+
+def _call_body(eqn: JaxprEqn) -> Optional[Jaxpr]:
+    """The body of a call-like equation, when its inputs are the equation's."""
+    bodies = [p for p in (eqn.params.get('call_jaxpr'), eqn.params.get('jaxpr')) if p is not None]
+    if len(bodies) != 1:
+        return None
+    body = getattr(bodies[0], 'jaxpr', bodies[0])
+    if not isinstance(body, Jaxpr) or len(body.invars) != len(eqn.invars):
+        return None
+    return body
+
+
+def _body_preserves_positions(body: Jaxpr, seeds: Sequence[Var], varshape: Tuple[int, ...]) -> bool:
+    """Whether every equation of *body* that reads a value forward-reachable
+    from *seeds* is proven to keep positions (:func:`eqn_preserves_positions`)."""
+    reach = {v for v in seeds if isinstance(v, Var)}
+    for e in body.eqns:
+        hit = [i for i, v in enumerate(e.invars) if isinstance(v, Var) and v in reach]
+        if not hit:
+            continue
+        if not eqn_preserves_positions(e, varshape, hit):
+            return False
+        reach.update(v for v in e.outvars if isinstance(v, Var))
+    return True
+
+
+def _custom_jvp_rule_preserves_positions(
+    eqn: JaxprEqn, varshape: Tuple[int, ...], path_positions: Sequence[int],
+) -> bool:
+    """Whether the JVP rule of a ``custom_jvp_call`` keeps positions in the
+    tangents of *path_positions*: the derivative a trace takes through the
+    call is the rule's, not the primal body's.
+
+    The rule is traced the way JAX's own ``jvp`` of the call traces it, with
+    every tangent instantiated; its jaxpr reads ``[*primals, *tangents]``
+    (after any constants). A rule that cannot be traced is not proven.
+    """
+    num_consts = int(eqn.params.get('num_consts', 0))
+    if any(i < num_consts for i in path_positions):
+        return False  # a custom_jvp has no derivative in its constants
+    rule: Any = eqn.params.get('jvp_jaxpr_fun', eqn.params.get('jvp_jaxpr_thunk'))
+    if rule is None:
+        return False
+    num_args = len(eqn.invars) - num_consts
+    try:
+        call = getattr(rule, 'call_wrapped', rule)
+        traced = call(*([False] * num_args))[0]
+    except Exception:  # noqa: BLE001 -- an untraceable rule proves nothing
+        return False
+    traced = getattr(traced, 'jaxpr', traced)
+    if not isinstance(traced, Jaxpr):
+        return False
+    inputs = [*traced.constvars, *traced.invars]
+    if len(inputs) < 2 * num_args:
+        return False
+    tangents = inputs[len(inputs) - num_args:]
+    return _body_preserves_positions(traced, [tangents[i - num_consts] for i in path_positions], varshape)
+
+
+def eqn_preserves_positions(eqn: JaxprEqn, varshape: Tuple[int, ...], path_positions: Sequence[int]) -> bool:
+    """Whether *eqn* is proven to keep positions on the operands at
+    *path_positions*, in value and in derivative.
+
+    The in-step read cuts of the hidden perturbation (issue #239) ask this of
+    every equation on a read. An allow-list, as :func:`_is_position_preserving`
+    (whose rule an ordinary equation must meet): a position-mixing equation
+    that is not a ``dot_general`` -- a ``rev``, a cumulative sum, a reduction
+    broadcast back, a ``gather`` -- keeps the shape, so only a proof counts.
+    A call-like equation (:data:`CALL_PRIMITIVES`) is proven when its path
+    operands carry ``varshape`` as their leading axes and every equation its
+    body applies to them is proven in turn (so the outputs they reach keep
+    that shape); a ``custom_jvp_call``
+    must also have a JVP rule that is proven on the path tangents. A
+    ``custom_vjp_call`` is never proven: its derivative is a Python function.
+    Control flow (``scan``, ``while``, ``cond``) is not proven either.
+
+    Parameters
+    ----------
+    eqn : JaxprEqn
+        The equation.
+    varshape : tuple of int
+        The hidden group's position layout.
+    path_positions : sequence of int
+        The positions in ``eqn.invars`` of the operands on the path.
+
+    Returns
+    -------
+    bool
+        ``True`` iff proven.
+    """
+    name = eqn.primitive.name
+    if name not in CALL_PRIMITIVES:
+        return _is_position_preserving(eqn, varshape)
+    if name == 'custom_vjp_call':
+        return False
+    if not all(_leading(eqn.invars[i], varshape) for i in path_positions):
+        return False
+    body = _call_body(eqn)
+    if body is None or not _body_preserves_positions(body, [body.invars[i] for i in path_positions], varshape):
+        return False
+    if name == 'custom_jvp_call':
+        return _custom_jvp_rule_preserves_positions(eqn, varshape, path_positions)
     return True
 
 

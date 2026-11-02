@@ -219,6 +219,28 @@ class HiddenGroup(NamedTuple):
     ``hidden_outvars`` are the outer scan carry vars. ``None`` for ordinary
     groups."""
 
+    def carried_vars(self) -> FrozenSet[Var]:
+        """The values the transition computes (issue #239).
+
+        The outvars of the equations of ``transition_jaxpr``. A value outside
+        this set is bound from the forward pass (a constvar), so the
+        transition holds it fixed and the group's Jacobian has no term
+        through it. The hidden perturbation cuts an in-step read of a new
+        hidden value only when every equation on the read computes a value in
+        this set *and* is proven to keep positions
+        (:func:`~braintrace._compiler.position_graph.eqn_preserves_positions`):
+        a position-coupling equation the transition holds (traced in under
+        ``include_recurrent_mixing=True``, or one the walker's rule does not
+        name, such as a ``roll`` or a dense dot inside a ``custom_jvp``,
+        #249) is carried by the per-position traces only in part.
+
+        Returns
+        -------
+        frozenset of Var
+            The values the transition computes.
+        """
+        return frozenset(ov for eq in self.transition_jaxpr.eqns for ov in eq.outvars)
+
     @property
     def varshape(self) -> Tuple[int, ...]:
         """The shape of each state variable.
@@ -1488,51 +1510,61 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             return
         super()._eval_scan(eqn)
 
-    def _eval_eqn(self, eqn: JaxprEqn) -> None:
-        """
-        Evaluating the normal jaxpr equation.
+    def _diagonal_boundary(self, eqn: JaxprEqn) -> Optional[str]:
+        """Why the position-diagonal transition leaves ``eqn`` out, or ``None``.
+
+        The one inclusion rule of the hidden-to-hidden transition under
+        diagonal recurrence (``include_recurrent_mixing=False``), applied by
+        :meth:`_eval_eqn`. The reasons:
+
+        ``'stop_gradient'``
+            No derivative flows through it, in either mode.
+        ``'etp_mixing'``
+            A recurrent ETP *mixing* primitive (``etp_mv``/``etp_mm``/
+            ``etp_conv``: ``is_etp_primitive`` but not
+            ``is_etp_enable_gradient_primitive``). Its output is supplied
+            separately (carried by the weight eligibility trace), so it is not
+            traced into the transition; skipping it keeps the transition
+            element-wise, which restores the bounded D-RTRL recurrence (the
+            0.1.2 behaviour). Identity-like, gradient-enabled ETP ops (e.g.
+            ``etp_elemwise``) are kept.
+        ``'recurrent_mixing'``
+            A *non-ETP* recurrent-weight mixing primitive that reads a
+            hidden-derived value (a plain ``dot_general``/
+            ``conv_general_dilated`` recurrent weight, as in a reservoir)
+            couples the leading ``varshape`` positions just like the ETP
+            matmul does. Treating it as a boundary keeps the transition
+            position-diagonal, which is what makes
+            ``is_diagonal_recurrence = not include_recurrent_mixing`` correct
+            rather than a footgun (a cross-position-coupled transition driven
+            by the cheap column-sum Jacobian is exactly what overflows the
+            eligibility trace). Only ops that *read the hidden state* count: a
+            feed-forward input projection (``x @ W_in``) does not couple the
+            recurrence and is kept. The set is deliberately narrow
+            (matmul/conv only): within-position reductions/gathers over the
+            ``num_state`` axis -- e.g. the ``gather`` that splits a stacked
+            ``HiddenGroupState`` (ALIF ``V``/``a``) -- are not cross-position
+            coupling and stay in the transition (``jacrev_last_dim`` handles
+            the resulting per-position block). The same holds for a
+            ``dot_general`` that provably contracts only such axes (``I @ c``
+            over the state axis of an ``(n, K)`` group state, #213).
+        ``'assumed_mixing'``
+            A ``dot_general`` on a hidden-derived value whose layout cannot be
+            proven (#213); it may couple positions, so it is a boundary too
+            (and reported by :meth:`_eval_eqn`).
+        ``'control_flow_mixing'``
+            An opaque control-flow equation (while, or a scan/cond the
+            canonicalizer left opaque) whose *body* applies a recurrent
+            weight-mixing primitive to the carried hidden state: it couples
+            the positions exactly like a top-level recurrent matmul. Bodies
+            that only mix loop constants (an input projection ``x @ W_in``)
+            are kept.
         """
         if eqn.primitive.name == 'stop_gradient':
-            return
-
-        # Treat a recurrent ETP *mixing* primitive (e.g. ``etp_mv``/``etp_mm``/
-        # ``etp_conv`` -- ``is_etp_primitive`` but not ``is_etp_enable_gradient_primitive``)
-        # as a boundary: its output is supplied separately (carried by the weight
-        # eligibility trace), so it must not be traced into the hidden-to-hidden
-        # transition. Skipping it here keeps the transition element-wise, which
-        # restores the bounded D-RTRL recurrence (the 0.1.2 behaviour). Identity-
-        # like, gradient-enabled ETP ops (e.g. ``etp_elemwise``) are *not* skipped.
-        # ``include_recurrent_mixing=True`` opts back into tracing through them.
-        if (
-            not self.include_recurrent_mixing
-            and is_etp_primitive(eqn.primitive)
-            and not is_etp_enable_gradient_primitive(eqn.primitive)
-        ):
-            return
-
-        # A *non-ETP* recurrent-weight mixing primitive that reads the hidden
-        # state (a plain ``dot_general``/``conv_general_dilated`` recurrent weight,
-        # as in a reservoir) couples the leading ``varshape`` positions just like
-        # the ETP matmul does. In the default ("without recurrence") mode it is
-        # likewise treated as a boundary so the hidden-to-hidden transition stays
-        # position-diagonal -- which is what makes
-        # ``is_diagonal_recurrence = not include_recurrent_mixing`` correct rather
-        # than a footgun (a cross-position-coupled transition driven by the cheap
-        # column-sum Jacobian is exactly what overflows the eligibility trace).
-        # Only ops that *read the hidden state* are skipped: a feed-forward input
-        # projection (``x @ W_in``) does not couple the recurrence and is kept.
-        # The set is deliberately narrow (matmul/conv only): within-position
-        # reductions/gathers over the ``num_state`` axis -- e.g. the ``gather`` that
-        # splits a stacked ``HiddenGroupState`` (ALIF ``V``/``a``) -- are NOT
-        # cross-position coupling and must remain in the transition (``jacrev_last_dim``
-        # already handles the resulting per-position block correctly). The same
-        # holds for a ``dot_general`` that provably contracts only such axes
-        # (``I @ c`` over the state axis of an ``(n, K)`` group state, #213); one
-        # whose layout cannot be proven stays a boundary and is reported.
-        if (
-            not self.include_recurrent_mixing
-            and eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES
-        ):
+            return 'stop_gradient'
+        if is_etp_primitive(eqn.primitive) and not is_etp_enable_gradient_primitive(eqn.primitive):
+            return 'etp_mixing'
+        if eqn.primitive.name in _RECURRENT_WEIGHT_MIXING_PRIMITIVES:
             hidden_positions = self._hidden_derived_invar_positions(eqn)
             if hidden_positions:
                 couples = (
@@ -1540,22 +1572,35 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
                     if eqn.primitive.name == 'dot_general' else True
                 )
                 if couples is None:
-                    self._report_assumed_mixing(eqn, hidden_positions)
-                if couples is not False:
-                    return
-        self._track_position_layout(eqn)
-
-        # An opaque control-flow equation (while, or a scan/cond the
-        # canonicalizer left opaque) whose *body* applies a recurrent
-        # weight-mixing primitive to the carried hidden state couples the
-        # positions exactly like a top-level recurrent matmul -- so in the
-        # default mode it is likewise a boundary. Bodies that only mix
-        # loop constants (an input projection ``x @ W_in``) are kept.
+                    return 'assumed_mixing'
+                if couples:
+                    return 'recurrent_mixing'
         if (
-            not self.include_recurrent_mixing
-            and (is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn))
+            (is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn))
             and self._control_flow_mixes_hidden(eqn)
         ):
+            return 'control_flow_mixing'
+        return None
+
+    def _eval_eqn(self, eqn: JaxprEqn) -> None:
+        """
+        Evaluating the normal jaxpr equation.
+        """
+        why = self._diagonal_boundary(eqn)
+        if why == 'stop_gradient':
+            return
+
+        # The mixing boundaries of the default ("without recurrence") mode;
+        # ``include_recurrent_mixing=True`` traces through them.
+        if not self.include_recurrent_mixing:
+            if why == 'etp_mixing' or why == 'recurrent_mixing':
+                return
+            if why == 'assumed_mixing':
+                self._report_assumed_mixing(eqn, self._hidden_derived_invar_positions(eqn))
+                return
+        self._track_position_layout(eqn)
+
+        if why == 'control_flow_mixing' and not self.include_recurrent_mixing:
             emit(
                 kind=DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING,
                 level=DiagnosticLevel.WARNING,

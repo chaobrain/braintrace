@@ -141,7 +141,10 @@ def test_listed_record_kinds_are_diagnostic_kinds():
     for case in pm.CASES:
         for kind in case.records:
             K(kind)  # raises on a misspelt kind
-        assert (case.check == pm.CREDIT_RECORDED) == bool(case.records), case.name
+        if case.check == pm.CREDIT_RECORDED:  # the record is the check
+            assert case.records, case.name
+        elif case.control:  # a record never rescues a control
+            assert not case.records, case.name
 
 
 def test_evaluate_counts_the_measured_diag_sites():

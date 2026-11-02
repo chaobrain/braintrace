@@ -193,6 +193,17 @@ class DiagnosticKind(str, Enum):
     ONLINE_GRADIENT_ZERO = 'online_gradient_zero'
     ONLINE_GRADIENT_PARTIAL = 'online_gradient_partial'
 
+    # In-step reads of a new hidden value (#239)
+    #
+    # ``HIDDEN_NEW_READ_CUT`` (INFO): a hidden update reads another hidden
+    # state's new value, and the eligibility traces carry that read; the
+    # single-step learning signal holds it fixed (``context['cuts']``).
+    # ``HIDDEN_NEW_READ_DOUBLE_COUNT`` (ERROR): such reads cannot be
+    # separated (``context['conflicts']``); the signal stays the total
+    # derivative and can count a path twice.
+    HIDDEN_NEW_READ_CUT = 'hidden_new_read_cut'
+    HIDDEN_NEW_READ_DOUBLE_COUNT = 'hidden_new_read_double_count'
+
     # Structural observations (informational / partial)
     PRIMITIVE_INSIDE_NESTED_JIT = 'primitive_inside_nested_jit'
     PRIMITIVE_INSIDE_CONTROL_FLOW = 'primitive_inside_control_flow'

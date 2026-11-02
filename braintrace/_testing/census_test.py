@@ -109,21 +109,64 @@ class TestStructuralChannels:
         ('weight-mask', 'CHAIN'),
         ('source-two-params', 'MULTISOURCE'),
         ('source-two-leaves', 'MULTISOURCE'),
-        ('newread-new', 'NEWREAD'),
+        ('newread-conflict', 'NEWREAD'),
     ])
     def test_flags_the_violation(self, name, channel):
         c = _measure(name, steps=1)
         assert any(k.startswith(channel + '|') for k in c.values[name])
 
-    @pytest.mark.parametrize('name', ['weight-raw', 'weight-mask-as-weight-fn', 'source-one', 'newread-old'])
+    @pytest.mark.parametrize('name', ['weight-raw', 'weight-mask-as-weight-fn', 'source-one', 'newread-old',
+                                      'newread-new'])
     def test_controls_are_clean(self, name):
+        """The controls, and the read #239's single-step perturbation holds fixed."""
         c = _measure(name, steps=1)
         flagged = [k for k in c.values.get(name, {}) if k.split('|')[0] in ('CHAIN', 'MULTISOURCE', 'NEWREAD')]
         assert flagged == []
 
     def test_newread_names_both_states(self):
-        c = _measure('newread-new', steps=1)
-        assert 'NEWREAD|etp_mm["(\'w\',)"]: (\'g\',) -> (\'V\',)' in c.values['newread-new'], c.values
+        c = _measure('newread-conflict', steps=1)
+        assert 'NEWREAD|etp_mm["(\'w\',)"]: (\'g\',) -> (\'V\',)' in c.values['newread-conflict'], c.values
+
+    @pytest.mark.parametrize('vjp_method,flagged', [('single-step', False), ('multi-step', True)])
+    def test_newread_skips_the_reads_the_perturbation_cuts(self, vjp_method, flagged):
+        """Single-step cuts the read (#239); a multi-step graph has no
+        perturbation, and its read is recorded as exposure."""
+        case = _case('newread-new')
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(case.model(), 'd_rtrl', case.inputs()[0], vjp_method=vjp_method)
+        perturb = learner.graph.hidden_perturb
+        assert (perturb is None) == flagged
+        assert list(getattr(perturb, 'new_read_cuts', ())) == ([] if flagged else [(('g',), ('V',))])
+        assert bool(census.structural_sites(learner.graph)['NEWREAD']) == flagged
+
+    def test_newread_follows_a_kept_read_past_a_cut_one(self):
+        """A chain ``g -> V -> a`` with both reads cut is clean; the path from
+        the new ``g`` to the new ``a`` runs through the cut read of ``g``."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.g = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.V = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.a = brainstate.HiddenState(jnp.zeros((1, 4)))
+
+            def update(self, x):
+                self.g.value = 0.9 * self.g.value + braintrace.matmul(x, self.w.value)
+                self.V.value = 0.9 * self.V.value + jnp.tanh(self.g.value)
+                self.a.value = 0.9 * self.a.value + jnp.tanh(self.V.value)
+                return self.a.value
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
+        assert list(learner.graph.hidden_perturb.new_read_cuts) == [(('g',), ('V',)), (('V',), ('a',))]
+        assert census.structural_sites(learner.graph)['NEWREAD'] == []
+        learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)), vjp_method='multi-step')
+        assert census.structural_sites(learner.graph)['NEWREAD'] == [
+            "etp_mm[\"('w',)\"]: ('V',) -> ('a',)", "etp_mm[\"('w',)\"]: ('g',) -> ('V',)",
+            "etp_mm[\"('w',)\"]: ('g',) -> ('a',)"]
 
     @pytest.mark.parametrize('order', ['through_etp', 'weight_free_g'])
     def test_newread_ignores_reads_that_cannot_double_count(self, order):
@@ -173,6 +216,31 @@ class TestStructuralChannels:
             learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
         traced = {p for r in learner.graph.hidden_param_op_relations for g in r.hidden_groups for p in g.hidden_paths}
         assert traced == {('g',)}
+        assert census.structural_sites(learner.graph)['NEWREAD'] == []
+
+    def test_newread_follows_a_kept_read_next_to_a_cut_one(self):
+        """The new ``g`` is read by ``V`` (cut) and by ``U``, which is outside
+        the relation's groups (kept). The census follows ``U``'s read and finds
+        no traced state behind it."""
+
+        class Net(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = brainstate.ParamState(jnp.ones((3, 4)) * 0.1)
+                self.g = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.V = brainstate.HiddenState(jnp.zeros((1, 4)))
+                self.U = brainstate.HiddenState(jnp.zeros((2, 2)))
+
+            def update(self, x):
+                self.g.value = 0.9 * self.g.value + braintrace.matmul(x, self.w.value)
+                self.V.value = 0.9 * self.V.value + jnp.tanh(self.g.value)
+                self.U.value = 0.9 * self.U.value + jnp.reshape(self.g.value, (2, 2))
+                return self.V.value
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            learner = braintrace.compile(Net(), 'd_rtrl', jnp.ones((1, 3)))
+        assert list(learner.graph.hidden_perturb.new_read_cuts) == [(('g',), ('V',))]
         assert census.structural_sites(learner.graph)['NEWREAD'] == []
 
     def test_descended_relation_is_read_through_the_scan_body(self):
@@ -326,4 +394,4 @@ def test_recording_continues_after_the_plugin_self_tests(tmp_path):
     prefix = run_after_self_tests(tmp_path, 'braintrace._testing.census', self_test, census.OUT_ENV)
     values = census.load(prefix)['values']
     probe = [v for t, v in values.items() if t.endswith('::test_probe_after_the_self_tests')]
-    assert probe and any(k.startswith('NEWREAD|') for k in probe[0]), sorted(values)
+    assert probe and any(k.startswith('CHAIN|') for k in probe[0]), sorted(values)
