@@ -38,7 +38,6 @@ import numpy as np
 import pytest
 
 import braintrace
-from braintrace._compiler.diagnostics import DiagnosticKind
 from braintrace._testing.oracle import (
     bptt_param_gradients,
     chunked_online_param_gradients,
@@ -233,16 +232,14 @@ _DOUBLE_COUNTED_ON_003943C = (
     191, 193, 195, 199, 200, 201, 207, 210, 211,
 )
 # seeds with one hidden group, new_read_exact=True, forced multi-step exact at T = 3 and
-# single-step not, on 003943c (35: see test_a_dense_old_read_is_reported_not_cut)
+# single-step not, on 003943c (35: see test_a_dense_old_read_in_a_call_is_not_a_new_read)
 _OFF_AT_THREE_STEPS_ON_003943C = (21, 114, 115, 123, 136, 143, 201)
 
 
 @pytest.mark.parametrize('seed', _DOUBLE_COUNTED_ON_003943C)
 def test_a_seed_that_double_counted_is_reported_or_exact(seed):
     """Each seed now reports its reads, or declares no double count and
-    equals BPTT at T = 1. The second happens where a dense dot inside a call
-    now splits the hidden groups (the walker leaves the call out), so the
-    read that mixed positions is no longer within one group."""
+    equals BPTT at T = 1."""
     make = _model(_spec(seed))
     with brainstate.environ.context(precision=64):
         hp = _graph(make).hidden_perturb
@@ -276,17 +273,17 @@ def test_a_declared_exact_one_group_graph_matches_multi_step(seed):
         assert _worst(single, ref) < 1e-9
 
 
-def test_a_dense_old_read_is_reported_not_cut():
+def test_a_dense_old_read_in_a_call_is_not_a_new_read():
     """Seed 35: ``h3`` reads the old ``h1`` through a dense dot inside a
-    ``custom_jvp``. The transition leaves the call out and reports it
-    (``CONTROL_FLOW_RECURRENT_MIXING``), so single-step D-RTRL is off BPTT at
-    T = 3 by its diagonal approximation; the elementwise cuts stay exact at
-    T = 1."""
+    ``custom_jvp``. That is not an in-step read of a new value, so the
+    planner does not report it, and the elementwise cuts stay exact at T = 1.
+    At T = 3 single-step D-RTRL is off BPTT because the walker traces the
+    call into the diagonal transition without a report (#249), not because
+    of a double count."""
     make = _model(_spec(35))
     with brainstate.environ.context(precision=64):
         graph = _graph(make)
         assert graph.hidden_perturb.new_read_exact is True
-        assert any(r.kind is DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING for r in graph.diagnostics)
         xs = _inputs(1)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')

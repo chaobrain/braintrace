@@ -81,7 +81,6 @@ from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
 from .position_graph import (
     _POSITION_PRESERVING_PRIMITIVES,
-    CALL_PRIMITIVES,
     DEFAULT_MAX_JACOBIAN_ELEMENTS,
     build_snap_pattern,
 )
@@ -232,8 +231,8 @@ class HiddenGroup(NamedTuple):
         (:func:`~braintrace._compiler.position_graph.eqn_preserves_positions`):
         a position-coupling equation the transition holds (traced in under
         ``include_recurrent_mixing=True``, or one the walker's rule does not
-        name, such as a ``roll``) is carried by the per-position traces only
-        in part.
+        name, such as a ``roll`` or a dense dot inside a ``custom_jvp``,
+        #249) is carried by the per-position traces only in part.
 
         Returns
         -------
@@ -1555,15 +1554,11 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             (and reported by :meth:`_eval_eqn`).
         ``'control_flow_mixing'``
             An opaque control-flow equation (while, or a scan/cond the
-            canonicalizer left opaque) or a call-like equation the
-            canonicalizer does not inline (``custom_jvp_call``,
-            ``custom_vjp_call``, ``checkpoint``/``remat``, a ``closed_call``)
-            whose *body* applies a recurrent weight-mixing primitive to a
-            hidden-derived input: it couples the positions exactly like a
-            top-level recurrent matmul (issue #239). Bodies that only mix
-            loop constants (an input projection ``x @ W_in``) are kept. A
-            call body whose inputs cannot be matched to the equation's is
-            assumed to mix.
+            canonicalizer left opaque) whose *body* applies a recurrent
+            weight-mixing primitive to the carried hidden state: it couples
+            the positions exactly like a top-level recurrent matmul. Bodies
+            that only mix loop constants (an input projection ``x @ W_in``)
+            are kept.
         """
         if eqn.primitive.name == 'stop_gradient':
             return 'stop_gradient'
@@ -1584,8 +1579,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             (is_scan_primitive(eqn) or is_while_primitive(eqn) or is_cond_primitive(eqn))
             and self._control_flow_mixes_hidden(eqn)
         ):
-            return 'control_flow_mixing'
-        if eqn.primitive.name in CALL_PRIMITIVES and self._call_mixes_hidden(eqn):
             return 'control_flow_mixing'
         return None
 
@@ -1916,24 +1909,6 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             _jaxpr_mixes_from(sub, seeds, feedback)
             for sub, seeds, feedback in _map_positions_to_subjaxpr_seeds(eqn, positions)
         )
-
-    def _call_mixes_hidden(self, eqn: JaxprEqn) -> bool:
-        """Whether a call-like equation's body applies a recurrent
-        weight-mixing primitive to a hidden-derived input (issue #239).
-
-        The body's inputs are the equation's, position for position (as
-        :func:`_jaxpr_mixes_from` descends a call inside a loop body); a body
-        whose arity differs is assumed to mix.
-        """
-        positions = self._hidden_derived_invar_positions(eqn)
-        if not positions:
-            return False
-        for sub in _param_subjaxprs(eqn):
-            if len(sub.invars) != len(eqn.invars):
-                return True
-            if _jaxpr_mixes_from(sub, [sub.invars[j] for j in positions], {}):
-                return True
-        return False
 
     def _attach_snap_pattern(self, group: HiddenGroup) -> HiddenGroup:
         """Derive and attach this group's SnAp-n neighbourhood, if one is asked for.
