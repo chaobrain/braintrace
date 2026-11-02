@@ -1053,6 +1053,9 @@ _UNPROVEN_READS = {
     'cumsum': lambda a: 0.5 * jnp.cumsum(a, axis=-1),
     'mean-field': lambda a: a - jnp.mean(a, axis=-1, keepdims=True),
     'gather': lambda a: a[..., _PERM],
+    # indices of the full position shape: only the allowlist rejects it
+    'gather-full-index': lambda a: a[jnp.zeros(a.shape, jnp.int32),
+                                     jnp.broadcast_to(jnp.asarray(_PERM, jnp.int32), a.shape)],
     'sum-broadcast': lambda a: 0.3 * jnp.sum(a, axis=-1, keepdims=True) * jnp.ones_like(a),
     'pad-shift': lambda a: jnp.pad(a, ((0, 0), (1, 0)))[..., :_N],
     'sort': lambda a: jnp.sort(a, axis=-1),
@@ -1065,7 +1068,13 @@ _UNPROVEN_READS = {
     'custom_vjp': _cv_tanh,
     'cond': lambda a: jax.lax.cond(True, jnp.tanh, jnp.sin, a),
     'scan': _scan_tanh,
+    # widens the new g into the slots of a HiddenGroupState: slot l at
+    # position i reads position l (in reads-into-slots, only the allowlist
+    # rejects it)
+    'broadcast-transposed': lambda a: jax.lax.broadcast_in_dim(a, a.shape + a.shape[-1:], (0, a.ndim)),
 }
+# the reads above that widen the read value into the slots of a group state
+_INTO_SLOTS = ('broadcast-transposed',)
 _PROVEN_READS = {
     'elementwise': lambda a: 0.6 * jnp.tanh(a) + jnp.where(a > 0, a, 0.1 * a),
     'custom_jvp-elementwise': _cj_tanh,
@@ -1121,7 +1130,33 @@ class _NoRecGAdd(_TwoStates):
         return self.V.value
 
 
-_CARRY_CASES.update({f'reads-h1-{n}': (_reads_h1(n, r), _P7, None) for n, r in _UNPROVEN_READS.items()})
+class _ReadsIntoSlots(brainstate.nn.Module):
+    """One group: ``st``, a HiddenGroupState of ``_N`` slots, reads the new h0
+    through ``read`` (the second fix-check's p28)."""
+
+    read = None
+
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.h0 = brainstate.HiddenState(0.3 * jnp.ones((batch_size, _N)))
+        self.st = brainstate.HiddenGroupState(0.6 * jnp.ones((batch_size, _N, _N)))
+
+    def update(self, x):
+        self.h0.value = 0.8 * self.h0.value + jnp.tanh(self.W(x))
+        self.st.value = 0.5 * self.st.value + type(self).read(self.h0.value)
+        return self.st.value.sum(-1)
+
+
+def _reads_into_slots(name, read):
+    return type(f'_ReadsIntoSlots_{name}', (_ReadsIntoSlots,), {'read': staticmethod(read)})
+
+
+_CARRY_CASES.update({f'reads-h1-{n}': (_reads_h1(n, r), _P7, None)
+                     for n, r in _UNPROVEN_READS.items() if n not in _INTO_SLOTS})
+_CARRY_CASES.update({f'reads-into-slots-{n}': (_reads_into_slots(n, _UNPROVEN_READS[n]), _P7, None) for n in _INTO_SLOTS})
 _CARRY_CASES.update({f'reads-h1-{n}': (_reads_h1(n, r), _P7, _ALL_THREE) for n, r in _PROVEN_READS.items()})
 _CARRY_CASES.update({'cross-group-add': (_CrossGroupAdd, _P3, None), 'no-rec-g-add': (_NoRecGAdd, _P3, None)})
 

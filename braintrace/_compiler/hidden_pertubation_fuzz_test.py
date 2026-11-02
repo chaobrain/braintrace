@@ -27,6 +27,7 @@ report the read, or equal BPTT. The generator is the review's, kept
 verbatim so the seeds draw the same models.
 """
 
+import copy
 import random
 import warnings
 
@@ -232,8 +233,32 @@ _DOUBLE_COUNTED_ON_003943C = (
     191, 193, 195, 199, 200, 201, 207, 210, 211,
 )
 # seeds with one hidden group, new_read_exact=True, forced multi-step exact at T = 3 and
-# single-step not, on 003943c (35: see test_a_dense_old_read_in_a_call_is_not_a_new_read)
+# single-step not, on 003943c (seed 35 was too, and still declares no double count:
+# test_a_dense_old_read_in_a_call_is_not_a_new_read)
 _OFF_AT_THREE_STEPS_ON_003943C = (21, 114, 115, 123, 136, 143, 201)
+
+
+def _variant(seed, new=None, old=None):
+    """The model of ``seed`` with its reads of new values of the kinds in
+    ``new`` redrawn as ``new[kind]``, and every read of an old value as
+    ``old``."""
+    spec = copy.deepcopy(_spec(seed))
+    spec['upd'] = [(decay, [(t[0], t[1], new.get(t[2], t[2])) if t[0] == 'new' and new else
+                            (t[0], t[1], old) if t[0] == 'old' and old else t for t in terms])
+                   for decay, terms in spec['upd']]
+    return _model(spec)
+
+
+def _off_bptt(make, steps):
+    """How far single-step and multi-step D-RTRL are off BPTT after ``steps``."""
+    xs = _inputs(steps)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        ref = bptt_param_gradients(make, xs)
+        single = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+        multi = chunked_online_param_gradients(
+            make, xs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'), chunk_size=1)
+    return _worst(single, ref), _worst(multi, ref)
 
 
 @pytest.mark.parametrize('seed', _DOUBLE_COUNTED_ON_003943C)
@@ -255,31 +280,63 @@ def test_a_seed_that_double_counted_is_reported_or_exact(seed):
 
 
 @pytest.mark.parametrize('seed', _OFF_AT_THREE_STEPS_ON_003943C)
-def test_a_declared_exact_one_group_graph_matches_multi_step(seed):
-    make = _model(_spec(seed))
+def test_a_seed_off_multi_step_on_003943c_is_reported(seed):
+    """Each seed declared no double count on 003943c; now it reports a read
+    it cut there."""
+    with brainstate.environ.context(precision=64):
+        hp = _graph(_model(_spec(seed))).hidden_perturb
+    assert hp.new_read_exact is False and hp.new_read_cuts == () and hp.new_read_conflicts
+
+
+# one hidden group, cut reads, new_read_exact=True and every read of an old value
+# elementwise: seeds 35 and 136 with their old reads made tanh (and 136's cond reads, not
+# proven to keep positions, made tanh so that they are cut)
+_EXACT_ONE_GROUP = {'35-old-tanh': (35, None, 'tanh'), '136-cond-old-tanh': (136, {'cond': 'tanh'}, 'tanh')}
+
+
+@pytest.mark.parametrize('name', sorted(_EXACT_ONE_GROUP))
+def test_a_declared_exact_one_group_graph_matches_multi_step(name):
+    """With every read of an old value elementwise, D-RTRL's transition holds
+    the whole recurrence, so with the carried reads cut single-step D-RTRL
+    equals multi-step and BPTT at T = 3."""
+    make = _variant(*_EXACT_ONE_GROUP[name])
     with brainstate.environ.context(precision=64):
         graph = _graph(make)
         hp = graph.hidden_perturb
-        if not hp.new_read_exact or len(graph.hidden_groups) != 1:
-            return  # reported, or several groups (not a claim about multi-step)
-        xs = _inputs(3)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            single = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
-            multi = chunked_online_param_gradients(
-                make, xs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'), chunk_size=1)
-            ref = bptt_param_gradients(make, xs)
-    if _worst(multi, ref) < 1e-12:
-        assert _worst(single, ref) < 1e-9
+        assert hp.new_read_exact is True and hp.new_read_cuts and len(graph.hidden_groups) == 1
+        single, multi = _off_bptt(make, 3)
+    assert multi < 1e-12 and single < 1e-12
+
+
+def test_a_position_coupling_old_read_is_a_known_approximation():
+    """Seed 136 with its cond reads made tanh: one group, three cut reads and
+    new_read_exact=True, and ``h3`` reads the old ``h2`` through a dense dot.
+    D-RTRL's transition is diagonal in positions, so it approximates that
+    read: single-step D-RTRL equals BPTT at T = 1 but not at T = 3, where
+    multi-step does. That is consistent with ``new_read_exact``, which says
+    only that no in-step read of a new value is double counted, not that the
+    single-step gradient is exact. With the old read elementwise single-step
+    matches (``136-cond-old-tanh`` above)."""
+    make = _variant(136, new={'cond': 'tanh'})
+    with brainstate.environ.context(precision=64):
+        graph = _graph(make)
+        hp = graph.hidden_perturb
+        assert hp.new_read_exact is True and len(hp.new_read_cuts) == 3 and len(graph.hidden_groups) == 1
+        assert _off_bptt(make, 1)[0] < 1e-12
+        single, multi = _off_bptt(make, 3)
+    assert multi < 1e-12
+    assert single > 0.1  # 0.198 at the time of writing
 
 
 def test_a_dense_old_read_in_a_call_is_not_a_new_read():
     """Seed 35: ``h3`` reads the old ``h1`` through a dense dot inside a
     ``custom_jvp``. That is not an in-step read of a new value, so the
     planner does not report it, and the elementwise cuts stay exact at T = 1.
-    At T = 3 single-step D-RTRL is off BPTT because the walker traces the
-    call into the diagonal transition without a report (#249), not because
-    of a double count."""
+    At T = 3 single-step D-RTRL is off BPTT, as it is with a plain dense dot
+    there: D-RTRL's diagonal transition approximates a read of an old value
+    that couples positions (see
+    ``test_a_position_coupling_old_read_is_a_known_approximation``); with the
+    old read elementwise it matches (``35-old-tanh``)."""
     make = _model(_spec(35))
     with brainstate.environ.context(precision=64):
         graph = _graph(make)

@@ -2915,7 +2915,8 @@ class TestCallLikeRecurrentMixing:
         names, kinds = self._compile(call, False)
         assert primitive in names and DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
 
-    @pytest.mark.xfail(strict=True, reason='#249: the walker does not look inside a call-like equation')
+    @pytest.mark.xfail(strict=True, raises=AssertionError,
+                       reason='#249: the walker does not look inside a call-like equation')
     @pytest.mark.parametrize('name', sorted(n for n, c in _CALLS.items() if c[2]))
     def test_a_recurrent_matmul_inside_a_call_is_left_out_and_reported(self, name):
         call, primitive, _ = _CALLS[name]
