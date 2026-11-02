@@ -1,7 +1,22 @@
 # Release Notes
 
 
-## Unreleased
+## Version 0.3.0
+
+A correctness release for online learning. Under the default
+`vjp_method='single-step'`, in-step reads of new hidden values are no longer
+counted twice (#239), and a learner conforms its inputs to the example inputs
+it was compiled with, or refuses them, where it used to run them silently at
+the wrong scale or dtype (#227, #241). A weight whose online gradient is zero
+by construction, and a hidden coupling that the grouping drops, are now
+reported (#199, #201). Substep scans, descended scans and `HiddenGroupState`
+models compile in more cases, and SnAp-n keeps its position pattern through
+rolled loops and spiking neurons.
+
+Read *Behavior changes* before upgrading: single-step gradients change on
+graphs with a cut read, `HiddenPerturbation` has three new trailing fields,
+and some calls that used to run are refused. The requirements are those of
+0.2.8.
 
 ### Fixes
 
