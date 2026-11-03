@@ -81,6 +81,8 @@ from .diagnostics import DiagnosticKind, DiagnosticLevel, emit
 from .module_info import extract_module_info, ModuleInfo
 from .position_graph import (
     _POSITION_PRESERVING_PRIMITIVES,
+    _call_body,
+    CALL_PRIMITIVES,
     DEFAULT_MAX_JACOBIAN_ELEMENTS,
     build_snap_pattern,
 )
@@ -1007,15 +1009,15 @@ def _jaxpr_mixes_from(
     Runs a forward reachability sweep from the seed variables, returning
     ``True`` as soon as a ``_RECURRENT_WEIGHT_MIXING_PRIMITIVES`` equation
     consumes a reachable value; nested control flow is descended with the
-    same position mapping. Call-like equations (``jit``/``pjit``, ``remat``,
-    ``custom_jvp_call``/``custom_vjp_call``) are descended positionally, so a
-    ``jax.jit``-wrapped helper inside a loop body cannot hide mixing; any
-    other equation carrying a body jaxpr whose arity does not match is
-    conservatively reported as mixing (degrading to the zero-recurrence
-    fallback plus a warning, never to a silently wrong Jacobian). The sweep
-    is repeated until the carry feedback (loop outvar fed back as
-    next-iteration invar) adds no new seeds, so mixing that only appears
-    after the first loop iteration is still found.
+    same position mapping. Call-like equations (:data:`CALL_PRIMITIVES`) are
+    checked by :func:`_call_mixes_from`, so a ``jax.jit``-wrapped helper, a
+    ``checkpoint`` or a custom-derivative call inside a loop body cannot hide
+    mixing; any other equation carrying a body jaxpr whose arity does not
+    match is conservatively reported as mixing (degrading to the
+    zero-recurrence fallback plus a warning, never to a silently wrong
+    Jacobian). The sweep is repeated until the carry feedback (loop outvar fed
+    back as next-iteration invar) adds no new seeds, so mixing that only
+    appears after the first loop iteration is still found.
     """
     seed_set = set(seeds)
     while True:
@@ -1033,6 +1035,9 @@ def _jaxpr_mixes_from(
                 for sub, sub_seeds, sub_fb in _map_positions_to_subjaxpr_seeds(eqn, hit):
                     if _jaxpr_mixes_from(sub, sub_seeds, sub_fb):
                         return True
+            elif eqn.primitive.name in CALL_PRIMITIVES:
+                if _call_mixes_from(eqn, hit):
+                    return True
             else:
                 for sub in _param_subjaxprs(eqn):
                     if len(sub.invars) != len(eqn.invars):
@@ -1048,6 +1053,92 @@ def _jaxpr_mixes_from(
         if new_seeds == seed_set:
             return False
         seed_set = new_seeds
+
+
+#: Call-like primitives whose derivative is a rule of their own, not their
+#: body's: the hidden-to-hidden Jacobian of a transition that holds one is
+#: taken through the rule.
+_CUSTOM_DERIVATIVE_CALLS = frozenset({'custom_jvp_call', 'custom_vjp_call'})
+
+
+def _derivative_jaxpr(
+    eqn: JaxprEqn,
+    positions: Sequence[int],
+    body: Jaxpr,
+) -> Optional[Tuple[Jaxpr, List[Var]]]:
+    """The derivative a transition takes through a custom-derivative call.
+
+    Traces the JVP (``custom_jvp_call``) or the VJP (``custom_vjp_call``) of
+    *eqn* with respect to its operands at *positions* (floating, so they have
+    a derivative), as JAX differentiates the call when it evaluates the
+    transition: through the JVP rule of a ``custom_jvp``, the backward
+    function of a ``custom_vjp``. *body* is the call's primal body; it lends
+    its debug info to the one-equation jaxpr that is differentiated.
+
+    Returns
+    -------
+    tuple of (Jaxpr, list of Var) or None
+        The traced jaxpr and its tangent (JVP) or cotangent (VJP) inputs, in
+        which the derivative is linear. ``None`` when the derivative cannot be
+        traced.
+    """
+    operands = list(dict.fromkeys(v for v in eqn.invars if isinstance(v, Var)))
+    diff = list(dict.fromkeys(operands.index(eqn.invars[j]) for j in positions))
+    single = Jaxpr(
+        [], operands, list(eqn.outvars), [eqn],
+        debug_info=body.debug_info._replace(arg_names=None, result_paths=None),
+    )
+
+    def at(args, diff_vals):
+        full = list(args)
+        for i, val in zip(diff, diff_vals):
+            full[i] = val
+        return jax.core.eval_jaxpr(single, [], *full)
+
+    if eqn.primitive.name == 'custom_jvp_call':
+        def derivative(args, tangents):
+            return jax.jvp(lambda *d: at(args, d), [args[i] for i in diff], tangents)[1]
+
+        seeds = [operands[i] for i in diff]
+    else:
+        def derivative(args, cotangents):
+            _, pullback = jax.vjp(lambda *d: at(args, d), *[args[i] for i in diff])
+            return pullback(cotangents)
+
+        seeds = list(eqn.outvars)
+    avals = [jax.ShapeDtypeStruct(v.aval.shape, v.aval.dtype) for v in operands]
+    seed_avals = [jax.ShapeDtypeStruct(v.aval.shape, v.aval.dtype) for v in seeds]
+    try:
+        traced = jax.make_jaxpr(derivative)(avals, seed_avals).jaxpr
+    except Exception:  # noqa: BLE001 -- an untraceable derivative is not seen
+        return None
+    return traced, list(traced.invars[len(avals):])
+
+
+def _call_mixes_from(eqn: JaxprEqn, positions: Sequence[int]) -> bool:
+    """Whether a call-like equation (:data:`CALL_PRIMITIVES`) applies a
+    recurrent weight-mixing primitive to its operands at *positions* (#249).
+
+    The body is checked as :func:`_jaxpr_mixes_from` checks a loop body, and
+    a ``custom_jvp_call``/``custom_vjp_call`` also on the derivative it is
+    differentiated with (:func:`_derivative_jaxpr`): a rule whose tangents
+    meet a dense weight couples the positions even when the primal does not.
+    What cannot be seen into fails closed and counts as mixing: a body that
+    does not take the equation's operands one to one, or a derivative that
+    cannot be traced.
+    """
+    body = _call_body(eqn)
+    if body is None:
+        return True
+    if _jaxpr_mixes_from(body, [body.invars[j] for j in positions], {}):
+        return True
+    if eqn.primitive.name not in _CUSTOM_DERIVATIVE_CALLS:
+        return False
+    floating = [j for j in positions if jnp.issubdtype(eqn.invars[j].aval.dtype, jnp.inexact)]
+    if not floating:
+        return False  # an integer operand has no derivative
+    derivative = _derivative_jaxpr(eqn, floating, body)
+    return derivative is None or _jaxpr_mixes_from(*derivative, {})
 
 
 class HiddenToHiddenGroupTracer(NamedTuple):
@@ -1470,6 +1561,9 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # where hidden-derived values keep their positions (``_position_layout``)
         self.position_layout: Dict[Var, _PositionLayout] = dict()
 
+        # the values some new hidden value depends on (``_feeds_hidden_outvars``)
+        self.feeds_hidden_outvars: Set[Var] = set()
+
         super().__init__(
             weight_invars=weight_invars,
             hidden_invars=hidden_invars,
@@ -1490,6 +1584,7 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         # the data structures for the tracing hidden-hidden relationships
         self.active_tracers = dict()
         self.position_layout = dict()
+        self.feeds_hidden_outvars = self._feeds_hidden_outvars()
 
         # evaluating the jaxpr
         self._eval_jaxpr(self.jaxpr)
@@ -1558,7 +1653,12 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             weight-mixing primitive to the carried hidden state: it couples
             the positions exactly like a top-level recurrent matmul. Bodies
             that only mix loop constants (an input projection ``x @ W_in``)
-            are kept.
+            are kept. The same holds for a call-like equation the
+            canonicalizer keeps (``custom_jvp_call``, ``custom_vjp_call``,
+            ``checkpoint``, ``closed_call``, a nested ``jit``) whose body, or
+            whose derivative rule, applies one to a hidden-derived operand
+            (#249, :func:`_call_mixes_from`); a call that cannot be seen into
+            counts as mixing.
         """
         if eqn.primitive.name == 'stop_gradient':
             return 'stop_gradient'
@@ -1580,6 +1680,11 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             and self._control_flow_mixes_hidden(eqn)
         ):
             return 'control_flow_mixing'
+        if eqn.primitive.name in CALL_PRIMITIVES and not self.include_recurrent_mixing:
+            # (under coupled recurrence every call is traced in: not checked)
+            hidden_positions = self._hidden_derived_invar_positions(eqn)
+            if hidden_positions and _call_mixes_from(eqn, hidden_positions):
+                return 'control_flow_mixing'
         return None
 
     def _eval_eqn(self, eqn: JaxprEqn) -> None:
@@ -1601,13 +1706,19 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
         self._track_position_layout(eqn)
 
         if why == 'control_flow_mixing' and not self.include_recurrent_mixing:
+            if not any(v in self.feeds_hidden_outvars for v in eqn.outvars):
+                # No new hidden value depends on it, so no transition would
+                # hold it: leaving it out drops nothing (a write into a
+                # buffer that is not a hidden state, #249).
+                return
             emit(
                 kind=DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING,
                 level=DiagnosticLevel.WARNING,
                 message=(
-                    f'An opaque {eqn.primitive.name} whose body applies a '
-                    f'recurrent weight-mixing primitive to the carried hidden '
-                    f'state was excluded from the hidden-to-hidden transition '
+                    f'An opaque {eqn.primitive.name} whose body (or derivative '
+                    f'rule) applies a recurrent weight-mixing primitive to a '
+                    f'hidden-derived value, or that could not be seen into, '
+                    f'was excluded from the hidden-to-hidden transition '
                     f'(default "without recurrence" mode). Its temporal credit '
                     f'falls back to the zero-recurrence (e-prop) approximation; '
                     f'pass include_recurrent_mixing=True to trace through it.'
@@ -1670,6 +1781,18 @@ class JaxprEvalForHiddenGroup(JaxprEvaluation):
             # if not matched, skip
             if len(matched):
                 self._add_eqn_in_a_tracer(eqn, tracer)
+
+    def _feeds_hidden_outvars(self) -> Set[Var]:
+        """The variables of :attr:`jaxpr` that some hidden outvar depends on.
+
+        A backward sweep over the top-level equations: an equation any of
+        whose outvars is in the set adds its invars.
+        """
+        feeds: Set[Var] = set(self.hidden_outvars)
+        for eqn in reversed(self.jaxpr.eqns):
+            if any(isinstance(v, Var) and v in feeds for v in eqn.outvars):
+                feeds.update(v for v in eqn.invars if isinstance(v, Var))
+        return feeds
 
     def _check_direct_hidden_reads(self, eqn: JaxprEqn, hidden_invars: List[Var]) -> None:
         """Raise if ``eqn`` reads two hidden states that cannot share a group.

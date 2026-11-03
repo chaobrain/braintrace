@@ -1214,6 +1214,7 @@ import jax.numpy as jnp
 
 from braintrace import DiagnosticKind, DiagnosticLevel
 from braintrace._compiler.diagnostics import diagnostic_context
+from jax.extend.core.primitives import closed_call_p
 from braintrace._compiler.hidden_group import (
     _transition_contains_while,
     block_diagonal_last_dim,
@@ -2859,6 +2860,96 @@ def _cj_tanh_jvp(primals, tangents):
     return jnp.tanh(primals[0]), tangents[0] * 1.5 / (1 + primals[0] ** 2)
 
 
+@jax.custom_jvp
+def _cj_rule_dense33(a):
+    """Elementwise primal; the JVP rule mixes positions (the derivative a
+    trace takes through the call is the rule's)."""
+    return jnp.tanh(a)
+
+
+@_cj_rule_dense33.defjvp
+def _cj_rule_dense33_jvp(primals, tangents):
+    return jnp.tanh(primals[0]), _dense33(tangents[0])
+
+
+@jax.custom_jvp
+def _cj_jit_dense33(a):
+    """A ``jit`` the canonicalizer does not inline: inside a custom_jvp body."""
+    return jax.jit(_dense33)(a)
+
+
+@_cj_jit_dense33.defjvp
+def _cj_jit_dense33_jvp(primals, tangents):
+    return jax.jit(_dense33)(primals[0]), jax.jit(_dense33)(tangents[0])
+
+
+@jax.custom_vjp
+def _cv_dense33(a):
+    return _dense33(a)
+
+
+_cv_dense33.defvjp(
+    lambda a: (_dense33(a), None),
+    lambda _, g: (g @ jnp.asarray(_DENSE33.T, g.dtype),),
+)
+
+
+@jax.custom_vjp
+def _cv_bwd_dense33(a):
+    """Elementwise primal; the backward rule mixes positions."""
+    return jnp.tanh(a)
+
+
+_cv_bwd_dense33.defvjp(
+    lambda a: (jnp.tanh(a), a),
+    lambda a, g: (g @ jnp.asarray(_DENSE33.T, g.dtype),),
+)
+
+
+@jax.custom_vjp
+def _cv_opaque(a):
+    """Elementwise primal; a backward rule that cannot be traced (it leaves JAX)."""
+    return jnp.tanh(a)
+
+
+_cv_opaque.defvjp(lambda a: (jnp.tanh(a), a), lambda a, g: (jnp.asarray(np.asarray(g)),))
+
+
+@jax.custom_vjp
+def _cv_tanh(a):
+    return jnp.tanh(a)
+
+
+_cv_tanh.defvjp(lambda a: (jnp.tanh(a), a), lambda a, g: (g * (1 - jnp.tanh(a) ** 2),))
+
+
+def _closed_call(f):
+    """``f`` as a ``closed_call`` equation, which no pass inlines."""
+
+    def call(a):
+        closed = jax.make_jaxpr(f)(a)
+        (out,) = closed_call_p.bind(a, call_jaxpr=closed)
+        return out
+
+    return call
+
+
+_CLOSED_CALL = closed_call_p.name  # 'eval_jaxpr' in jax >= 0.7
+
+
+@jax.custom_jvp
+def _spike(v):
+    """A surrogate-gradient spike: a step, with a sigmoid' derivative."""
+    return (v > 0.).astype(v.dtype)
+
+
+@_spike.defjvp
+def _spike_jvp(primals, tangents):
+    (v,), (dv,) = primals, tangents
+    sg = jax.nn.sigmoid(4. * v)
+    return _spike(v), dv * 4. * sg * (1. - sg)
+
+
 class _CallRecurrence(brainstate.nn.Module):
     """h recurs through ``call(h)``, a call-like equation the canonicalizer
     does not inline."""
@@ -2867,7 +2958,8 @@ class _CallRecurrence(brainstate.nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.W = braintrace.nn.Linear(3, 3)
+        with brainstate.random.seed_context(0):  # one weight for every instance
+            self.W = braintrace.nn.Linear(3, 3)
 
     def init_state(self, batch_size=None, **kwargs):
         self.h = brainstate.HiddenState(0.3 * jnp.ones((batch_size, 3)))
@@ -2877,27 +2969,97 @@ class _CallRecurrence(brainstate.nn.Module):
         return self.h.value
 
 
+# name -> (call, primitive of the outermost call equation, mixes positions)
 _CALLS = {
     'custom_jvp-dense': (_cj_dense33, 'custom_jvp_call', True),
+    'custom_jvp-rule-dense': (_cj_rule_dense33, 'custom_jvp_call', True),
+    'custom_jvp-jit-dense': (_cj_jit_dense33, 'custom_jvp_call', True),
+    'custom_vjp-dense': (_cv_dense33, 'custom_vjp_call', True),
+    'custom_vjp-bwd-dense': (_cv_bwd_dense33, 'custom_vjp_call', True),
+    # fails closed: a derivative that cannot be traced is not proven diagonal
+    'custom_vjp-opaque': (_cv_opaque, 'custom_vjp_call', True),
     'checkpoint-dense': (jax.checkpoint(_dense33), 'remat2', True),
+    'checkpoint-jit-dense': (jax.checkpoint(jax.jit(_dense33)), 'remat2', True),
+    'closed_call-dense': (_closed_call(_dense33), _CLOSED_CALL, True),
+    # two deep: the mixing is in the JVP rule of a custom_jvp inside a checkpoint
+    'checkpoint-jit-custom_jvp-rule-dense': (
+        jax.checkpoint(jax.jit(_cj_rule_dense33)), 'remat2', True),
     'custom_jvp-elementwise': (_cj_tanh, 'custom_jvp_call', False),
+    'custom_jvp-spike': (_spike, 'custom_jvp_call', False),
+    'custom_vjp-elementwise': (_cv_tanh, 'custom_vjp_call', False),
     'checkpoint-elementwise': (jax.checkpoint(jnp.tanh), 'remat2', False),
+    'checkpoint-jit-elementwise': (jax.checkpoint(jax.jit(jnp.tanh)), 'remat2', False),
+    'closed_call-elementwise': (_closed_call(jnp.tanh), _CLOSED_CALL, False),
+    'checkpoint-jit-custom_jvp-elementwise': (
+        jax.checkpoint(jax.jit(_cj_tanh)), 'remat2', False),
 }
+
+
+class _CallInputProjection(brainstate.nn.Module):
+    """``h`` and ``x`` enter one call; only ``x`` meets the dense weight."""
+
+    def __init__(self):
+        super().__init__()
+        with brainstate.random.seed_context(0):  # one weight for every instance
+            self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.h = brainstate.HiddenState(0.3 * jnp.ones((batch_size, 3)))
+
+    def update(self, x):
+        step = jax.checkpoint(lambda h, i: 0.5 * h + jnp.tanh(_dense33(i)))
+        self.h.value = step(self.h.value, self.W(x))
+        return self.h.value
+
+
+class _SpikingCell(brainstate.nn.Module):
+    """A LIF cell whose spike is a custom_jvp surrogate and whose reset reads it."""
+
+    def __init__(self):
+        super().__init__()
+        with brainstate.random.seed_context(0):  # one weight for every instance
+            self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.v = brainstate.HiddenState(0.2 * jnp.ones((batch_size, 3)))
+
+    def update(self, x):
+        v = self.v.value
+        self.v.value = 0.9 * v * (1. - _spike(v - 0.5)) + self.W(x)
+        return jax.nn.sigmoid(self.v.value)
+
+
+class _CallReadout(brainstate.nn.Module):
+    """A mixing call reads the hidden state, but only the output depends on
+    it (a readout, or a write into a buffer that is not a hidden state)."""
+
+    def __init__(self):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.h = brainstate.HiddenState(0.3 * jnp.ones((batch_size, 3)))
+        self.buf = brainstate.ShortTermState(jnp.zeros((batch_size, 3)))
+
+    def update(self, x):
+        self.buf.value = _cj_dense33(self.h.value)
+        self.h.value = 0.5 * self.h.value + jnp.tanh(self.W(x))
+        return _cj_dense33(self.h.value)
 
 
 class TestCallLikeRecurrentMixing:
     """A recurrent weight-mixing primitive inside a call-like equation that
-    the canonicalizer keeps (``custom_jvp_call``, ``checkpoint``) couples
-    positions like a top-level one. The walker does not look inside such a
-    call yet, so under diagonal recurrence it traces the call into the
-    transition without a report (#249; the in-step read cuts of #239 prove
-    the call's body themselves). A call whose body keeps positions stays in
-    the transition."""
+    the canonicalizer keeps (``custom_jvp_call``, ``custom_vjp_call``,
+    ``checkpoint``, ``closed_call``, a ``jit`` nested inside one of them)
+    couples positions like a top-level one, and so does one in the derivative
+    rule of a ``custom_jvp``/``custom_vjp``. Under diagonal recurrence the
+    walker leaves such a call out of the transition and reports it (#249). A
+    call whose body and derivative keep positions stays in the transition."""
 
     @staticmethod
-    def _compile(call, include_recurrent_mixing):
-        cls = type('_Cell', (_CallRecurrence,), {'call': staticmethod(call)})
-        cell = cls()
+    def _compile(cell_cls, include_recurrent_mixing):
+        cell = cell_cls()
         brainstate.nn.init_all_states(cell, batch_size=1)
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', UserWarning)
@@ -2907,24 +3069,89 @@ class TestCallLikeRecurrentMixing:
         (group,) = groups
         names = {e.primitive.name for e in group.transition_jaxpr.eqns}
         kinds = {r.kind for r in reporter.records()}
-        return names, kinds
+        return group, names, kinds
+
+    @staticmethod
+    def _cell(call):
+        return type('_Cell', (_CallRecurrence,), {'call': staticmethod(call)})
 
     @pytest.mark.parametrize('name', sorted(n for n, c in _CALLS.items() if not c[2]))
     def test_a_call_that_keeps_positions_stays_in_the_diagonal_transition(self, name):
         call, primitive, _ = _CALLS[name]
-        names, kinds = self._compile(call, False)
-        assert primitive in names and DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
+        group, names, kinds = self._compile(self._cell(call), False)
+        assert primitive in names and not kinds
+        assert group.is_diagonal_recurrence
 
-    @pytest.mark.xfail(strict=True, raises=AssertionError,
-                       reason='#249: the walker does not look inside a call-like equation')
     @pytest.mark.parametrize('name', sorted(n for n, c in _CALLS.items() if c[2]))
     def test_a_recurrent_matmul_inside_a_call_is_left_out_and_reported(self, name):
         call, primitive, _ = _CALLS[name]
-        names, kinds = self._compile(call, False)
-        assert primitive not in names and DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING in kinds
+        group, names, kinds = self._compile(self._cell(call), False)
+        assert primitive not in names
+        assert kinds == {DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING}
+        assert group.is_diagonal_recurrence
 
     @pytest.mark.parametrize('name', sorted(_CALLS))
     def test_coupled_recurrence_traces_through_the_call(self, name):
         call, primitive, _ = _CALLS[name]
-        names, kinds = self._compile(call, True)
+        group, names, kinds = self._compile(self._cell(call), True)
         assert primitive in names and DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING not in kinds
+        assert not group.is_diagonal_recurrence
+
+    def test_a_call_that_mixes_only_the_input_stays(self):
+        _, names, kinds = self._compile(_CallInputProjection, False)
+        assert 'remat2' in names and not kinds
+
+    def test_a_mixing_call_no_new_hidden_value_depends_on_is_not_reported(self):
+        """Leaving such a call out drops nothing from any transition, so the
+        walker does not warn (the per-edge delay deposit of brainspike, #249)."""
+        group, names, kinds = self._compile(_CallReadout, False)
+        assert 'custom_jvp_call' not in names and not kinds
+        assert group.is_diagonal_recurrence
+
+    def test_the_surrogate_spike_and_its_reset_stay_in_the_transition(self):
+        group, names, kinds = self._compile(_SpikingCell, False)
+        assert 'custom_jvp_call' in names and not kinds
+        assert group.is_diagonal_recurrence
+
+    @staticmethod
+    def _inputs():
+        with brainstate.random.seed_context(3):
+            return brainstate.random.uniform(-1., 1., (6, 1, 3))
+
+    def test_d_rtrl_is_exact_through_a_position_keeping_call(self):
+        """The surrogate spike's reset stays in the diagonal transition, so
+        D-RTRL, exact on a position-diagonal cell, matches BPTT."""
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        xs = self._inputs()
+        g = online_param_gradients_singlestep_naive(_SpikingCell, xs, algo_factory=braintrace.D_RTRL)
+        g_ref = bptt_param_gradients(_SpikingCell, xs)
+        assert max(float(jnp.abs(v).max()) for v in jax.tree.leaves(g_ref)) > 1e-3
+        assert_param_gradients_close(g, g_ref, atol=1e-6, rtol=1e-5)
+
+    # not 'checkpoint-jit-dense': inline_jit_calls breaks that remat (#251)
+    @pytest.mark.parametrize('name', ['custom_jvp-dense', 'custom_vjp-dense', 'checkpoint-dense'])
+    def test_d_rtrl_through_a_mixing_call_equals_the_top_level_matmul(self, name):
+        """A recurrent matmul inside a call is a boundary of the diagonal
+        transition, as the same matmul at the top level is: D-RTRL computes
+        the same gradient for both (on main it rolled the column sums of the
+        coupled Jacobian instead)."""
+        from braintrace._testing.oracle import (
+            assert_gradients_differ,
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        xs = self._inputs()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            g = online_param_gradients_singlestep_naive(
+                self._cell(_CALLS[name][0]), xs, algo_factory=braintrace.D_RTRL)
+        g_top = online_param_gradients_singlestep_naive(
+            self._cell(_dense33), xs, algo_factory=braintrace.D_RTRL)
+        assert_param_gradients_close(g, g_top, atol=1e-6, rtol=1e-5)
+        # the recurrent matmul is live: diagonal D-RTRL drops a real term
+        assert_gradients_differ(g_top, bptt_param_gradients(self._cell(_dense33), xs))

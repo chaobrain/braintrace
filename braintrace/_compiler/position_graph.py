@@ -290,9 +290,11 @@ def _is_position_preserving(eqn: JaxprEqn, varshape: Tuple[int, ...]) -> bool:
 #: Call-like primitives whose body jaxpr takes the equation's inputs position
 #: for position (``call_jaxpr`` or ``jaxpr`` param). ``jit``/``pjit`` calls are
 #: usually inlined before the analyses run (``jaxpr_graph``); the
-#: custom-derivative calls and ``checkpoint``/``remat`` are not.
+#: custom-derivative calls and ``checkpoint``/``remat`` are not, nor is a ``jit``
+#: nested inside one of them. ``eval_jaxpr`` is the name of ``closed_call`` in
+#: current JAX.
 CALL_PRIMITIVES = frozenset({
-    'jit', 'pjit', 'closed_call', 'core_call', 'remat', 'remat2', 'checkpoint',
+    'jit', 'pjit', 'closed_call', 'eval_jaxpr', 'core_call', 'remat', 'remat2', 'checkpoint',
     'custom_jvp_call', 'custom_vjp_call',
 })
 
