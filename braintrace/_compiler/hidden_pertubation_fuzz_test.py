@@ -291,7 +291,8 @@ def test_a_seed_that_double_counted_is_reported_or_exact(seed):
     with brainstate.environ.context(precision=64):
         hp = _graph(make).hidden_perturb
         if hp.new_read_exact is False:
-            assert hp.new_read_cuts == () and hp.new_read_conflicts
+            assert hp.new_read_conflicts
+            assert hp.new_read_cuts == () or seed in _CUT_BESIDE_A_CONFLICT
             return
         xs = _inputs(1)
         with warnings.catch_warnings():
@@ -299,6 +300,37 @@ def test_a_seed_that_double_counted_is_reported_or_exact(seed):
             single = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
             ref = bptt_param_gradients(make, xs)
     assert _worst(single, ref) < 1e-9
+
+
+# seeds with a conflict whose other sources' reads are cut since #248 (none was before),
+# and the worst relative distance of single-step to forced multi-step D-RTRL at
+# T = 1, 2, 6 on 01dd3d8, rounded up: the cuts may only bring it closer
+_CUT_BESIDE_A_CONFLICT = {
+    5: (1.2148, 0.8063, 1.0409), 19: (1e-12, 1e-12, 1e-12), 33: (0.3667, 0.2939, 0.1927),
+    34: (0.4005, 0.2727, 0.4926), 73: (0.4215, 0.3068, 0.0978), 119: (0.3936, 0.3556, 0.2013),
+    157: (0.4552, 0.3652, 0.2034), 181: (0.5463, 0.3825, 0.3036), 197: (0.0708, 0.0589, 0.0164),
+}
+
+
+def _single_vs_multi(make, steps):
+    with brainstate.random.seed_context(7):
+        xs = brainstate.random.rand(steps, 1, 3) + 0.1
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        single = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+        multi = chunked_online_param_gradients(
+            make, xs, algo_factory=lambda m: braintrace.D_RTRL(m, vjp_method='multi-step'), chunk_size=1)
+    return _worst(single, multi)
+
+
+@pytest.mark.parametrize('seed', sorted(_CUT_BESIDE_A_CONFLICT))
+def test_a_cut_beside_a_conflict_brings_single_step_no_further_from_multi_step(seed):
+    make = _model(_spec(seed))
+    with brainstate.environ.context(precision=64):
+        hp = _graph(make).hidden_perturb
+        assert hp.new_read_cuts and hp.new_read_conflicts and hp.new_read_exact is False
+        for steps, bound in zip((1, 2, 6), _CUT_BESIDE_A_CONFLICT[seed]):
+            assert _single_vs_multi(make, steps) <= bound, steps
 
 
 @pytest.mark.parametrize('seed', _OFF_AT_THREE_STEPS_ON_003943C)

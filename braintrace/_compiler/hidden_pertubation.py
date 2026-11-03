@@ -103,10 +103,11 @@ class HiddenPerturbation(NamedTuple):
         traces are not proven to carry a read across steps (it crosses hidden
         groups, or goes through an equation the group transition leaves out
         or one not proven position-preserving, i.e. not elementwise), or the
-        reads cannot be emitted apart. When
-        non-empty, no read is cut: the signal is the total derivative, which
-        counts some in-step paths twice, and the graph carries a
-        ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record (also warned).
+        reads cannot be emitted apart. A conflict blocks its sources: the
+        signal of a blocked source is the total derivative, which counts some
+        in-step paths twice, and the graph carries a
+        ``HIDDEN_NEW_READ_DOUBLE_COUNT`` record (also warned). The reads of
+        the other sources are still cut (#248).
     new_read_exact : bool
         ``True`` iff the reads were planned and no conflict was found: then no
         in-step read of a new hidden value is double counted in the
@@ -525,14 +526,20 @@ class NewReadPlan(NamedTuple):
     cuts : tuple of (Path, Path)
         The cut reads ``(path_k, path_j)``.
     conflicts : tuple of str
-        Why the reads cannot be separated. When non-empty the plan must not
-        be applied.
+        Why some reads cannot be separated. The plan is applied all the same:
+        the source of each conflict is in ``blocked``, and only the reads of
+        the other sources are cut (issue #248).
+    blocked : tuple of Path
+        The sources, in order, that keep the total derivative on every read,
+        because of a conflict of their own or one between their cuts and
+        those of another source.
     """
     sources: Dict[Var, None]
     state_eqns: FrozenSet[int]
     output_eqns: FrozenSet[int]
     cuts: Tuple[Tuple[Path, Path], ...]
     conflicts: Tuple[str, ...]
+    blocked: Tuple[Path, ...] = ()
 
 
 def _is_trace_boundary(eqn: JaxprEqn) -> bool:
@@ -597,6 +604,15 @@ def plan_new_read_cuts(
           with cuts;
         - an equation serving both worlds is a ``while``, has effects or
           produces a hidden state that a cut source reads directly and keeps.
+
+        The first four are a source's own: its reads alone decide them. Such
+        a source is *blocked*: none of its reads is cut. The last two are
+        between sources, and so is a cut read into a blocked source or into
+        a state that a blocked source reads. They are found with the blocked
+        sources left out, and their sources (the one with the kept read; the
+        cut sources whose cut reads use the equation; the source of the cut)
+        are blocked in turn, until none is found. The cuts of the other
+        sources are applied (issue #248).
     """
     eqns = jaxpr.eqns
     producer: Dict[Var, int] = {}
@@ -683,7 +699,9 @@ def plan_new_read_cuts(
         if isinstance(v, Var) and v not in hidden
     ]
 
-    conflicts: List[str] = []
+    # [the conflicts of each source] its reads alone decide them
+    own: Dict[Var, List[str]] = {k: [] for k in sources}
+    reads_of: Dict[Var, Set[Var]] = {}
     found = {}
     kept_direct: List[Tuple[Var, Var]] = []
     for k in sources:
@@ -696,9 +714,9 @@ def plan_new_read_cuts(
                 continue
             decision = policy.edge(path_of[k], path_of[j])
             if decision == 'conflict':
-                conflicts.append(f'the relations disagree on the read {path_of[k]} -> {path_of[j]}')
+                own[k].append(f'the relations disagree on the read {path_of[k]} -> {path_of[j]}')
             elif decision == 'cut' and 'etp' in how:
-                conflicts.append(f'{path_of[j]} reads {path_of[k]} both directly and through an ETP op')
+                own[k].append(f'{path_of[j]} reads {path_of[k]} both directly and through an ETP op')
             elif decision == 'cut':
                 read_eqns = [eqns[i] for i in sorted(direct & backward([j], direct_only=True))]
                 read_vars = {k, *(ov for e in read_eqns for ov in e.outvars)}
@@ -706,47 +724,84 @@ def plan_new_read_cuts(
                 if why is None:
                     cut.append(j)
                 else:
-                    conflicts.append(why)
+                    own[k].append(why)
             else:
                 kept.append(j)
                 kept_direct.append((k, j))
         found[k] = (direct, every, cut, kept)
-
-    cut_sources = {k: None for k in sources if found[k][2]}
-    cut_sinks = {j for k in cut_sources for j in found[k][2]}
+        reads_of[k] = set(sinks)
     for k, m in kept_direct:
         traced = policy.traced(path_of[k])
         if any(policy.group(path_of[j]) in traced for j in direct_closure(m)):
-            conflicts.append(
+            own[k].append(
                 f'the kept read {path_of[k]} -> {path_of[m]} reaches a group that '
                 f'the relations of {path_of[k]} trace'
             )
-        if m in cut_sinks and k in cut_sources:
-            conflicts.append(f'{path_of[m]} has a cut read and a kept read of {path_of[k]}')
 
-    state_eqns: Set[int] = set()
-    output_eqns: Set[int] = set()
-    cuts: List[Tuple[Path, Path]] = []
-    for k in cut_sources:
-        direct, every, cut, kept = found[k]
-        cuts.extend((path_of[k], path_of[j]) for j in cut)
-        state_eqns |= direct & backward(cut, direct_only=True)
-        output_eqns |= every & backward(kept + merge_nonhidden, direct_only=False)
-    for i in sorted(state_eqns & output_eqns):
-        eqn = eqns[i]
-        if is_while_primitive(eqn) or eqn.effects:
-            conflicts.append(f'an equation ({eqn.primitive}) serves a cut read and the outputs, '
-                             f'and cannot be emitted twice')
-        for ov in eqn.outvars:
-            if ov in hidden and ov not in cut_sinks:
-                conflicts.append(f'one equation ({eqn.primitive}) computes a cut read and the kept '
-                                 f'read of {path_of[ov]}')
+    # [blocking] a source with a conflict keeps the total derivative on all
+    # its reads (it is not a cut source: every reader sees it perturbed in
+    # place). The conflicts between the cuts of several sources are then
+    # recomputed without the blocked ones, and their sources blocked too,
+    # until nothing changes (issue #248).
+    conflicts: List[str] = [c for k in sources for c in own[k]]
+    blocked: Set[Var] = {k for k in sources if own[k]}
+    while True:
+        cut_sources = {k: None for k in sources if found[k][2] and k not in blocked}
+        cut_sinks = {j for k in cut_sources for j in found[k][2]}
+        newly: Dict[Var, None] = {}
+        for k in cut_sources:
+            # a cut is applied only into a state whose reads are all decided:
+            # it drops k -> j -> ... from k's signal, which is exact only when
+            # the traces carry what follows j, and a blocked source's reads
+            # (of j, or by j) are those the traces are not trusted with
+            for j in found[k][2]:
+                if j in blocked:
+                    conflicts.append(f'{path_of[k]} -> {path_of[j]} is cut, but {path_of[j]} keeps the '
+                                     f'total derivative on its reads')
+                    newly[k] = None
+                for b in blocked:
+                    if j in reads_of[b]:
+                        conflicts.append(f'{path_of[k]} -> {path_of[j]} is cut, but {path_of[j]} also reads '
+                                         f'{path_of[b]}, which keeps the total derivative')
+                        newly[k] = None
+        for k, m in kept_direct:
+            if m in cut_sinks and k in cut_sources:
+                conflicts.append(f'{path_of[m]} has a cut read and a kept read of {path_of[k]}')
+                newly[k] = None
+        state_of: Dict[Var, Set[int]] = {}
+        state_eqns: Set[int] = set()
+        output_eqns: Set[int] = set()
+        for k in cut_sources:
+            direct, every, cut, kept = found[k]
+            state_of[k] = direct & backward(cut, direct_only=True)
+            state_eqns |= state_of[k]
+            output_eqns |= every & backward(kept + merge_nonhidden, direct_only=False)
+        for i in sorted(state_eqns & output_eqns):
+            eqn = eqns[i]
+            found_here = []
+            if is_while_primitive(eqn) or eqn.effects:
+                found_here.append(f'an equation ({eqn.primitive}) serves a cut read and the outputs, '
+                                  f'and cannot be emitted twice')
+            for ov in eqn.outvars:
+                if ov in hidden and ov not in cut_sinks:
+                    found_here.append(f'one equation ({eqn.primitive}) computes a cut read and the kept '
+                                      f'read of {path_of[ov]}')
+            if found_here:
+                conflicts.extend(found_here)
+                # emitted once, in the perturbed world, when no cut read needs it
+                newly.update((k, None) for k in cut_sources if i in state_of[k])
+        if not newly:
+            break
+        blocked.update(newly)
+
+    cuts: List[Tuple[Path, Path]] = [(path_of[k], path_of[j]) for k in cut_sources for j in found[k][2]]
     return NewReadPlan(
         sources=cut_sources,
         state_eqns=frozenset(state_eqns),
         output_eqns=frozenset(output_eqns),
         cuts=tuple(cuts),
         conflicts=tuple(dict.fromkeys(conflicts)),
+        blocked=tuple(path_of[k] for k in sources if k in blocked),
     )
 
 
@@ -995,7 +1050,8 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
 
     def _plan_new_reads(self) -> Optional[NewReadPlan]:
         """Plan the cut reads (#239) and record the outcome; return the plan
-        to apply, or ``None`` (no policy, nothing to cut, or a conflict)."""
+        to apply, or ``None`` (no policy or nothing to cut). A conflict
+        blocks only its sources: the cuts of the others are applied (#248)."""
         self._new_read_conflicts: Tuple[str, ...] = ()
         if self.new_read_policy is None:
             return None
@@ -1016,16 +1072,16 @@ class JaxprEvalForHiddenPerturbation(JaxprEvaluation):
                     f'Hidden updates read the new value of another hidden state '
                     f'in the same step, and these reads cannot be separated: '
                     f'{list(plan.conflicts)}. The single-step learning signal '
-                    f'is the total derivative, which counts the path through '
-                    f'such a read twice when the eligibility trace carries it '
-                    f'too, so the gradient can be wrong. '
+                    f'of {list(plan.blocked)} is the total derivative, which '
+                    f'counts the path through such a read twice when the '
+                    f'eligibility trace carries it too, so the gradient can be '
+                    f'wrong. The reads of the other sources are still cut. '
                     f"vjp_method='multi-step' builds no perturbation and "
                     f'avoids it.'
                 ),
-                hidden_paths=paths,
-                context={'cuts': plan.cuts, 'conflicts': plan.conflicts},
+                hidden_paths=tuple(dict.fromkeys(paths + plan.blocked)),
+                context={'cuts': plan.cuts, 'conflicts': plan.conflicts, 'blocked': plan.blocked},
             )
-            return None
         if not plan.cuts:
             return None
         emit(

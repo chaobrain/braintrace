@@ -1460,6 +1460,149 @@ class TestPlanNewReadCuts:
         assert plan.output_eqns  # the eqn that feeds h2 reads the perturbed h0
 
 
+
+def _p(*names):
+    return tuple((n,) for n in names)
+
+
+class TestCutsPerSource:
+    """A conflict blocks its sources only; the cuts of the other sources are
+    applied (issue #248). Hidden ``hI`` is the path ``('hI',)``."""
+
+    def test_an_own_conflict_blocks_only_its_source(self):
+        # h0 -> h1: the relations disagree; h2 -> h3 is independent and cut
+        def fn(h0, h1, h2, h3, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), n2, 0.9 * h3 + jnp.tanh(n2), h3
+
+        rule = _Rule({_p('h0', 'h1'): 'conflict', _p('h2', 'h3'): 'cut'})
+        plan = _plan(fn, 4, rule, n_args=5)
+        assert plan.cuts == (_p('h2', 'h3'),) and plan.blocked == _p('h0')
+        assert plan.conflicts == ("the relations disagree on the read ('h0',) -> ('h1',)",)
+        assert len(plan.sources) == 1 and plan.state_eqns and not plan.output_eqns
+
+    def test_a_blocked_source_keeps_every_read_its_other_cuts_too(self):
+        # h0 -> h1 is cut but h0 -> h2 is not carried: h0 is blocked, h3 cut
+        def fn(h0, h1, h2, h3, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + braintrace.matmul(x, w) + jnp.sin(n0)
+            return n0, 0.9 * h1 + jnp.tanh(n0), n2, 0.9 * h3 + jnp.tanh(n2), h3
+
+        rule = _Rule({_p('h0', 'h1'): 'cut', _p('h0', 'h2'): 'cut', _p('h2', 'h3'): 'cut'},
+                     uncarried={_p('h0', 'h2')})
+        plan = _plan(fn, 4, rule, n_args=5)
+        assert plan.cuts == (_p('h2', 'h3'),) and plan.blocked == _p('h0')
+        assert plan.conflicts == ("not carried: ('h0',) -> ('h2',)",)
+
+    def test_a_derived_conflict_blocks_a_second_source_and_a_third(self):
+        # round 1: h0 has a conflict of its own (h0 -> h4 disagree);
+        # round 2: with h0 left out, h3 still has a cut read (of h2) and a
+        # kept read of h1, a source with cuts: h1 is blocked;
+        # round 3: h2 -> h3 is a cut into a state the blocked h1 reads: h2 is
+        # blocked; h5 -> h6 is independent and stays cut
+        def fn(h0, h1, h2, h3, h4, h5, h6, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + jnp.tanh(n1)
+            n3 = 0.9 * h3 + jnp.tanh(n2) + jnp.sin(n1)
+            n5 = 0.9 * h5 + braintrace.matmul(x, w)
+            return n0, n1, n2, n3, 0.9 * h4 + jnp.cos(n0), n5, 0.9 * h6 + jnp.tanh(n5), h6
+
+        rule = _Rule({_p('h0', 'h4'): 'conflict', _p('h1', 'h2'): 'cut', _p('h2', 'h3'): 'cut',
+                      _p('h5', 'h6'): 'cut'})
+        plan = _plan(fn, 7, rule, n_args=8)
+        assert plan.blocked == _p('h0', 'h1', 'h2') and plan.cuts == (_p('h5', 'h6'),)
+        assert plan.conflicts == (
+            "the relations disagree on the read ('h0',) -> ('h4',)",
+            "('h3',) has a cut read and a kept read of ('h1',)",
+            "('h2',) -> ('h3',) is cut, but ('h3',) also reads ('h1',), which keeps the total derivative",
+        )
+
+    def test_a_derived_conflict_is_found_with_the_blocked_sources_left_out(self):
+        # h2 has a kept read of h1 and a cut read of h0 only; h0 is blocked
+        # (h0 -> h4 disagree), so h2 has no cut read left, and h1 -> h3 is cut
+        def fn(h0, h1, h2, h3, h4, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + jnp.tanh(n0) + jnp.sin(n1)
+            return n0, n1, n2, 0.9 * h3 + jnp.tanh(n1), 0.9 * h4 + jnp.cos(n0), h4
+
+        rule = _Rule({_p('h0', 'h2'): 'cut', _p('h0', 'h4'): 'conflict', _p('h1', 'h3'): 'cut'})
+        plan = _plan(fn, 5, rule, n_args=6)
+        assert plan.blocked == _p('h0') and plan.cuts == (_p('h1', 'h3'),)
+        assert plan.conflicts == ("the relations disagree on the read ('h0',) -> ('h4',)",)
+        # without the conflict of h0, h2's two reads conflict: h1 is blocked,
+        # and then h0, whose cut is into h2, which h1 reads
+        del rule.edges[_p('h0', 'h4')]
+        plan = _plan(fn, 5, rule, n_args=6)
+        assert plan.blocked == _p('h0', 'h1') and plan.cuts == ()
+        assert plan.conflicts == (
+            "('h2',) has a cut read and a kept read of ('h1',)",
+            "('h0',) -> ('h2',) is cut, but ('h2',) also reads ('h1',), which keeps the total derivative",
+        )
+
+    def test_a_cut_into_a_blocked_source_blocks_its_source_down_a_chain(self):
+        # h2 -> h1 -> h0 are cut reads, h0 -> h4 a conflict: h0 is blocked,
+        # then h1 (its cut drops h1 -> h0 -> h4), then h2, one per round;
+        # h3 -> h5 is independent and stays cut
+        def fn(h0, h1, h2, h3, h4, h5, x, w):
+            n2 = 0.9 * h2 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + jnp.tanh(n2)
+            n0 = 0.9 * h0 + jnp.tanh(n1)
+            n3 = 0.9 * h3 + braintrace.matmul(x, w)
+            return n0, n1, n2, n3, 0.9 * h4 + jnp.cos(n0), 0.9 * h5 + jnp.tanh(n3), h5
+
+        rule = _Rule({_p('h0', 'h4'): 'conflict', _p('h1', 'h0'): 'cut', _p('h2', 'h1'): 'cut',
+                      _p('h3', 'h5'): 'cut'})
+        plan = _plan(fn, 6, rule, n_args=7)
+        assert plan.blocked == _p('h0', 'h1', 'h2') and plan.cuts == (_p('h3', 'h5'),)
+        assert plan.conflicts == (
+            "the relations disagree on the read ('h0',) -> ('h4',)",
+            "('h1',) -> ('h0',) is cut, but ('h0',) keeps the total derivative on its reads",
+            "('h2',) -> ('h1',) is cut, but ('h1',) keeps the total derivative on its reads",
+        )
+        assert plan.state_eqns and not plan.output_eqns
+
+    def test_a_shared_equation_blocks_the_sources_whose_cut_reads_use_it(self):
+        # the while serves the cut read h0 -> h1 and the output: h0 is
+        # blocked; h2 -> h3 is cut
+        def fn(h0, h1, h2, h3, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            t = jax.lax.while_loop(lambda c: c[1] < 3, lambda c: (c[0] * 0.5, c[1] + 1), (jnp.tanh(n0), 0))[0]
+            n2 = 0.9 * h2 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + t, n2, 0.9 * h3 + jnp.tanh(n2), t
+
+        rule = _Rule({_p('h0', 'h1'): 'cut', _p('h2', 'h3'): 'cut'})
+        plan = _plan(fn, 4, rule, n_args=5)
+        assert plan.blocked == _p('h0') and plan.cuts == (_p('h2', 'h3'),)
+        assert any('cannot be emitted twice' in c for c in plan.conflicts), plan.conflicts
+        assert not any(eqn.primitive.name == 'while' for eqn in
+                       (jax.make_jaxpr(fn)(*([jnp.ones((1, _N))] * 4), jnp.ones((1, 3)),
+                                           jnp.ones((3, _N))).jaxpr.eqns[i] for i in plan.state_eqns))
+
+    def test_a_kept_read_reaching_a_traced_group_blocks_its_source(self):
+        # h0 -> h1 is kept and h1 -> h2 reaches a group h0's relations trace;
+        # h3 -> h4 (no group) is independent and cut
+        def fn(h0, h1, h2, h3, h4, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + jnp.tanh(n0)
+            n3 = 0.9 * h3 + braintrace.matmul(x, w)
+            return n0, n1, 0.9 * h2 + jnp.tanh(n1), n3, 0.9 * h4 + jnp.tanh(n3), h4
+
+        rule = _Rule({_p('h3', 'h4'): 'cut'}, groups={('h0',): 0, ('h1',): 1, ('h2',): 0}, traced={0})
+        plan = _plan(fn, 5, rule, n_args=6)
+        assert plan.blocked == _p('h0') and plan.cuts == (_p('h3', 'h4'),)
+        assert any('kept read' in c for c in plan.conflicts), plan.conflicts
+
+    def test_without_a_conflict_nothing_is_blocked(self):
+        def fn(h0, h1, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), h1
+
+        plan = _plan(fn, 2, _Rule({_p('h0', 'h1'): 'cut'}))
+        assert plan.blocked == () and plan.conflicts == () and plan.cuts == (_p('h0', 'h1'),)
+
 class TestNewReadCutsOnGraphs:
     """The plan applied by ``compile_etrace_graph`` (single-step D-RTRL)."""
 
@@ -1494,9 +1637,8 @@ class TestNewReadCutsOnGraphs:
     def test_a_kept_read_is_exact_at_one_step(self, name):
         assert _worst_relative_error(_KEEP_MODELS[name], 1) < 1e-12
 
-    # _ConflictPlusCut and _Real also hold a read the policy would cut: the
-    # plan of a graph with a conflict must not be applied at all
-    @pytest.mark.parametrize('cls', [_Disagree, _DirectAndEtp, _ConflictPlusCut, _Real])
+    # one source each: the conflict blocks it, and nothing is cut
+    @pytest.mark.parametrize('cls', [_Disagree, _DirectAndEtp])
     def test_a_conflict_keeps_today_s_signal_and_records_an_error(self, cls):
         with pytest.warns(UserWarning, match='cannot be separated'):
             model = _make(cls)()
@@ -1511,6 +1653,45 @@ class TestNewReadCutsOnGraphs:
         assert tuple(record.context['conflicts']) == tuple(hp.new_read_conflicts)
         today = add_hidden_perturbation_from_minfo(graph.module_info)
         assert str(hp.perturb_jaxpr) == str(today.perturb_jaxpr)
+
+    def test_a_conflict_blocks_only_its_source(self):
+        """#248: h1's conflict (h2 reads it directly and through an ETP op)
+        no longer drops the independent cut g -> V. At T = 1 from a zero
+        state Wg equals BPTT (it was 1.0 off, the 2x double count of
+        g -> V); W1 stays off, and the conflict is reported."""
+        with pytest.warns(UserWarning, match='cannot be separated'):
+            model = _make(_ConflictPlusCut)()
+            brainstate.nn.init_all_states(model, batch_size=1)
+            learner = braintrace.D_RTRL(model)
+            learner.compile_graph(jnp.ones((1, 3)))
+        graph = learner.graph
+        hp = graph.hidden_perturb
+        assert list(hp.new_read_cuts) == [(('g',), ('V',))] and hp.new_read_exact is False
+        assert hp.new_read_conflicts == ("('h2',) reads ('h1',) both directly and through an ETP op",)
+        (record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT)
+        assert record.level is DiagnosticLevel.ERROR
+        assert tuple(record.context['conflicts']) == tuple(hp.new_read_conflicts)
+        assert tuple(record.context['blocked']) == (('h1',),)
+        (cut_record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_CUT)
+        assert list(cut_record.context['cuts']) == [(('g',), ('V',))]
+
+        with brainstate.environ.context(precision=64):
+            with brainstate.random.seed_context(2):
+                xs = brainstate.random.randn(1, 1, 3)
+            ref = _flat(bptt_param_gradients(_make(_ConflictPlusCut), xs))
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                got = _flat(online_param_gradients_singlestep_naive(
+                    _make(_ConflictPlusCut), xs, algo_factory=braintrace.D_RTRL))
+
+        def rel(key):
+            return np.linalg.norm(got[key] - ref[key]) / np.linalg.norm(ref[key])
+
+        keys = {name: [k for k in ref if f"'{name}'" in k] for name in ('W1', 'W2', 'Wg')}
+        assert all(len(v) == 2 for v in keys.values()), keys
+        assert max(rel(k) for k in keys['Wg']) < 1e-12
+        assert max(rel(k) for k in keys['W2']) < 1e-12
+        assert min(rel(k) for k in keys['W1']) > 1.0   # the conflict's own double count
 
     def test_multi_step_builds_no_perturbation(self):
         graph = _graph(_SameGroup, vjp_method='multi-step')
