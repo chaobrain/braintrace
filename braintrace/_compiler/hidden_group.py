@@ -233,8 +233,8 @@ class HiddenGroup(NamedTuple):
         (:func:`~braintrace._compiler.position_graph.eqn_preserves_positions`):
         a position-coupling equation the transition holds (traced in under
         ``include_recurrent_mixing=True``, or one the walker's rule does not
-        name, such as a ``roll`` or a dense dot inside a ``custom_jvp``,
-        #249) is carried by the per-position traces only in part.
+        name, such as a ``roll``) is carried by the per-position traces only
+        in part.
 
         Returns
         -------

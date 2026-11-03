@@ -1,6 +1,34 @@
 # Release Notes
 
 
+## Unreleased
+
+### Fixes
+
+- **The hidden-group walker looks inside call-like equations (#249).** Under
+  diagonal recurrence (`include_recurrent_mixing=False`: D-RTRL, e-prop,
+  pp_prop, ES-D-RTRL) the walker leaves a recurrent `dot_general`/`conv` on a
+  hidden-derived value out of the position-diagonal transition, and reports an
+  opaque `scan`/`while`/`cond` whose body applies one. The same matmul inside
+  a call the canonicalizer keeps (`custom_jvp`, `custom_vjp`, `checkpoint`,
+  `closed_call`, a `jit` nested in one of them) was traced into the
+  transition, so the transition coupled positions while the group reported
+  `is_diagonal_recurrence=True`; the column-sum Jacobian then rolled the
+  cross-position terms into the trace, with no report. The walker now checks
+  a call's body like a loop body and, for a `custom_jvp`/`custom_vjp`, also
+  the derivative JAX differentiates it with (the JVP rule, the backward
+  function). Such a call is left out and reported
+  (`CONTROL_FLOW_RECURRENT_MIXING`), as an opaque loop is; D-RTRL through it
+  now equals D-RTRL through the same matmul at the top level. A call whose
+  body or derivative cannot be seen into (a body that does not take the
+  call's operands one to one, a derivative that cannot be traced) counts as
+  mixing. Calls that keep positions, such as a surrogate spike function, stay
+  in the transition. The report is emitted only when a new hidden value
+  depends on the call (or loop), since otherwise no transition would hold it
+  (a spike deposit into a delay buffer that is not a hidden state). Under
+  `include_recurrent_mixing=True` every call is traced in, as before.
+  `closed_call` is also recognised under its current JAX name, `eval_jaxpr`.
+
 ## Version 0.3.0
 
 A correctness release for online learning. Under the default
