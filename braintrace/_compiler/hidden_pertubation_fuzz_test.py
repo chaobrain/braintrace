@@ -234,8 +234,11 @@ _DOUBLE_COUNTED_ON_003943C = (
 )
 # seeds with one hidden group, new_read_exact=True, forced multi-step exact at T = 3 and
 # single-step not, on 003943c (seed 35 was too, and still declares no double count:
-# test_a_dense_old_read_in_a_call_is_not_a_new_read)
-_OFF_AT_THREE_STEPS_ON_003943C = (21, 114, 115, 123, 136, 143, 201)
+# test_a_dense_old_read_in_a_call_is_not_a_new_read; seed 114 was too, and its read
+# h0 -> h1 goes through a dense dot inside a checkpoint, which the walker now leaves out
+# of the transition like a top-level dot (#249): two groups, no read to cut, and
+# test_a_seed_that_double_counted_is_reported_or_exact[114] finds it equal to BPTT)
+_OFF_AT_THREE_STEPS_ON_003943C = (21, 115, 123, 136, 143, 201)
 
 
 def _variant(seed, new=None, old=None):
