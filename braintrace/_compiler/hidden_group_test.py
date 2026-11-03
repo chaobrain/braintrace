@@ -3054,8 +3054,20 @@ def _cj_shared_rule(primal):
     return f
 
 
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+def _gather_by(idx, x):
+    """``x[..., idx]``; one body text for every ``idx``: a closed-over constant."""
+    return x[..., jnp.asarray(idx)]
+
+
+@_gather_by.defjvp
+def _gather_by_jvp(idx, primals, tangents):
+    return _gather_by(idx, primals[0]), tangents[0][..., jnp.asarray(idx)]
+
+
 # name -> (call keeping positions, call that does not); both share one rule
 _SHARED_RULE = {
+    'custom_jvp-shared-rule-two-bodies': (_cj_shared_rule(jnp.tanh), _cj_shared_rule(_roll)),
     'custom_jvp-shared-rule-two-bodies': (_cj_shared_rule(jnp.tanh), _cj_shared_rule(_roll)),
     'app-nondiff-function': (lambda h: _app(jnp.tanh, h), lambda h: _app(_roll, h)),
     'custom_jvp-nondiff-string': (lambda h: _by_kind(h, 'id'), lambda h: _by_kind(h, 'roll')),
@@ -3357,6 +3369,27 @@ class TestCallLikeRecurrentMixing:
         cell_keep = type('_Cell', (_TwoCalls,), {'calls': (keep,)})
         _, names, kinds = self._compile(cell_keep, False)
         assert call in names and not kinds
+
+    def test_calls_that_differ_only_in_a_constant_are_judged_apart(self):
+        """Two gathers whose bodies print alike and differ only in a constant
+        (the index array: the identity, a permutation). The memo also names a
+        body's constants, so no verdict could be shared between them; the
+        allow-list refuses any gather today, so both are left out."""
+        from braintrace._compiler.hidden_group import _call_mixing
+        ident = lambda h: _gather_by((0, 1, 2), h)
+        perm = lambda h: _gather_by((1, 2, 0), h)
+        eqns = [e for e in jax.make_jaxpr(lambda h: (ident(h), perm(h)))(jnp.ones((1, 3))).jaxpr.eqns
+                if e.primitive.name == 'custom_jvp_call']
+        assert len(eqns) == 2
+        assert str(eqns[0].params['call_jaxpr']) == str(eqns[1].params['call_jaxpr'])
+        memo = {}
+        for eqn in eqns:
+            hidden = eqn.params['num_consts']  # the operand after the constants
+            assert 'gather' in _call_mixing(eqn, [hidden], (1, 3), memo)
+        cell = type('_Cell', (_TwoCalls,), {'calls': (ident, perm)})
+        group, names, kinds = self._compile(cell, False)
+        assert 'custom_jvp_call' not in names
+        assert kinds == {DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING} and group.is_diagonal_recurrence
 
     def test_a_barrier_maps_each_slot_to_itself(self):
         """Through an ``optimization_barrier`` the hidden value reaches only its

@@ -1274,8 +1274,12 @@ def _call_mixing(
         rules = tuple(_rule_identity(eqn.params.get(k), keep) for k in _RULE_PARAMS[name] if k in eqn.params)
         body = eqn.params.get('call_jaxpr')
         if rules and all(r is not None for r in rules) and body is not None:
-            # the rule with what it is bound to, the body, and the operands
-            key = (name, rules, str(body), tuple(positions), varshape,
+            # the rule with what it is bound to, the body with its constants
+            # (named by identity: the text of a body omits their values), and
+            # the operands
+            consts = tuple(getattr(body, 'consts', ()) or ())
+            keep.extend(consts)
+            key = (name, rules, str(body), tuple(id(c) for c in consts), tuple(positions), varshape,
                    tuple((v.aval.shape, str(v.aval.dtype)) for v in eqn.invars))
             if key in memo:
                 return memo[key][0]
