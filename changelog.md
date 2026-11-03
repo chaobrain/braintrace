@@ -1,6 +1,55 @@
 # Release Notes
 
 
+## Unreleased
+
+### Fixes
+
+- **The hidden-group walker looks inside call-like equations (#249).** Under
+  diagonal recurrence (`include_recurrent_mixing=False`: D-RTRL, e-prop,
+  pp_prop, ES-D-RTRL) the walker leaves a recurrent `dot_general`/`conv` on a
+  hidden-derived value out of the position-diagonal transition, and reported
+  an opaque `scan`/`while`/`cond` whose body applied one. The same matmul
+  inside a call the canonicalizer keeps (`custom_jvp`, `custom_vjp`,
+  `checkpoint`, `closed_call`, a `jit` nested in one of them) was traced into
+  the transition, so the transition coupled positions while the group
+  reported `is_diagonal_recurrence=True`; the trace then rolled the
+  cross-position terms, with no report. So did any other position-mixing
+  equation in a call or a loop body (a roll, a permutation, a mean, a
+  permuting scatter), and one only in a `custom_jvp`'s JVP rule.
+  - The walker now holds the body of every loop and call-like equation that
+    reads a hidden-derived value, and the derivative a `custom_jvp`/
+    `custom_vjp` is differentiated with (its JVP rule, its backward
+    function), to the allow-list of the in-step read cuts (#239): every
+    floating equation on the path from the hidden operands must be proven to
+    keep positions (elementwise on the full position shape, an
+    `optimization_barrier`, a scatter with only its operand on the path, or a
+    loop or call proven in turn). Integer and boolean values carry no
+    derivative and are not followed. Anything else is mixing: the equation
+    is left out of the transition and reported
+    (`CONTROL_FLOW_RECURRENT_MIXING`, whose message and
+    `context['inner_op']` now name the equation not proven). What cannot be
+    seen into fails closed: a body that does not take the call's operands
+    one to one, a derivative that cannot be traced, operands derived from
+    states of different varshapes.
+  - D-RTRL through a matmul in a call now equals D-RTRL through the same
+    matmul at the top level. A surrogate spike function, `jax.nn.relu`, a
+    `checkpoint` of elementwise code, a constant scatter-added into the state
+    and an identity with a barrier in its JVP rule stay in the transition.
+  - The report is emitted only when a new hidden value depends on the
+    equation, since otherwise no transition would hold it (a spike deposit
+    into a delay buffer that is not a hidden state). A loop or call that
+    reads two hidden states that cannot share a group still raises.
+  - The verdict of a custom derivative call is memoised on its rule, the
+    arguments the rule is bound to (`nondiff_argnums`, a `functools.partial`)
+    and its body, so a chain of calls whose rules apply the inner call again
+    is traced once per call, and calls that share a rule are judged apart.
+  - Top-level equations keep the narrower rule (a roll or a permutation at
+    the top level still stays in the transition, #233). Under
+    `include_recurrent_mixing=True` every loop and call is traced in, as
+    before. `closed_call` is also recognised under its current JAX name,
+    `eval_jaxpr`.
+
 ## Version 0.3.0
 
 A correctness release for online learning. Under the default
