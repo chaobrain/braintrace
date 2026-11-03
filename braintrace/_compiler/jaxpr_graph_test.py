@@ -370,6 +370,28 @@ class TestInlineJitInsideCheckpoint:
         (eqn,) = _remat_eqns(inlined.jaxpr)
         assert len(eqn.invars) == 2  # the hoisted constant, then the operand
 
+    def test_a_checkpoint_inside_a_jit_body(self):
+        # the checkpoint reaches the rewrite while the outer jit is spliced
+        inlined = self._check(jax.jit(jax.checkpoint(jax.jit(_dense_tanh))), jnp.ones((1, 3)) * 0.3)
+        (eqn,) = _remat_eqns(inlined.jaxpr)
+        assert len(eqn.invars) == 2 and eqn.invars[0] in inlined.jaxpr.constvars
+
+    def test_a_tuple_prevent_cse_is_padded_for_the_hoisted_constants(self):
+        x = jnp.ones((1, 3)) * 0.3
+        inlined = self._check(jax.checkpoint(jax.jit(_dense_tanh), prevent_cse=(False,)), x)
+        (eqn,) = _remat_eqns(inlined.jaxpr)
+        assert eqn.params['prevent_cse'] == (False, False)
+
+        f = jax.checkpoint(lambda a, b: jax.jit(_dense_tanh)(a) * b, prevent_cse=(False, True))
+        inlined = inline_jit_calls(jax.make_jaxpr(f)(x, x))
+        (eqn,) = _remat_eqns(inlined.jaxpr)
+        assert eqn.params['prevent_cse'] == (False, False, True) and len(eqn.invars) == 3
+        run = lambda a: _eval_closed(inlined, a, x)[0]
+        np.testing.assert_allclose(run(x), f(x, x), rtol=1e-6)
+        np.testing.assert_allclose(jax.jvp(run, (x,), (x,))[1], jax.jvp(lambda a: f(a, x), (x,), (x,))[1], rtol=1e-6)
+        np.testing.assert_allclose(jax.grad(lambda a: run(a).sum())(x),
+                                   jax.grad(lambda a: f(a, x).sum())(x), rtol=1e-6)
+
     def test_a_jit_without_constants_in_a_checkpoint(self):
         self._check(jax.checkpoint(jax.jit(jnp.tanh)), jnp.ones((1, 3)) * 0.3)
 

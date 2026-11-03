@@ -160,12 +160,15 @@ def _contains_jit_eqn(jaxpr: Jaxpr) -> bool:
 
 
 def _sub_closed_jaxprs(eqn: JaxprEqn) -> Iterator[ClosedJaxpr]:
-    """Yield the ``ClosedJaxpr`` bodies of a control-flow equation.
+    """Yield the jaxpr bodies held in the ``jaxpr``, ``cond_jaxpr``,
+    ``body_jaxpr`` and ``branches`` params of an equation.
 
-    Covers ``scan`` (``jaxpr``), ``while`` (``cond_jaxpr``/``body_jaxpr``),
-    and ``cond`` (``branches``). ``call_jaxpr`` (custom-derivative calls) is
-    deliberately excluded: those bodies carry derivative semantics and are
-    never rewritten by :func:`inline_jit_calls`.
+    These are the bodies of ``scan``, ``while`` and ``cond``, and, since JAX
+    0.11 made ``ClosedJaxpr`` and ``Jaxpr`` one class, also the open bodies of
+    ``checkpoint`` (``remat2``), ``shard_map`` and ``run_state``.
+    ``call_jaxpr`` (custom-derivative calls) is deliberately excluded: those
+    bodies carry derivative semantics and are never rewritten by
+    :func:`inline_jit_calls`.
     """
     for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
         sub = eqn.params.get(key)
@@ -281,7 +284,8 @@ def _inline_jits_in_control_flow_params(eqn: JaxprEqn) -> Optional[tuple]:
                 inlined = _open_body(inlined, sub)
                 prevent_cse = new_params.get('prevent_cse')
                 if isinstance(prevent_cse, tuple):
-                    new_params['prevent_cse'] = (True,) * len(hoisted) + prevent_cse
+                    # as JAX does for the constants it hoists (ad_checkpoint)
+                    new_params['prevent_cse'] = (False,) * len(hoisted) + prevent_cse
             elif name not in _CLOSED_BODY_PRIMITIVES and len(inlined.consts) > len(getattr(sub, 'consts', ())):
                 continue  # an open body of another kind: leave its jits
             new_params[key] = inlined
