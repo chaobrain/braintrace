@@ -5,6 +5,16 @@
 
 ### Fixes
 
+- **A `jit` with constants inside a `checkpoint` no longer breaks
+  differentiation (#251).** `inline_jit_calls` inlined the jit into the
+  checkpoint's body and attached the jit's constants to that body. A
+  checkpoint body is an open jaxpr, so JAX's `remat_jvp` raised an
+  `AssertionError` when any algorithm (or `jax.jvp`/`jax.grad`) differentiated
+  the rewritten jaxpr. The constants now become leading operands of the
+  checkpoint equation, bound as constants of the enclosing jaxpr. A jit with
+  constants in another open body (`shard_map`) is kept, where it was inlined
+  with unbound constants.
+
 - **The hidden-group walker looks inside call-like equations (#249).** Under
   diagonal recurrence (`include_recurrent_mixing=False`: D-RTRL, e-prop,
   pp_prop, ES-D-RTRL) the walker leaves a recurrent `dot_general`/`conv` on a
