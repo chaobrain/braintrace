@@ -40,9 +40,10 @@
     equation, since otherwise no transition would hold it (a spike deposit
     into a delay buffer that is not a hidden state). A loop or call that
     reads two hidden states that cannot share a group still raises.
-  - The verdict of a custom derivative call is memoised on its rule, so a
-    chain of calls whose rules apply the inner call again is traced once
-    per call.
+  - The verdict of a custom derivative call is memoised on its rule, the
+    arguments the rule is bound to (`nondiff_argnums`, a `functools.partial`)
+    and its body, so a chain of calls whose rules apply the inner call again
+    is traced once per call, and calls that share a rule are judged apart.
   - Top-level equations keep the narrower rule (a roll or a permutation at
     the top level still stays in the transition, #233). Under
     `include_recurrent_mixing=True` every loop and call is traced in, as

@@ -2983,6 +2983,86 @@ def _cjvp_reapplied(inner):
     return f
 
 
+@functools.partial(jax.custom_jvp, nondiff_argnums=(0,))
+def _app(f, x):
+    """JAX's documented ``app(f, x)``: one rule for every ``f``."""
+    return f(x)
+
+
+@_app.defjvp
+def _app_jvp(f, primals, tangents):
+    return jax.jvp(f, primals, tangents)
+
+
+@functools.partial(jax.custom_jvp, nondiff_argnums=(1,))
+def _by_kind(x, kind):
+    """One body for every ``kind``; the rule picks by the string."""
+    return jnp.tanh(x)
+
+
+@_by_kind.defjvp
+def _by_kind_jvp(kind, primals, tangents):
+    return jnp.tanh(primals[0]), tangents[0] if kind == 'id' else _roll(tangents[0])
+
+
+def _bwd_by_kind(kind, a, g):
+    return (g if kind == 'id' else _roll(g)),
+
+
+def _cv_partial(kind):
+    """A custom_vjp whose backward function is a ``partial`` of one function."""
+
+    @jax.custom_vjp
+    def f(a):
+        return jnp.tanh(a)
+
+    f.defvjp(lambda a: (jnp.tanh(a), a), functools.partial(_bwd_by_kind, kind))
+    return f
+
+
+_CV_ID, _CV_ROLL = _cv_partial('id'), _cv_partial('roll')
+
+
+class _TwoCalls(brainstate.nn.Module):
+    """``h`` recurs through two calls that share a rule, one keeping positions
+    (``keep``) and one not (``mix``), in the order given."""
+
+    calls = ()
+
+    def __init__(self):
+        super().__init__()
+        with brainstate.random.seed_context(0):
+            self.W = braintrace.nn.Linear(3, 3)
+
+    def init_state(self, batch_size=None, **kwargs):
+        self.h = brainstate.HiddenState(0.3 * jnp.ones((batch_size, 3)))
+
+    def update(self, x):
+        h = self.h.value
+        self.h.value = 0.5 * h + sum(0.3 * c(h) for c in type(self).calls) + self.W(x)
+        return self.h.value
+
+
+def _shared_rule(primals, tangents):
+    return jnp.tanh(primals[0]), tangents[0]
+
+
+def _cj_shared_rule(primal):
+    """A custom_jvp of ``primal`` with one module-level rule for every primal."""
+    f = jax.custom_jvp(primal)
+    f.defjvp(_shared_rule)
+    return f
+
+
+# name -> (call keeping positions, call that does not); both share one rule
+_SHARED_RULE = {
+    'custom_jvp-shared-rule-two-bodies': (_cj_shared_rule(jnp.tanh), _cj_shared_rule(_roll)),
+    'app-nondiff-function': (lambda h: _app(jnp.tanh, h), lambda h: _app(_roll, h)),
+    'custom_jvp-nondiff-string': (lambda h: _by_kind(h, 'id'), lambda h: _by_kind(h, 'roll')),
+    'custom_vjp-partial-bwd': (_CV_ID, _CV_ROLL),
+}
+
+
 def _while2(inner):
     """Two steps of ``inner`` in a while loop (not unrolled: dynamic bounds)."""
 
@@ -3259,6 +3339,53 @@ class TestCallLikeRecurrentMixing:
         g = online_param_gradients_singlestep_naive(cell, xs, algo_factory=braintrace.D_RTRL)
         g_ref = bptt_param_gradients(cell, xs)
         assert_param_gradients_close(g, g_ref, atol=1e-6, rtol=1e-5)
+
+    @pytest.mark.parametrize('order', ['keep-first', 'mix-first'])
+    @pytest.mark.parametrize('name', sorted(_SHARED_RULE))
+    def test_calls_that_share_a_rule_are_judged_apart(self, name, order):
+        """The memo of a custom derivative call names the rule with what it is
+        bound to: a ``nondiff_argnums`` argument, a ``partial``'s arguments. One
+        call keeping positions and one not, in either order: only the second
+        is left out, and the report names it."""
+        keep, mix = _SHARED_RULE[name]
+        calls = (keep, mix) if order == 'keep-first' else (mix, keep)
+        cell = type('_Cell', (_TwoCalls,), {'calls': calls})
+        _, names, kinds = self._compile(cell, False)
+        assert kinds == {DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING}
+        call = 'custom_vjp_call' if name.startswith('custom_vjp') else 'custom_jvp_call'
+        assert call in names  # the call that keeps positions stays
+        cell_keep = type('_Cell', (_TwoCalls,), {'calls': (keep,)})
+        _, names, kinds = self._compile(cell_keep, False)
+        assert call in names and not kinds
+
+    def test_a_barrier_maps_each_slot_to_itself(self):
+        """Through an ``optimization_barrier`` the hidden value reaches only its
+        own slot: a roll of the input in the other slot does not mix."""
+        step = jax.checkpoint(lambda h, i: (lambda a, b: 0.5 * a + jnp.roll(b, 1, axis=-1))(
+            *jax.lax.optimization_barrier((h, i))))
+
+        class Cell(_CallInputProjection):
+            def update(self, x):
+                self.h.value = step(self.h.value, self.W(x))
+                return self.h.value
+
+        _, names, kinds = self._compile(Cell, False)
+        assert 'remat2' in names and not kinds
+
+    def test_an_unused_barrier_slot_does_not_mix(self):
+        """A roll that only fills a barrier slot nothing reads has no
+        derivative to couple: the call stays, and D-RTRL matches BPTT."""
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        cell = self._cell(jax.checkpoint(lambda h: jax.lax.optimization_barrier((_roll(h), h))[1]))
+        _, names, kinds = self._compile(cell, False)
+        assert 'remat2' in names and not kinds
+        xs = self._inputs()
+        g = online_param_gradients_singlestep_naive(cell, xs, algo_factory=braintrace.D_RTRL)
+        assert_param_gradients_close(g, bptt_param_gradients(cell, xs), atol=1e-6, rtol=1e-5)
 
     def test_d_rtrl_is_exact_through_a_position_keeping_call(self):
         """The surrogate spike's reset stays in the diagonal transition, so

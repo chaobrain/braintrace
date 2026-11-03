@@ -1049,7 +1049,10 @@ def _jaxpr_mixing(
     # read by an equation with such an output (a backward sweep)
     live = {v for v in jaxpr.outvars if isinstance(v, Var) and _inexact(v)}
     for eqn in reversed(jaxpr.eqns):
-        if any(isinstance(v, Var) and v in live for v in eqn.outvars):
+        if eqn.primitive.name in _IDENTITY_MAPPED_PRIMITIVES:  # slot by slot
+            live.update(v for v, o in zip(eqn.invars, eqn.outvars)
+                        if isinstance(v, Var) and _inexact(v) and o in live)
+        elif any(isinstance(v, Var) and v in live for v in eqn.outvars):
             live.update(v for v in eqn.invars if isinstance(v, Var) and _inexact(v))
     seed_set = {v for v in seeds if isinstance(v, Var) and _inexact(v)}
     while True:
@@ -1059,6 +1062,8 @@ def _jaxpr_mixing(
                 j for j, v in enumerate(eqn.invars)
                 if isinstance(v, Var) and v in reachable
             ]
+            if eqn.primitive.name in _IDENTITY_MAPPED_PRIMITIVES:
+                hit = [j for j in hit if eqn.outvars[j] in live]
             if not hit or not any(isinstance(v, Var) and v in live for v in eqn.outvars):
                 continue
             why = _eqn_mixing(eqn, hit, varshape, memo)
@@ -1119,17 +1124,33 @@ def _eqn_mixing(
     return name
 
 
-def _user_function(fun: Any, limit: int = 10) -> Optional[Callable]:
-    """The user's function under a JAX wrapper of a custom derivative rule.
+def _rule_identity(fun: Any, keep: List[Any], limit: int = 10) -> Optional[Tuple[Any, ...]]:
+    """What names the rule under a JAX wrapper of a custom derivative rule.
 
     A breadth-first search through ``WrappedFun.f``, ``functools.partial`` and
-    closure cells for the first plain function defined outside JAX. Its
-    identity names the rule (a rule made by a factory is a new function per
-    closure), so :func:`_call_mixing` can memoise on it. ``None`` when not
-    found: the call is then not memoised.
+    closure cells down to the first plain function defined outside JAX: the
+    user's rule. Its identity names the rule up to what the call binds it
+    with, so the arguments bound on the way are part of it: the static
+    (``nondiff_argnums``) arguments JAX prepends with ``_prepend_static_args``
+    and the arguments of a ``functools.partial``. A value is named by itself
+    when it is a string, number, ``None`` or a tuple of them, and by its
+    ``id`` otherwise (the objects are appended to *keep*, which the memo
+    holds, so the ids stay valid). ``None`` when no rule is found: the call
+    is then not memoised.
     """
     import functools
     import types
+
+    def name(val: Any) -> Any:
+        val = getattr(val, 'val', val) if type(val).__name__ == 'Unhashable' else val
+        if val is None or isinstance(val, (str, int, float, bool)):
+            return val
+        if isinstance(val, (tuple, list)):
+            return tuple(name(v) for v in val)
+        keep.append(val)
+        return ('id', id(val))
+
+    bound: List[Any] = []
     queue = [(fun, 0)]
     seen: Set[int] = set()
     while queue:
@@ -1138,10 +1159,15 @@ def _user_function(fun: Any, limit: int = 10) -> Optional[Callable]:
             continue
         seen.add(id(obj))
         if isinstance(obj, types.FunctionType) and not (obj.__module__ or '').startswith('jax'):
-            return obj
+            keep.append(obj)
+            return (id(obj), tuple(bound))
         if isinstance(obj, functools.partial):
+            bound.append(('partial', name(obj.args), name(tuple(sorted(obj.keywords.items())))))
             queue.append((obj.func, depth + 1))
             continue
+        for gen, args in getattr(obj, 'transforms', ()) or ():
+            if getattr(gen, '__name__', '') == '_prepend_static_args':
+                bound.append(('static', name(args)))
         for cell in (getattr(obj, '__closure__', None) or ()):
             try:
                 queue.append((cell.cell_contents, depth + 1))
@@ -1237,21 +1263,25 @@ def _call_mixing(
     cannot be traced.
 
     The verdict of a custom derivative call is memoised in *memo* on its rule
-    and operands, so a chain of calls whose rules apply the inner call again
+    and what the rule is bound to (:func:`_rule_identity`), its body and its
+    operands, so a chain of calls whose rules apply the inner call again
     is traced once per call, not once per path through the chain.
     """
     name = eqn.primitive.name
     key = None
+    keep: List[Any] = []
     if name in _CUSTOM_DERIVATIVE_CALLS:
-        rules = tuple(_user_function(eqn.params.get(k)) for k in _RULE_PARAMS[name] if k in eqn.params)
-        if rules and all(r is not None for r in rules):
-            key = (name, tuple(id(r) for r in rules), tuple(positions), varshape,
+        rules = tuple(_rule_identity(eqn.params.get(k), keep) for k in _RULE_PARAMS[name] if k in eqn.params)
+        body = eqn.params.get('call_jaxpr')
+        if rules and all(r is not None for r in rules) and body is not None:
+            # the rule with what it is bound to, the body, and the operands
+            key = (name, rules, str(body), tuple(positions), varshape,
                    tuple((v.aval.shape, str(v.aval.dtype)) for v in eqn.invars))
             if key in memo:
                 return memo[key][0]
     why = _call_mixing_unmemoised(eqn, positions, varshape, memo)
     if key is not None:
-        memo[key] = (why, rules)  # holding the rules keeps their ids valid
+        memo[key] = (why, keep)  # holding the named objects keeps their ids valid
     return why
 
 
