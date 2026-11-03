@@ -318,3 +318,120 @@ class TestInlineJitInsideControlFlow:
         for arg in (jnp.arange(3.0) + 1.0, jnp.arange(3.0) - 5.0):
             np.testing.assert_allclose(
                 _eval_closed(cleaned, arg)[0], f(arg))
+
+
+_M = np.linspace(0.1, 0.9, 9).reshape(3, 3)
+
+
+def _dense_tanh(a):
+    """Closes over a NumPy constant, so its jit body has a constvar."""
+    return jnp.tanh(a @ jnp.asarray(_M, a.dtype))
+
+
+_SCALE = np.asarray([0.5, 1.0, 1.5])
+
+
+def _scaled_tanh(a):
+    """Closes over a NumPy constant and keeps positions apart."""
+    return jnp.tanh(a * jnp.asarray(_SCALE, a.dtype))
+
+
+def _remat_eqns(jaxpr):
+    return [e for e in jaxpr.eqns if e.primitive.name in ('remat2', 'checkpoint')]
+
+
+class TestInlineJitInsideCheckpoint:
+    """A ``jit`` nested in a ``checkpoint`` (#251). A ``remat2`` body is an open
+    jaxpr: JAX's ``remat_jvp`` asserts it has no constvars. Inlining the jit
+    hoists its constants into operands of the checkpoint, so the body stays
+    open and the walker sees one level."""
+
+    @staticmethod
+    def _check(f, x, n_remat=1):
+        closed = jax.make_jaxpr(f)(x)
+        inlined = inline_jit_calls(closed)
+        remats = _remat_eqns(inlined.jaxpr)
+        assert len(remats) == n_remat
+        for eqn in remats:
+            body = eqn.params['jaxpr']
+            assert not body.constvars and not _has_jit_eqn(body)
+            assert len(body.invars) == len(eqn.invars)
+        # the same values, and the same derivatives in both modes
+        run = lambda v: _eval_closed(inlined, v)[0]
+        np.testing.assert_allclose(run(x), f(x), rtol=1e-6)
+        t = jnp.linspace(-1., 1., x.size).reshape(x.shape)
+        np.testing.assert_allclose(jax.jvp(run, (x,), (t,))[1], jax.jvp(f, (x,), (t,))[1], rtol=1e-6)
+        np.testing.assert_allclose(jax.grad(lambda v: run(v).sum())(x),
+                                   jax.grad(lambda v: f(v).sum())(x), rtol=1e-6)
+        return inlined
+
+    def test_a_jit_with_constants_in_a_checkpoint(self):
+        inlined = self._check(jax.checkpoint(jax.jit(_dense_tanh)), jnp.ones((1, 3)) * 0.3)
+        (eqn,) = _remat_eqns(inlined.jaxpr)
+        assert len(eqn.invars) == 2  # the hoisted constant, then the operand
+
+    def test_a_jit_without_constants_in_a_checkpoint(self):
+        self._check(jax.checkpoint(jax.jit(jnp.tanh)), jnp.ones((1, 3)) * 0.3)
+
+    def test_a_checkpoint_in_a_checkpoint(self):
+        self._check(jax.checkpoint(lambda a: 2. * jax.checkpoint(jax.jit(_dense_tanh))(a)),
+                    jnp.ones((1, 3)) * 0.3)
+
+    def test_a_checkpoint_in_a_scan_body(self):
+        step = jax.checkpoint(jax.jit(_dense_tanh))
+        f = lambda a: jax.lax.scan(lambda c, _: (step(c), None), a, None, length=2)[0]
+        x = jnp.ones((1, 3)) * 0.3
+        inlined = inline_jit_calls(jax.make_jaxpr(f)(x))
+        (scan,) = [e for e in inlined.jaxpr.eqns if e.primitive.name == 'scan']
+        (eqn,) = _remat_eqns(scan.params['jaxpr'].jaxpr)
+        assert not eqn.params['jaxpr'].constvars
+        run = lambda v: _eval_closed(inlined, v)[0]
+        np.testing.assert_allclose(jax.grad(lambda v: run(v).sum())(x),
+                                   jax.grad(lambda v: f(v).sum())(x), rtol=1e-6)
+
+    def test_online_learning_through_the_checkpoint(self):
+        """The issue's reproduction: D-RTRL differentiates the rewritten
+        checkpoint; it raised an AssertionError in JAX's ``remat_jvp``. With
+        an elementwise body (a mixing one would make D-RTRL approximate), D-RTRL
+        is exact, so BPTT is the oracle."""
+        import brainstate
+        import braintrace
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        step = jax.checkpoint(jax.jit(_scaled_tanh))
+        assert _remat_eqns(jax.make_jaxpr(step)(jnp.ones(3)).jaxpr)[0].params['jaxpr'].eqns[0].params['jaxpr'].consts
+
+        class Cell(brainstate.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.W = brainstate.ParamState(jnp.asarray(_M, jnp.float32))
+
+            def init_state(self, batch_size=None, **kwargs):
+                self.h = brainstate.HiddenState(0.3 * jnp.ones((batch_size, 3)))
+
+            def update(self, x):
+                self.h.value = 0.5 * self.h.value + step(braintrace.matmul(x, self.W.value))
+                return self.h.value
+
+        with brainstate.random.seed_context(0):
+            xs = brainstate.random.uniform(-1., 1., (5, 1, 3))
+        g = online_param_gradients_singlestep_naive(Cell, xs, algo_factory=braintrace.D_RTRL)
+        assert_param_gradients_close(g, bptt_param_gradients(Cell, xs), atol=1e-6, rtol=1e-5)
+
+    def test_a_jit_with_constants_in_a_shard_map_is_kept(self):
+        """Another open body: its jit is kept, not inlined with unbound
+        constants (on main its evaluation raised in ``eval_jaxpr``)."""
+        from jax.sharding import PartitionSpec as P
+        mesh = jax.make_mesh((1,), ('x',))
+        f = jax.shard_map(jax.jit(_scaled_tanh), mesh=mesh, in_specs=P(), out_specs=P())
+        x = jnp.asarray([0.3, -0.7, 1.1], jnp.float32)
+        new = inline_jit_calls(jax.make_jaxpr(f)(x))
+        (eqn,) = new.jaxpr.eqns
+        assert eqn.params['jaxpr'].constvars == []
+        assert [e.primitive.name for e in eqn.params['jaxpr'].eqns] == ['jit']
+        run = lambda a: jax.core.eval_jaxpr(new.jaxpr, new.consts, a)[0]
+        np.testing.assert_array_equal(run(x), f(x))
+        np.testing.assert_array_equal(jax.jvp(run, (x,), (x,))[1], jax.jvp(f, (x,), (x,))[1])
