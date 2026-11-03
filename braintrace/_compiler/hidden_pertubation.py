@@ -607,12 +607,12 @@ def plan_new_read_cuts(
 
         The first four are a source's own: its reads alone decide them. Such
         a source is *blocked*: none of its reads is cut. The last two are
-        between sources, and so is a cut read into a blocked source or into
-        a state that a blocked source reads. They are found with the blocked
-        sources left out, and their sources (the one with the kept read; the
-        cut sources whose cut reads use the equation; the source of the cut)
-        are blocked in turn, until none is found. The cuts of the other
-        sources are applied (issue #248).
+        between sources; they are found with the blocked sources left out,
+        and their sources (the one with the kept read; the cut sources whose
+        cut reads use the equation) are blocked in turn, until none is
+        found. The cuts of the other sources are applied (issue #248).
+        Blocking a source changes only its own signal, so a cut of another
+        source stays exact.
     """
     eqns = jaxpr.eqns
     producer: Dict[Var, int] = {}
@@ -701,7 +701,6 @@ def plan_new_read_cuts(
 
     # [the conflicts of each source] its reads alone decide them
     own: Dict[Var, List[str]] = {k: [] for k in sources}
-    reads_of: Dict[Var, Set[Var]] = {}
     found = {}
     kept_direct: List[Tuple[Var, Var]] = []
     for k in sources:
@@ -729,7 +728,6 @@ def plan_new_read_cuts(
                 kept.append(j)
                 kept_direct.append((k, j))
         found[k] = (direct, every, cut, kept)
-        reads_of[k] = set(sinks)
     for k, m in kept_direct:
         traced = policy.traced(path_of[k])
         if any(policy.group(path_of[j]) in traced for j in direct_closure(m)):
@@ -742,28 +740,14 @@ def plan_new_read_cuts(
     # its reads (it is not a cut source: every reader sees it perturbed in
     # place). The conflicts between the cuts of several sources are then
     # recomputed without the blocked ones, and their sources blocked too,
-    # until nothing changes (issue #248).
+    # until nothing changes (issue #248). They only shrink as sources are
+    # blocked, so this settles after one recompute; the loop keeps it so.
     conflicts: List[str] = [c for k in sources for c in own[k]]
     blocked: Set[Var] = {k for k in sources if own[k]}
     while True:
         cut_sources = {k: None for k in sources if found[k][2] and k not in blocked}
         cut_sinks = {j for k in cut_sources for j in found[k][2]}
         newly: Dict[Var, None] = {}
-        for k in cut_sources:
-            # a cut is applied only into a state whose reads are all decided:
-            # it drops k -> j -> ... from k's signal, which is exact only when
-            # the traces carry what follows j, and a blocked source's reads
-            # (of j, or by j) are those the traces are not trusted with
-            for j in found[k][2]:
-                if j in blocked:
-                    conflicts.append(f'{path_of[k]} -> {path_of[j]} is cut, but {path_of[j]} keeps the '
-                                     f'total derivative on its reads')
-                    newly[k] = None
-                for b in blocked:
-                    if j in reads_of[b]:
-                        conflicts.append(f'{path_of[k]} -> {path_of[j]} is cut, but {path_of[j]} also reads '
-                                         f'{path_of[b]}, which keeps the total derivative')
-                        newly[k] = None
         for k, m in kept_direct:
             if m in cut_sinks and k in cut_sources:
                 conflicts.append(f'{path_of[m]} has a cut read and a kept read of {path_of[k]}')

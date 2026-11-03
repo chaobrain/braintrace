@@ -184,8 +184,8 @@ position-preserving), the signal of its source stays the total derivative on
 every read and the graph records ``DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT``
 (ERROR, also warned); ``vjp_method='multi-step'`` builds no perturbation and
 avoids it. Such a conflict blocks only its source, and the sources whose cuts
-cannot be emitted apart from it or lead into a state it reads: the reads of the
-other sources are still cut.
+cannot then be emitted apart from the kept reads: the reads of the other
+sources are still cut.
 ``graph.hidden_perturb`` declares the outcome: ``new_read_cuts``,
 ``new_read_conflicts`` and ``new_read_exact``. ``new_read_exact`` means only
 that no in-step read of a new hidden value is double counted in the single-step

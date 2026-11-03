@@ -11,9 +11,9 @@
   source, stayed double counted (`_ConflictPlusCut`: `Wg` was 1.0 off BPTT at
   T = 1). A source with a conflict of its own now keeps the total derivative
   on every read. The conflicts between sources (a state with a cut and a kept
-  read of one source, an equation that cannot serve both worlds, and a cut
-  into a blocked source or a state one reads) are recomputed without the
-  blocked sources, and their sources blocked in turn, until none is found.
+  read of one source, an equation that cannot serve both worlds) are
+  recomputed without the blocked sources, and their sources blocked in turn,
+  until none is found.
   The cuts of the other sources are applied. `new_read_conflicts` lists every
   conflict, `new_read_exact` stays `False`, and the
   `HIDDEN_NEW_READ_DOUBLE_COUNT` record names the blocked sources
