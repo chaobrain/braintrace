@@ -76,6 +76,14 @@ def _custom_jvp_dense_jvp(primals, tangents):
     return _dot(v), _dot(dv)
 
 
+@jax.custom_vjp
+def _custom_vjp_tanh(v):
+    return jnp.tanh(v)
+
+
+_custom_vjp_tanh.defvjp(lambda v: (jnp.tanh(v), v), lambda v, g: (g * (1 - jnp.tanh(v) ** 2),))
+
+
 def _term(kind, v, x):
     if kind == 'tanh':
         return jnp.tanh(v)
@@ -99,6 +107,13 @@ def _term(kind, v, x):
         return _custom_jvp_dense(v)
     if kind == 'ckpt':
         return jax.checkpoint(_dot)(v)
+    # not drawn by _spec (adding them to _KINDS would redraw every seed): kinds
+    # for _variant. A custom_vjp the walker proves elementwise and the planner
+    # never proves; a call holding a roll, which the walker leaves out (#249).
+    if kind == 'cvjp':
+        return _custom_vjp_tanh(v)
+    if kind == 'ckptroll':
+        return jax.checkpoint(lambda a: jnp.roll(a, 1, axis=-1))(v)
     raise ValueError(kind)
 
 
@@ -226,7 +241,13 @@ def _worst(got, ref):
                 if np.linalg.norm(r) > 0), default=0.0)
 
 
-# seeds with new_read_exact=True and single-step D-RTRL off BPTT at T = 1 on 003943c
+# seeds with new_read_exact=True and single-step D-RTRL off BPTT at T = 1 on 003943c.
+# Since #249 the hidden-group walker leaves a call whose body is not proven to keep
+# positions out of the transition, as a top-level dense dot: the 'ckpt' and 'cjdense'
+# reads are group boundaries. 36 of the seeds below change graph; eight (0, 70, 71, 83,
+# 97, 114, 174, 187) move from a reported conflict (a read through that call) to
+# new_read_exact=True, since the read now crosses groups and no trace carries it, and
+# test_a_seed_that_double_counted_is_reported_or_exact finds each equal to BPTT at T = 1.
 _DOUBLE_COUNTED_ON_003943C = (
     0, 21, 24, 30, 33, 34, 37, 43, 47, 48, 50, 54, 56, 60, 62, 63, 65, 68, 70, 71, 83, 84, 85, 86,
     97, 98, 99, 106, 107, 112, 114, 120, 123, 131, 132, 143, 145, 160, 163, 174, 181, 185, 187,
@@ -234,10 +255,8 @@ _DOUBLE_COUNTED_ON_003943C = (
 )
 # seeds with one hidden group, new_read_exact=True, forced multi-step exact at T = 3 and
 # single-step not, on 003943c (seed 35 was too, and still declares no double count:
-# test_a_dense_old_read_in_a_call_is_not_a_new_read; seed 114 was too, and its read
-# h0 -> h1 goes through a dense dot inside a checkpoint, which the walker now leaves out
-# of the transition like a top-level dot (#249): two groups, no read to cut, and
-# test_a_seed_that_double_counted_is_reported_or_exact[114] finds it equal to BPTT)
+# test_a_dense_old_read_in_a_call_is_not_a_new_read; seed 114 was too, and is one of the
+# eight above that the walker now splits at a call, #249)
 _OFF_AT_THREE_STEPS_ON_003943C = (21, 115, 123, 136, 143, 201)
 
 
@@ -289,6 +308,33 @@ def test_a_seed_off_multi_step_on_003943c_is_reported(seed):
     with brainstate.environ.context(precision=64):
         hp = _graph(_model(_spec(seed))).hidden_perturb
     assert hp.new_read_exact is False and hp.new_read_cuts == () and hp.new_read_conflicts
+
+
+# The 'ckpt' and 'cjdense' reads are boundaries of the walker now (#249), so they no
+# longer reach the planner's refusal of a call it cannot prove. These variants redraw
+# them, and the surrogate 'cjvp' reads, as a custom_vjp the walker proves elementwise but
+# the planner never proves ('cvjp'), and a checkpoint holding a roll ('ckptroll').
+# On the seeds of the first tuple a read goes through the custom_vjp in the group.
+_UNPROVEN_CALL_SEEDS = (24, 70, 98, 163, 211)
+_CALL_VARIANT = {'ckpt': 'cvjp', 'cjdense': 'ckptroll', 'cjvp': 'cvjp'}
+
+
+@pytest.mark.parametrize('seed', _UNPROVEN_CALL_SEEDS + (0, 56, 114, 132))
+def test_a_read_through_a_call_the_planner_cannot_prove_is_reported_or_exact(seed):
+    make = _variant(seed, new=_CALL_VARIANT)
+    with brainstate.environ.context(precision=64):
+        hp = _graph(make).hidden_perturb
+        if seed in _UNPROVEN_CALL_SEEDS:
+            assert any('custom_vjp_call' in c for c in hp.new_read_conflicts)
+        if hp.new_read_exact is False:
+            assert hp.new_read_cuts == () and hp.new_read_conflicts
+            return
+        xs = _inputs(1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            single = online_param_gradients_singlestep_naive(make, xs, algo_factory=braintrace.D_RTRL)
+            ref = bptt_param_gradients(make, xs)
+    assert _worst(single, ref) < 1e-9
 
 
 # one hidden group, cut reads, new_read_exact=True and every read of an old value

@@ -2936,6 +2936,73 @@ def _closed_call(f):
 
 _CLOSED_CALL = closed_call_p.name  # 'eval_jaxpr' in jax >= 0.7
 
+_PERM3 = np.array([1, 2, 0])
+
+
+def _perm(a):
+    return a[..., _PERM3]
+
+
+def _roll(a):
+    return jnp.roll(a, 1, axis=-1)
+
+
+def _mean_mix(a):
+    return a * jnp.mean(a, axis=-1, keepdims=True)
+
+
+def _scatter_set_perm(a):
+    """Writes ``a`` into itself at permuted positions: the updates move."""
+    return a.at[..., _PERM3].set(a)
+
+
+def _scatter_add_const(a):
+    """Adds a constant at one position: the operand keeps its positions."""
+    return a.at[..., 0].add(1.)
+
+
+def _cjvp(primal, rule):
+    """A custom_jvp of ``primal`` whose JVP rule is the JVP of ``rule``."""
+
+    @jax.custom_jvp
+    def f(a):
+        return primal(a)
+
+    f.defjvp(lambda p, t: (primal(p[0]), jax.jvp(rule, (p[0],), (t[0],))[1]))
+    return f
+
+
+def _cjvp_reapplied(inner):
+    """A custom_jvp of ``inner`` whose JVP rule applies ``inner`` to the tangent."""
+
+    @jax.custom_jvp
+    def f(a):
+        return inner(a)
+
+    f.defjvp(lambda p, t: (inner(p[0]), inner(t[0])))
+    return f
+
+
+def _while2(inner):
+    """Two steps of ``inner`` in a while loop (not unrolled: dynamic bounds)."""
+
+    def f(h):
+        return jax.lax.while_loop(lambda c: c[0] < 2, lambda c: (c[0] + 1, 0.5 * inner(c[1])), (0, h))[1]
+
+    return f
+
+
+def _barrier(a):
+    """An identity whose JVP passes the tangent through an optimization barrier
+    (brainspike's ``ad_fusion_barrier``)."""
+
+    @jax.custom_jvp
+    def f(x):
+        return x
+
+    f.defjvp(lambda p, t: (jax.lax.optimization_barrier(p[0]), jax.lax.optimization_barrier(t[0])))
+    return f(a)
+
 
 @jax.custom_jvp
 def _spike(v):
@@ -2984,7 +3051,23 @@ _CALLS = {
     # two deep: the mixing is in the JVP rule of a custom_jvp inside a checkpoint
     'checkpoint-jit-custom_jvp-rule-dense': (
         jax.checkpoint(jax.jit(_cj_rule_dense33)), 'remat2', True),
+    # not only a matmul: any equation the allow-list does not prove (review of #249)
+    'custom_jvp-perm': (_cjvp(_perm, _perm), 'custom_jvp_call', True),
+    'custom_jvp-rule-gather': (_cjvp(jnp.tanh, _perm), 'custom_jvp_call', True),
+    'checkpoint-roll': (jax.checkpoint(_roll), 'remat2', True),
+    'checkpoint-tanh-then-perm': (jax.checkpoint(lambda a: _perm(jnp.tanh(a))), 'remat2', True),
+    'checkpoint-mean': (jax.checkpoint(_mean_mix), 'remat2', True),
+    'closed_call-roll': (_closed_call(_roll), _CLOSED_CALL, True),
+    'checkpoint-scatter-set-perm': (jax.checkpoint(_scatter_set_perm), 'remat2', True),
+    # a call in a loop body, its mixing only in a JVP rule
+    'while-custom_jvp-rule-dense': (_while2(_cj_rule_dense33), 'while', True),
+    'while-checkpoint-perm': (_while2(jax.checkpoint(_perm)), 'while', True),
     'custom_jvp-elementwise': (_cj_tanh, 'custom_jvp_call', False),
+    'checkpoint-scatter-add-const': (jax.checkpoint(_scatter_add_const), 'remat2', False),
+    'checkpoint-cond-elementwise': (
+        jax.checkpoint(lambda a: jax.lax.cond(jnp.sum(a) > 0., jnp.tanh, jnp.sin, a)), 'remat2', False),
+    'custom_jvp-barrier': (_barrier, 'custom_jvp_call', False),
+    'while-custom_jvp-elementwise': (_while2(_cj_tanh), 'while', False),
     'custom_jvp-spike': (_spike, 'custom_jvp_call', False),
     'custom_vjp-elementwise': (_cv_tanh, 'custom_vjp_call', False),
     'checkpoint-elementwise': (jax.checkpoint(jnp.tanh), 'remat2', False),
@@ -3083,7 +3166,7 @@ class TestCallLikeRecurrentMixing:
         assert group.is_diagonal_recurrence
 
     @pytest.mark.parametrize('name', sorted(n for n, c in _CALLS.items() if c[2]))
-    def test_a_recurrent_matmul_inside_a_call_is_left_out_and_reported(self, name):
+    def test_a_call_not_proven_to_keep_positions_is_left_out_and_reported(self, name):
         call, primitive, _ = _CALLS[name]
         group, names, kinds = self._compile(self._cell(call), False)
         assert primitive not in names
@@ -3117,6 +3200,65 @@ class TestCallLikeRecurrentMixing:
     def _inputs():
         with brainstate.random.seed_context(3):
             return brainstate.random.uniform(-1., 1., (6, 1, 3))
+
+    @pytest.mark.parametrize('name, inner', [
+        ('custom_jvp-dense', 'dot_general in custom_jvp_call'),
+        ('custom_jvp-rule-gather', 'gather in the derivative rule of custom_jvp_call'),
+        ('checkpoint-roll', 'in remat2'),
+        ('checkpoint-scatter-set-perm', 'scatter in remat2'),
+        ('while-checkpoint-perm', 'gather in remat2 in while'),
+        ('custom_vjp-opaque', 'custom_vjp_call (its derivative rule could not be traced)'),
+    ])
+    def test_the_report_names_the_equation_not_proven(self, name, inner):
+        cell = self._cell(_CALLS[name][0])()
+        brainstate.nn.init_all_states(cell, batch_size=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)
+            with diagnostic_context() as reporter:
+                find_hidden_groups_from_module(cell, jnp.ones((1, 3)))
+        (record,) = [r for r in reporter.records()
+                     if r.kind is DiagnosticKind.CONTROL_FLOW_RECURRENT_MIXING]
+        assert inner in record.context['inner_op'] and inner in record.message
+
+    def test_a_call_whose_body_does_not_take_its_operands_one_to_one_mixes(self):
+        """The body of a call-like equation is read positionally; when its
+        arity differs from the equation's, nothing is proven."""
+        from braintrace._compiler.hidden_group import _call_mixing
+        closed = jax.make_jaxpr(jax.checkpoint(lambda a: jnp.tanh(a)))(jnp.ones((1, 3)))
+        (eqn,) = closed.jaxpr.eqns
+        assert _call_mixing(eqn, [0], (1, 3), {}) is None
+        two = jax.make_jaxpr(lambda a, b: a * b)(jnp.ones((1, 3)), jnp.ones((1, 3))).jaxpr
+        bad = eqn.replace(params={**eqn.params, 'jaxpr': two})
+        assert 'one to one' in _call_mixing(bad, [0], (1, 3), {})
+
+    def test_a_chain_of_custom_jvp_rules_is_traced_once_per_call(self, monkeypatch):
+        """Each rule of a depth-12 chain applies the inner call again, to the
+        tangent: the body and the rule of every call reach the inner call, so
+        without memoising the checks take 2**12 - 1 derivative traces."""
+        from braintrace._compiler import hidden_group as hg
+        traces = []
+        original = hg._derivative_jaxpr
+        monkeypatch.setattr(hg, '_derivative_jaxpr', lambda *a: traces.append(1) or original(*a))
+        f = jnp.tanh
+        for _ in range(12):
+            f = _cjvp_reapplied(f)
+        _, names, kinds = self._compile(self._cell(f), False)
+        assert len(traces) == 12
+        assert 'custom_jvp_call' in names and not kinds
+
+    def test_d_rtrl_is_exact_through_a_scatter_that_keeps_positions(self):
+        """A constant added at one position of the operand, in a checkpoint,
+        stays in the diagonal transition; D-RTRL matches BPTT."""
+        from braintrace._testing.oracle import (
+            assert_param_gradients_close,
+            bptt_param_gradients,
+            online_param_gradients_singlestep_naive,
+        )
+        xs = self._inputs()
+        cell = self._cell(_CALLS['checkpoint-scatter-add-const'][0])
+        g = online_param_gradients_singlestep_naive(cell, xs, algo_factory=braintrace.D_RTRL)
+        g_ref = bptt_param_gradients(cell, xs)
+        assert_param_gradients_close(g, g_ref, atol=1e-6, rtol=1e-5)
 
     def test_d_rtrl_is_exact_through_a_position_keeping_call(self):
         """The surrogate spike's reset stays in the diagonal transition, so
