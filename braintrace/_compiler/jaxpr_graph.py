@@ -160,12 +160,15 @@ def _contains_jit_eqn(jaxpr: Jaxpr) -> bool:
 
 
 def _sub_closed_jaxprs(eqn: JaxprEqn) -> Iterator[ClosedJaxpr]:
-    """Yield the ``ClosedJaxpr`` bodies of a control-flow equation.
+    """Yield the jaxpr bodies held in the ``jaxpr``, ``cond_jaxpr``,
+    ``body_jaxpr`` and ``branches`` params of an equation.
 
-    Covers ``scan`` (``jaxpr``), ``while`` (``cond_jaxpr``/``body_jaxpr``),
-    and ``cond`` (``branches``). ``call_jaxpr`` (custom-derivative calls) is
-    deliberately excluded: those bodies carry derivative semantics and are
-    never rewritten by :func:`inline_jit_calls`.
+    These are the bodies of ``scan``, ``while`` and ``cond``, and, since JAX
+    0.11 made ``ClosedJaxpr`` and ``Jaxpr`` one class, also the open bodies of
+    ``checkpoint`` (``remat2``), ``shard_map`` and ``run_state``.
+    ``call_jaxpr`` (custom-derivative calls) is deliberately excluded: those
+    bodies carry derivative semantics and are never rewritten by
+    :func:`inline_jit_calls`.
     """
     for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
         sub = eqn.params.get(key)
@@ -229,16 +232,63 @@ def _contains_jit(jaxpr: Jaxpr) -> bool:
     return False
 
 
-def _inline_jits_in_control_flow_params(eqn: JaxprEqn) -> Optional[dict]:
+#: Equations whose ``jaxpr`` param is an *open* jaxpr, which may not hold
+#: constants (JAX's ``remat_jvp`` asserts it has no constvars). Since JAX 0.11
+#: ``ClosedJaxpr`` and ``Jaxpr`` are one class, so the type does not tell an
+#: open body from a closed one. A jit inlined into one of these bodies has its
+#: constants hoisted into leading operands of the equation (#251).
+_OPEN_BODY_CALLS = frozenset({'remat2', 'remat', 'checkpoint'})
+
+#: Equations whose body params are closed jaxprs that may gain constants.
+_CLOSED_BODY_PRIMITIVES = frozenset({'scan', 'while', 'cond'})
+
+
+def _open_body(closed: ClosedJaxpr, template: Jaxpr) -> Jaxpr:
+    """*closed* as an open jaxpr: its constvars become leading invars."""
+    body = closed.jaxpr
+    debug_info = getattr(template, 'debug_info', None)
+    if debug_info is not None:
+        debug_info = debug_info._replace(arg_names=None)
+    return Jaxpr(
+        constvars=[],
+        invars=[*body.constvars, *body.invars],
+        outvars=list(body.outvars),
+        eqns=list(body.eqns),
+        effects=body.effects,
+        debug_info=debug_info,
+    )
+
+
+def _inline_jits_in_control_flow_params(eqn: JaxprEqn) -> Optional[tuple]:
     """Rewrite a control-flow eqn's body params so jit calls inside them are
-    inlined; return the new params dict, or ``None`` when every body is
-    already jit-free (so the caller can keep the eqn by identity)."""
+    inlined.
+
+    Returns ``(params, hoisted)``, or ``None`` when every body is already
+    jit-free (so the caller can keep the eqn by identity). ``hoisted`` lists
+    ``(constvar, value)`` pairs the caller must bind and prepend to the
+    equation's operands: the constants of jits inlined into the open body of a
+    checkpoint (:data:`_OPEN_BODY_CALLS`, #251). A ``scan``/``while``/``cond``
+    body is closed and keeps its new constants. Any other equation with a body
+    keeps a jit whose constants it could not hold.
+    """
+    name = eqn.primitive.name
     new_params = dict(eqn.params)
     changed = False
+    hoisted: List[tuple] = []
     for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
         sub = new_params.get(key)
         if isinstance(sub, ClosedJaxpr) and _contains_jit(sub.jaxpr):
-            new_params[key] = inline_jit_calls(sub)
+            inlined = inline_jit_calls(sub)
+            if name in _OPEN_BODY_CALLS and key == 'jaxpr':
+                hoisted.extend(zip(inlined.jaxpr.constvars, inlined.consts))
+                inlined = _open_body(inlined, sub)
+                prevent_cse = new_params.get('prevent_cse')
+                if isinstance(prevent_cse, tuple):
+                    # as JAX does for the constants it hoists (ad_checkpoint)
+                    new_params['prevent_cse'] = (False,) * len(hoisted) + prevent_cse
+            elif name not in _CLOSED_BODY_PRIMITIVES and len(inlined.consts) > len(getattr(sub, 'consts', ())):
+                continue  # an open body of another kind: leave its jits
+            new_params[key] = inlined
             changed = True
     branches = new_params.get('branches')
     if branches is not None:
@@ -250,7 +300,7 @@ def _inline_jits_in_control_flow_params(eqn: JaxprEqn) -> Optional[dict]:
         if any(nb is not ob for nb, ob in zip(new_branches, branches)):
             new_params['branches'] = new_branches
             changed = True
-    return new_params if changed else None
+    return (new_params, hoisted) if changed else None
 
 
 def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
@@ -309,6 +359,16 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
     extra_consts: List[Any] = []
     new_eqns: List[JaxprEqn] = []
 
+    def hoist(pairs: Sequence[tuple]) -> List[Var]:
+        """Bind hoisted ``(constvar, value)`` pairs as fresh outer constvars."""
+        fresh_vars = []
+        for cv, cval in pairs:
+            fresh = new_var('', cv.aval)
+            extra_constvars.append(fresh)
+            extra_consts.append(cval)
+            fresh_vars.append(fresh)
+        return fresh_vars
+
     def splice(inner_closed: ClosedJaxpr, call_arg_atoms: Sequence[Atom]) -> List[Any]:
         """Inline one jit body with every internal var freshened; return the
         body's (resolved) output atoms.
@@ -348,9 +408,10 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
                     outvars=fresh_outvars,
                 )
                 # a control-flow eqn inside a jit body may itself hide jits
-                new_params = _inline_jits_in_control_flow_params(eqn)
-                if new_params is not None:
-                    replace_kwargs['params'] = new_params
+                rewritten = _inline_jits_in_control_flow_params(eqn)
+                if rewritten is not None:
+                    replace_kwargs['params'] = rewritten[0]
+                    replace_kwargs['invars'] = [*hoist(rewritten[1]), *replace_kwargs['invars']]
                 new_eqns.append(eqn.replace(**replace_kwargs))
         return [res(v) for v in inner.outvars]
 
@@ -363,10 +424,11 @@ def inline_jit_calls(closed_jaxpr: ClosedJaxpr) -> ClosedJaxpr:
             for outer_ov, out_atom in zip(eqn.outvars, outs):
                 top_subst[outer_ov] = out_atom
         else:
-            new_params = _inline_jits_in_control_flow_params(eqn)
+            rewritten = _inline_jits_in_control_flow_params(eqn)
             new_invars = [resolve_top(v) for v in eqn.invars]
-            if new_params is not None:
-                new_eqns.append(eqn.replace(invars=new_invars, params=new_params))
+            if rewritten is not None:
+                new_eqns.append(eqn.replace(
+                    invars=[*hoist(rewritten[1]), *new_invars], params=rewritten[0]))
             elif all(a is b for a, b in zip(new_invars, eqn.invars)):
                 new_eqns.append(eqn)
             else:
