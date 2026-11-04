@@ -741,6 +741,69 @@ class _ConflictPlusCut(brainstate.nn.Module):
         return self.h2.value + self.V.value
 
 
+
+class _ConflictPlusCutEtpV(_ConflictPlusCut):
+    """_ConflictPlusCut where V also reads the conflicted h1 through an ETP
+    op: the traces stop there, so g -> V is still cut exactly (review of
+    #248)."""
+
+    def __init__(self):
+        super().__init__()
+        self.Wv = braintrace.nn.Linear(_N, _N)
+
+    def update(self, x):
+        self.h1.value = 0.8 * self.h1.value + jnp.tanh(self.W1(x))
+        self.h2.value = 0.9 * self.h2.value + jnp.tanh(self.W2(self.h1.value)) + 0.3 * jnp.sin(self.h1.value)
+        self.g.value = 0.8 * self.g.value + self.Wg(x)
+        self.V.value = 0.9 * self.V.value + jnp.tanh(self.g.value) + 0.5 * self.Wv(self.h1.value)
+        return self.h2.value + self.V.value
+
+
+class _CutIntoDisagree(brainstate.nn.Module):
+    """k -> g is cut (one group); the relations disagree on g -> V, so g is
+    blocked. Only Wk feeds k (review of #248)."""
+
+    def __init__(self):
+        super().__init__()
+        self.Wk = braintrace.nn.Linear(3, _N)
+        self.W1 = braintrace.nn.Linear(3, _N)
+        self.W2 = braintrace.nn.Linear(3, _N)
+        self.U = braintrace.nn.Linear(3, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for name in ('k', 'g', 'V'):
+            setattr(self, name, brainstate.HiddenState(_zeros(batch_size)))
+
+    def update(self, x):
+        self.k.value = 0.8 * self.k.value + self.Wk(x)
+        y1 = self.W1(x)
+        self.g.value = 0.8 * self.g.value + y1 + self.W2(x) + jnp.tanh(self.k.value)
+        mix = jnp.asarray(np.linspace(0.2, 1.0, _N * _N).reshape(_N, _N), self.g.value.dtype)
+        self.V.value = 0.9 * self.V.value + self.U(x) * jnp.tanh(y1) + jnp.tanh(self.g.value) @ mix
+        return self.V.value
+
+
+class _LongChain(brainstate.nn.Module):
+    """a -> b -> c -> d -> e in one group; e reads d directly and through an
+    ETP op, so only d is blocked (review of #248)."""
+
+    def __init__(self):
+        super().__init__()
+        self.W = braintrace.nn.Linear(3, _N)
+        self.We = braintrace.nn.Linear(_N, _N)
+
+    def init_state(self, batch_size=None, **kwargs):
+        for name in 'abcde':
+            setattr(self, name, brainstate.HiddenState(_zeros(batch_size)))
+
+    def update(self, x):
+        self.a.value = 0.8 * self.a.value + self.W(x)
+        self.b.value = 0.7 * self.b.value + jnp.tanh(self.a.value)
+        self.c.value = 0.7 * self.c.value + jnp.tanh(self.b.value)
+        self.d.value = 0.7 * self.d.value + jnp.tanh(self.c.value)
+        self.e.value = 0.7 * self.e.value + jnp.sin(self.d.value) + self.We(self.d.value)
+        return self.e.value + self.b.value
+
 class _CutSourceEtpReader(brainstate.nn.Module):
     """g1 -> V1 is cut; a stacked layer also reads the new g1 through an ETP
     op, and that read must see the perturbed g1."""
@@ -1460,6 +1523,195 @@ class TestPlanNewReadCuts:
         assert plan.output_eqns  # the eqn that feeds h2 reads the perturbed h0
 
 
+
+def _p(*names):
+    return tuple((n,) for n in names)
+
+
+class TestCutsPerSource:
+    """A conflict blocks its sources only; the cuts of the other sources are
+    applied (issue #248). Hidden ``hI`` is the path ``('hI',)``."""
+
+    def test_an_own_conflict_blocks_only_its_source(self):
+        # h0 -> h1: the relations disagree; h2 -> h3 is independent and cut
+        def fn(h0, h1, h2, h3, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), n2, 0.9 * h3 + jnp.tanh(n2), h3
+
+        rule = _Rule({_p('h0', 'h1'): 'conflict', _p('h2', 'h3'): 'cut'})
+        plan = _plan(fn, 4, rule, n_args=5)
+        assert plan.cuts == (_p('h2', 'h3'),) and plan.blocked == _p('h0')
+        assert plan.conflicts == ("the relations disagree on the read ('h0',) -> ('h1',)",)
+        assert len(plan.sources) == 1 and plan.state_eqns and not plan.output_eqns
+
+    def test_a_blocked_source_keeps_every_read_its_other_cuts_too(self):
+        # h0 -> h1 is cut but h0 -> h2 is not carried: h0 is blocked, h3 cut
+        def fn(h0, h1, h2, h3, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + braintrace.matmul(x, w) + jnp.sin(n0)
+            return n0, 0.9 * h1 + jnp.tanh(n0), n2, 0.9 * h3 + jnp.tanh(n2), h3
+
+        rule = _Rule({_p('h0', 'h1'): 'cut', _p('h0', 'h2'): 'cut', _p('h2', 'h3'): 'cut'},
+                     uncarried={_p('h0', 'h2')})
+        plan = _plan(fn, 4, rule, n_args=5)
+        assert plan.cuts == (_p('h2', 'h3'),) and plan.blocked == _p('h0')
+        assert plan.conflicts == ("not carried: ('h0',) -> ('h2',)",)
+
+    def test_a_derived_conflict_blocks_a_second_source(self):
+        # round 1: h0 has a conflict of its own (h0 -> h4 disagree);
+        # round 2: with h0 left out, h3 still has a cut read (of h2) and a
+        # kept read of h1, a source with cuts: h1 is blocked. h2 -> h3 and
+        # h5 -> h6 stay cut: blocking h1 changes only h1's signal
+        def fn(h0, h1, h2, h3, h4, h5, h6, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + jnp.tanh(n1)
+            n3 = 0.9 * h3 + jnp.tanh(n2) + jnp.sin(n1)
+            n5 = 0.9 * h5 + braintrace.matmul(x, w)
+            return n0, n1, n2, n3, 0.9 * h4 + jnp.cos(n0), n5, 0.9 * h6 + jnp.tanh(n5), h6
+
+        rule = _Rule({_p('h0', 'h4'): 'conflict', _p('h1', 'h2'): 'cut', _p('h2', 'h3'): 'cut',
+                      _p('h5', 'h6'): 'cut'})
+        plan = _plan(fn, 7, rule, n_args=8)
+        assert plan.blocked == _p('h0', 'h1') and plan.cuts == (_p('h2', 'h3'), _p('h5', 'h6'))
+        assert plan.conflicts == (
+            "the relations disagree on the read ('h0',) -> ('h4',)",
+            "('h3',) has a cut read and a kept read of ('h1',)",
+        )
+
+    def test_a_derived_conflict_is_found_with_the_blocked_sources_left_out(self):
+        # h2 has a kept read of h1 and a cut read of h0 only; h0 is blocked
+        # (h0 -> h4 disagree), so h2 has no cut read left, and h1 -> h3 is cut
+        def fn(h0, h1, h2, h3, h4, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + braintrace.matmul(x, w)
+            n2 = 0.9 * h2 + jnp.tanh(n0) + jnp.sin(n1)
+            return n0, n1, n2, 0.9 * h3 + jnp.tanh(n1), 0.9 * h4 + jnp.cos(n0), h4
+
+        rule = _Rule({_p('h0', 'h2'): 'cut', _p('h0', 'h4'): 'conflict', _p('h1', 'h3'): 'cut'})
+        plan = _plan(fn, 5, rule, n_args=6)
+        assert plan.blocked == _p('h0') and plan.cuts == (_p('h1', 'h3'),)
+        assert plan.conflicts == ("the relations disagree on the read ('h0',) -> ('h4',)",)
+        # without the conflict of h0, h2's two reads conflict and block h1 only
+        del rule.edges[_p('h0', 'h4')]
+        plan = _plan(fn, 5, rule, n_args=6)
+        assert plan.blocked == _p('h1') and plan.cuts == (_p('h0', 'h2'),)
+        assert plan.conflicts == ("('h2',) has a cut read and a kept read of ('h1',)",)
+
+    def test_a_cut_into_a_blocked_source_stays(self):
+        # h2 -> h1 -> h0 are cut reads, h0 -> h4 a conflict: only h0 is blocked
+        def fn(h0, h1, h2, h3, h4, h5, x, w):
+            n2 = 0.9 * h2 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + jnp.tanh(n2)
+            n0 = 0.9 * h0 + jnp.tanh(n1)
+            n3 = 0.9 * h3 + braintrace.matmul(x, w)
+            return n0, n1, n2, n3, 0.9 * h4 + jnp.cos(n0), 0.9 * h5 + jnp.tanh(n3), h5
+
+        rule = _Rule({_p('h0', 'h4'): 'conflict', _p('h1', 'h0'): 'cut', _p('h2', 'h1'): 'cut',
+                      _p('h3', 'h5'): 'cut'})
+        plan = _plan(fn, 6, rule, n_args=7)
+        assert plan.blocked == _p('h0')
+        assert plan.cuts == (_p('h1', 'h0'), _p('h2', 'h1'), _p('h3', 'h5'))
+        assert plan.conflicts == ("the relations disagree on the read ('h0',) -> ('h4',)",)
+
+    def test_a_shared_equation_blocks_the_sources_whose_cut_reads_use_it(self):
+        # the while serves the cut read h0 -> h1 and the output: h0 is
+        # blocked; h2 -> h3 is cut
+        def fn(h0, h1, h2, h3, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            t = jax.lax.while_loop(lambda c: c[1] < 3, lambda c: (c[0] * 0.5, c[1] + 1), (jnp.tanh(n0), 0))[0]
+            n2 = 0.9 * h2 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + t, n2, 0.9 * h3 + jnp.tanh(n2), t
+
+        rule = _Rule({_p('h0', 'h1'): 'cut', _p('h2', 'h3'): 'cut'})
+        plan = _plan(fn, 4, rule, n_args=5)
+        assert plan.blocked == _p('h0') and plan.cuts == (_p('h2', 'h3'),)
+        assert any('cannot be emitted twice' in c for c in plan.conflicts), plan.conflicts
+        assert not any(eqn.primitive.name == 'while' for eqn in
+                       (jax.make_jaxpr(fn)(*([jnp.ones((1, _N))] * 4), jnp.ones((1, 3)),
+                                           jnp.ones((3, _N))).jaxpr.eqns[i] for i in plan.state_eqns))
+
+    def test_a_kept_read_reaching_a_traced_group_blocks_its_source(self):
+        # h0 -> h1 is kept and h1 -> h2 reaches a group h0's relations trace;
+        # h3 -> h4 (no group) is independent and cut
+        def fn(h0, h1, h2, h3, h4, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            n1 = 0.9 * h1 + jnp.tanh(n0)
+            n3 = 0.9 * h3 + braintrace.matmul(x, w)
+            return n0, n1, 0.9 * h2 + jnp.tanh(n1), n3, 0.9 * h4 + jnp.tanh(n3), h4
+
+        rule = _Rule({_p('h3', 'h4'): 'cut'}, groups={('h0',): 0, ('h1',): 1, ('h2',): 0}, traced={0})
+        plan = _plan(fn, 5, rule, n_args=6)
+        assert plan.blocked == _p('h0') and plan.cuts == (_p('h3', 'h4'),)
+        assert any('kept read' in c for c in plan.conflicts), plan.conflicts
+
+    def test_without_a_conflict_nothing_is_blocked(self):
+        def fn(h0, h1, x, w):
+            n0 = 0.9 * h0 + braintrace.matmul(x, w)
+            return n0, 0.9 * h1 + jnp.tanh(n0), h1
+
+        plan = _plan(fn, 2, _Rule({_p('h0', 'h1'): 'cut'}))
+        assert plan.blocked == () and plan.conflicts == () and plan.cuts == (_p('h0', 'h1'),)
+
+
+class _OnlyFrom:
+    """``policy`` for the reads of ``source``; every other read is kept."""
+
+    def __init__(self, policy, source):
+        self.policy, self.source = policy, source
+
+    def edge(self, path_k, path_j):
+        return self.policy.edge(path_k, path_j) if path_k == self.source else 'keep'
+
+    def why_not_carried(self, *args):
+        return self.policy.why_not_carried(*args)
+
+    def group(self, path):
+        return self.policy.group(path)
+
+    def traced(self, path):
+        return self.policy.traced(path)
+
+
+def _signals(perturbation, minfo, x):
+    """``dL/dp`` per perturbed path, for a loss on every output of the step."""
+    inputs = jax.tree.leaves(((x,), [st.value for st in minfo.compiled_model_states]))
+
+    def loss(p):
+        return sum(jnp.sum(jnp.sin(o)) for o in perturbation.eval_jaxpr(inputs, p)
+                   if jnp.issubdtype(jnp.asarray(o).dtype, jnp.floating))
+    grads = jax.grad(loss)(perturbation.init_perturb_data())
+    return dict(zip(perturbation.perturb_hidden_paths, (np.asarray(g) for g in grads)))
+
+
+def assert_cuts_per_source(graph, x):
+    """#248's property: blocking a source changes only its own signal. Each
+    source that the plan cuts has the signal it has when its reads are the
+    only ones cut; every other source has the total derivative (no read
+    cut), within 1e-12 in f64 and 1e-5 in f32. Returns the other sources."""
+    minfo = graph.module_info
+    dtype = brainstate.environ.dftype()  # the precision the graph was compiled in
+    x = jnp.asarray(x, dtype)
+    tol = dict(rtol=1e-12, atol=1e-14) if dtype == jnp.float64 else dict(rtol=1e-5, atol=1e-7)
+    policy = NewReadPolicy(graph.hid_path_to_group, graph.hidden_param_op_relations)
+
+    def build(new_read_policy):  # the bypass gradients are no part of the signal
+        return add_hidden_perturbation_from_minfo(minfo, include_output_bypass=False,
+                                                  new_read_policy=new_read_policy)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        full = build(policy)
+        total = _signals(build(None), minfo, x)
+        got = _signals(full, minfo, x)
+        cut_sources = list(dict.fromkeys(k for k, _ in full.new_read_cuts))
+        alone = {k: _signals(build(_OnlyFrom(policy, k)),
+                             minfo, x)[k] for k in cut_sources}
+    for path, signal in got.items():
+        ref = alone[path] if path in alone else total[path]
+        np.testing.assert_allclose(signal, ref, err_msg=str(path), **tol)
+    return [p for p in got if p not in alone]
+
 class TestNewReadCutsOnGraphs:
     """The plan applied by ``compile_etrace_graph`` (single-step D-RTRL)."""
 
@@ -1494,9 +1746,8 @@ class TestNewReadCutsOnGraphs:
     def test_a_kept_read_is_exact_at_one_step(self, name):
         assert _worst_relative_error(_KEEP_MODELS[name], 1) < 1e-12
 
-    # _ConflictPlusCut and _Real also hold a read the policy would cut: the
-    # plan of a graph with a conflict must not be applied at all
-    @pytest.mark.parametrize('cls', [_Disagree, _DirectAndEtp, _ConflictPlusCut, _Real])
+    # one source each: the conflict blocks it, and nothing is cut
+    @pytest.mark.parametrize('cls', [_Disagree, _DirectAndEtp])
     def test_a_conflict_keeps_today_s_signal_and_records_an_error(self, cls):
         with pytest.warns(UserWarning, match='cannot be separated'):
             model = _make(cls)()
@@ -1511,6 +1762,90 @@ class TestNewReadCutsOnGraphs:
         assert tuple(record.context['conflicts']) == tuple(hp.new_read_conflicts)
         today = add_hidden_perturbation_from_minfo(graph.module_info)
         assert str(hp.perturb_jaxpr) == str(today.perturb_jaxpr)
+
+    def test_a_conflict_blocks_only_its_source(self):
+        """#248: h1's conflict (h2 reads it directly and through an ETP op)
+        no longer drops the independent cut g -> V. At T = 1 from a zero
+        state Wg equals BPTT (it was 1.0 off, the 2x double count of
+        g -> V); W1 stays off, and the conflict is reported."""
+        with pytest.warns(UserWarning, match='cannot be separated'):
+            model = _make(_ConflictPlusCut)()
+            brainstate.nn.init_all_states(model, batch_size=1)
+            learner = braintrace.D_RTRL(model)
+            learner.compile_graph(jnp.ones((1, 3)))
+        graph = learner.graph
+        hp = graph.hidden_perturb
+        assert list(hp.new_read_cuts) == [(('g',), ('V',))] and hp.new_read_exact is False
+        assert hp.new_read_conflicts == ("('h2',) reads ('h1',) both directly and through an ETP op",)
+        (record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT)
+        assert record.level is DiagnosticLevel.ERROR
+        assert tuple(record.context['conflicts']) == tuple(hp.new_read_conflicts)
+        assert tuple(record.context['blocked']) == (('h1',),)
+        assert ('h1',) in record.hidden_paths and ('g',) in record.hidden_paths
+        (cut_record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_CUT)
+        assert list(cut_record.context['cuts']) == [(('g',), ('V',))]
+
+        with brainstate.environ.context(precision=64):
+            with brainstate.random.seed_context(2):
+                xs = brainstate.random.randn(1, 1, 3)
+            ref = _flat(bptt_param_gradients(_make(_ConflictPlusCut), xs))
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                got = _flat(online_param_gradients_singlestep_naive(
+                    _make(_ConflictPlusCut), xs, algo_factory=braintrace.D_RTRL))
+
+        def rel(key):
+            return np.linalg.norm(got[key] - ref[key]) / np.linalg.norm(ref[key])
+
+        keys = {name: [k for k in ref if f"'{name}'" in k] for name in ('W1', 'W2', 'Wg')}
+        assert all(len(v) == 2 for v in keys.values()), keys
+        assert max(rel(k) for k in keys['Wg']) < 1e-12
+        assert max(rel(k) for k in keys['W2']) < 1e-12
+        assert min(rel(k) for k in keys['W1']) > 1.0   # the conflict's own double count
+
+    @pytest.mark.parametrize('cls, exact, blocked', [
+        (_ConflictPlusCut, ['Wg', 'W2'], [('h1',)]),
+        (_ConflictPlusCutEtpV, ['Wg', 'W2'], [('h1',)]),
+        (_CutIntoDisagree, ['Wk'], [('g',)]),
+    ])
+    def test_the_cut_of_an_unblocked_source_is_exact_at_one_step(self, cls, exact, blocked):
+        """At T = 1 from a zero state, a weight that feeds only unblocked
+        sources gets the BPTT gradient; the blocked source's weights stay
+        off, and are reported."""
+        graph = _graph(cls)
+        hp = graph.hidden_perturb
+        assert hp.new_read_cuts and hp.new_read_conflicts and hp.new_read_exact is False
+        (record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT)
+        assert list(record.context['blocked']) == blocked
+        assert all(b in record.hidden_paths for b in blocked)
+        with brainstate.environ.context(precision=64):
+            with brainstate.random.seed_context(2):
+                xs = brainstate.random.randn(1, 1, 3)
+            ref = _flat(bptt_param_gradients(_make(cls), xs))
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                got = _flat(online_param_gradients_singlestep_naive(_make(cls), xs, algo_factory=braintrace.D_RTRL))
+        off = []
+        for key, r in ref.items():
+            err = np.linalg.norm(got[key] - r) / np.linalg.norm(r)
+            if any(f"'{name}'" in key for name in exact):
+                assert err < 1e-12, key
+            else:
+                off.append(err)
+        assert max(off) > 1e-3   # the blocked source's own double count
+
+    def test_a_chain_blocks_only_its_conflicted_source(self):
+        hp = _graph(_LongChain).hidden_perturb
+        assert list(hp.new_read_cuts) == [(('a',), ('b',)), (('b',), ('c',)), (('c',), ('d',))]
+        assert hp.new_read_conflicts == ("('e',) reads ('d',) both directly and through an ETP op",)
+
+    @pytest.mark.parametrize('cls', [_ConflictPlusCut, _ConflictPlusCutEtpV, _CutIntoDisagree, _LongChain,
+                                     _Real, _RealDense])
+    def test_blocking_a_source_changes_only_its_signal(self, cls):
+        with brainstate.environ.context(precision=64):
+            graph = _graph(cls)
+            blocked = assert_cuts_per_source(graph, jnp.asarray([[0.3, 0.7, 0.2]]))
+        assert blocked
 
     def test_multi_step_builds_no_perturbation(self):
         graph = _graph(_SameGroup, vjp_method='multi-step')
@@ -1635,12 +1970,17 @@ class TestOnlyCarriedReadsAreCut:
         graph, warned = _compile_recording(cls, _ALGORITHMS[algo])
         hp = graph.hidden_perturb
         if cuts is None:
-            assert hp.new_read_exact is False and hp.new_read_cuts == () and hp.new_read_conflicts
+            # the source of the uncarried read is blocked; since #248 the
+            # cuts of the other sources stay (the reads-h1 cases cut h0's)
+            assert hp.new_read_exact is False and hp.new_read_conflicts
             assert len(warned) == 1 and issubclass(warned[0].category, UserWarning)
             (record,) = _records(graph, DiagnosticKind.HIDDEN_NEW_READ_DOUBLE_COUNT)
-            assert record.level is DiagnosticLevel.ERROR
-            today = add_hidden_perturbation_from_minfo(graph.module_info)
-            assert str(hp.perturb_jaxpr) == str(today.perturb_jaxpr)
+            assert record.level is DiagnosticLevel.ERROR and record.context['blocked']
+            assert not {k for k, _ in hp.new_read_cuts} & set(record.context['blocked'])
+            if not hp.new_read_cuts:
+                today = add_hidden_perturbation_from_minfo(graph.module_info)
+                assert str(hp.perturb_jaxpr) == str(today.perturb_jaxpr)
+            assert_cuts_per_source(graph, jnp.asarray([[0.3, 0.7, 0.2]]))
         else:
             assert hp.new_read_exact is True and list(hp.new_read_cuts) == cuts and warned == []
 

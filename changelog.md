@@ -5,6 +5,20 @@
 
 ### Fixes
 
+- **A conflict of in-step reads blocks only its sources (#248).** When the
+  in-step read planner (#239) found one conflict, it cut no read of the
+  graph: an independent read that could be cut exactly, through another
+  source, stayed double counted (`_ConflictPlusCut`: `Wg` was 1.0 off BPTT at
+  T = 1). A source with a conflict of its own now keeps the total derivative
+  on every read. The conflicts between sources (a state with a cut and a kept
+  read of one source, an equation that cannot serve both worlds) are
+  recomputed without the blocked sources, and their sources blocked in turn,
+  until none is found.
+  The cuts of the other sources are applied. `new_read_conflicts` lists every
+  conflict, `new_read_exact` stays `False`, and the
+  `HIDDEN_NEW_READ_DOUBLE_COUNT` record names the blocked sources
+  (`context['blocked']`). Graphs without a conflict are unchanged.
+
 - **A `jit` with constants inside a `checkpoint` no longer breaks
   differentiation (#251).** `inline_jit_calls` inlined the jit into the
   checkpoint's body and attached the jit's constants to that body. A

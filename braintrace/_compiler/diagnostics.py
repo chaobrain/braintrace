@@ -199,8 +199,9 @@ class DiagnosticKind(str, Enum):
     # state's new value, and the eligibility traces carry that read; the
     # single-step learning signal holds it fixed (``context['cuts']``).
     # ``HIDDEN_NEW_READ_DOUBLE_COUNT`` (ERROR): such reads cannot be
-    # separated (``context['conflicts']``); the signal stays the total
-    # derivative and can count a path twice.
+    # separated (``context['conflicts']``); the signal of their sources
+    # (``context['blocked']``) stays the total derivative and can count a
+    # path twice. The reads of the other sources are still cut (#248).
     HIDDEN_NEW_READ_CUT = 'hidden_new_read_cut'
     HIDDEN_NEW_READ_DOUBLE_COUNT = 'hidden_new_read_double_count'
 
