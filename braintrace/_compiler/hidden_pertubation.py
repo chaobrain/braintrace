@@ -740,11 +740,12 @@ def plan_new_read_cuts(
     # its reads (it is not a cut source: every reader sees it perturbed in
     # place). The conflicts between the cuts of several sources are then
     # recomputed without the blocked ones, and their sources blocked too,
-    # until nothing changes (issue #248). They only shrink as sources are
-    # blocked, so this settles after one recompute; the loop keeps it so.
+    # until nothing changes (issue #248). A blocked source is never a cut
+    # source, and a round that continues blocks at least one new cut source,
+    # so the loop runs at most len(sources) + 1 rounds.
     conflicts: List[str] = [c for k in sources for c in own[k]]
     blocked: Set[Var] = {k for k in sources if own[k]}
-    while True:
+    for _ in range(len(sources) + 1):
         cut_sources = {k: None for k in sources if found[k][2] and k not in blocked}
         cut_sinks = {j for k in cut_sources for j in found[k][2]}
         newly: Dict[Var, None] = {}
@@ -776,6 +777,7 @@ def plan_new_read_cuts(
                 newly.update((k, None) for k in cut_sources if i in state_of[k])
         if not newly:
             break
+        assert not blocked & set(newly), 'a blocked source is blocked again'
         blocked.update(newly)
 
     cuts: List[Tuple[Path, Path]] = [(path_of[k], path_of[j]) for k in cut_sources for j in found[k][2]]
