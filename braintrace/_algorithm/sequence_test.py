@@ -775,6 +775,63 @@ class TestVmap:
         for k, v in _arrays(grads).items():
             assert np.all(np.isfinite(v)), f'{k} is not finite'
 
+    def test_reset_state_zeroes_every_lanes_traces(self):
+        """``ETraceVmap.reset_state`` used to be ``Module``'s no-op.
+
+        After a call the traces are non-zero; ``reset_state`` must zero them
+        all, keep their lane axis and rewind ``running_index``.
+        """
+        batch = 3
+        xs, ys = _lane_data(batch)
+        learner = _vmap_learner(batch)
+        learner.etrace_grad(
+            xs, ys, step_fn=lambda i, t: jnp.sum((learner(i) - t) ** 2))
+        before = {k: s.value for k, s in learner.module.etrace_bwg.items()}
+        assert max(float(jnp.max(jnp.abs(x))) for x in jax.tree.leaves(before)) > 0.0
+        assert int(learner.module.running_index.value) == T
+
+        learner.reset_state()
+
+        for k, s in learner.module.etrace_bwg.items():
+            for old, new in zip(jax.tree.leaves(before[k]), jax.tree.leaves(s.value)):
+                assert jnp.shape(new) == jnp.shape(old)
+                assert jnp.shape(new)[0] == batch
+                assert float(jnp.max(jnp.abs(new))) == 0.0, f'{k} kept its trace'
+        assert int(learner.module.running_index.value) == 0
+
+    def test_a_second_call_after_reset_state_repeats_the_first(self):
+        """Two consecutive batched calls, with ``reset_state`` and the hidden
+        states restored between them, give the same gradient. Before the fix
+        the second call started from the first call's traces.
+        """
+        batch = 3
+        xs, ys = _lane_data(batch)
+        net = _VmapNet()
+        learner = braintrace.compile(net, 'D_RTRL', jnp.zeros((batch, N_IN)),
+                                     batch_size=batch, vmap=True,
+                                     vjp_method='multi-step')
+        hidden0 = {k: s.value for k, s in net.states(brainstate.HiddenState).items()}
+
+        def step_fn(inp, tar):
+            return jnp.sum((learner(inp) - tar) ** 2)
+
+        g_first = learner.etrace_grad(xs, ys, step_fn=step_fn)
+        learner.reset_state()
+        for k, s in net.states(brainstate.HiddenState).items():
+            s.value = hidden0[k]
+        g_second = learner.etrace_grad(xs, ys, step_fn=step_fn)
+
+        for k, v in _arrays(g_first).items():
+            assert np.max(np.abs(v)) > 0.0, f'{k} is identically zero -- vacuous'
+        _assert_trees_equal(g_second, g_first, rtol=1e-6, atol=1e-7,
+                            msg='second call after reset_state vs the first')
+
+    def test_reset_state_refuses_a_batch_size(self):
+        """The lane axis is the vmap's; a ``batch_size`` would add a second one."""
+        learner = _vmap_learner(3)
+        with pytest.raises(ValueError, match='batch_size'):
+            learner.reset_state(3)
+
     def test_the_vmap_return_value_is_still_a_brainstate_vmap(self):
         """Spec test 20 -- existing ``vmap=True`` users must be unaffected."""
         learner = _vmap_learner(3)
