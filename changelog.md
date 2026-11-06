@@ -5,6 +5,15 @@
 
 ### Fixes
 
+- **A batched learner resets its traces (#255).** `compile(..., vmap=True)`
+  returns an `ETraceVmap`, which inherited `brainstate.nn.Module`'s no-op
+  `reset_state`: `reset_state()` left every lane's eligibility traces and
+  `running_index` as the last call left them, so each later `etrace_grad` or
+  `etrace_evolve` started from the previous sequence's traces. It now
+  delegates to the wrapped learner's `reset_state`, which zeroes the traces
+  with their lane axis. A `batch_size` is refused there, since it would add a
+  second batch axis.
+
 - **A conflict of in-step reads blocks only its sources (#248).** When the
   in-step read planner (#239) found one conflict, it cut no read of the
   graph: an independent read that could be cut exactly, through another

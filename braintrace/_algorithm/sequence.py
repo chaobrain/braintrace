@@ -573,3 +573,37 @@ class ETraceVmap(SequenceDriverMixin, brainstate.nn.Vmap):
     @property
     def _seq_vjp_method(self) -> Optional[str]:
         return getattr(self.module, 'vjp_method', None)
+
+    def reset_state(self, batch_size: Optional[int] = None, **kwargs: Any) -> None:
+        """Reset every lane's eligibility traces and the running index.
+
+        ``brainstate.nn.Vmap`` inherits the no-op ``Module.reset_state``, so
+        without this a batched learner kept the previous sequence's traces and
+        every call after the first started from them. The wrapped learner's
+        ``reset_state`` zeroes its traces with ``zeros_like``, which keeps the
+        lane axis that ``compile(..., vmap=True)`` gave them, so this delegates
+        to it. Like the learner's own ``reset_state``, it leaves the model's
+        hidden states alone.
+
+        Parameters
+        ----------
+        batch_size : int, optional
+            Must be ``None``: the lane axis is fixed by
+            ``compile(..., batch_size=...)``, and a batch size here would put a
+            second batch axis in front of it.
+        **kwargs
+            Passed to the wrapped learner's ``reset_state``.
+
+        Raises
+        ------
+        ValueError
+            If ``batch_size`` is not ``None``.
+        """
+        if batch_size is not None:
+            raise ValueError(
+                f'ETraceVmap.reset_state(batch_size={batch_size!r}): the lane '
+                f'axis is fixed by compile(..., vmap=True, batch_size=...), and '
+                f'the traces already carry it; call reset_state() without '
+                f'batch_size.'
+            )
+        self.module.reset_state(**kwargs)  # type: ignore[attr-defined]
