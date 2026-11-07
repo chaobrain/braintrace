@@ -485,18 +485,22 @@ def _filtered_grad(kind, kappa, xs, **kw):
     return learner, g
 
 
+@pytest.mark.parametrize('vjp_method', ['single-step', 'multi-step'])
 @pytest.mark.parametrize('kind', ['dense', 'sparse'])
-def test_kappa_filter_under_vmap_is_the_sum_of_unbatched_lanes(kind):
+def test_kappa_filter_under_vmap_is_the_sum_of_unbatched_lanes(kind, vjp_method):
     # The batched objective sums the lanes' losses, so its gradient of the
     # shared weights is the sum of the B unbatched gradients (f32 tolerance:
     # the batched path reassociates the lane sum).
-    batched, g_b = _filtered_grad(kind, 0.5, _XS, batch_size=_B, vmap=True)
-    lanes = [_filtered_grad(kind, 0.5, _XS[:, b]) for b in range(_B)]
+    batched, g_b = _filtered_grad(kind, 0.5, _XS, batch_size=_B, vmap=True,
+                                  vjp_method=vjp_method)
+    lanes = [_filtered_grad(kind, 0.5, _XS[:, b], vjp_method=vjp_method)
+             for b in range(_B)]
     g_ref = jax.tree.map(lambda *g: sum(g), *[g for _, g in lanes])
     jax.tree.map(lambda a, r: npt.assert_allclose(a, r, rtol=1e-5, atol=1e-5),
                  g_b, g_ref)
     # the filter contributes: kappa=0 gives a different gradient
-    _, g_0 = _filtered_grad(kind, 0.0, _XS, batch_size=_B, vmap=True)
+    _, g_0 = _filtered_grad(kind, 0.0, _XS, batch_size=_B, vmap=True,
+                            vjp_method=vjp_method)
     diff = max(float(jnp.max(jnp.abs(a - b)))
                for a, b in zip(jax.tree.leaves(g_b), jax.tree.leaves(g_0)))
     assert diff > 1e-2

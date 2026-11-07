@@ -1193,7 +1193,9 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 input_is_multi_step,
             )
 
-        # the trace filter advances on the trace the backward pass would pair
+        # the trace filter advances on the trace the backward pass would pair:
+        # the new trace under single-step VJP, the start trace (the trace
+        # before this call) under multi-step VJP
         _, filter_vals = self._advance_trace_filter(
             filter_vals,
             old_etrace_vals if self.graph_executor.is_multi_step_vjp else etrace_vals,

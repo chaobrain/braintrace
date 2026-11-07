@@ -16,9 +16,11 @@
   leaves with it, and the backward pass gets the filtered trace (and, for a
   hidden output bypass, the filter before the step) as residuals. A batched
   gradient is the sum of the unbatched lanes' gradients. Unbatched gradients
-  under `etrace_grad` are bit-identical. One change: a step that is not
+  under `etrace_grad` are bit-identical. One change: a call that is not
   differentiated (a plain `learner(x)`, `etrace_evolve`) now advances the
-  filter too, as it advances the trace; before, only differentiated steps did.
+  filter too; before, only differentiated calls did. On single-step calls the
+  filter so advances with the trace, every step, as e-prop defines it. A
+  `MultiStepData` call still advances it once, not once per step (#259).
   New `ETraceVjpAlgorithm` hooks for a stateful filter:
   `_get_trace_filter_data`, `_assign_trace_filter_data`,
   `_advance_trace_filter`, `_previous_filtered_trace`.

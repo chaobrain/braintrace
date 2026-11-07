@@ -342,6 +342,33 @@ def test_previous_trace_hook_reads_the_filtered_trace_without_advancing_it():
         jax.tree.map(npt.assert_array_equal, new_filter[k], fwd_res[1][k])
 
 
+def test_kappa_filter_with_bypass_under_vmap_is_the_sum_of_unbatched_lanes():
+    # e-prop's trace filter on a model with a hidden output bypass, under
+    # compile(vmap=True) (#257): the bypass pairs the filter before the step,
+    # which the forward pass hands the backward pass. The batched objective
+    # sums the lanes' losses, so the gradient is the sum of the B unbatched
+    # lanes' (f32 tolerance: the batched path reassociates the lane sum).
+    B, kappa = 3, 0.7
+    xs = jax.random.uniform(jax.random.PRNGKey(5), (T, B, N_IN)) * 2.0
+
+    def grad(x_seq, **kw):
+        brainstate.random.seed(0)
+        learner = braintrace.compile(_LIF('pre_reset'), 'eprop', x_seq[0],
+                                     kappa_filter_decay=kappa, **kw)
+        module = learner.module if kw.get('vmap') else learner
+        assert list(module.graph.hidden_perturb.bypass_hidden_paths) == [('V',)]
+        return learner.etrace_grad(
+            x_seq, step_fn=lambda x: jnp.sum((learner(x) - 0.3) ** 2))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        batched = grad(xs, batch_size=B, vmap=True)
+        lanes = [grad(xs[:, b]) for b in range(B)]
+    ref = jax.tree.map(lambda *g: sum(g), *lanes)
+    jax.tree.map(lambda a, r: npt.assert_allclose(a, r, rtol=1e-5, atol=1e-5), batched, ref)
+    assert max(float(jnp.max(jnp.abs(g))) for g in jax.tree.leaves(ref)) > 1e-2
+
+
 def test_vmapped_lanes_match_per_sample_bptt():
     # The OnlineVmapTrainer flow: per-lane states, the graph compiled per lane.
     B = 3
