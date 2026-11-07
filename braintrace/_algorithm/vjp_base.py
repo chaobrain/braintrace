@@ -418,6 +418,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
     - ``._update_etrace_data()``: update the eligibility trace data.
     - ``._assign_etrace_data()``: assign the eligibility trace data to the states.
     - ``._get_etrace_data()``: get the eligibility trace data.
+
+    An algorithm with a stateful trace filter (``trace_filter='kappa'``) also
+    overrides ``._get_trace_filter_data()``, ``._assign_trace_filter_data()``,
+    ``._advance_trace_filter()`` and ``._previous_filtered_trace()``. The filter
+    is advanced in the forward pass and carried through ``._true_update_fun()``
+    next to the trace, never read or written in the backward pass (#257).
     """
 
     __module__ = 'braintrace'
@@ -1034,8 +1040,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             key: st.value
             for key, st in self.other_states.items()
         }
-        # etrace data
+        # etrace data, and the trace filter's (None without a filter). The
+        # filter travels next to the trace through `_true_update_fun` -- an
+        # argument in, a result out -- so that an outer transform (the per-lane
+        # vmap of `compile(..., vmap=True)`, a scan) sees it as data (#257).
         last_etrace_vals = self._get_etrace_data()
+        last_filter_vals = self._get_trace_filter_data()
 
         # Optional per-call auxiliary data (e.g. a neuromodulatory signal) that
         # a subclass needs inside `_compute_learning_signal` but that must not be
@@ -1059,13 +1069,13 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             out,
             hidden_vals,
             other_vals,
-            new_etrace_vals
+            (new_etrace_vals, new_filter_vals),
         ) = self._true_update_fun(
             args,
             weight_vals,
             hidden_vals,
             other_vals,
-            last_etrace_vals,
+            (last_etrace_vals, last_filter_vals),
             self.running_index.value,
             aux,
         )
@@ -1088,6 +1098,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         # It's logic may be different for different etrace algorithms.
         #
         self._assign_etrace_data(new_etrace_vals)  # call the protocol method
+        self._assign_trace_filter_data(new_filter_vals)
 
         # update the running index
         running_index = self.running_index.value + 1
@@ -1102,10 +1113,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         weight_vals: WeightVals,
         hidden_vals: HiddenVals,
         oth_state_vals: StateVals,
-        etrace_vals: ETraceVals,
+        trace_vals: Tuple[ETraceVals, Any],
         running_index: Any,
         aux: Any = None,
-    ) -> Tuple[Outputs, HiddenVals, StateVals, ETraceVals]:
+    ) -> Tuple[Outputs, HiddenVals, StateVals, Tuple[ETraceVals, Any]]:
         """
         The main function to update the [model] and the [eligibility trace] states.
 
@@ -1120,7 +1131,12 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
           - the model output
           - the updated hidden states
           - the updated other states
-          - the updated eligibility trace states
+          - the updated eligibility trace states and trace filter, a pair
+
+        ``trace_vals`` is the pair ``(etrace_vals, filter_vals)``: the trace and
+        the trace filter's values (``None`` without a filter). The filter
+        advances here exactly as in ``_update_fn_fwd``, so a step that is not
+        differentiated advances it too.
 
         Note that the weight values are assumed not changed in this function.
 
@@ -1130,6 +1146,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         ``_compute_learning_signal``.
         """
         input_is_multi_step = has_multistep_data(*args)
+        etrace_vals, filter_vals = trace_vals
 
         # state value assignment
         assign_state_values_v2(self.param_states, weight_vals, write=False)
@@ -1156,6 +1173,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             init_etrace=etrace_vals if etrace_stepper is not None else None,
         )
 
+        old_etrace_vals = etrace_vals
         if final_etrace is not None:
             # fused path: the executor already rolled the eligibility trace in-loop.
             etrace_vals = final_etrace
@@ -1175,8 +1193,16 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
                 input_is_multi_step,
             )
 
+        # the trace filter advances on the trace the backward pass would pair:
+        # the new trace under single-step VJP, the start trace (the trace
+        # before this call) under multi-step VJP
+        _, filter_vals = self._advance_trace_filter(
+            filter_vals,
+            old_etrace_vals if self.graph_executor.is_multi_step_vjp else etrace_vals,
+        )
+
         # returns
-        return out, hidden_vals, oth_state_vals, etrace_vals
+        return out, hidden_vals, oth_state_vals, (etrace_vals, filter_vals)
 
     def _update_fn_fwd(
         self,
@@ -1184,10 +1210,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         weight_vals: WeightVals,
         hidden_vals: HiddenVals,
         othstate_vals: StateVals,
-        etrace_vals: ETraceVals,
+        trace_vals: Tuple[ETraceVals, Any],
         running_index: int,
         aux: Any = None,
-    ) -> Tuple[Tuple[Outputs, HiddenVals, StateVals, ETraceVals], Any]:
+    ) -> Tuple[Tuple[Outputs, HiddenVals, StateVals, Tuple[ETraceVals, Any]], Any]:
         """
         The forward function to update the [model] and the [eligibility trace] states when computing
         the VJP gradients.
@@ -1208,15 +1234,17 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
               * the model output
               * the updated hidden states
               * the updated other states
-              * the updated eligibility trace states
+              * the updated eligibility trace states and trace filter, a pair
 
         - The second part is the data used for backward gradient computation:
               * the residuals of the model
-              * the eligibility trace data at the current/last time step
+              * the eligibility trace data at the current/last time step,
+                filtered when a trace filter is active
               * the weight id to its value mapping
               * the running index
         """
         input_is_multi_step = has_multistep_data(*args)
+        etrace_vals, filter_vals = trace_vals
 
         # state value assignment
         assign_state_values_v2(self.param_states, weight_vals, write=False)
@@ -1265,14 +1293,25 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
 
         # returns
         old_etrace_vals = etrace_vals
-        fwd_out = (out, hiddens, oth_states, new_etrace_vals)
-        fwd_res = (
-            residuals,
+        # The trace filter advances here, in the forward pass, on the trace the
+        # backward pass pairs with the learning signal; the backward pass gets
+        # the filtered trace as a residual. Advancing it in the backward pass
+        # instead -- a state write there -- escapes an outer vmap: JAX batches
+        # the backward rule in a vmap of its own, so the write leaks that
+        # vmap's tracer and the read sees the lane axis the per-lane rule does
+        # not expect (#257).
+        paired_etrace_vals, new_filter_vals = self._advance_trace_filter(
+            filter_vals,
             (
                 old_etrace_vals
                 if self.graph_executor.is_multi_step_vjp else
                 new_etrace_vals
             ),
+        )
+        fwd_out = (out, hiddens, oth_states, (new_etrace_vals, new_filter_vals))
+        fwd_res = (
+            residuals,
+            paired_etrace_vals,
             weight_vals,
             running_index,
             args,  # threaded to _update_fn_bwd for the learning-signal hook
@@ -1289,8 +1328,10 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             (self._inject_exit_cotangent(hiddens, aux)
              if self.config.learning_signal == 'bootstrapped' else None),
             # Single-step with a hidden output bypass (#185): the bypass learning
-            # signal dL^t/dh^{t-1} pairs with the *previous* trace e^{t-1}.
-            (old_etrace_vals if self._has_hidden_output_bypass() else None),
+            # signal dL^t/dh^{t-1} pairs with the *previous* trace e^{t-1}
+            # (filtered, under a trace filter: the filter before this step).
+            (self._previous_filtered_trace(filter_vals, old_etrace_vals)
+             if self._has_hidden_output_bypass() else None),
         )
         return fwd_out, fwd_res
 
@@ -1486,9 +1527,7 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
         #
         # [3a] Single-step hidden output bypass (#185): an output read from
         # h^{t-1} without going through h^t carries the learning signal
-        # dL^t/dh^{t-1}, which pairs with the previous trace e^{t-1}. Solved
-        # *before* the main contraction, which may advance stateful trace
-        # filters.
+        # dL^t/dh^{t-1}, which pairs with the previous trace e^{t-1}.
         #
         dg_weights_prev = None
         if prev_etrace_vals is not None:
@@ -2187,6 +2226,65 @@ class ETraceVjpAlgorithm(ETraceAlgorithm):
             The eligibility trace data.
         """
         raise NotImplementedError
+
+    def _get_trace_filter_data(self) -> Any:
+        """The trace filter's values, or ``None`` without a filter.
+
+        The default is ``None``. An algorithm with a stateful trace filter
+        returns its values; they reach :meth:`_advance_trace_filter` and
+        :meth:`_previous_filtered_trace` through the forward pass.
+        """
+        return None
+
+    def _assign_trace_filter_data(self, filter_vals: Any) -> None:
+        """Store the trace filter's values after a step (no-op by default).
+
+        Parameters
+        ----------
+        filter_vals : Any
+            What :meth:`_advance_trace_filter` returned as the new filter.
+        """
+        del filter_vals
+
+    def _advance_trace_filter(self, filter_vals: Any, etrace_vals: Any) -> Tuple[Any, Any]:
+        """Advance the trace filter on the trace the backward pass pairs.
+
+        Called in the forward pass, once per step, never in the backward
+        pass. The default, for an algorithm without a filter, passes the
+        trace through.
+
+        Parameters
+        ----------
+        filter_vals : Any
+            The filter before this step, from :meth:`_get_trace_filter_data`.
+        etrace_vals : Any
+            The trace the backward pass contracts with the learning signal.
+
+        Returns
+        -------
+        tuple
+            ``(trace for the backward pass, new filter values)``.
+        """
+        return etrace_vals, filter_vals
+
+    def _previous_filtered_trace(self, filter_vals: Any, etrace_vals: Any) -> Any:
+        """The previous trace the hidden output bypass pairs (#185).
+
+        Parameters
+        ----------
+        filter_vals : Any
+            The filter before this step.
+        etrace_vals : Any
+            The trace before this step.
+
+        Returns
+        -------
+        Any
+            ``etrace_vals`` by default; the filter before this step under a
+            trace filter.
+        """
+        del filter_vals
+        return etrace_vals
 
 
 def _instantiate_zero(ct: Any) -> Any:
