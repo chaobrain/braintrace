@@ -1,7 +1,14 @@
 # Release Notes
 
 
-## Unreleased
+## Version 0.3.1
+
+A fix release for batched and online learners. A batched learner (`compile(...,
+vmap=True)`) now resets its traces (#255) and runs e-prop's trace filter
+(#257). An in-step read conflict no longer blocks independent cuts (#248), a
+jit's constants are hoisted out of a checkpoint body when it is inlined (#251),
+and the hidden-group walker looks inside call-like equations and custom
+derivative rules (#249).
 
 ### Fixes
 
