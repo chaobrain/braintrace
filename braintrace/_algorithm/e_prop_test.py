@@ -15,9 +15,13 @@
 
 import unittest
 
+import brainevent
 import brainstate
 import jax
 import jax.numpy as jnp
+import numpy as np
+import numpy.testing as npt
+import pytest
 
 import braintrace
 from braintrace._algorithm.e_prop import EProp
@@ -443,3 +447,85 @@ def test_docstring_compile_example_runs():
     assert y.shape == (1,)
     assert bool(jnp.all(jnp.isfinite(y)))
     assert len(learner.graph.hidden_param_op_relations) >= 1
+
+
+# ----------------------------------------------------------------------------
+# #257: the kappa trace filter under compile(..., vmap=True)
+# ----------------------------------------------------------------------------
+
+_B, _N, _T = 3, 5, 6
+_rng = np.random.RandomState(0)
+_DENSE = ((_rng.rand(_N, _N) < 0.5) * _rng.randn(_N, _N)).astype('float32')
+_XS = jnp.asarray(_rng.randn(_T, _B, _N).astype('float32'))
+
+
+class _FilterNet(brainstate.nn.Module):
+    """The issue's model: a leaky recurrent layer through one ETP weight."""
+
+    def __init__(self, kind):
+        super().__init__()
+        if kind == 'sparse':
+            self.w = braintrace.nn.SparseLinear(
+                brainevent.CSR.fromdense(jnp.asarray(_DENSE)))
+        else:
+            self.w = braintrace.nn.Linear(_N, _N, w_init=jnp.asarray(_DENSE))
+
+    def init_state(self, *args, **kwargs):
+        self.h = brainstate.HiddenState(jnp.zeros(_N))
+
+    def update(self, x):
+        self.h.value = 0.9 * self.h.value + self.w(jnp.tanh(self.h.value) + x)
+        return self.h.value
+
+
+def _filtered_grad(kind, kappa, xs, **kw):
+    learner = braintrace.compile(_FilterNet(kind), 'eprop', xs[0],
+                                 kappa_filter_decay=kappa, **kw)
+    g = learner.etrace_grad(xs, step_fn=lambda x: jnp.sum(learner(x) ** 2))
+    return learner, g
+
+
+@pytest.mark.parametrize('kind', ['dense', 'sparse'])
+def test_kappa_filter_under_vmap_is_the_sum_of_unbatched_lanes(kind):
+    # The batched objective sums the lanes' losses, so its gradient of the
+    # shared weights is the sum of the B unbatched gradients (f32 tolerance:
+    # the batched path reassociates the lane sum).
+    batched, g_b = _filtered_grad(kind, 0.5, _XS, batch_size=_B, vmap=True)
+    lanes = [_filtered_grad(kind, 0.5, _XS[:, b]) for b in range(_B)]
+    g_ref = jax.tree.map(lambda *g: sum(g), *[g for _, g in lanes])
+    jax.tree.map(lambda a, r: npt.assert_allclose(a, r, rtol=1e-5, atol=1e-5),
+                 g_b, g_ref)
+    # the filter contributes: kappa=0 gives a different gradient
+    _, g_0 = _filtered_grad(kind, 0.0, _XS, batch_size=_B, vmap=True)
+    diff = max(float(jnp.max(jnp.abs(a - b)))
+               for a, b in zip(jax.tree.leaves(g_b), jax.tree.leaves(g_0)))
+    assert diff > 1e-2
+    # each lane's filter state is that lane's unbatched filter
+    flt_b = [f.value for f in batched.module._trace_filters.values()]
+    for b, (lane, _) in enumerate(lanes):
+        flt_l = [f.value for f in lane._trace_filters.values()]
+        jax.tree.map(lambda a, r: npt.assert_allclose(a[b], r, rtol=1e-5, atol=1e-6),
+                     flt_b, flt_l)
+
+
+@pytest.mark.parametrize('vjp_method', ['single-step', 'multi-step'])
+def test_kappa_filter_advances_in_the_forward_pass(vjp_method):
+    # A step that is not differentiated advances the filter exactly as a
+    # differentiated one does: the filter is a function of the trace sequence.
+    learners = []
+    for differentiate in (False, True):
+        learner = braintrace.compile(_FilterNet('dense'), 'eprop', _XS[0, 0],
+                                     kappa_filter_decay=0.5, vjp_method=vjp_method)
+
+        def step(x, learner=learner):
+            return jnp.sum(learner(x) ** 2)
+
+        for t in range(3):
+            if differentiate:
+                brainstate.transform.grad(step, learner.param_states)(_XS[t, 0])
+            else:
+                step(_XS[t, 0])
+        learners.append(learner)
+    plain, diffed = ([f.value for f in l._trace_filters.values()] for l in learners)
+    jax.tree.map(npt.assert_array_equal, plain, diffed)
+    assert max(float(jnp.max(jnp.abs(v))) for v in jax.tree.leaves(plain)) > 1e-2

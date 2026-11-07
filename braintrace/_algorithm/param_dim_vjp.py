@@ -1553,6 +1553,60 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         for x, val in etrace_vals.items():
             self.etrace_bwg[x].value = val
 
+    def _get_trace_filter_data(self) -> Optional[Dict[ETraceWG_Key, PyTree]]:
+        """The ``trace_filter='kappa'`` values, or ``None`` without a filter."""
+        if not self._trace_filters:
+            return None
+        return {k: v.value for k, v in self._trace_filters.items()}
+
+    def _assign_trace_filter_data(self, filter_vals: Optional[Dict[ETraceWG_Key, PyTree]]) -> None:
+        """Store the advanced ``trace_filter='kappa'`` values."""
+        if filter_vals is None:
+            return
+        for key, val in filter_vals.items():
+            self._trace_filters[key].value = val
+
+    def _advance_trace_filter(
+        self,
+        filter_vals: Optional[Dict[ETraceWG_Key, PyTree]],
+        etrace_vals: Dict[ETraceWG_Key, PyTree],
+    ) -> Tuple[Dict[ETraceWG_Key, PyTree], Optional[Dict[ETraceWG_Key, PyTree]]]:
+        """Low-pass the raw trace before it is contracted with the signal.
+
+        Applied elementwise (``jax.tree.map`` over the trace's own PyTree,
+        including its trailing ``num_state`` axis), so multi-state HiddenGroups
+        are filtered independently per state -- never summed across states and
+        broadcast back:
+
+        .. math::
+
+            \bar e^t_{ji} = \kappa\,\bar e^{t-1}_{ji} + e^t_{ji}
+
+        Returns the filtered trace, for the backward pass, and the new filter.
+        """
+        if filter_vals is None:
+            return etrace_vals, None
+        kappa = self.config.kappa
+        filtered = dict(etrace_vals)
+        new_filter = dict(filter_vals)
+        for key, trace in etrace_vals.items():
+            if key not in filter_vals:
+                continue
+            new_val = jax.tree.map(lambda prev, e: kappa * prev + e, filter_vals[key], trace)
+            filtered[key] = new_val
+            new_filter[key] = new_val
+        return filtered, new_filter
+
+    def _previous_filtered_trace(
+        self,
+        filter_vals: Optional[Dict[ETraceWG_Key, PyTree]],
+        etrace_vals: Dict[ETraceWG_Key, PyTree],
+    ) -> Dict[ETraceWG_Key, PyTree]:
+        """The previous *filtered* trace (the filter before this step)."""
+        if filter_vals is None:
+            return etrace_vals
+        return {k: filter_vals.get(k, v) for k, v in etrace_vals.items()}
+
     def _make_scan_fn(self, weight_vals: Dict[Path, PyTree]) -> Callable:
         """Build the per-step D-RTRL eligibility-trace stepper (scan body).
 
@@ -1668,17 +1722,13 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         """Contract the previous trace with the hidden output-bypass signal.
 
         See :meth:`ETraceVjpAlgorithm._solve_previous_trace_gradients`. With
-        trace filters active, the previous *filtered* trace (the filter's
-        current value, not yet advanced this step) is the one paired.
+        trace filters active, the forward pass hands in the previous *filtered*
+        trace (the filter before this step; see
+        :meth:`_previous_filtered_trace`).
         """
-        etrace = dict(etrace_h2w_at_t_minus_1)
-        if self._trace_filters:
-            for key, flt in self._trace_filters.items():
-                if key in etrace:
-                    etrace[key] = flt.value
         dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
         _solve_param_dim_weight_gradients(
-            etrace,
+            etrace_h2w_at_t_minus_1,
             dG_weights,
             dl_to_hidden_groups,
             self.graph.hidden_param_op_relations,
@@ -1713,7 +1763,9 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
             Current timestep counter used for bias correction.
         etrace_h2w_at_t : Dict[ETraceWG_Key, PyTree]
             Eligibility trace values at the current timestep, mapping parameter-hidden
-            state relationship keys to trace values.
+            state relationship keys to trace values. Under ``trace_filter='kappa'``
+            the forward pass has already filtered them
+            (:meth:`_advance_trace_filter`).
         dl_to_hidden_groups : Sequence[jax.Array]
             Gradients of the loss with respect to hidden states at the current timestep.
         weight_vals : Dict[Path, PyTree]
@@ -1729,29 +1781,6 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         Dict[Path, PyTree]
             Dictionary mapping parameter paths to their gradient values.
         """
-        # `trace_filter`: low-pass the raw trace before it is contracted with the
-        # learning signal. Applied elementwise (`jax.tree.map` over the trace's
-        # own PyTree, including its trailing num_state axis) so multi-state
-        # HiddenGroups are filtered independently per state -- never summed
-        # across states and broadcast back.
-        #
-        #     e_bar^t_{ji} = kappa * e_bar^{t-1}_{ji} + e^t_{ji}
-        #
-        if self._trace_filters:
-            kappa = self.config.kappa
-            filtered: Dict[ETraceWG_Key, PyTree] = {}
-            for key, trace in etrace_h2w_at_t.items():
-                flt = self._trace_filters.get(key)
-                if flt is None:
-                    filtered[key] = trace
-                    continue
-                new_val = jax.tree.map(
-                    lambda prev, e: kappa * prev + e, flt.value, trace
-                )
-                flt.value = new_val
-                filtered[key] = new_val
-            etrace_h2w_at_t = filtered
-
         dG_weights: Dict[Path, Any] = {path: None for path in self.param_states}
 
         # update the etrace weight gradients

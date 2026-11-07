@@ -5,6 +5,24 @@
 
 ### Fixes
 
+- **E-prop's trace filter runs under `compile(..., vmap=True)` (#257).** With
+  `kappa_filter_decay > 0`, the first `etrace_grad` of a batched learner
+  raised (`UnexpectedTracerError` with a dense `Linear`, a CSR shape assertion
+  with a `SparseLinear`). The filter was advanced in the custom VJP's backward
+  rule, by a state write there. JAX batches that rule in a vmap of its own, so
+  the write leaked its tracer, and the read saw the filter with its lane axis
+  where the per-lane rule expects none. The filter now advances in the forward
+  pass, next to the trace: it enters `_true_update_fun` with the trace and
+  leaves with it, and the backward pass gets the filtered trace (and, for a
+  hidden output bypass, the filter before the step) as residuals. A batched
+  gradient is the sum of the unbatched lanes' gradients. Unbatched gradients
+  under `etrace_grad` are bit-identical. One change: a step that is not
+  differentiated (a plain `learner(x)`, `etrace_evolve`) now advances the
+  filter too, as it advances the trace; before, only differentiated steps did.
+  New `ETraceVjpAlgorithm` hooks for a stateful filter:
+  `_get_trace_filter_data`, `_assign_trace_filter_data`,
+  `_advance_trace_filter`, `_previous_filtered_trace`.
+
 - **A batched learner resets its traces (#255).** `compile(..., vmap=True)`
   returns an `ETraceVmap`, which inherited `brainstate.nn.Module`'s no-op
   `reset_state`: `reset_state()` left every lane's eligibility traces and

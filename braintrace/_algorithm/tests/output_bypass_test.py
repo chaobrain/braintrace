@@ -35,6 +35,7 @@ import brainstate
 import braintools
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpy.testing as npt
 import pytest
 
@@ -303,22 +304,42 @@ def test_previous_trace_hook_is_the_weight_contraction(algo):
 
 
 def test_previous_trace_hook_reads_the_filtered_trace_without_advancing_it():
+    # The forward pass hands the bypass the previous *filtered* trace -- the
+    # filter before this step -- and neither it nor the contraction advances
+    # the filter (it advances once per step, in the forward pass; #257).
     learner, dl, weights = _engine('eprop', kappa_filter_decay=0.9)
     assert learner._trace_filters
     before = {k: f.value for k, f in learner._trace_filters.items()}
     trace = learner._get_etrace_data()
-    prev = learner._solve_previous_trace_gradients(0, trace, dl, weights)
+    prev_trace = learner._previous_filtered_trace(learner._get_trace_filter_data(), trace)
+    assert set(prev_trace) == set(trace)
+    for k in trace:
+        assert prev_trace[k] is before[k]
+    prev = learner._solve_previous_trace_gradients(0, prev_trace, dl, weights)
     for k, f in learner._trace_filters.items():
         npt.assert_array_equal(f.value, before[k])
-    # identical to contracting the filter's current value directly
-    filtered = {k: before.get(k, v) for k, v in trace.items()}
-    learner._trace_filters, saved = {}, learner._trace_filters
-    try:
-        ref = learner._solve_previous_trace_gradients(0, filtered, dl, weights)
-    finally:
-        learner._trace_filters = saved
-    for path in weights:
-        npt.assert_allclose(prev[path], ref[path], rtol=1e-6)
+    # the filter differs from the raw trace, so the pairing matters
+    raw = learner._solve_previous_trace_gradients(0, trace, dl, weights)
+    assert any(not np.allclose(prev[p], raw[p]) for p in weights)
+    # and the forward pass is what pairs it: its bypass residual is the filter
+    # before the step, its main residual the filter advanced on the new trace
+    xs, _ = _data(N)
+    fwd_out, fwd_res = learner._update_fn_fwd(
+        learner._conform_inputs((xs[4],)),
+        weights,
+        {k: s.value for k, s in learner.hidden_states.items()},
+        {k: s.value for k, s in learner.other_states.items()},
+        (trace, learner._get_trace_filter_data()),
+        learner.running_index.value,
+        None,
+    )
+    new_trace, new_filter = fwd_out[-1]
+    kappa = learner.config.kappa
+    for k in trace:
+        jax.tree.map(npt.assert_array_equal, fwd_res[-1][k], before[k])
+        jax.tree.map(lambda f, b, e: npt.assert_allclose(f, kappa * b + e, rtol=1e-6),
+                     fwd_res[1][k], before[k], new_trace[k])
+        jax.tree.map(npt.assert_array_equal, new_filter[k], fwd_res[1][k])
 
 
 def test_vmapped_lanes_match_per_sample_bptt():
