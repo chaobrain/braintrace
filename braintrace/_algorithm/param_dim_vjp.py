@@ -1571,7 +1571,7 @@ class ParamDimVjpAlgorithm(ETraceVjpAlgorithm):
         filter_vals: Optional[Dict[ETraceWG_Key, PyTree]],
         etrace_vals: Dict[ETraceWG_Key, PyTree],
     ) -> Tuple[Dict[ETraceWG_Key, PyTree], Optional[Dict[ETraceWG_Key, PyTree]]]:
-        """Low-pass the raw trace before it is contracted with the signal.
+        r"""Low-pass the raw trace before it is contracted with the signal.
 
         Applied elementwise (``jax.tree.map`` over the trace's own PyTree,
         including its trailing ``num_state`` axis), so multi-state HiddenGroups
