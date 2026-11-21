@@ -6,7 +6,9 @@ import numpy as np
 
 def _load_shared():
     root = pathlib.Path(__file__).resolve().parents[1]
-    spec = importlib.util.spec_from_file_location("_drtrl_shared", root / "_shared.py")
+    spec = importlib.util.spec_from_file_location(
+        "_drtrl_shared", root / "_shared.py"
+    )
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -48,7 +50,9 @@ def test_sine_batch_shape():
 def test_char_batches_shape():
     s = _load_shared()
     text = "abcdefghij" * 10
-    vocab, x, y = s.make_char_batches(text=text, seq_len=8, batch_size=4, seed=0)
+    vocab, x, y = s.make_char_batches(
+        text=text, seq_len=8, batch_size=4, seed=0
+    )
     assert len(vocab) > 0
     assert x.shape == (8, 4, len(vocab))
     assert y.shape == (8, 4)
