@@ -61,13 +61,9 @@ jobs:
           fi
           python -m pip install . || exit 1
       - name: Test with pytest
-        # ``-n auto`` uses one worker per available core. Worker count is the
-        # dominant cost knob here: each worker is its own JAX process, so the
-        # suite is memory-bound long before it is CPU-bound, and oversubscribing
-        # makes it slower *and* heavier (measured locally on 16 cores: -n 14 was
-        # slower than -n 6 at double the peak RSS). ``auto`` tracks the runner's
-        # core count, and hosted runners scale RAM with cores, so it stays inside
-        # the budget as the runner size changes.
+        # Use all four vCPUs of the public ubuntu-latest runner. ``-n auto``
+        # counts physical cores and selected only two workers on run #804.
+        # Keep this bounded: each worker owns a separate JAX compilation cache.
         #
         # Per-worker growth is bounded in conftest.py -- JAX never evicts
         # compiled executables, which without that bound puts the full suite into
@@ -77,7 +73,7 @@ jobs:
         # cost concentrates in a handful of tests, so a regression there is worth
         # catching by eye.
         run: |
-          pytest braintrace/ -n auto --durations=15 \
+          pytest braintrace/ -n 4 --durations=15 \
             --cov=braintrace --cov-report=xml --cov-report=term-missing
       - name: Upload coverage to Codecov
         # Upload from a single matrix entry (latest JAX) to avoid duplicate
