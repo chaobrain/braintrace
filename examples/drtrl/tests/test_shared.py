@@ -1,7 +1,6 @@
 import importlib.util
 import pathlib
 
-import jax.numpy as jnp
 import numpy as np
 
 
@@ -15,10 +14,13 @@ def _load_shared():
 
 def test_integrator_batch_shape():
     s = _load_shared()
-    x, y = s.make_integrator_batch(num_step=25, num_batch=4)
+    x, y = s.make_integrator_batch(num_step=25, num_batch=4, seed=195)
     assert x.shape == (25, 4, 1)
     assert y.shape == (25, 4, 1)
-    assert jnp.allclose(y, jnp.cumsum(x, axis=0))
+    # Compare against a high-precision reference, allowing float32 rounding
+    # near zero rather than depending on JAX's accumulation order.
+    expected = np.cumsum(np.asarray(x), axis=0, dtype=np.float64)
+    np.testing.assert_allclose(y, expected, rtol=1e-6, atol=1e-7)
 
 
 def test_copy_batch_shape():
