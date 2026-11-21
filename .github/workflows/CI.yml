@@ -119,7 +119,7 @@ jobs:
           python -m pip install . || exit 1
       - name: Test examples with pytest
         run: |
-          pytest examples/ -n auto --durations=15
+          pytest examples/ -n 4 --durations=15
 
 
   typecheck_and_build:
