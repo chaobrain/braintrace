@@ -1214,31 +1214,33 @@ def _derivative_jaxpr(
         traced.
     """
     operands = list(dict.fromkeys(v for v in eqn.invars if isinstance(v, Var)))
-    diff = list(dict.fromkeys(operands.index(eqn.invars[j]) for j in positions))
+    diff = list(dict.fromkeys(operands.index(cast(Var, eqn.invars[j])) for j in positions))
     single = Jaxpr(
         [], operands, list(eqn.outvars), [eqn],
         debug_info=body.debug_info._replace(arg_names=None, result_paths=None),
     )
 
-    def at(args, diff_vals):
+    def at(args: Sequence[Any], diff_vals: Sequence[Any]) -> List[Any]:
         full = list(args)
         for i, val in zip(diff, diff_vals):
             full[i] = val
         return jax.core.eval_jaxpr(single, [], *full)
 
     if eqn.primitive.name == 'custom_jvp_call':
-        def derivative(args, tangents):
-            return jax.jvp(lambda *d: at(args, d), [args[i] for i in diff], tangents)[1]
+        def derivative(args: Sequence[Any], seeds: Sequence[Any]) -> Any:
+            return jax.jvp(lambda *d: at(args, d), [args[i] for i in diff], seeds)[1]
 
         seeds = [operands[i] for i in diff]
     else:
-        def derivative(args, cotangents):
+        def derivative(args: Sequence[Any], seeds: Sequence[Any]) -> Any:
             _, pullback = jax.vjp(lambda *d: at(args, d), *[args[i] for i in diff])
-            return pullback(cotangents)
+            return pullback(seeds)
 
         seeds = [v for v in eqn.outvars if _inexact(v)]
-    avals = [jax.ShapeDtypeStruct(v.aval.shape, v.aval.dtype) for v in operands]
-    seed_avals = [jax.ShapeDtypeStruct(v.aval.shape, v.aval.dtype) for v in seeds]
+    avals = [jax.ShapeDtypeStruct(cast(jax.core.ShapedArray, v.aval).shape,
+                                cast(jax.core.ShapedArray, v.aval).dtype) for v in operands]
+    seed_avals = [jax.ShapeDtypeStruct(cast(jax.core.ShapedArray, v.aval).shape,
+                                     cast(jax.core.ShapedArray, v.aval).dtype) for v in seeds]
     try:
         traced = jax.make_jaxpr(derivative)(avals, seed_avals).jaxpr
     except Exception:  # noqa: BLE001 -- an untraceable derivative is not seen
@@ -1280,7 +1282,8 @@ def _call_mixing(
             consts = tuple(getattr(body, 'consts', ()) or ())
             keep.extend(consts)
             key = (name, rules, str(body), tuple(id(c) for c in consts), tuple(positions), varshape,
-                   tuple((v.aval.shape, str(v.aval.dtype)) for v in eqn.invars))
+                   tuple((cast(jax.core.ShapedArray, v.aval).shape,
+                          str(cast(jax.core.ShapedArray, v.aval).dtype)) for v in eqn.invars))
             if key in memo:
                 return memo[key][0]
     why = _call_mixing_unmemoised(eqn, positions, varshape, memo)

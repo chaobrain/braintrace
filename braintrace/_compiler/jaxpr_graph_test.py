@@ -451,9 +451,30 @@ class TestInlineJitInsideCheckpoint:
         f = jax.shard_map(jax.jit(_scaled_tanh), mesh=mesh, in_specs=P(), out_specs=P())
         x = jnp.asarray([0.3, -0.7, 1.1], jnp.float32)
         new = inline_jit_calls(jax.make_jaxpr(f)(x))
-        (eqn,) = new.jaxpr.eqns
+        (eqn,) = [e for e in new.jaxpr.eqns if e.primitive.name == 'shard_map']
         assert eqn.params['jaxpr'].constvars == []
         assert [e.primitive.name for e in eqn.params['jaxpr'].eqns] == ['jit']
         run = lambda a: jax.core.eval_jaxpr(new.jaxpr, new.consts, a)[0]
         np.testing.assert_array_equal(run(x), f(x))
         np.testing.assert_array_equal(jax.jvp(run, (x,), (x,))[1], jax.jvp(f, (x,), (x,))[1])
+
+    def test_inlining_shard_map_keeps_its_open_body_protocol(self):
+        """An inlined open body must stay open on older JAX."""
+        from jax.sharding import PartitionSpec as P
+
+        mesh = jax.make_mesh((1,), ('x',))
+        f = jax.shard_map(jax.jit(lambda a: 2. * a + 1.), mesh=mesh,
+                          in_specs=P(), out_specs=P())
+        x = jnp.asarray([0.3, -0.7, 1.1], jnp.float32)
+        new = inline_jit_calls(jax.make_jaxpr(f)(x))
+        (eqn,) = [e for e in new.jaxpr.eqns
+                  if e.primitive.name == 'shard_map']
+        body = eqn.params['jaxpr']
+        assert not _has_jit_eqn(getattr(body, 'jaxpr', body))
+
+        def run(a):
+            return _eval_closed(new, a)[0]
+
+        np.testing.assert_array_equal(run(x), f(x))
+        np.testing.assert_array_equal(jax.jvp(run, (x,), (x,))[1],
+                                      jax.jvp(f, (x,), (x,))[1])
