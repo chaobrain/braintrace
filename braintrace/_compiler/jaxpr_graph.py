@@ -159,20 +159,29 @@ def _contains_jit_eqn(jaxpr: Jaxpr) -> bool:
     return any(is_jit_primitive(eqn) for eqn in jaxpr.eqns)
 
 
+def _closed_body(body: Any) -> Optional[ClosedJaxpr]:
+    """Normalize open bodies on JAX versions with distinct jaxpr classes."""
+    if isinstance(body, ClosedJaxpr):
+        return body
+    if isinstance(body, Jaxpr):
+        return ClosedJaxpr(body, [])
+    return None
+
+
 def _sub_closed_jaxprs(eqn: JaxprEqn) -> Iterator[ClosedJaxpr]:
     """Yield the jaxpr bodies held in the ``jaxpr``, ``cond_jaxpr``,
     ``body_jaxpr`` and ``branches`` params of an equation.
 
-    These are the bodies of ``scan``, ``while`` and ``cond``, and, since JAX
-    0.11 made ``ClosedJaxpr`` and ``Jaxpr`` one class, also the open bodies of
-    ``checkpoint`` (``remat2``), ``shard_map`` and ``run_state``.
+    These include closed bodies of ``scan``, ``while`` and ``cond``, and open
+    bodies of ``checkpoint`` (``remat2``), ``shard_map`` and ``run_state``.
+    Open bodies are wrapped on older JAX, whose two jaxpr classes are distinct.
     ``call_jaxpr`` (custom-derivative calls) is deliberately excluded: those
     bodies carry derivative semantics and are never rewritten by
     :func:`inline_jit_calls`.
     """
     for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
-        sub = eqn.params.get(key)
-        if isinstance(sub, ClosedJaxpr):
+        sub = _closed_body(eqn.params.get(key))
+        if sub is not None:
             yield sub
     for b in eqn.params.get('branches', ()) or ():
         if isinstance(b, ClosedJaxpr):
@@ -277,18 +286,24 @@ def _inline_jits_in_control_flow_params(eqn: JaxprEqn) -> Optional[tuple]:
     hoisted: List[tuple] = []
     for key in ('jaxpr', 'cond_jaxpr', 'body_jaxpr'):
         sub = new_params.get(key)
-        if isinstance(sub, ClosedJaxpr) and _contains_jit(sub.jaxpr):
-            inlined = inline_jit_calls(sub)
+        closed = _closed_body(sub)
+        if closed is not None and _contains_jit(closed.jaxpr):
+            inlined = inline_jit_calls(closed)
             if name in _OPEN_BODY_CALLS and key == 'jaxpr':
                 hoisted.extend(zip(inlined.jaxpr.constvars, inlined.consts))
-                inlined = _open_body(inlined, sub)
+                inlined = _open_body(inlined, closed.jaxpr)
                 prevent_cse = new_params.get('prevent_cse')
                 if isinstance(prevent_cse, tuple):
                     # as JAX does for the constants it hoists (ad_checkpoint)
                     new_params['prevent_cse'] = (False,) * len(hoisted) + prevent_cse
             elif name not in _CLOSED_BODY_PRIMITIVES and len(inlined.consts) > len(getattr(sub, 'consts', ())):
                 continue  # an open body of another kind: leave its jits
-            new_params[key] = inlined
+            # Keep the original open/closed protocol for non-checkpoint bodies.
+            if (not isinstance(sub, ClosedJaxpr)
+                    and isinstance(inlined, ClosedJaxpr)):
+                new_params[key] = inlined.jaxpr
+            else:
+                new_params[key] = inlined
             changed = True
     branches = new_params.get('branches')
     if branches is not None:

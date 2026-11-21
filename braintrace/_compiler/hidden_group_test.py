@@ -2928,7 +2928,13 @@ def _closed_call(f):
 
     def call(a):
         closed = jax.make_jaxpr(f)(a)
-        (out,) = closed_call_p.bind(a, call_jaxpr=closed)
+        params = closed_call_p.get_bind_params({'call_jaxpr': closed})
+        # JAX 0.9 passes wrapped subfunctions positionally.
+        if isinstance(params, tuple):
+            subfuns, params = params
+            (out,) = closed_call_p.bind(*subfuns, a, **params)
+        else:
+            (out,) = closed_call_p.bind(a, **params)
         return out
 
     return call
